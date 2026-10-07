@@ -39,6 +39,17 @@
 (function_declaration
   name: (identifier) @symbol.function)
 
+; A `private` interface `fun` (S-609, CR-202, FR-RS-48): a class implementing
+; the interface does not inherit it. The marker keeps it out of the supertype
+; walk's interface levels (`plugin.toml`'s `inherits_interface_bodies`); it
+; stays the interface's member. An abstract interface `fun` needs no marker — it
+; records no body.
+(class_declaration
+  "interface"
+  (class_body
+    (function_declaration
+      (modifiers (visibility_modifier "private"))) @item.uninherited))
+
 ; A class property → Field — the bound LCOM4 field-sharing input read by
 ; `this.<name>` accesses (references.scm). Scoped to `class_body` so only true
 ; member properties are captured: Kotlin reuses `property_declaration` for

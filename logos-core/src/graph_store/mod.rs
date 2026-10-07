@@ -336,6 +336,11 @@ pub struct NewNode<'a> {
     ///
     /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
     pub signature: bool,
+    /// `true` for an interface member its implementors do not inherit (S-609,
+    /// [FR-RS-48]) — the `nodes.uninherited` column, migration 35.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    pub uninherited: bool,
 }
 
 impl<'a> NewNode<'a> {
@@ -366,6 +371,7 @@ impl<'a> NewNode<'a> {
             receiver_mode: None,
             variants: None,
             signature: false,
+            uninherited: false,
         }
     }
 }
@@ -1984,6 +1990,19 @@ pub trait GraphStore {
         Ok(Vec::new())
     }
 
+    /// The callables a type implementing their container never inherits a
+    /// body from (S-609, [FR-RS-48]): every node recorded with no body
+    /// (`nodes.has_body` 0) or recorded `nodes.uninherited` (migration 35),
+    /// ordered by id. What a supertype walk never binds at an interface level.
+    /// The [`node_arities`](GraphStore::node_arities) shape, empty by default —
+    /// only the SQLite store implements it — so a non-SQLite or test store
+    /// records none.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    fn uninherited_members(&self) -> Result<Vec<NodeId>> {
+        Ok(Vec::new())
+    }
+
     /// Every recorded impl block (S-606, [CR-202] F1), ordered by file path
     /// and line — empty by default, as [`node_item_facts`](GraphStore::node_item_facts).
     ///
@@ -3307,6 +3326,18 @@ impl GraphStore for SqliteGraphStore {
                 })
             })
             .collect()
+    }
+
+    fn uninherited_members(&self) -> Result<Vec<NodeId>> {
+        // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM nodes WHERE has_body = 0 OR uninherited IS NOT NULL ORDER BY id",
+        )?;
+        let ids = stmt
+            .query_map([], |row| Ok(NodeId(row.get(0)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting uninherited members for the binder")?;
+        Ok(ids)
     }
 
     fn impl_blocks(&self) -> Result<Vec<ImplBlockRow>> {
@@ -5738,8 +5769,9 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
         "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
                             derived, exported, cyclomatic_complexity, line_count, fingerprint, \
                             test_evidence, body, max_nesting_depth, has_body, body_tokens, \
-                            self_type, param_min, param_max, takes_self, receiver_mode, variants, signature) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23) \
+                            self_type, param_min, param_max, takes_self, receiver_mode, variants, signature, \
+                            uninherited) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) \
          ON CONFLICT(symbol_id) DO UPDATE SET \
              kind = excluded.kind, \
              name = excluded.name, \
@@ -5762,7 +5794,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              takes_self = excluded.takes_self, \
              receiver_mode = excluded.receiver_mode, \
              variants = excluded.variants, \
-             signature = excluded.signature",
+             signature = excluded.signature, \
+             uninherited = excluded.uninherited",
         rusqlite::params![
             node.symbol_id,
             node.kind.as_i32(),
@@ -5787,6 +5820,7 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
             node.receiver_mode.map(ReceiverMode::as_i32),
             node.variants,
             node.signature.then_some(1i64),
+            node.uninherited.then_some(1i64),
         ],
     )
     .context("upserting node")?;

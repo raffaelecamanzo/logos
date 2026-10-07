@@ -61,6 +61,14 @@ class_call_instantiates = true
 # supertypes are interfaces, and are `Extends`.
 supertype_kind_follows_target = true
 
+# A class inherits the bodies of the interface members it implements (S-609,
+# FR-RS-48): a call no class of the supertype list's chain answers goes on to
+# the interfaces the chain implements, then their super-interfaces — class
+# before interface. Only an interface `fun` with a body is a candidate there:
+# an abstract one records no body, and a `private` one is marked
+# `@item.uninherited` (`queries/symbols.scm`).
+inherits_interface_bodies = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
 # (counted once per expression, the keyword-walk approximation), `?:` is the

@@ -162,6 +162,7 @@ pub(super) fn extract_one_doc(
         receiver_mode: None,
         variants: None,
         signature: false,
+        uninherited: false,
     });
 
     // A parser bound to the markdown *inline* grammar, for the per-`inline`-block
@@ -310,6 +311,7 @@ fn walk_sections(
             receiver_mode: None,
             variants: None,
             signature: false,
+            uninherited: false,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),

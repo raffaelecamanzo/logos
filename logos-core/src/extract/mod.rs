@@ -362,6 +362,14 @@ pub struct NodeFact {
     ///
     /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
     pub signature: bool,
+    /// `true` for an interface member a type implementing the interface does
+    /// not inherit (S-609, [FR-RS-48]) — a Java `static` or `private` interface
+    /// method, a Kotlin `private` interface `fun` — marked by an
+    /// `@item.uninherited` capture. A supertype walk never binds one through
+    /// an implementing type; the interface's own members still include it.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    pub uninherited: bool,
 }
 
 /// A graph relationship produced by extraction.
@@ -813,34 +821,11 @@ fn extract_one(
     // [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
     let file_module: Option<LogosSymbol> = match build_symbol(ctx, &path_segments, &[]) {
         Ok(sym) => {
-            facts.nodes.push(NodeFact {
-                symbol: sym.clone(),
-                kind: NodeKind::Module,
-                name: file_module_name(&path_segments, &plugin.semantics().package_stems),
-                start_line: 1,
-                end_line: input.source.lines().count().max(1) as u32,
-                metrics: None,
-                // The synthetic file module is bookkeeping, not a declaration:
-                // it is never a dead-code candidate nor an exported root, and
-                // carries no test-marker evidence (S-027 — evidence is per
-                // function only).
-                exported: false,
-                fingerprint: None,
-                test_evidence: false,
-                // Code/module nodes carry no FTS body — only DocSection prose is
-                // body-indexed (FR-DG-05).
-                body: None,
-                // The synthetic file module is not a function: no nesting depth,
-                // no shingles (CR-005).
-                max_nesting_depth: None,
-                shingles: Vec::new(),
-                self_type: None,
-                params: None,
-                takes_self: None,
-                receiver_mode: None,
-                variants: None,
-                signature: false,
-            });
+            facts.nodes.push(file_module_node(
+                sym.clone(),
+                file_module_name(&path_segments, &plugin.semantics().package_stems),
+                input.source.lines().count().max(1) as u32,
+            ));
             Some(sym)
         }
         Err(err) => {
@@ -943,6 +928,7 @@ fn extract_one(
             receiver_mode,
             variants: decl.item.variants.clone(),
             signature: decl.item.signature,
+            uninherited: decl.item.uninherited,
         });
 
         // A Contains edge links the enclosing scope to this declaration; both
@@ -1614,6 +1600,36 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
                 b.arg_count,
             ))
     });
+}
+
+/// The synthetic file-module node `symbol` names, spanning lines 1 to
+/// `end_line`. It is bookkeeping, not a declaration: never a dead-code
+/// candidate nor an exported root, with no test-marker evidence (S-027 —
+/// evidence is per function only), no FTS body (only DocSection prose is
+/// body-indexed, FR-DG-05), and — not being a function — no nesting depth,
+/// shingles (CR-005) or callable fact.
+fn file_module_node(symbol: LogosSymbol, name: String, end_line: u32) -> NodeFact {
+    NodeFact {
+        symbol,
+        kind: NodeKind::Module,
+        name,
+        start_line: 1,
+        end_line,
+        metrics: None,
+        exported: false,
+        fingerprint: None,
+        test_evidence: false,
+        body: None,
+        max_nesting_depth: None,
+        shingles: Vec::new(),
+        self_type: None,
+        params: None,
+        takes_self: None,
+        receiver_mode: None,
+        variants: None,
+        signature: false,
+        uninherited: false,
+    }
 }
 
 /// The human-facing name of a file's module node: the file stem, or — for a

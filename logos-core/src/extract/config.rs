@@ -224,6 +224,7 @@ pub(super) fn emit_anchored_node(
         receiver_mode: None,
         variants: None,
         signature: false,
+        uninherited: false,
     });
     facts.edges.push(EdgeFact {
         source: parent_symbol.clone(),
@@ -342,6 +343,7 @@ pub(super) fn extract_one_config(
         receiver_mode: None,
         variants: None,
         signature: false,
+        uninherited: false,
     });
 
     // The generic, depth-bounded section walk runs only when the descriptor
@@ -510,6 +512,7 @@ fn walk_sections(
             receiver_mode: None,
             variants: None,
             signature: false,
+            uninherited: false,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),
@@ -655,6 +658,7 @@ fn walk_anchors(
             receiver_mode: None,
             variants: None,
             signature: false,
+            uninherited: false,
         });
         facts.edges.push(EdgeFact {
             source: config_file_symbol.clone(),

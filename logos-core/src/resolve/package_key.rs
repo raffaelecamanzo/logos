@@ -86,6 +86,11 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     kind_following_supertypes: HashSet<String>,
+    /// Normalised extensions whose language's classes inherit the bodies of
+    /// the interface members they implement (S-609, [FR-RS-48]).
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    interface_body_exts: HashSet<String>,
     /// Normalised extensions whose language declares that a namespace sees the
     /// types of its enclosing namespaces (S-595, [FR-RS-45]).
     ///
@@ -202,6 +207,7 @@ impl PackageLayout {
             .with_families(registry.families())
             .with_call_targets(registry.call_targets())
             .with_kind_following_supertypes(registry.supertype_kind_follows_target())
+            .with_interface_bodies(registry.interface_body_inheriting_extensions())
             .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
             .with_free_only_bare_calls(registry.free_only_bare_call_extensions())
             .with_free_call_fallthrough(registry.free_call_fallthrough_extensions())
@@ -332,6 +338,14 @@ impl PackageLayout {
     /// [`LanguageRegistry::supertype_kind_follows_target`] returns).
     pub fn with_kind_following_supertypes(mut self, exts: impl IntoIterator<Item = String>) -> Self {
         extend_normalised(&mut self.kind_following_supertypes, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose classes inherit the bodies of
+    /// the interface members they implement (S-609; the set
+    /// [`LanguageRegistry::interface_body_inheriting_extensions`] returns).
+    pub fn with_interface_bodies(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.interface_body_exts, exts);
         self
     }
 
@@ -575,6 +589,15 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.kind_following_supertypes.contains(&ext))
     }
 
+    /// Whether a type declared in the file at `path` inherits the bodies of
+    /// the interface members it implements (S-609, [FR-RS-48]), so a supertype
+    /// walk goes on from its `Extends` chain to its interfaces.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    pub fn inherits_interface_bodies(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.interface_body_exts.contains(&ext))
+    }
+
     fn path_model(&self, path: &str) -> Option<&PathModel> {
         self.path_models.get(&extension(path)?)
     }
@@ -653,6 +676,7 @@ impl PackageLayout {
             .with_kind_following_supertypes(
                 exts().filter(|_| semantics.supertype_kind_follows_target),
             )
+            .with_interface_bodies(exts().filter(|_| semantics.inherits_interface_bodies))
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
             .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
             .with_free_call_fallthrough(exts().filter(|_| semantics.implicit_call_falls_through))
@@ -1443,6 +1467,30 @@ mod call_target_tests {
         }
         assert!(declaring > 0, "some shipped plugin declares the enclosing-namespace key");
         assert!(silent > 0, "a plugin that does not declare it binds as before");
+    }
+
+    /// The same parity for the interface-body key (S-609): the single-plugin
+    /// layout answers every extension as the registry's does, over a set some
+    /// shipped plugin is in — and a plugin that does not declare the key is
+    /// out of it.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_interface_body_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let (mut declaring, mut silent) = (0, 0);
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let inherits = own.inherits_interface_bodies(&path);
+                assert_eq!(inherits, full.inherits_interface_bodies(&path), "{path}");
+                declaring += usize::from(inherits);
+                silent += usize::from(!inherits);
+            }
+        }
+        assert!(declaring > 0, "some shipped plugin declares the interface-body key");
+        assert!(silent > 0, "a plugin that does not declare it walks as before");
     }
 
     /// The same parity for the free-only bare-call key (S-590): the

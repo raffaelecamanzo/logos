@@ -1633,8 +1633,9 @@ A proven `Extends` is also what a call on the current instance climbs: a Python
 `self.m()`, PHP `$this->m()`, C# `this.M()` or unqualified Kotlin/C# `m()` reaches
 an inherited `m`, and Python's `super().m()`, PHP's `parent::m()`, C#'s `base.M()`
 and Kotlin's `super.m()` bind the nearest supertype that declares exactly one
-`m`. An `Implements` is never climbed, so `base.M()` in a class whose only
-supertype is an interface binds nothing. The walk reads one base class per level,
+`m`. An `Implements` is not part of that chain, so `base.M()` in a class whose only
+supertype is an interface binds nothing (a language declaring
+`inherits_interface_bodies`, below, visits interfaces after the chain). The walk reads one base class per level,
 so it never climbs through a Python class with several bases (its MRO decides) or
 a PHP class that uses a trait (the trait's method outranks the inherited one).
 Python's `super(A, self)`, Kotlin's `super<T>` and `super@Outer` name another
@@ -1642,6 +1643,26 @@ starting point and stay unbound. A class's header never names the class itself:
 `from unittest import TestCase` then `class TestCase(TestCase)` names the import.
 A PHP `namespace\X` supertype is not captured. Rust's `impl Trait for X` methods
 bind their trait as before.
+
+Java and Kotlin classes inherit the bodies of the interface members they
+implement, so their descriptors declare:
+
+```toml
+# Java, Kotlin: a class inherits its interfaces' `default` bodies.
+inherits_interface_bodies = true
+```
+
+With it, a call no class of the `Extends` chain answers goes on to the
+interfaces the chain's classes implement, then their super-interfaces, nearest
+level first. A superclass method always beats an interface default. Only a
+member with a body is a candidate there. An abstract member never is, nor one
+the `symbols` query marks `@item.uninherited` (Java's `static` and `private`
+interface methods, Kotlin's `private` interface functions). Two unrelated
+defaults of one name bind nothing, and arity applies. A chain that crosses a
+class whose base class is not in the graph reaches no interface, since that base
+may declare the method. The key defaults to `false`: C#'s default interface
+member is reachable only through an interface-typed receiver, so C# does not
+declare it.
 
 ### Receivers (`implicit_receiver`, `[wrapper_methods]`)
 

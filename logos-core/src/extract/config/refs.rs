@@ -1769,6 +1769,7 @@ mod tests {
             receiver_mode: None,
             variants: None,
             signature: false,
+            uninherited: false,
         }
     }
 

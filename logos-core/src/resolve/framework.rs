@@ -444,7 +444,7 @@ pub fn run(
 
     // Snapshot (one reader-pool read): the same consistent basis the
     // resolution pass binds against.
-    let (files, nodes, edges, refs, namespaces, signatures) = runtime.submit_read(|store| {
+    let (files, nodes, edges, refs, namespaces, signatures, uninherited) = runtime.submit_read(|store| {
         Ok((
             store.indexed_files()?,
             store.all_nodes()?,
@@ -452,6 +452,7 @@ pub fn run(
             store.unresolved_refs()?,
             store.file_namespaces()?,
             super::signature_nodes(store)?,
+            store.uninherited_members()?,
         ))
     })?;
 
@@ -515,9 +516,11 @@ pub fn run(
     let layout = PackageLayout::from_registry(registry)
         .with_declared_namespaces(namespaces)
         .with_import_root_overrides(&resolution.import_roots);
-    // A required signature binds nothing (S-606).
+    // A required signature binds nothing (S-606), nor does an interface member
+    // an implementing type does not inherit (S-609).
     let (bind_nodes, bind_edges) = binder::bindable(&nodes, &edges, &signatures);
-    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone());
+    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone())
+        .with_uninherited(uninherited);
     let member = MemberConstants {
         root,
         registry,

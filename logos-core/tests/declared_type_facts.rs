@@ -145,13 +145,15 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// column), 29 (S-514, the ledger's `receiver` column and its identity
 /// index), 30 (S-518, the `files.namespace` column), 31 (S-597, the alias in
 /// that identity index), 32 (S-587, the ledger's `peeled` column in it), 33
-/// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it) and 34
-/// (S-606, the associated-item columns and the impl-block table) after it; the
-/// next [`Engine::start`] re-applies all eleven, as a real upgrade does.
+/// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it), 34
+/// (S-606, the associated-item columns and the impl-block table) and 35
+/// (S-609, the `nodes.uninherited` column) after it; the next
+/// [`Engine::start`] re-applies all twelve, as a real upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
+        "ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
+         DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
          ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
          ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \

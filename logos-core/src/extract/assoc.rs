@@ -29,6 +29,9 @@
 //! - `@item.signature` — a declaration that is a required signature of its
 //!   container: a member its implementors supply, with no body of its own (a
 //!   Rust trait's `fn m(&self);`).
+//! - `@item.uninherited` — an interface member that a type implementing the
+//!   interface does not inherit (S-609, [FR-RS-48]): a Java `static` or
+//!   `private` interface method, a Kotlin `private` interface `fun`.
 //!
 //! # Type paths
 //!
@@ -40,6 +43,7 @@
 //! [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
 //! [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
 //! [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+//! [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -84,6 +88,9 @@ pub(super) struct DeclItemFacts {
     pub(super) variants: Option<String>,
     /// Whether the declaration is a required signature.
     pub(super) signature: bool,
+    /// Whether the declaration is an interface member its implementors do not
+    /// inherit.
+    pub(super) uninherited: bool,
 }
 
 /// The companions one impl block's matches captured.
@@ -105,6 +112,7 @@ pub(super) struct AssocCaptures<'tree> {
     variants: Vec<Node<'tree>>,
     receivers: Vec<(Node<'tree>, ReceiverMode)>,
     signatures: HashSet<usize>,
+    uninherited: HashSet<usize>,
 }
 
 impl<'tree> AssocCaptures<'tree> {
@@ -138,6 +146,9 @@ impl<'tree> AssocCaptures<'tree> {
             "signature" => {
                 self.signatures.insert(node.id());
             }
+            "uninherited" => {
+                self.uninherited.insert(node.id());
+            }
             _ => {
                 let mode = name
                     .strip_prefix("receiver.")
@@ -156,6 +167,7 @@ impl<'tree> AssocCaptures<'tree> {
         let decl_at: HashMap<usize, usize> = decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
         for (i, decl) in decls.iter().enumerate() {
             out[i].signature = self.signatures.contains(&decl.node.id());
+            out[i].uninherited = self.uninherited.contains(&decl.node.id());
         }
 
         // Each declaration's receiver: the strongest mode any capture gives it.

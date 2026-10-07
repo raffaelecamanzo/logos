@@ -168,6 +168,9 @@ struct Snapshot {
     /// The required signatures (S-606, `nodes.signature`), which bind nothing
     /// ([`binder::bindable`]).
     signatures: HashSet<NodeId>,
+    /// The callables an implementing type never inherits from an interface
+    /// (S-609; [`GraphStore::uninherited_members`]).
+    uninherited: Vec<NodeId>,
     /// file_id → project-relative path, for an incremental run to test a row's
     /// owning file against the change-set. Empty on a full index.
     file_paths: HashMap<i64, String>,
@@ -268,6 +271,7 @@ pub fn run(
             arities: store.node_arities()?,
             namespaces: store.file_namespaces()?,
             signatures: signature_nodes(store)?,
+            uninherited: store.uninherited_members()?,
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
             file_paths: if want_file_paths {
@@ -308,6 +312,7 @@ pub fn run(
     let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
         .with_arities(&snap.arities)
+        .with_uninherited(snap.uninherited)
         .with_path_specifiers(specifier_targets, go_modules)
         .with_imported_bindings(&snap.refs, policy);
 
@@ -989,7 +994,8 @@ pub(crate) fn call_residue_by_language(
     let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures);
     let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
         .with_self_types(store.node_self_types()?)
-        .with_arities(&store.node_arities()?);
+        .with_arities(&store.node_arities()?)
+        .with_uninherited(store.uninherited_members()?);
     let declared = index.declared_type_names();
 
     let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();
