@@ -504,8 +504,20 @@ fn typescript_ranges_and_counts() {
 #[test]
 fn ruby_ranges_and_counts() {
     let src = "def f(a, b = 2, *c, d:, e: 1, **f, &g)\n  g(1, 2); h(*xs); m 1, 2; x.n; User.find(1); cfg(1, timeout: 1, retries: 2)\nend\n\
-        class C\n  def m(a)\n    self.m(1)\n  end\nend\n";
-    assert_eq!(ranges("lib/a.rb", src), map(&[("f", range(2, None)), ("m", range(1, Some(1)))]));
+        class C\n  def m(a)\n    self.m(1)\n  end\nend\n\
+        def kw(a, **o)\n  gb(1, &blk); hs(**opts)\nend\n\
+        def sp(a, *r); end\n\
+        def fw(...)\n  fa(...)\nend\n";
+    assert_eq!(
+        ranges("lib/a.rb", src),
+        map(&[
+            ("f", range(2, None)),
+            ("fw", range(0, None)),
+            ("kw", range(1, None)),
+            ("m", range(1, Some(1))),
+            ("sp", range(1, None)),
+        ])
+    );
     let counts = counts("lib/a.rb", src);
     assert_eq!(counts["g"], vec![Some(2)]);
     assert_eq!(counts["h"], vec![None]);
@@ -513,6 +525,8 @@ fn ruby_ranges_and_counts() {
     assert_eq!(counts["n"], vec![Some(0)]);
     assert_eq!(counts["cfg"], vec![None], "a bare `key:` run is one hash or several keywords");
     assert_eq!(counts["User"], vec![None], "the receiver row is no callee");
+    assert_eq!(counts["gb"], vec![Some(1)], "a `&block` is no argument");
+    assert_eq!((&counts["hs"], &counts["fa"]), (&vec![None], &vec![None]), "`**h` and `...` spread");
 }
 
 /// Only a callable records a range: a droppable Java override that captures a
