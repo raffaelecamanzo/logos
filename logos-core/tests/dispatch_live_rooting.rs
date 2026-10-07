@@ -617,16 +617,20 @@ fn dyn_dispatch_trait_default_is_live_and_call_fans_out_to_impls() {
     let is_doc_ids: std::collections::HashSet<_> =
         nodes.iter().filter(|n| n.name == "is_doc").map(|n| n.id).collect();
 
-    // The `&dyn Plug` call `p.is_doc()` fans out to BOTH `is_doc` nodes via Calls
-    // edges from `use_plugin` — one reference, the SET of concrete targets
-    // (the trait default and the impl override), never fabricated (FR-RS-08).
-    let fanout = edges
+    // The `&dyn Plug` call `p.is_doc()` fans out via Calls edges from
+    // `use_plugin` — one reference, the SET of concrete targets, never
+    // fabricated (FR-RS-08). The set holds the default only where an impl does
+    // not override it (FR-RS-08 as amended by FR-RS-47, S-608): `Compiled`, the
+    // one impl, overrides it, so the impl's `is_doc` is the one target, and the
+    // default stays live through its trait-default rooting above.
+    let fanout: Vec<_> = edges
         .iter()
         .filter(|e| {
             e.kind == EdgeKind::Calls && e.source == use_plugin_id && is_doc_ids.contains(&e.target)
         })
-        .count();
-    assert_eq!(fanout, 2, "the dyn call fans out to both is_doc targets");
+        .map(|e| nodes.iter().find(|n| n.id == e.target).and_then(|n| n.start_line))
+        .collect();
+    assert_eq!(fanout, vec![Some(6)], "the dyn call fans out to the one impl's is_doc");
 
     // The impl method carries an `Implements` edge to the `Plug` trait node —
     // the structural link the fan-out enumerated the impls from.

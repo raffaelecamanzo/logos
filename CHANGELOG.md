@@ -91,6 +91,36 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   opt in with `impl_block_lookup = true` in `plugin.toml` (Rust declares it).
   Run `logos scan` (or `logos index`) to re-bind an existing graph; a bare
   `logos sync` re-binds only the rows its change touches.
+- **Trait defaults, `Deref` targets, trait-typed receivers and qualified paths
+  join the Rust lookup (CR-202, S-608).** A trait's default body is now a
+  candidate for every type whose impl of the trait does not override it — an
+  empty `impl Greet for X {}` included — so `x.hello()`, `X::hello(x)` and
+  `self.hello()` bind it; an override beats the default, an inherent method
+  beats both, the trait must be in scope, and two traits in scope that each
+  supply the method bind nothing. A method call that finds nothing on its type
+  retries on the type's `Deref` target, each type once and at most 8 hops; a
+  path call never does. `self.m()` / `Self::m()` in a trait's default body, a
+  receiver typed `impl Tr` or by a generic parameter bounded by `Tr` (inline,
+  in a `where` clause, or on the enclosing `impl`), and a written `Tr::m(x)`
+  now fan out as a `&dyn Tr` call does (a trait-typed receiver also inside a
+  macro's arguments) to every impl of the method plus the default body; for
+  every such call,
+  `&dyn Tr` included, the default is no longer a target when every impl
+  overrides it. Two bounds that each supply the method bind nothing, and a
+  method only a bound outside the repository (`Clone`, `Iterator`) supplies
+  reads `external-type`. `<T as Tr>::m()` binds `T`'s impl of `Tr::m`, or
+  `Tr`'s default. A sync now also re-binds the calls an `impl` block's header
+  can move — an empty impl or a `Deref` impl added or removed — as a fresh
+  index would. On a full-indexed export of this repository, the previous
+  build vs this one: `Calls` edges 26,681 → 26,710 (36 added: `&impl
+  EventSink`, `Arc<E: MemberEngine>` and three `GraphStore` default bodies
+  fanning out to their impls; 7 removed: `&dyn GraphStore` calls to defaults
+  the one impl overrides); every delta checked against the source; non-Rust
+  graphs byte-identical; 70 bare receiver calls become trait-qualified (65 now
+  `external-type`); Rust `unclassified` stays 0; cold index time unchanged
+  within noise. The quality signal reads 8126 → 8162 on that export (dependency
+  depth 15 → 14, raw modularity 0.7254 → 0.7261). Run `logos scan` (or
+  `logos index`) to re-bind an existing graph.
 
 ### Fixed
 

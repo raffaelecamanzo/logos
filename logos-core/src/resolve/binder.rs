@@ -70,11 +70,15 @@
 //!
 //! A file of an **impl-block** language (Rust; S-607, [FR-RS-47]) decides a
 //! call to a type's method — `Self::m()`, `self.m()`, a proven `x.m()`, a
-//! written `T::m()` — by one associated-item lookup ([`Ctx::lookup`]) among
-//! the functions of every `impl` block whose header resolves to `T`
-//! ([`Index::assoc_items`]). Once a path's type segment is reached the lookup
-//! decides the call, whatever it found: no wider rung reads the path again
-//! ([`Ctx::type_reached`]).
+//! written `T::m()`, a qualified `<T as Tr>::m()` — by one associated-item
+//! lookup ([`Ctx::lookup`]) among the functions of every `impl` block whose
+//! header resolves to `T` ([`Index::assoc_items`]) and the trait defaults those
+//! blocks lend it, retrying a method call on `T`'s `Deref` target (S-608).
+//! Once a path's type segment is reached the lookup decides the call, whatever
+//! it found: no wider rung reads the path again ([`Ctx::type_reached`]). A
+//! trait-typed call — a trait body's `self.m()`, a `dyn`/`impl`/bound-typed
+//! receiver, a written `Tr::m(x)` — fans out to every impl of the method and
+//! the default where an impl does not override it ([`Ctx::fan_out`]).
 //!
 //! [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
 //!
@@ -216,6 +220,44 @@ enum Syntax {
     Path,
 }
 
+/// One candidate of the associated-item lookup (S-608, [`Ctx::probe`]): a
+/// function of an `impl` block, or a trait's default body that block lends its
+/// type — `block` indexes [`Index::impl_headers`], whose header ranks it
+/// (inherent or trait, and which trait).
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    id: NodeId,
+    block: usize,
+}
+
+/// The trait a qualified `<T as Tr>::m` names (S-608, [FR-RS-47] rule 5): the
+/// repository trait the call's scope resolves `Tr` to, or — a trait the graph
+/// cannot place — its simple name, matched against the impl headers that name
+/// an unplaced trait of that name ([`Ctx::resolve_qualified_call`]).
+///
+/// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+#[derive(Debug, Clone, Copy)]
+enum Named<'a> {
+    Placed(NodeId),
+    Unplaced(&'a str),
+}
+
+impl Named<'_> {
+    /// Whether the `impl` block `header` is an impl of this trait.
+    fn names(self, header: &ImplHeader) -> bool {
+        match self {
+            Named::Placed(tr) => header.trait_node == Some(tr),
+            Named::Unplaced(simple) => {
+                header.trait_node.is_none()
+                    && header
+                        .trait_path
+                        .as_deref()
+                        .is_some_and(|path| path.rsplit("::").next() == Some(simple))
+            }
+        }
+    }
+}
+
 /// Why a package-shaped `Calls` row stays unbound (S-468, [CR-150] §3.2 C,
 /// [FR-RS-10]) — the reason the per-language readout counts it under
 /// ([FR-RS-09]). Recorded by the lookup that gave up, on the same walk that
@@ -275,9 +317,11 @@ pub(crate) enum Residue {
     /// other-member superclass, the implicit `Object`), stops at an interface,
     /// or cycles. Also a recorded-self-type `Self::m` call whose self type
     /// records no `m` in its crate (S-493, Go), and in an impl-block language
-    /// a `T` whose impls hold no function `m` the call can reach — a trait
-    /// default, a derive or a `Deref` target supplies it, method syntax met
-    /// only an associated function, or the trait is not in scope (S-607).
+    /// a `T` whose impls hold no function `m` the call can reach — a derive
+    /// supplies it, method syntax met only an associated function, or the
+    /// trait is not in scope (S-607) — nor any trait default its impls lend
+    /// it, nor its `Deref` chain (S-608); and a trait-typed call whose trait
+    /// has neither an impl nor a default of `m` (a supertrait's is not read).
     SupertypeUnreached,
     /// Callables of the name were found, and none admits the call's argument
     /// count (S-592, [FR-RS-43]): every level of the walk holding the name
@@ -437,6 +481,11 @@ fn is_type_like(kind: NodeKind) -> bool {
 /// recursing forever.
 const MAX_ALIAS_DEPTH: u8 = 8;
 
+/// Maximum `Deref` hops a method-syntax lookup retries through (S-608,
+/// [`Ctx::lookup`]) — each type is visited once besides, so a cycle ends
+/// sooner.
+const MAX_DEREF_DEPTH: usize = 8;
+
 /// Hard cap on the `Contains`-hierarchy walk in [`Ctx::typed_owner`] (S-039) — a
 /// defensive bound against a malformed cycle, far above any real doc/code
 /// nesting depth (markdown headings reach 6; module nesting follows directory
@@ -593,6 +642,9 @@ struct ImplHeader {
     /// — `None` for an inherent impl and for an external trait (`Display`,
     /// `Default`), which the graph cannot place in or out of scope.
     trait_node: Option<NodeId>,
+    /// The block's functions, id-sorted — none for an empty block, which
+    /// overrides no default of its trait (S-608).
+    fns: Vec<NodeId>,
 }
 
 /// The immutable lookup index one resolution run binds against.
@@ -713,7 +765,8 @@ pub(crate) struct Index {
     files_by_namespace: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
     /// that trait method, id-sorted and deduplicated — the fan-out universe for a
-    /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]). Built from the
+    /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]) and every other
+    /// trait-typed call (S-608, [`Ctx::fan_out`]). Built from the
     /// `Implements` reference rows (impl method → its trait), so it is available
     /// on the very first index pass, before any `Implements` edge is committed.
     ///
@@ -818,9 +871,30 @@ pub(crate) struct Index {
     /// what a `Self::m` / `self.m()` call reads its `T` from, and whether a
     /// candidate is a trait impl's.
     assoc_owner: HashMap<NodeId, usize>,
-    /// Every recorded `impl` block holding at least one function, with its
-    /// header resolved once ([`ImplHeader`]).
+    /// Every recorded `impl` block of an impl-block language, an empty one
+    /// included (S-608), with its header resolved once ([`ImplHeader`]).
     impl_headers: Vec<ImplHeader>,
+    /// A type node → the trait impl blocks for it whose trait is a repository
+    /// trait, as indexes into [`impl_headers`](Index::impl_headers) (S-608,
+    /// [FR-RS-47] rule 1): whose trait's default bodies are the type's
+    /// candidates where its block does not override them. An empty block
+    /// counts.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    trait_impls: HashMap<NodeId, Vec<usize>>,
+    /// A trait's simple name → every trait impl block naming a trait of that
+    /// name, as indexes into [`impl_headers`](Index::impl_headers) (S-608) —
+    /// the implementors whose overrides decide whether a trait's default body
+    /// is a fan-out target ([`Index::overridden_everywhere`]).
+    impls_by_trait_name: HashMap<String, Vec<usize>>,
+    /// A type node → the one type its `impl Deref` names as `Target`, resolved
+    /// in the block's scope (S-608, [FR-RS-47] rule 4): [`Res::NotFound`] for a
+    /// type the repository does not declare, [`Res::Ambiguous`] when two
+    /// `Deref` impls of the type name two. What a method-syntax miss retries on
+    /// ([`Ctx::lookup`]).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    deref_targets: HashMap<NodeId, Res>,
     /// The callables recorded as taking `self` (S-604; the `nodes.takes_self`
     /// column, true) — the ones a path call `T::m(x, …)` passes the receiver
     /// to as its first argument (S-607). Empty unless the run was given the
@@ -968,6 +1042,9 @@ impl Index {
             assoc_items: HashMap::new(),
             assoc_owner: HashMap::new(),
             impl_headers: Vec::new(),
+            trait_impls: HashMap::new(),
+            impls_by_trait_name: HashMap::new(),
+            deref_targets: HashMap::new(),
             with_self: HashSet::new(),
             receiver_modes: HashMap::new(),
             variants: HashMap::new(),
@@ -1181,7 +1258,8 @@ impl Index {
     /// it holds — the innermost such block, and none when two blocks of one
     /// span hold it (two `impl`s on one line) — less a function nested in one
     /// of the block's own functions. A block holding none (an empty
-    /// `impl Greet for X {}`) records nothing here. Its header is resolved
+    /// `impl Greet for X {}`) is recorded too (S-608): it lends its type its
+    /// trait's default bodies. Its header is resolved
     /// **once**, in its own file's scope, as a proven receiver's type is
     /// ([`Ctx::resolve_receiver_type`]): its `use` declarations, its module,
     /// its crate and the re-exports they follow, never a workspace guess. A
@@ -1189,7 +1267,10 @@ impl Index {
     /// to that type's candidates ([`Index::assoc_items`]); a reference header
     /// (`impl Tr for &X`), a primitive, tuple or slice, a generic parameter and
     /// an external type add none. Its trait, when the repository declares it,
-    /// is resolved the same way ([`ImplHeader::trait_node`]).
+    /// is resolved the same way ([`ImplHeader::trait_node`]), and so is an
+    /// `impl Deref`'s `Target` ([`Index::deref_targets`]). The scope of a block
+    /// is that of its first function, and an empty block's the innermost
+    /// module of its file holding its first line.
     ///
     /// Read only for the files of an impl-block language
     /// ([`PackageLayout::looks_up_impl_blocks`]). Reads no arity fact: the
@@ -1254,15 +1335,34 @@ impl Index {
                 members[i].push(n.id);
             }
         }
-        let resolved: Vec<(Vec<NodeId>, ImplHeader)> = blocks
-            .iter()
-            .zip(members)
-            .filter_map(|(block, mut fns)| {
-                let &first = fns.first()?;
+        // The modules of each file holding a block, an empty block's scope.
+        let mut modules: HashMap<&str, Vec<FileModule>> = HashMap::new();
+        for n in nodes.iter().filter(|n| n.kind == NodeKind::Module) {
+            let Some(path) = n.file_path.as_deref().filter(|p| by_file.contains_key(p)) else { continue };
+            // A file's own module has no parent and spans the file; an inline
+            // one spans its lines.
+            let span = match (self.parent.contains_key(&n.id), lines.get(&n.id)) {
+                (false, _) => None,
+                (true, Some(&span)) => Some(span),
+                (true, None) => continue,
+            };
+            modules.entry(path).or_default().push((n.id, span));
+        }
+        let resolved: Vec<(Vec<NodeId>, ImplHeader, Option<Res>)> = by_file
+            .values()
+            .flatten()
+            .copied()
+            .collect::<std::collections::BTreeSet<usize>>()
+            .into_iter()
+            .filter_map(|i| {
+                let (block, mut fns) = (&blocks[i], std::mem::take(&mut members[i]));
                 fns.sort_unstable();
                 // The header is read where it is written: the scope holding
-                // the block's first function.
-                let scope = self.parent.get(&first).copied().unwrap_or(first);
+                // the block's first function, or an empty block's module.
+                let scope = match fns.first() {
+                    Some(&first) => self.parent.get(&first).copied().unwrap_or(first),
+                    None => block_module(modules.get(block.file_path.as_str())?, i64::from(block.start_line))?,
+                };
                 let ctx = Ctx::for_scope(&self, scope, self.file_ids.get(&block.file_path).copied());
                 let self_type = if block.self_ref {
                     Res::NotFound
@@ -1273,23 +1373,44 @@ impl Index {
                     Res::Found(id) if self.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait) => Some(id),
                     _ => None,
                 });
+                let deref = block.deref_target.as_deref().map(|t| ctx.header_type(t));
                 let header = ImplHeader {
                     self_type,
                     self_path: block.self_type.clone(),
                     trait_path: block.trait_path.clone(),
                     trait_node,
+                    fns: fns.clone(),
                 };
-                Some((fns, header))
+                Some((fns, header, deref))
             })
             .collect();
         let mut assoc: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
-        for (fns, header) in resolved {
+        for (fns, header, deref) in resolved {
             let at = self.impl_headers.len();
             for &f in &fns {
                 self.assoc_owner.insert(f, at);
                 if let (Res::Found(ty), Some(info)) = (header.self_type, self.info.get(&f)) {
                     assoc.entry((ty, info.name.clone())).or_default().push(f);
                 }
+            }
+            if let Some(path) = &header.trait_path {
+                let simple = path.rsplit("::").next().unwrap_or(path);
+                self.impls_by_trait_name.entry(simple.to_string()).or_default().push(at);
+            }
+            if let (Res::Found(ty), Some(_)) = (header.self_type, header.trait_node) {
+                self.trait_impls.entry(ty).or_default().push(at);
+            }
+            if let (Res::Found(ty), Some(target)) = (header.self_type, deref) {
+                // Two `Deref` impls of one type (`impl Deref for W<A>` and
+                // `W<B>`, generics stripped) naming two targets decide none.
+                self.deref_targets
+                    .entry(ty)
+                    .and_modify(|known| {
+                        if *known != target {
+                            *known = Res::Ambiguous;
+                        }
+                    })
+                    .or_insert(target);
             }
             self.impl_headers.push(header);
         }
@@ -1484,6 +1605,39 @@ impl Index {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// Whether the `impl` block `at` declares a function `name` — overriding
+    /// its trait's default of that name (S-608).
+    fn block_overrides(&self, at: usize, name: &str) -> bool {
+        self.impl_headers[at]
+            .fns
+            .iter()
+            .any(|f| self.info.get(f).is_some_and(|i| i.name == name))
+    }
+
+    /// Whether every implementor of the trait `tr` overrides its method `name`
+    /// (S-608, [FR-RS-08] as amended by [FR-RS-47]) — so that its default body
+    /// is no dispatch target: at least one impl block of `tr`, each declaring
+    /// `name`. A block naming a trait of `tr`'s name that its scope does not
+    /// place may be one of `tr`'s implementors, so the default is not proven
+    /// overridden past it.
+    ///
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn overridden_everywhere(&self, tr: NodeId, name: &str) -> bool {
+        let Some(blocks) = self.info.get(&tr).and_then(|i| self.impls_by_trait_name.get(&i.name)) else {
+            return false;
+        };
+        let mut any = false;
+        for &at in blocks {
+            match self.impl_headers[at].trait_node {
+                Some(other) if other != tr => {}
+                Some(_) if self.block_overrides(at, name) => any = true,
+                _ => return false,
+            }
+        }
+        any
+    }
+
     /// Members of `scope` named `name`, filtered by `want`.
     fn members_named(&self, scope: NodeId, name: &str, want: Want) -> Vec<NodeId> {
         self.members
@@ -1642,8 +1796,33 @@ impl Index {
     /// [`ref_affected`](Index::ref_affected) for every `Calls` row
     /// (`resolve::run`), as the [`renamed_import_tokens`](Index::renamed_import_tokens)
     /// precedent is.
+    ///
+    /// So are the impl functions of every type a `Deref` chain reaches from a
+    /// type the change spells, and the names of the trait methods those types'
+    /// blocks lend them (S-608): a method call on a type whose chain crosses
+    /// the change — a `Deref` impl added or removed — may now reach, or no
+    /// longer reach, a method of a type further down that neither the call nor
+    /// the change spells.
     pub(crate) fn impl_header_tokens(&self, dirty: &HashSet<String>) -> HashSet<String> {
         let spells = |text: &str| super::tokens(text).iter().any(|t| dirty.contains(t));
+        let mut downstream: HashSet<NodeId> = HashSet::new();
+        let mut level: Vec<NodeId> = self
+            .deref_targets
+            .iter()
+            .flat_map(|(&ty, target)| [Some(ty), if let Res::Found(t) = target { Some(*t) } else { None }])
+            .flatten()
+            .filter(|ty| self.info.get(ty).is_some_and(|i| spells(&i.name)))
+            .collect();
+        for _ in 0..=MAX_DEREF_DEPTH {
+            level.retain(|&ty| downstream.insert(ty));
+            level = level
+                .iter()
+                .filter_map(|ty| match self.deref_targets.get(ty) {
+                    Some(&Res::Found(next)) => Some(next),
+                    _ => None,
+                })
+                .collect();
+        }
         let moved: HashSet<usize> = self
             .impl_headers
             .iter()
@@ -1652,17 +1831,24 @@ impl Index {
                 spells(&h.self_path)
                     || h.trait_path.as_deref().is_some_and(spells)
                     || h.trait_node.and_then(|t| self.info.get(&t)).is_some_and(|i| spells(&i.name))
+                    || matches!(h.self_type, Res::Found(ty) if downstream.contains(&ty))
             })
             .map(|(at, _)| at)
             .collect();
         if moved.is_empty() {
             return HashSet::new();
         }
+        let lent = moved
+            .iter()
+            .filter(|&&at| matches!(self.impl_headers[at].self_type, Res::Found(ty) if downstream.contains(&ty)))
+            .filter_map(|&at| self.impl_headers[at].trait_node)
+            .flat_map(|tr| self.members.get(&tr).into_iter().flat_map(|m| m.keys()));
         self.assoc_owner
             .iter()
             .filter(|(_, at)| moved.contains(at))
-            .filter_map(|(f, _)| self.info.get(f))
-            .flat_map(|i| super::tokens(&i.name))
+            .filter_map(|(f, _)| self.info.get(f).map(|i| &i.name))
+            .chain(lent)
+            .flat_map(|name| super::tokens(name))
             .filter(|t| !dirty.contains(t))
             .collect()
     }
@@ -1700,6 +1886,25 @@ impl Index {
         }
         extra
     }
+}
+
+/// A module of a file and the lines it spans — `None` for the file's own
+/// module, which spans the file ([`block_module`]).
+type FileModule = (NodeId, Option<(i64, i64)>);
+
+/// The innermost of a file's `modules` holding `line` — an inline module whose
+/// lines hold it, else the file's own module (spanless) — where an empty `impl`
+/// block's header is read (S-608, [`Index::with_associated_items`]).
+fn block_module(modules: &[FileModule], line: i64) -> Option<NodeId> {
+    modules
+        .iter()
+        .filter_map(|&(id, span)| match span {
+            Some((start, end)) if start <= line && line <= end => Some((end - start, id)),
+            Some(_) => None,
+            None => Some((i64::MAX, id)),
+        })
+        .min()
+        .map(|(_, id)| id)
 }
 
 /// `Contains` topology: child→parent, and scope→name→members with each member
@@ -2635,7 +2840,15 @@ fn bind_traced(
     let relation = relation_want_of(r, source_info, &ix.layout);
     let ctx = Ctx::for_row(r, ix, source, policy);
     ctx.scope_only.set(relation.is_some() || is_proven_receiver_call(r));
-    let outcome = bind_in(&ctx, r, relation);
+    let outcome = match (bind_in(&ctx, r, relation), ctx.fanned.take()) {
+        (Outcome::Unbound, Some(targets)) => Outcome::BoundMany {
+            source,
+            targets,
+            kind: EdgeKind::Calls,
+            payload: None,
+        },
+        (outcome, _) => outcome,
+    };
     (outcome, ctx.miss.into_inner())
 }
 
@@ -2825,10 +3038,12 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // never through the scope hierarchy — through the one lookup in an
             // impl-block language (S-607, [`Ctx::resolve_self_path_call`]),
             // else among the methods recorded with the caller's self type
-            // ([`Ctx::resolve_recorded_self_type_call`], Go).
+            // ([`Ctx::resolve_recorded_self_type_call`], Go). A qualified
+            // `<T as Tr>::m()` binds through the one lookup too (S-608,
+            // [`Ctx::resolve_qualified_call`]).
             if r.kind == EdgeKind::Calls {
                 let resolved = if ctx.impl_blocks {
-                    ctx.resolve_self_path_call(r)
+                    ctx.resolve_qualified_call(&r.target).or_else(|| ctx.resolve_self_path_call(r))
                 } else {
                     ctx.resolve_recorded_self_type_call(&r.target)
                 };
@@ -2914,20 +3129,24 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
                     _ => Outcome::Unbound,
                 };
             }
-            // A trait-object dynamic-dispatch call (S-281, CR-073, FR-RS-08):
-            // extraction encodes a *provable* `&dyn T` receiver on `p.f()` as a
-            // trait-qualified `T::f` target (a bare `.f()` stays a single segment,
-            // never reaches here, and binds by its receiver's shape below,
-            // [FR-RS-12]). Fan out to the SET of that trait method's
-            // targets: the trait's own default body (a member of the trait node)
-            // ∪ every concrete workspace impl of it. Every target is a real
-            // indexed node reached through the *proven* trait `T` — never a
-            // same-named method on an unrelated type, never a free function, never
-            // a stdlib/external target ([NFR-RA-05]). A trait that is external or
-            // ambiguous, or one with neither a default body nor a workspace impl,
-            // yields no target and stays an honest miss.
+            // A trait-typed receiver call (S-281, CR-073, FR-RS-08; S-608):
+            // extraction encodes a *provable* `&dyn T`, `impl T` or `T`-bounded
+            // receiver on `p.f()` as a trait-qualified `T::f` target (a bare
+            // `.f()` stays a single segment, never reaches here, and binds by its
+            // receiver's shape below, [FR-RS-12]). Fan out to the SET of that
+            // trait method's targets ([`Ctx::fan_out`]): every concrete
+            // workspace impl of it, and the trait's own default body unless
+            // every impl overrides it. Every target is a real indexed node
+            // reached through the *proven* trait `T` — never a same-named method
+            // on an unrelated type, never a free function, never a
+            // stdlib/external target ([NFR-RA-05]). A trait that is external or
+            // ambiguous, or one with neither a default body nor a workspace
+            // impl, yields no target and stays an honest miss.
             if r.kind == EdgeKind::Calls && r.target.contains("::") {
-                return ctx.resolve_dyn_dispatch(source, &r.target);
+                return match ctx.resolve_dyn_dispatch(&r.target) {
+                    Res::Found(target) => bound(target),
+                    _ => Outcome::Unbound,
+                };
             }
             // A receiver call (`x.f()` → `f`): extraction records the bare
             // method name and its receiver's SHAPE, never its type ([FR-EX-13];
@@ -3199,6 +3418,15 @@ struct Ctx<'a> {
     /// lost. Read by [`residue`] alone, and only for a row that stays unbound;
     /// binding never consults it.
     miss: RefCell<Option<Residue>>,
+    /// The targets a trait-typed call fans out to ([FR-RS-08]'s set,
+    /// [`fan_out`](Ctx::fan_out)), when one did: a `dyn`, `impl`- or
+    /// bound-typed receiver, a trait body's `self` call, a written `Tr::m(x)`
+    /// (S-608). Its rung answers [`Res::NotFound`], since a [`Res`] holds one
+    /// node, and [`bind_traced`] turns the set into the row's
+    /// [`Outcome::BoundMany`] — the one place a fan-out becomes edges.
+    ///
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    fanned: RefCell<Option<Vec<NodeId>>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -3228,6 +3456,7 @@ impl<'a> Ctx<'a> {
             scope_only: Cell::new(false),
             lexical_start: Cell::new(source),
             miss: RefCell::new(None),
+            fanned: RefCell::new(None),
         }
     }
 
@@ -3761,6 +3990,67 @@ impl Ctx<'_> {
         Some(res)
     }
 
+    /// Resolve a qualified `<T as Tr>::m` in an impl-block language (S-608,
+    /// [FR-RS-47] rule 5) — the target S-606 records for the call — as
+    /// `lookup(T, m)` with path syntax, restricted to `T`'s impl of `Tr`, else
+    /// `Tr`'s default body ([`Named`]). `T` and `Tr` are read in the caller's
+    /// scope and module model only, as an impl header is
+    /// ([`header_type`](Ctx::header_type)). A `T` the repository does not
+    /// declare — a generic parameter, `std::io::Error` — is
+    /// [`Residue::ExternalType`]; one the scope names twice
+    /// [`Residue::TypeAmbiguous`]. A `Tr` the graph cannot place names the
+    /// unplaced trait impls of `T` by its simple name. `None` for a target
+    /// that is no qualified path.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn resolve_qualified_call(&self, target: &str) -> Option<Res> {
+        let qualified = target.strip_prefix('<')?;
+        let scoped = self.scope_only.replace(true);
+        let res = self.qualified_call(qualified);
+        self.scope_only.set(scoped);
+        Some(res)
+    }
+
+    /// [`resolve_qualified_call`](Ctx::resolve_qualified_call) past its `<`.
+    fn qualified_call(&self, qualified: &str) -> Res {
+        let parts = qualified
+            .rsplit_once(">::")
+            .and_then(|(inner, name)| Some((inner.rsplit_once(" as ")?, name)))
+            .filter(|(_, name)| !name.is_empty() && !name.contains("::"));
+        let Some(((ty, tr), name)) = parts else {
+            self.note(Want::Callable, || Residue::ExternalType {
+                candidates: Vec::new(),
+            });
+            return Res::NotFound;
+        };
+        let ty = match self.header_type(ty) {
+            Res::Found(ty) => ty,
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
+            Res::NotFound => {
+                self.note(Want::Callable, || Residue::ExternalType {
+                    candidates: Vec::new(),
+                });
+                return Res::NotFound;
+            }
+        };
+        let named = match self.header_type(tr) {
+            Res::Found(id) if self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait) => Named::Placed(id),
+            Res::NotFound => Named::Unplaced(tr.rsplit("::").next().unwrap_or(tr)),
+            Res::Found(_) => {
+                self.note(Want::Callable, || Residue::SupertypeUnreached);
+                return Res::NotFound;
+            }
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
+        };
+        self.lookup(ty, name, Syntax::Path, Some(named))
+    }
+
     /// Resolve `Self::m` in an impl-block language (S-607, [FR-RS-47]) — a
     /// written `Self::m()`, path syntax, or the `Self::m` row extraction
     /// records for a `self.m()`, which carries receiver shape `self` (S-606)
@@ -3785,9 +4075,6 @@ impl Ctx<'_> {
     /// bind took recorded a reason (S-607, [FR-RS-47], [`residue`]) — read
     /// off the path's own resolution, by scope and module model only:
     ///
-    /// - `<T as Tr>::m` — [`Residue::ExternalType`] when `T` is no repository
-    ///   type, else [`Residue::SupertypeUnreached`] (no lookup reads a
-    ///   qualified path yet; [`Residue::TypeAmbiguous`] when two);
     /// - a bare name — [`Residue::OverloadAmbiguous`] when it reaches two
     ///   callables; [`Residue::NotACallable`] when it reaches a type (`W(1)`,
     ///   `Self(1)`) or an enum variant a `use` or glob brings in; else
@@ -3810,14 +4097,6 @@ impl Ctx<'_> {
             return Residue::NoReceiverEvidence;
         }
         self.scope_only.set(true);
-        if let Some(qualified) = r.target.strip_prefix('<') {
-            let ty = qualified.split_once(" as ").map_or(qualified, |(ty, _)| ty);
-            return match self.header_type(ty) {
-                Res::Found(_) => Residue::SupertypeUnreached,
-                Res::Ambiguous => Residue::TypeAmbiguous,
-                Res::NotFound => external(),
-            };
-        }
         let segs = split(&r.target);
         let Some((name, prefix)) = segs.split_last() else {
             return Residue::NameNotInScope;
@@ -3887,27 +4166,39 @@ impl Ctx<'_> {
         self.ix.assoc_owner.get(&self.source).map(|&h| &self.ix.impl_headers[h])
     }
 
+    /// The trait the source is a default body of (S-608), if any: a function
+    /// whose `Contains` parent is a trait.
+    fn own_trait(&self) -> Option<NodeId> {
+        let parent = *self.ix.parent.get(&self.source)?;
+        self.ix.info.get(&parent).is_some_and(|i| i.kind == NodeKind::Trait).then_some(parent)
+    }
+
     /// `name` called through the caller's own type, `T` being the self type of
     /// the `impl` block the caller is a function of ([`lookup`](Ctx::lookup)
     /// with `syntax`; S-607, [FR-RS-11] as amended by [FR-RS-47]) — in any
     /// crate, inherent before trait in any module.
     ///
-    /// A caller in no impl block — a trait's default body, a free function —
-    /// proves no type: [`Residue::NoReceiverEvidence`] (a trait body's
-    /// fan-out is S-608's). A header naming no repository type (`impl Tr for
-    /// Vec<X>`, `for u8`, a generic parameter) is [`Residue::ExternalType`]:
-    /// the type's own methods are not in the graph. One its scope names twice
-    /// is [`Residue::TypeAmbiguous`].
+    /// A caller that is a trait's default body is typed by that trait: the
+    /// call fans out to [FR-RS-08]'s set ([`trait_call`](Ctx::trait_call),
+    /// S-608, [FR-RS-47] rule 5). A caller in no impl block or trait — a free
+    /// function — proves no type: [`Residue::NoReceiverEvidence`]. A header
+    /// naming no repository type (`impl Tr for Vec<X>`, `for u8`, a generic
+    /// parameter) is [`Residue::ExternalType`]: the type's own methods are not
+    /// in the graph. One its scope names twice is [`Residue::TypeAmbiguous`].
     ///
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     fn self_type_call(&self, name: &str, syntax: Syntax) -> Res {
         let Some(header) = self.own_header() else {
+            if let Some(tr) = self.own_trait() {
+                return self.trait_call(tr, name);
+            }
             self.note(Want::Callable, || Residue::NoReceiverEvidence);
             return Res::NotFound;
         };
         match header.self_type {
-            Res::Found(ty) => self.lookup(ty, name, syntax),
+            Res::Found(ty) => self.lookup(ty, name, syntax, None),
             Res::Ambiguous => {
                 self.note(Want::Callable, || Residue::TypeAmbiguous);
                 Res::Ambiguous
@@ -3921,78 +4212,147 @@ impl Ctx<'_> {
         }
     }
 
-    /// The one associated-item lookup (S-607, [FR-RS-47]): the one callable
-    /// `name` among the type `ty`'s items, as `syntax` calls it — `self.m()`,
-    /// `Self::m()`, a proven `x.m()` and a written `T::m()` alike.
+    /// The one associated-item lookup (S-607, S-608, [FR-RS-47]): the one
+    /// callable `name` among the type `ty`'s items, as `syntax` calls it —
+    /// `self.m()`, `Self::m()`, a proven `x.m()`, a written `T::m()` and, with
+    /// `named`, a qualified `<T as Tr>::m()` alike.
+    ///
+    /// Each type is probed ([`probe`](Ctx::probe)). A probe that reaches no
+    /// candidate — none of the name, or none callable with this syntax or in
+    /// scope — retries, with method syntax and no named trait, on the type's
+    /// recorded `Deref` target ([`Index::deref_targets`], rule 4): each type
+    /// once, to [`MAX_DEREF_DEPTH`] hops, so a cycle terminates. A target the
+    /// repository does not declare is [`Residue::ExternalType`] (its methods
+    /// are not in the graph), one two `Deref` impls disagree on
+    /// [`Residue::TypeAmbiguous`]. Path syntax never retries: `T::m()` names
+    /// `T`'s own items.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn lookup(&self, ty: NodeId, name: &str, syntax: Syntax, named: Option<Named<'_>>) -> Res {
+        let mut ty = ty;
+        let mut seen: HashSet<NodeId> = HashSet::from([ty]);
+        loop {
+            let missed = match self.probe(ty, name, syntax, named) {
+                Ok(decided) => return decided,
+                Err(missed) => missed,
+            };
+            let retry = syntax == Syntax::Method && named.is_none() && seen.len() <= MAX_DEREF_DEPTH;
+            match self.ix.deref_targets.get(&ty).filter(|_| retry) {
+                Some(&Res::Found(next)) if !seen.contains(&next) => {
+                    seen.insert(next);
+                    ty = next;
+                }
+                Some(Res::NotFound) => {
+                    self.note(Want::Callable, || Residue::ExternalType {
+                        candidates: Vec::new(),
+                    });
+                    return Res::NotFound;
+                }
+                Some(Res::Ambiguous) => {
+                    self.note(Want::Callable, || Residue::TypeAmbiguous);
+                    return Res::Ambiguous;
+                }
+                _ => {
+                    self.note(Want::Callable, || missed);
+                    return Res::NotFound;
+                }
+            }
+        }
+    }
+
+    /// One type's step of the [`lookup`](Ctx::lookup): `Ok` with what it
+    /// decided (a reason noted for a miss), or `Err` with the reason it reached
+    /// no candidate, which a `Deref` retry may overrule.
     ///
     /// 1. **Universe** — the functions of every recorded `impl` block whose
     ///    self type resolves to `ty` ([`Index::assoc_items`]), from any crate
-    ///    and any file. None at all is [`Residue::SupertypeUnreached`] — a
-    ///    trait default, a derive, a `Deref` target supplies it, none of which
-    ///    this lookup reads yet — or [`Residue::NotACallable`] when `name` is
-    ///    one of `ty`'s enum variants.
+    ///    and any file, and the **default bodies** of the repository traits
+    ///    `ty` implements where its block does not override them
+    ///    ([`Index::trait_impls`], S-608) — an empty `impl Greet for X {}`
+    ///    included. A default ranks as its trait's function. With `named`
+    ///    (`<T as Tr>::m`), only the functions of `ty`'s impl of that trait,
+    ///    else its default. None at all is `Err(SupertypeUnreached)` — a
+    ///    derive may supply it, or the type's `Deref` target — or
+    ///    `Err(NotACallable)` when `name` is one of `ty`'s enum variants.
     /// 2. **Syntax** — method syntax drops every candidate recorded as not
     ///    taking `self` ([`Index::without_self`]); path syntax keeps it. An
     ///    unknown fact never filters.
-    /// 3. **Scope** — a trait impl's function is no candidate where its trait
-    ///    is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)). Nothing
-    ///    left after 2 and 3 is [`Residue::SupertypeUnreached`].
+    /// 3. **Scope** — a trait's function or default is no candidate where its
+    ///    trait is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)),
+    ///    unless the call names the trait. Nothing left after 2 and 3 is
+    ///    `Err(SupertypeUnreached)`.
     /// 4. **Arity** — the argument count as the syntax passes it
     ///    ([`admitted_by_count`](Ctx::admitted_by_count)); nothing left is
     ///    [`Residue::NoApplicableOverload`].
     /// 5. **Precedence** — an inherent candidate beats a trait's, in any
-    ///    module. A repository trait's function left out by 3 beside external
-    ///    traits' functions alone binds nothing: an external trait, never
-    ///    placed in or out of scope, does not win by default. With method
-    ///    syntax, inherent candidates that all take `&self`/`&mut self` beside
-    ///    a trait's taking `self` by value bind nothing: rustc's by-value probe
-    ///    may pick the trait's, and which is
+    ///    module, and an impl's override beats the default it overrides (the
+    ///    default never entered the universe). A repository trait's function
+    ///    left out by 3 beside external traits' functions alone binds nothing:
+    ///    an external trait, never placed in or out of scope, does not win by
+    ///    default. With method syntax, inherent candidates that all take
+    ///    `&self`/`&mut self` beside a trait's taking `self` by value bind
+    ///    nothing: rustc's by-value probe may pick the trait's, and which is
     ///    not decided here ([`Residue::OverloadAmbiguous`]).
     /// 6. **Exactly one** — two of the deciding rank are
-    ///    [`Residue::OverloadAmbiguous`] ([NFR-RA-05]).
+    ///    [`Residue::OverloadAmbiguous`] ([NFR-RA-05]): two traits in scope
+    ///    each supplying `name`, a default among them.
     ///
     /// A trait as `ty` (`Tr::m(x)`) is dispatched on its first argument, which
-    /// nothing proves: [`Residue::NoReceiverEvidence`].
+    /// nothing proves: the call fans out to [FR-RS-08]'s set
+    /// ([`trait_call`](Ctx::trait_call), S-608).
     ///
-    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    fn lookup(&self, ty: NodeId, name: &str, syntax: Syntax) -> Res {
+    fn probe(&self, ty: NodeId, name: &str, syntax: Syntax, named: Option<Named<'_>>) -> Result<Res, Residue> {
         let ix = self.ix;
         if ix.info.get(&ty).is_some_and(|i| i.kind == NodeKind::Trait) {
-            self.note(Want::Callable, || Residue::NoReceiverEvidence);
-            return Res::NotFound;
+            return Ok(self.trait_call(ty, name));
         }
-        let named = ix.assoc_items.get(&(ty, name.to_string())).map_or(&[][..], Vec::as_slice);
-        let reachable: Vec<NodeId> = named
+        let header = |c: &Candidate| &ix.impl_headers[c.block];
+        let own = ix.assoc_items.get(&(ty, name.to_string())).map_or(&[][..], Vec::as_slice);
+        let mut universe: Vec<Candidate> = own
+            .iter()
+            .filter_map(|&id| Some(Candidate { id, block: *ix.assoc_owner.get(&id)? }))
+            .collect();
+        for &block in ix.trait_impls.get(&ty).map_or(&[][..], Vec::as_slice) {
+            if ix.block_overrides(block, name) {
+                continue;
+            }
+            let Some(tr) = ix.impl_headers[block].trait_node else { continue };
+            universe.extend(ix.members_named(tr, name, Want::Callable).into_iter().map(|id| Candidate { id, block }));
+        }
+        if let Some(named) = named {
+            universe.retain(|c| named.names(header(c)));
+        }
+        let mut ids = HashSet::new();
+        universe.retain(|c| ids.insert(c.id));
+        let reachable: Vec<Candidate> = universe
             .iter()
             .copied()
-            .filter(|c| syntax == Syntax::Path || !ix.without_self.contains(c))
+            .filter(|c| syntax == Syntax::Path || !ix.without_self.contains(&c.id))
             .collect();
-        let mut candidates: Vec<NodeId> = reachable.iter().copied().filter(|&c| self.trait_in_scope(c)).collect();
+        let mut candidates: Vec<Candidate> = reachable
+            .iter()
+            .copied()
+            .filter(|c| named.is_some() || self.trait_in_scope(header(c)))
+            .collect();
         let scoped_out = candidates.len() < reachable.len();
         if candidates.is_empty() {
-            let variant = named.is_empty() && self.is_variant(ty, name);
-            self.note(Want::Callable, || {
-                if variant {
-                    Residue::NotACallable
-                } else {
-                    Residue::SupertypeUnreached
-                }
+            return Err(if universe.is_empty() && self.is_variant(ty, name) {
+                Residue::NotACallable
+            } else {
+                Residue::SupertypeUnreached
             });
-            return Res::NotFound;
         }
-        candidates = self.admitted_by_count(candidates, syntax);
+        let admitted = self.admitted_by_count(candidates.iter().map(|c| c.id).collect(), syntax);
+        candidates.retain(|c| admitted.contains(&c.id));
         if candidates.is_empty() {
             self.note(Want::Callable, || Residue::NoApplicableOverload);
-            return Res::NotFound;
+            return Ok(Res::NotFound);
         }
-        let of_trait = |c: &NodeId| {
-            ix.assoc_owner
-                .get(c)
-                .is_some_and(|&h| ix.impl_headers[h].trait_path.is_some())
-        };
-        let (traits, inherent): (Vec<NodeId>, Vec<NodeId>) = candidates.into_iter().partition(of_trait);
-        let mode = |c: &NodeId| ix.receiver_modes.get(c).copied();
+        let (traits, inherent): (Vec<Candidate>, Vec<Candidate>) =
+            candidates.into_iter().partition(|c| header(c).trait_path.is_some());
+        let mode = |c: &Candidate| ix.receiver_modes.get(&c.id).copied();
         let by_value_rival = syntax == Syntax::Method
             && !inherent.is_empty()
             && inherent.iter().all(|c| matches!(mode(c), Some(ReceiverMode::Ref | ReceiverMode::RefMut)))
@@ -4001,20 +4361,18 @@ impl Ctx<'_> {
         // traits' alone: the scope read may have missed a form that brings the
         // repository trait in, and the external one is unplaced — never let it
         // win by default.
-        let unplaced_only = scoped_out
-            && inherent.is_empty()
-            && traits
-                .iter()
-                .all(|c| ix.assoc_owner.get(c).is_some_and(|&h| ix.impl_headers[h].trait_node.is_none()));
+        let unplaced_only =
+            scoped_out && inherent.is_empty() && traits.iter().all(|c| header(c).trait_node.is_none());
         let res = if by_value_rival || unplaced_only {
             Res::Ambiguous
         } else {
-            exactly_one(if inherent.is_empty() { &traits } else { &inherent })
+            let deciding: Vec<NodeId> = if inherent.is_empty() { &traits } else { &inherent }.iter().map(|c| c.id).collect();
+            exactly_one(&deciding)
         };
         if res == Res::Ambiguous {
             self.note(Want::Callable, || Residue::OverloadAmbiguous);
         }
-        res
+        Ok(res)
     }
 
     /// `candidates` less every one whose parameter range excludes the call's
@@ -4044,8 +4402,9 @@ impl Ctx<'_> {
         candidates
     }
 
-    /// Whether the trait impl'd function `candidate` may be called here (S-607,
-    /// [FR-RS-47]): an inherent function, and one of a trait the graph cannot
+    /// Whether a function of the `impl` block `header` — or a default its
+    /// trait lends through it (S-608) — may be called here (S-607,
+    /// [FR-RS-47]): an inherent block's, and one of a trait the graph cannot
     /// place (an external trait — `Default`, `Display` — which the prelude or
     /// an import may bring), always may. A repository trait is in scope when
     /// it is the trait of the caller's own impl (CRA-02), the caller's module
@@ -4054,13 +4413,8 @@ impl Ctx<'_> {
     /// ([`imports_trait`](Ctx::imports_trait)).
     ///
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
-    fn trait_in_scope(&self, candidate: NodeId) -> bool {
-        let Some(tr) = self
-            .ix
-            .assoc_owner
-            .get(&candidate)
-            .and_then(|&h| self.ix.impl_headers[h].trait_node)
-        else {
+    fn trait_in_scope(&self, header: &ImplHeader) -> bool {
+        let Some(tr) = header.trait_node else {
             return true;
         };
         self.own_header().is_some_and(|own| own.trait_node == Some(tr))
@@ -4181,7 +4535,7 @@ impl Ctx<'_> {
             return Res::NotFound;
         }
         match self.resolve_receiver_type(type_path) {
-            Res::Found(ty) => self.lookup(ty, name, Syntax::Method),
+            Res::Found(ty) => self.lookup(ty, name, Syntax::Method, None),
             Res::Ambiguous => {
                 self.note(Want::Callable, || Residue::TypeAmbiguous);
                 Res::Ambiguous
@@ -4475,8 +4829,9 @@ impl Ctx<'_> {
     /// `Contains` children are.
     ///
     /// A caller that is a function of a recorded `impl` block (Rust) binds
-    /// through its block's self type, by the one lookup with method syntax
-    /// ([`self_type_call`](Ctx::self_type_call), S-607) — the shape a
+    /// through its block's self type, by the one lookup with method syntax —
+    /// and one that is a trait's default body fans out through its trait
+    /// ([`self_type_call`](Ctx::self_type_call), S-607, S-608) — the shape a
     /// `self.m()` keeps when its header recorded no self type (`impl a::X`,
     /// `impl Tr for std::io::Error`). A caller with a recorded self type in a
     /// language without impl blocks (Go: a method at module level) binds
@@ -4506,7 +4861,7 @@ impl Ctx<'_> {
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     fn resolve_self_receiver(&self, name: &str) -> Res {
-        if self.impl_blocks && self.own_header().is_some() {
+        if self.impl_blocks && (self.own_header().is_some() || self.own_trait().is_some()) {
             return self.self_type_call(name, Syntax::Method);
         }
         if self.ix.self_types.contains_key(&self.source) {
@@ -4576,59 +4931,116 @@ impl Ctx<'_> {
         self.supertype_member(bases, HashSet::from([class]), name)
     }
 
-    /// Fan out a trait-object dynamic-dispatch call `T::f` to the SET of that
-    /// trait method's targets (S-281, [CR-073], [FR-RS-08]).
+    /// Fan out a trait-typed receiver call `T::f` to the SET of that trait
+    /// method's targets (S-281, [CR-073], [FR-RS-08]; S-608, [FR-RS-47] rule 5).
     ///
     /// `target` is the trait-qualified form extraction emits for a *provable*
-    /// `&dyn T` receiver — the method is the last `::` segment, the trait its
-    /// predecessor. The fan-out set is the trait's own default body (a
-    /// [`Want::Callable`] member of the resolved [`NodeKind::Trait`] node) ∪ every
-    /// concrete workspace impl of that method ([`Index::impls_of`]). Union
-    /// reachability: any impl — or the default, for an impl that does not override
-    /// — is a legitimate runtime dispatch target ([FR-AN-01]).
+    /// trait-typed receiver — `&dyn T`, `impl T`, a generic parameter bounded
+    /// by `T` — the method the last `::` segment, the head its trait, or its
+    /// several bounds joined by `+` (`A+B::f`). Each bound is read by its
+    /// unique name ([`Index::trait_by_name`]); one the graph cannot place
+    /// (`Send`, `Clone`) provides nothing it can see. The one bound whose set
+    /// ([`fan_out`](Ctx::fan_out)) is not empty decides the call. Two such
+    /// bounds bind nothing ([`Residue::OverloadAmbiguous`]): rustc rejects the
+    /// call as ambiguous. None is [`Residue::ExternalType`] beside an unplaced
+    /// bound — whose method it may be — and [`Residue::SupertypeUnreached`]
+    /// otherwise.
     ///
     /// Never fabricate ([NFR-RA-05]): every target is a real indexed node reached
     /// through the **proven** trait `T`, so no same-named method on an unrelated
-    /// type, free function, or external target can enter the set. A trait that is
-    /// external or ambiguously named, or one with neither a default body nor a
-    /// workspace impl of `f`, yields an empty set and stays an honest miss. The
-    /// set is id-sorted and deduped for a deterministic edge order ([NFR-RA-06]).
+    /// type, free function, or external target can enter the set.
     ///
     /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
-    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    fn resolve_dyn_dispatch(&self, source: NodeId, target: &str) -> Outcome {
-        // `T::f` — the method is the last `::` segment, the trait its predecessor.
+    fn resolve_dyn_dispatch(&self, target: &str) -> Res {
         // A malformed target (`::f`, `T::`, a single segment) cannot reach here
-        // (`target.contains("::")` gated the call) but a missing predecessor is
+        // (`target.contains("::")` gated the call) but a missing head is
         // handled defensively as an honest miss.
-        let mut segs = target.rsplit("::");
-        let (Some(method), Some(trait_name)) = (segs.next(), segs.next()) else {
-            return Outcome::Unbound;
+        let Some((head, method)) = target.rsplit_once("::") else {
+            return Res::NotFound;
         };
-        let Some(trait_node) = self.ix.trait_by_name(trait_name) else {
-            // External / ambiguous trait — honest miss.
-            self.note(Want::Callable, || Residue::ExternalType {
-                candidates: Vec::new(),
-            });
-            return Outcome::Unbound;
-        };
-        let mut targets = self.ix.members_named(trait_node, method, Want::Callable);
-        targets.extend_from_slice(self.ix.impls_of(trait_node, method));
+        let mut unplaced = false;
+        let mut providers: Vec<Vec<NodeId>> = Vec::new();
+        for bound in head.split('+') {
+            match self.ix.trait_by_name(bound) {
+                Some(tr) => {
+                    let set = self.fan_out(tr, method);
+                    if !set.is_empty() {
+                        providers.push(set);
+                    }
+                }
+                None => unplaced = true,
+            }
+        }
+        match <[Vec<NodeId>; 1]>::try_from(providers) {
+            Ok([set]) => self.fan_out_to(set),
+            Err(providers) if providers.is_empty() => {
+                self.note(Want::Callable, || {
+                    if unplaced {
+                        Residue::ExternalType {
+                            candidates: Vec::new(),
+                        }
+                    } else {
+                        Residue::SupertypeUnreached
+                    }
+                });
+                Res::NotFound
+            }
+            Err(_) => {
+                self.note(Want::Callable, || Residue::OverloadAmbiguous);
+                Res::Ambiguous
+            }
+        }
+    }
+
+    /// The SET a call through the trait `tr` fans out to (S-281, [FR-RS-08] as
+    /// amended by [FR-RS-47]; S-608): every concrete repository impl of its
+    /// method `name` ([`Index::impls_of`]), plus the trait's own default body
+    /// (a [`Want::Callable`] member of the trait node) unless every
+    /// implementor overrides it ([`Index::overridden_everywhere`]). Union
+    /// reachability: any impl — or the default, for an impl that does not
+    /// override — is a legitimate runtime dispatch target ([FR-AN-01]). A
+    /// required signature binds nothing: it is no node of the index
+    /// ([`bindable`]). Id-sorted and deduped for a deterministic edge order
+    /// ([NFR-RA-06]).
+    ///
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn fan_out(&self, tr: NodeId, name: &str) -> Vec<NodeId> {
+        let mut targets = self.ix.impls_of(tr, name).to_vec();
+        if !self.ix.overridden_everywhere(tr, name) {
+            targets.extend(self.ix.members_named(tr, name, Want::Callable));
+        }
         targets.sort_unstable();
         targets.dedup();
-        if targets.is_empty() {
+        targets
+    }
+
+    /// A call through the trait `tr` — a trait body's `self.m()` / `Self::m()`,
+    /// a written `Tr::m(x)` — fanned out to [`fan_out`](Ctx::fan_out)'s set
+    /// (S-608, [FR-RS-47] rule 5). An empty set is
+    /// [`Residue::SupertypeUnreached`]: neither an impl nor a default supplies
+    /// the method (a supertrait's is not read).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn trait_call(&self, tr: NodeId, name: &str) -> Res {
+        let set = self.fan_out(tr, name);
+        if set.is_empty() {
             self.note(Want::Callable, || Residue::SupertypeUnreached);
-            return Outcome::Unbound;
+            return Res::NotFound;
         }
-        Outcome::BoundMany {
-            source,
-            targets,
-            kind: EdgeKind::Calls,
-            payload: None,
-        }
+        self.fan_out_to(set)
+    }
+
+    /// Record `targets` as the row's fan-out ([`fanned`](Ctx::fanned)), which
+    /// [`bind_traced`] binds, and answer [`Res::NotFound`] to the rung.
+    fn fan_out_to(&self, targets: Vec<NodeId>) -> Res {
+        *self.fanned.borrow_mut() = Some(targets);
+        Res::NotFound
     }
 
     /// Bind one cross-artifact reference under never-fabricate (CR-011,
@@ -6092,7 +6504,7 @@ impl Ctx<'_> {
                     return match self.type_in_module(&key, seg, MAX_ALIAS_DEPTH) {
                         Res::Found(ty) => {
                             self.type_reached.set(true);
-                            self.lookup(ty, &segs[i + 1], Syntax::Path)
+                            self.lookup(ty, &segs[i + 1], Syntax::Path, None)
                         }
                         Res::Ambiguous => {
                             self.type_reached.set(true);
@@ -6488,8 +6900,9 @@ mod tests {
         let branch = src.find(concat!("if self.impl_blocks && i == segs", ".len() - 2")).expect("the Rust branch");
         let collapse = src.find(concat!("// The `Type::func` collapse of every", " other language")).expect("the collapse");
         assert!(branch < collapse, "the impl-block branch must decide first");
-        // `Self::m`/`self.m()`, a proven `x.m()` and a written `T::m()`: three
-        // call sites of the one lookup, no fourth rule.
-        assert_eq!(src.matches(concat!("self.look", "up(")).count(), 3);
+        // `Self::m`/`self.m()`, a proven `x.m()`, a written `T::m()` and a
+        // qualified `<T as Tr>::m()` (S-608): four call sites of the one
+        // lookup, no fifth rule.
+        assert_eq!(src.matches(concat!("self.look", "up(")).count(), 4);
     }
 }

@@ -2341,9 +2341,9 @@ fn a_same_named_type_in_another_crate_is_never_a_candidate() {
 #[test]
 fn a_self_call_from_a_caller_in_no_impl_block_proves_no_receiver() {
     use super::binder::{residue, Residue};
-    // `lone` is in no impl block (a free function, a trait's default method):
-    // its `Self::helper` proves no type, and never reaches the scope hierarchy
-    // (S-607; a trait body's fan-out is S-608's).
+    // `lone` is in no impl block and no trait (a free function): its
+    // `Self::helper` proves no type, and never reaches the scope hierarchy
+    // (S-607; a trait default body's call fans out instead, S-608).
     let r = call(100, LIB_RS, 74, "Self::helper");
     let ix = self_type_index(&r, &[75, 78, 84]);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
@@ -2710,8 +2710,8 @@ fn an_inherent_method_outranks_a_trait_impls_and_two_of_one_rank_bind_nothing() 
     let ix = receiver_index(&close, &store, &[]);
     assert_eq!(bind(&close, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&close, &ix, BindingPolicy::Aggressive), Some(Residue::OverloadAmbiguous));
-    // None: the type records no `missing` — a trait default or a derive
-    // supplies it — and the free `helper` beside the caller is no method of it.
+    // None: the type records no `missing` — a derive supplies it — and the
+    // free `helper` beside the caller is no method of it.
     for target in ["Store::missing", "Store::helper"] {
         let none = proven(102, target, None);
         let ix = receiver_index(&none, &store, &[]);

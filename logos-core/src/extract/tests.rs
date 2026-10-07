@@ -1195,6 +1195,58 @@ fn scoped_dyn_trait_takes_its_last_segment() {
     );
 }
 
+/// A receiver typed by a generic parameter's trait bounds, or by `impl Tr`,
+/// is trait-qualified as a `dyn Tr` one is (S-608, FR-RS-47 rule 5): inline
+/// and `where` bounds, the enclosing impl's parameters, `&`/`Box` peeled, and
+/// several bounds joined by `+` in written order — a lifetime, `?Sized` and a
+/// `Fn(…)` bound name no trait.
+#[test]
+fn generic_bound_and_impl_trait_receivers_are_trait_qualified() {
+    let cases = [
+        ("fn f<T: Run>(t: &T) { t.go(); }", "Run::go"),
+        ("fn f<T>(t: T) where T: Run { t.go(); }", "Run::go"),
+        ("fn f<T: Run>(t: &mut T) where T: Walk { t.go(); }", "Run+Walk::go"),
+        ("fn f<'a, T: 'a + ?Sized + a::b::Run + Send>(t: &'a T) { t.go(); }", "Run+Send::go"),
+        ("fn f<T: Run>(t: Box<T>) { t.go(); }", "Run::go"),
+        ("fn f(t: &impl Run) { t.go(); }", "Run::go"),
+        ("fn f(t: impl Run + Walk) { t.go(); }", "Run+Walk::go"),
+        ("fn f<F: Fn(u8) + Run>(t: F) { t.go(); }", "Run::go"),
+        ("struct H<T>(T);\nimpl<T: Run> H<T> { fn f(&self, t: &T) { t.go(); } }", "Run::go"),
+        ("trait Tr<T: Run> { fn f(&self, t: &T) { t.go(); } }", "Run::go"),
+    ];
+    for (src, want) in cases {
+        let facts = extract_src("src/lib.rs", src);
+        assert_eq!(method_call_targets(&facts), vec![want], "{src}");
+    }
+}
+
+/// Near misses of [`generic_bound_and_impl_trait_receivers_are_trait_qualified`]:
+/// a parameter bounded by no trait, a type named like no parameter of the
+/// function, a function's own unbounded `T` shadowing its impl's bounded one,
+/// a `where` clause bounding a type that is not a parameter, and a parameter
+/// inside a container — none is trait-qualified (a concrete-looking type is
+/// left to receiver typing, S-587).
+#[test]
+fn a_generic_bounded_by_no_trait_stays_a_bare_name() {
+    let cases = [
+        "fn f<T>(t: &T) { t.go(); }",
+        "fn f<'a, T: 'a + ?Sized>(t: &'a T) { t.go(); }",
+        "fn f<U: Run>(t: &T) { t.go(); }",
+        "struct H<T>(T);\nimpl<T: Run> H<T> { fn f<T>(&self, t: &T) { t.go(); } }",
+        "fn f(t: &Q) where Q: Run { t.go(); }",
+        "fn f<T: Run>(t: Vec<T>) { t.go(); }",
+    ];
+    for src in cases {
+        let facts = extract_src("src/lib.rs", src);
+        assert!(
+            !method_call_targets(&facts).iter().any(|t| t.contains("::")),
+            "{src}: {:?}",
+            method_call_targets(&facts)
+        );
+        assert!(facts.refs.iter().any(|r| r.target.ends_with("go")), "{src}: the call is still recorded");
+    }
+}
+
 #[test]
 fn non_dyn_receiver_method_call_stays_a_bare_name() {
     // A concrete-typed receiver is NOT a provable trait object: the call never

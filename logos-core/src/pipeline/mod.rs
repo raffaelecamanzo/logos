@@ -697,16 +697,23 @@ pub fn sync(
         .chain(removals.iter().cloned())
         .chain(module_descriptors)
         .collect();
-    // With them, the names each imported (S-588) and the namespace each
-    // declared (S-518): a file that changes either renames no node, so those
-    // are the keys that move. And whether one
+    // With them, the names each imported (S-588), the namespace each
+    // declared (S-518) and the names its `impl` headers spell (S-608): a file
+    // that changes any of them renames no node, so those are the keys that
+    // move. And whether one
     // of them declared a global namespace wildcard, read here for the same
     // reason: the re-extract replaces its ledger rows.
     let (old_names, old_global_imports): (Vec<String>, bool) = if changed_paths.is_empty() {
         (Vec::new(), false)
     } else {
         runtime.submit_read(|store| {
-            let mut names = Vec::new();
+            let mut names: Vec<String> = store
+                .impl_blocks()?
+                .into_iter()
+                .filter(|b| changed_paths.contains(&b.file_path))
+                .flat_map(|b| [Some(b.self_type), b.trait_path, b.deref_target])
+                .flatten()
+                .collect();
             let mut global_imports = false;
             for path in &changed_paths {
                 names.extend(store.node_names_for_path(path)?);
@@ -2045,7 +2052,8 @@ fn persist_failure_warning(failure: &PersistFailure, stale: bool) -> String {
 
 /// A sync's CR-015 incremental resolution change-set (part 2 of 2): union the
 /// names that entered the changed files (this sync's freshly extracted facts,
-/// with the namespaces they declare, S-518, and the names they import, S-588)
+/// with the namespaces they declare, S-518, the names they import, S-588, and
+/// those their `impl` headers spell, S-608)
 /// with those that left them (`old_names`) and the changed paths, tokenized. The
 /// resolve pass re-binds exactly the rows these can move and skips the rest —
 /// the same result as retrying the whole ledger (FR-RS-03), a fraction of the
@@ -2072,6 +2080,18 @@ fn sync_delta(
         // import behind `use super::*`), spelling only the imported name.
         for alias in f.refs.iter().filter(|r| r.kind == EdgeKind::Imports).filter_map(|r| r.alias.as_deref()) {
             dirty_tokens.extend(crate::resolve::tokens(alias));
+        }
+        // The types, traits and `Deref` targets its `impl` headers name
+        // (S-608): an empty `impl Greet for X {}` declares no node, and lends
+        // `X` its trait's defaults; a `Deref` impl moves every method call on
+        // its type.
+        for block in &f.impl_blocks {
+            for text in [Some(&block.self_type), block.trait_path.as_ref(), block.deref_target.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                dirty_tokens.extend(crate::resolve::tokens(text));
+            }
         }
     }
     for path in &changed_paths {

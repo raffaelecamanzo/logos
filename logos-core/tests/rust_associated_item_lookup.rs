@@ -740,15 +740,16 @@ fn a_private_glob_brings_no_trait_into_a_globbing_files_scope() {
     assert_eq!(from(&edges, "src/user.rs:f@3"), targets(&["src/open.rs:sec@2"]));
 }
 
-/// The reasons of the shapes no lookup decides yet or at all: a qualified
-/// `<T as Tr>::m()` on a repository type (`supertype-unreached` until S-608
-/// binds it), a trait head `Tr::m(s)` (`no-receiver-evidence`), a module path
-/// to a tuple struct and a function-local enum's variant (`not-a-callable`).
+/// The reasons of the shapes no lookup binds: a qualified `<T as Tr>::m()` on
+/// a type the repository does not declare (`external-type`), a trait head
+/// `Tr::m(s)` whose trait has neither an impl nor a default of `m`
+/// (`supertype-unreached`; S-608 binds one that has), a module path to a tuple
+/// struct and a function-local enum's variant (`not-a-callable`).
 #[test]
 fn the_shapes_no_lookup_decides_each_carry_their_reason() {
     let cases: [(&str, R); 4] = [
-        ("pub struct T;\npub trait Tr { fn m(); }\nimpl Tr for T { fn m() {} }\npub fn f() { <T as Tr>::m(); }\n", R::SupertypeUnreached),
-        ("pub trait Tr { fn m(&self); }\npub struct S;\nimpl Tr for S { fn m(&self) {} }\npub fn f(s: &S) { Tr::m(s); }\n", R::NoReceiverEvidence),
+        ("pub trait Tr { fn m(); }\npub fn f() { <std::io::Error as Tr>::m(); }\n", R::ExternalType),
+        ("pub trait Tr { fn m(&self); }\npub struct S;\npub fn f(s: &S) { Tr::m(s); }\n", R::SupertypeUnreached),
         ("pub mod m { pub struct W(pub u8); }\npub fn f() { m::W(1); }\n", R::NotACallable),
         ("pub fn f() {\n    enum L { A(u8) }\n    L::A(1);\n}\n", R::NotACallable),
     ];

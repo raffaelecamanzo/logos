@@ -192,9 +192,10 @@ fn every_associated_item_fact_is_persisted() {
 }
 
 /// S-606 / CR-202: a required signature is a bodyless `Method` contained by
-/// its trait, and nothing else touches it — no call binds it (the `self.m()`
-/// calls in the trait's default body stay unbound, as before the signature was
-/// a node; the qualified call binds nothing) — and it is never reported dead.
+/// its trait, and nothing else touches it — no call binds it: the `self.m()`
+/// calls in the trait's default body fan out to the impls of `m` alone (S-608,
+/// `Y`'s; `X`'s empty impl lends no body), and the qualified call, which `X`'s
+/// impl supplies no body for, binds nothing — and it is never reported dead.
 #[test]
 fn a_required_signature_binds_no_call_and_is_never_dead() {
     let tmp = tree(&[(LIB, LIB_SRC), (A, A_SRC)]);
@@ -202,7 +203,15 @@ fn a_required_signature_binds_no_call_and_is_never_dead() {
     let rt = engine.runtime().unwrap();
 
     let calls = edges(rt, EdgeKind::Calls);
-    assert_eq!(calls, vec![("go@11".to_string(), "go2@12".to_string())], "only `go` binds, to `go2`");
+    assert_eq!(
+        calls,
+        vec![
+            ("go@11".to_string(), "go2@12".to_string()),
+            ("twice@7".to_string(), "hello@3".to_string()),
+            ("twice@7".to_string(), "meta@4".to_string()),
+        ],
+        "`go` binds `go2`, and the default body's calls reach `Y`'s impls, never a signature"
+    );
     let signatures = ["hello@5", "meta@6"];
     let label = labels(rt);
     for e in rt.submit_read(|store| store.all_edges()).expect("read runs") {
@@ -218,9 +227,10 @@ fn a_required_signature_binds_no_call_and_is_never_dead() {
         .filter(|r| r.kind == EdgeKind::Calls && !r.resolved)
         .map(|r| r.target)
         .collect();
-    for target in ["hello", "meta", "<X as Greet>::hello"] {
-        assert!(unbound.contains(&target.to_string()), "{target} stays unbound: {unbound:?}");
-    }
+    assert!(
+        unbound.contains(&"<X as Greet>::hello".to_string()),
+        "the qualified call stays unbound: {unbound:?}"
+    );
 
     let verdicts: HashMap<String, (NodeKind, Option<bool>, Option<bool>)> = rt
         .submit_read(|store| store.annotation_nodes())
@@ -394,9 +404,10 @@ fn a_handoff_beside_a_same_named_signature_roots_the_handler() {
 
 /// S-606: `status` reads the call residue over the same signature-free graph
 /// the binder binds against, so it states what binding produced. The default
-/// body's `self.hello()` and `self.meta()` stay unbound, and each keeps the
-/// reason the trait's members give it. Over a graph that held the signatures
-/// they would read as bindable, and land in `unclassified`.
+/// body's `self.hello()` and `self.meta()` stay unbound — no impl supplies a
+/// body (S-608) — and each reads `supertype-unreached`; `x.twice()` binds the
+/// default `X`'s empty impl lends. Over a graph that held the signatures they
+/// would read as bindable, and land in `unclassified`.
 #[test]
 fn the_call_residue_states_what_binding_left_beside_required_signatures() {
     let src = "\
@@ -419,6 +430,6 @@ pub fn q(x: &X) { x.twice(); }
         .and_then(|row| row.call_residue)
         .expect("the rust row states its call residue");
     let reasons: BTreeMap<R, u64> = residue.reasons.into_iter().filter(|(_, n)| *n > 0).collect();
-    assert_eq!((residue.unbound, residue.unclassified), (3, 0), "{reasons:?}");
-    assert_eq!(reasons, [(R::SupertypeUnreached, 3)].into_iter().collect());
+    assert_eq!((residue.unbound, residue.unclassified), (2, 0), "{reasons:?}");
+    assert_eq!(reasons, [(R::SupertypeUnreached, 2)].into_iter().collect());
 }
