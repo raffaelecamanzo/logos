@@ -4056,6 +4056,10 @@ fn a_bare_call_is_filtered_only_in_a_language_that_overloads() {
     let ix = ranged_hierarchy(&r, range(1, Some(1)), range(0, Some(0)));
     assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::NoApplicableOverload));
+    // The aggressive workspace name match filters too: `A.m()` cannot take
+    // it, so the one `m` left is the inherited `Base.m(x)` — never an
+    // ambiguity with the own member the count rules out.
+    bound_to(bind(&r, &ix, BindingPolicy::Aggressive), 313, 302, EdgeKind::Calls);
     let (nodes, edges) = shape_fixture();
     let bare = counted(call(101, PY_FILE, 204, "m"), Some(1));
     let ix = Index::build(&nodes, &edges, std::slice::from_ref(&bare))
