@@ -25,7 +25,9 @@
 //!   unseen superclass may declare the method, and a class's beats an
 //!   interface's;
 //! - a class reaches the default of an interface its superclass implements:
-//!   the walk reads every chain type's interfaces, not the start type's alone.
+//!   the walk reads every chain type's interfaces, not the start type's alone;
+//! - an `implements` clause naming an interface the graph does not hold blocks
+//!   nothing: only an unseen superclass can declare the method first.
 //!
 //! Sync ≡ reindex holds when an interface gains or loses a default or a
 //! super-interface and when a class gains or loses an `implements` clause (the
@@ -148,8 +150,9 @@ const JAVA_USER: &str = "src/main/java/com/x/User.java";
 const JAVA_OUT: &str = "src/main/java/com/x/Out.java";
 const JAVA_MID: &str = "src/main/java/com/x/Mid.java";
 const JAVA_SUB: &str = "src/main/java/com/x/Sub.java";
+const JAVA_GEN: &str = "src/main/java/com/x/Gen.java";
 
-const JAVA_FILES: [(&str, &str); 9] = [
+const JAVA_FILES: [(&str, &str); 10] = [
     (
         JAVA_I,
         "package com.x;
@@ -252,6 +255,17 @@ public abstract class Sub extends Mid {
 }
 ",
     ),
+    (
+        JAVA_GEN,
+        "package com.x;
+
+import org.lib.GeneratedApi;
+
+public abstract class Gen implements GeneratedApi, I {
+    void callGen() { m(1); }
+}
+",
+    ),
 ];
 
 #[cfg(feature = "lang-java")]
@@ -288,6 +302,9 @@ fn a_java_call_reaches_an_implemented_interfaces_default_body() {
             ("Out.callUnseen", &[]),
             // The interface a superclass implements: every chain type's.
             ("Sub.callInherited", &["I.m"]),
+            // An interface the graph does not hold is no superclass: it
+            // blocks nothing (the estate's generated OpenAPI interfaces).
+            ("Gen.callGen", &["I.m"]),
         ],
     );
     let reasons = residue(&engine, "java");
