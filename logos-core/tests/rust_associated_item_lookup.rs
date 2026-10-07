@@ -580,3 +580,43 @@ pub fn caller() { helper(); }
     assert!(from(&edges, "src/lib.rs:caller@3").is_empty(), "{edges:?}");
     assert_eq!(residue(&engine), reasons(&[(R::NameNotInScope, 1)]));
 }
+
+/// A trait's scope moved by a third file: a `pub use` of it added to, or
+/// removed from, the prelude a caller globs in rebinds the call on sync,
+/// though neither the row (`W::sec`) nor the caller's file spells `Secret`.
+#[test]
+fn a_trait_brought_into_scope_by_a_globbed_re_export_rebinds_on_sync() {
+    let base = [
+        ("src/lib.rs", "pub mod hidden;\npub mod prelude;\npub mod user;\npub struct W;\n"),
+        ("src/hidden.rs", "pub trait Secret { fn sec(&self); }\nimpl Secret for crate::W { fn sec(&self) {} }\n"),
+        ("src/user.rs", "use crate::prelude::*;\npub fn seen(w: &crate::W) { w.sec(); }\n"),
+    ];
+    let bare = ("src/prelude.rs", "pub fn helper() {}\n");
+    let reexporting = ("src/prelude.rs", "pub fn helper() {}\npub use crate::hidden::Secret;\n");
+    let mut without = base.to_vec();
+    without.push(bare);
+    let edges = synced_equals_reindexed(&without, &[reexporting]);
+    assert_eq!(from(&edges, "src/user.rs:seen@2"), targets(&["src/hidden.rs:sec@2"]));
+    let mut with = base.to_vec();
+    with.push(reexporting);
+    let edges = synced_equals_reindexed(&with, &[bare]);
+    assert!(from(&edges, "src/user.rs:seen@2").is_empty(), "{edges:?}");
+}
+
+/// A written `T::m()` reaches an impl whose header names its type through a
+/// third file's renaming re-export: retargeting that re-export moves the
+/// function from `Z` to `Y` on sync.
+#[test]
+fn an_impl_header_read_through_a_retargeted_re_export_rebinds_written_calls_on_sync() {
+    let initial = [
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod facade;\npub mod w;\npub mod user;\n"),
+        ("src/a.rs", "pub struct Y;\n"),
+        ("src/b.rs", "pub struct Z;\n"),
+        ("src/facade.rs", "pub use crate::b::Z as X;\n"),
+        ("src/w.rs", "use crate::facade::X;\nimpl X { pub fn mk() {} }\n"),
+        ("src/user.rs", "use crate::a::Y;\nuse crate::b::Z;\npub fn z() { Z::mk(); }\npub fn y() { Y::mk(); }\n"),
+    ];
+    let edges = synced_equals_reindexed(&initial, &[("src/facade.rs", "pub use crate::a::Y as X;\n")]);
+    assert!(from(&edges, "src/user.rs:z@3").is_empty(), "{edges:?}");
+    assert_eq!(from(&edges, "src/user.rs:y@4"), targets(&["src/w.rs:mk@2"]));
+}

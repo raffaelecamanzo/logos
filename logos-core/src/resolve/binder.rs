@@ -1552,6 +1552,40 @@ impl Index {
         false
     }
 
+    /// The names of the impl functions whose block header a token of `dirty`
+    /// spells — its self type or its trait, as written, or its trait's name —
+    /// beyond `dirty` (S-607). Which calls such a function answers moves with
+    /// what its header resolves to, and with where its trait is in scope, both
+    /// read through other files' `use`s: a `pub use` retargeted or removed in a
+    /// third file spells the header's name and never the call's. Read beside
+    /// [`ref_affected`](Index::ref_affected) for every `Calls` row
+    /// (`resolve::run`), as the [`renamed_import_tokens`](Index::renamed_import_tokens)
+    /// precedent is.
+    pub(crate) fn impl_header_tokens(&self, dirty: &HashSet<String>) -> HashSet<String> {
+        let spells = |text: &str| super::tokens(text).iter().any(|t| dirty.contains(t));
+        let moved: HashSet<usize> = self
+            .impl_headers
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| {
+                spells(&h.self_path)
+                    || h.trait_path.as_deref().is_some_and(spells)
+                    || h.trait_node.and_then(|t| self.info.get(&t)).is_some_and(|i| spells(&i.name))
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if moved.is_empty() {
+            return HashSet::new();
+        }
+        self.assoc_owner
+            .iter()
+            .filter(|(_, at)| moved.contains(at))
+            .filter_map(|(f, _)| self.info.get(f))
+            .flat_map(|i| super::tokens(&i.name))
+            .filter(|t| !dirty.contains(t))
+            .collect()
+    }
+
     /// The tokens a proven Rust receiver's row (S-588) can read through
     /// another module's renaming import, beyond `dirty`: the name of every
     /// `use … as N` (in any file) whose imported name a token of `dirty` — or

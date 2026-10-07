@@ -349,6 +349,9 @@ pub fn run(
             // …and the names a renaming import elsewhere gives a dirty name,
             // which a proven Rust receiver's type is read through (S-588).
             let renamed = index.renamed_import_tokens(&d.dirty_tokens);
+            // …and the functions of every impl block whose header the change
+            // spells, which a call reaches through the one lookup (S-607).
+            let headers = index.impl_header_tokens(&d.dirty_tokens);
             snap.refs
                 .iter()
                 .filter(|&r| {
@@ -356,6 +359,7 @@ pub fn run(
                         || (!renamed.is_empty()
                             && binder::is_proven_receiver_call(r)
                             && index.ref_affected(r, &renamed))
+                        || (!headers.is_empty() && r.kind == EdgeKind::Calls && index.ref_affected(r, &headers))
                 })
                 .collect()
         }
