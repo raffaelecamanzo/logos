@@ -2088,12 +2088,8 @@ fn import_row(
     semantics: &Semantics,
 ) -> Option<(Vec<String>, RefForm, Option<String>)> {
     let marked = |name: &str| captures.iter().any(|c| capture_names[c.index as usize] == name);
-    let capture_text = |name: &str| {
-        captures
-            .iter()
-            .find(|c| capture_names[c.index as usize] == name)
-            .and_then(|c| c.node.utf8_text(source).ok())
-    };
+    let capture_text =
+        |name: &str| match_capture(captures, capture_names, name).and_then(|n| n.utf8_text(source).ok());
     let segments = match (capture_text(FROM_MODULE_CAPTURE), semantics.import_specifier) {
         (Some(module), _) => {
             let mut segments = from_module_segments(module);
@@ -2981,11 +2977,8 @@ fn collect_decls<'t>(
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
-        let self_type = m
-            .captures
-            .iter()
-            .find(|c| capture_names[c.index as usize] == SELF_TYPE_CAPTURE)
-            .and_then(|c| c.node.utf8_text(source).ok())
+        let self_type = match_capture(m.captures, capture_names, SELF_TYPE_CAPTURE)
+            .and_then(|n| n.utf8_text(source).ok())
             .map(str::trim)
             .filter(|t| !t.is_empty());
         let chained = m

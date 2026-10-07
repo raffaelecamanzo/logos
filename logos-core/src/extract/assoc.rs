@@ -47,6 +47,7 @@ use tree_sitter::Node;
 
 use crate::model::ReceiverMode;
 
+use super::arity::owning_decl;
 use super::Decl;
 
 /// The capture-name prefix of the vocabulary.
@@ -218,19 +219,6 @@ impl<'tree> AssocCaptures<'tree> {
         blocks.sort_by_key(|(start, _)| *start);
         blocks.into_iter().map(|(_, b)| b).collect()
     }
-}
-
-/// The nearest captured declaration enclosing `node`, or `node` itself when it
-/// is one.
-fn owning_decl(node: Node<'_>, decl_at: &HashMap<usize, usize>) -> Option<usize> {
-    let mut ancestor = Some(node);
-    while let Some(n) = ancestor {
-        if let Some(&idx) = decl_at.get(&n.id()) {
-            return Some(idx);
-        }
-        ancestor = n.parent();
-    }
-    None
 }
 
 /// A type path as recorded ([module docs](self)): a path's `::` segments as
