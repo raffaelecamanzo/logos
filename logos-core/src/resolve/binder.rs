@@ -3986,7 +3986,7 @@ impl Ctx<'_> {
         named
             || scope.globs.iter().any(|glob| {
                 self.module_key_of(glob, MAX_ALIAS_DEPTH).is_some_and(|key| {
-                    self.type_in_module(&key, name) == Res::Found(tr)
+                    self.type_in_module(&key, name, MAX_ALIAS_DEPTH) == Res::Found(tr)
                         || (ancestor(&key)
                             && self.module_scope(&key).is_some_and(|parent| {
                                 self.through_reexported_globs(&key, &parent.globs, name, MAX_ALIAS_DEPTH)
@@ -3998,13 +3998,13 @@ impl Ctx<'_> {
 
     /// The one type `name` the module `key` holds (S-607): a type-like member
     /// it declares, else one it re-exports — by a named `use`, or a `pub use`
-    /// glob ([`reexported_type`](Ctx::reexported_type)).
-    fn type_in_module(&self, key: &ModKey, name: &str) -> Res {
+    /// glob ([`reexported_type`](Ctx::reexported_type)), `depth` hops at most.
+    fn type_in_module(&self, key: &ModKey, name: &str, depth: u8) -> Res {
         let Some(&module) = self.ix.modules.get(key) else {
             return Res::NotFound;
         };
         match exactly_one(&self.member_types(module, name)) {
-            Res::NotFound => self.reexported_type(key, name, MAX_ALIAS_DEPTH),
+            Res::NotFound => self.reexported_type(key, name, depth),
             decided => decided,
         }
     }
@@ -4258,13 +4258,7 @@ impl Ctx<'_> {
         for glob in globs {
             for (krate, mut base, rest) in self.anchors(key, glob) {
                 base.extend(rest.iter().cloned());
-                let module_key = (krate, base);
-                let Some(&module) = self.ix.modules.get(&module_key) else { continue };
-                let res = match exactly_one(&self.member_types(module, name)) {
-                    Res::NotFound => self.reexported_type(&module_key, name, depth - 1),
-                    decided => decided,
-                };
-                match res {
+                match self.type_in_module(&(krate, base), name, depth - 1) {
                     Res::Found(id) => {
                         found.push(id);
                         break;
@@ -5932,7 +5926,7 @@ impl Ctx<'_> {
                     if !want.is_call() {
                         return Res::NotFound;
                     }
-                    return match self.type_in_module(&key, seg) {
+                    return match self.type_in_module(&key, seg, MAX_ALIAS_DEPTH) {
                         Res::Found(ty) => {
                             self.type_reached.set(true);
                             self.lookup(ty, &segs[i + 1], Syntax::Path)
