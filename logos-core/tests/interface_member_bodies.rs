@@ -23,7 +23,9 @@
 //!   (`overload-ambiguous`), and a call no default admits binds nothing;
 //! - a class whose superclass the graph does not hold reaches no default: the
 //!   unseen superclass may declare the method, and a class's beats an
-//!   interface's.
+//!   interface's;
+//! - a class reaches the default of an interface its superclass implements:
+//!   the walk reads every chain type's interfaces, not the start type's alone.
 //!
 //! Sync ≡ reindex holds when an interface gains or loses a default or a
 //! super-interface and when a class gains or loses an `implements` clause (the
@@ -144,8 +146,10 @@ const JAVA_BASE: &str = "src/main/java/com/x/Base.java";
 const JAVA_C: &str = "src/main/java/com/x/C.java";
 const JAVA_USER: &str = "src/main/java/com/x/User.java";
 const JAVA_OUT: &str = "src/main/java/com/x/Out.java";
+const JAVA_MID: &str = "src/main/java/com/x/Mid.java";
+const JAVA_SUB: &str = "src/main/java/com/x/Sub.java";
 
-const JAVA_FILES: [(&str, &str); 7] = [
+const JAVA_FILES: [(&str, &str); 9] = [
     (
         JAVA_I,
         "package com.x;
@@ -232,6 +236,22 @@ public abstract class Out extends External implements I {
 }
 ",
     ),
+    (
+        JAVA_MID,
+        "package com.x;
+
+public abstract class Mid implements I {}
+",
+    ),
+    (
+        JAVA_SUB,
+        "package com.x;
+
+public abstract class Sub extends Mid {
+    void callInherited() { m(1); }
+}
+",
+    ),
 ];
 
 #[cfg(feature = "lang-java")]
@@ -266,6 +286,8 @@ fn a_java_call_reaches_an_implemented_interfaces_default_body() {
             ("I.viaPriv", &["I.priv"]),
             // The superclass leaves the graph: it may declare `m`.
             ("Out.callUnseen", &[]),
+            // The interface a superclass implements: every chain type's.
+            ("Sub.callInherited", &["I.m"]),
         ],
     );
     let reasons = residue(&engine, "java");
@@ -362,6 +384,12 @@ abstract class C : Base(), I, K {
 abstract class Out : External(), I {
     fun callUnseen() { m(1) }
 }
+
+abstract class Mid : I
+
+abstract class Sub : Mid() {
+    fun callInherited() { m(1) }
+}
 ";
 
 #[cfg(feature = "lang-kotlin")]
@@ -386,6 +414,7 @@ fn a_kotlin_call_reaches_an_implemented_interfaces_bodied_member() {
             // `I.make(1)` reaches it.
             ("C.callMake", &[]),
             ("Out.callUnseen", &[]),
+            ("Sub.callInherited", &["I.m"]),
             ("I.viaPriv", &["I.priv"]),
         ],
     );
