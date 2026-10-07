@@ -1223,9 +1223,10 @@ fn generic_bound_and_impl_trait_receivers_are_trait_qualified() {
 /// Near misses of [`generic_bound_and_impl_trait_receivers_are_trait_qualified`]:
 /// a parameter bounded by no trait, a type named like no parameter of the
 /// function, a function's own unbounded `T` shadowing its impl's bounded one,
-/// a `where` clause bounding a type that is not a parameter, and a parameter
-/// inside a container — none is trait-qualified (a concrete-looking type is
-/// left to receiver typing, S-587).
+/// a `where` clause bounding a type that is not a parameter, a parameter
+/// inside a container, and a name a `for`, `if let`, `while let`, `match` arm,
+/// closure parameter or destructuring `let` binds again — none is
+/// trait-qualified (a concrete-looking type is left to receiver typing, S-587).
 #[test]
 fn a_generic_bounded_by_no_trait_stays_a_bare_name() {
     let cases = [
@@ -1235,6 +1236,13 @@ fn a_generic_bounded_by_no_trait_stays_a_bare_name() {
         "struct H<T>(T);\nimpl<T: Run> H<T> { fn f<T>(&self, t: &T) { t.go(); } }",
         "fn f(t: &Q) where Q: Run { t.go(); }",
         "fn f<T: Run>(t: Vec<T>) { t.go(); }",
+        // A pattern rebinding the name: the inner `t` is another value.
+        "fn f<T: Run>(t: T, xs: &[B]) { for t in xs { t.go(); } }",
+        "fn f(t: &impl Run, x: Option<&B>) { if let Some(t) = x { t.go(); } }",
+        "fn f(t: &dyn Run, x: Option<&B>) { while let Some(t) = x { t.go(); } }",
+        "fn f<T: Run>(t: T, x: Option<B>) { match x { Some(t) => t.go(), None => {} } }",
+        "fn f<T: Run>(t: T, xs: &[B]) { xs.iter().for_each(|t| { t.go(); }); }",
+        "fn f<T: Run>(t: T, p: (B, u8)) { let (t, _) = p; t.go(); }",
     ];
     for src in cases {
         let facts = extract_src("src/lib.rs", src);

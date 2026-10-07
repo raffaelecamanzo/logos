@@ -3868,24 +3868,38 @@ fn receiver_trait_head(site: Node<'_>, recv_name: &str, source: &[u8]) -> Option
 /// — an explicit parameter type (preferred), else a `let recv: &dyn T` binding
 /// in the body.
 /// A nested `function_item` is not descended (its bindings belong to its own
-/// scope), so a shadowing inner binding cannot mis-type an outer receiver.
+/// scope, and it cannot capture `recv`), so a shadowing inner binding cannot
+/// mis-type an outer receiver.
 fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Option<String> {
     // Collect EVERY binding of `recv_name` in this function's own scope — each
-    // parameter and each body `let` (not descending into a nested fn/closure,
-    // which owns its own scope) whose pattern is exactly the receiver name — as
-    // its optional type-annotation node.
+    // parameter and each body `let` whose pattern is exactly the receiver name,
+    // as its optional type-annotation node, and every other pattern that binds
+    // it (S-608): a destructuring `let`, a `for`, an `if let` / `while let`, a
+    // `match` arm or a closure's parameter, each untyped. A closure's body is
+    // walked: it shares the function's scope for every name it does not bind.
     //
     // The proof must be a *single* per-file type: a name bound more than once is
     // shadowed, and this walk is scope-blind (it cannot tell which binding is live
     // at the call site), so guessing one would fabricate a dispatch edge — e.g. a
     // `c: &Concrete` parameter shadowed by a later `let c: &dyn T` would wrongly
-    // qualify the *first* `c.method()` as `T::method`. Bail on anything but exactly
-    // one binding, and require that binding to be annotated: an unambiguous,
-    // annotated `&dyn T` binding qualifies; zero, several, or an un-annotated
-    // binding is an honest miss ([NFR-RA-05]).
+    // qualify the *first* `c.method()` as `T::method`, and a `t: T` parameter
+    // shadowed by `for t in xs` would type the loop's `t.go()` by `T`'s bound.
+    // Bail on anything but exactly one binding, and require that binding to be
+    // annotated: an unambiguous, annotated binding qualifies; zero, several, or
+    // an un-annotated binding is an honest miss ([NFR-RA-05]).
     let name_of = |n: Node<'_>| {
         n.child_by_field_name("pattern")
             .and_then(|p| p.utf8_text(source).ok())
+    };
+    let binds = |pattern: Option<Node<'_>>| {
+        let mut stack: Vec<Node<'_>> = pattern.into_iter().collect();
+        while let Some(n) = stack.pop() {
+            if n.kind() == "identifier" && n.utf8_text(source).ok() == Some(recv_name) {
+                return true;
+            }
+            stack.extend((0..n.named_child_count()).filter_map(|i| n.named_child(i)));
+        }
+        false
     };
     let mut bindings: Vec<Option<Node<'_>>> = Vec::new();
     if let Some(params) = fn_node.child_by_field_name("parameters") {
@@ -3899,12 +3913,19 @@ fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Op
     if let Some(body) = fn_node.child_by_field_name("body") {
         let mut stack = vec![body];
         while let Some(n) = stack.pop() {
-            if n.kind() == "let_declaration" && name_of(n) == Some(recv_name) {
-                bindings.push(n.child_by_field_name("type"));
+            match n.kind() {
+                "let_declaration" if name_of(n) == Some(recv_name) => bindings.push(n.child_by_field_name("type")),
+                "let_declaration" | "for_expression" | "let_condition" | "match_arm"
+                    if binds(n.child_by_field_name("pattern")) =>
+                {
+                    bindings.push(None);
+                }
+                "closure_expression" if binds(n.child_by_field_name("parameters")) => bindings.push(None),
+                _ => {}
             }
             for i in 0..n.child_count() {
                 if let Some(ch) = n.child(i) {
-                    if !matches!(ch.kind(), "function_item" | "closure_expression") {
+                    if ch.kind() != "function_item" {
                         stack.push(ch);
                     }
                 }
