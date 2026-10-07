@@ -543,8 +543,13 @@ fn an_override_inherits_defaults_so_its_range_is_unknown() {
         class C : B() {\n    override fun drop(scope: Int?) {}\n    fun keep(a: Int) {}\n}\n";
     assert_eq!(ranges("src/a.kt", kt), map(&[("drop", None), ("keep", range(1, Some(1)))]));
     let scala = "class C extends B {\n  override def drop(scope: Int): Unit = ()\n  \
-        def keep(a: Int): Unit = ()\n}\n";
-    assert_eq!(ranges("src/a.scala", scala), map(&[("drop", None), ("keep", range(1, Some(1)))]));
+        def keep(a: Int): Unit = ()\n}\n\
+        abstract class D extends B {\n  override def shed(scope: Int): Unit\n  def hold(a: Int): Unit\n}\n";
+    assert_eq!(
+        ranges("src/a.scala", scala),
+        map(&[("drop", None), ("hold", range(1, Some(1))), ("keep", range(1, Some(1))), ("shed", None)]),
+        "an abstract `override def` declaration too"
+    );
 }
 
 /// PHP's first-class callable `f(...)` (S-592) makes a closure and passes no
