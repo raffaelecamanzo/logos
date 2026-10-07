@@ -264,6 +264,7 @@ fn scala_ranges_and_counts() {
     let src = "class C {\n\
         def f(a: Int, b: Int = 2, c: Int*)(d: Int): Int = 1\n\
         def q(): Int = 1\n\
+        def d(a: Int, b: Int = 2): Int = 1\n\
         def p: Int = 1\n\
         def r(using x: Int): Int = 1\n\
         def caller(xs: Seq[Int]): Unit = { g(1, 2); h { x => x }; k(1)(2); m(xs: _*); n(1) { 2 }; o(xs*) }\n\
@@ -272,6 +273,7 @@ fn scala_ranges_and_counts() {
         ranges("src/C.scala", src),
         map(&[
             ("caller", range(1, Some(1))),
+            ("d", range(1, Some(2))),
             ("f", range(1, None)),
             ("p", None),
             ("q", range(0, Some(0))),
@@ -299,10 +301,11 @@ fn csharp_ranges_and_counts() {
         void F(int a, int b = 2, params int[] c) { G(1, 2); H(x: 1); this.K(); }\n\
         static void E(this int s, int a) {}\n\
         void G(int a, int b) {}\n\
+        void D(int a, int b = 2) {}\n\
         }\n";
     assert_eq!(
         ranges("src/C.cs", src),
-        map(&[("E", None), ("F", range(1, None)), ("G", range(2, Some(2)))])
+        map(&[("D", range(1, Some(2))), ("E", None), ("F", range(1, None)), ("G", range(2, Some(2)))])
     );
     assert_eq!(
         counts("src/C.cs", src),
@@ -321,6 +324,7 @@ fn cpp_ranges_and_counts() {
         template<typename... Ts> void v(Ts... xs) { w(xs...); }\n\
         int z(void) { return 0; }\n\
         int y() { return 0; }\n\
+        int d(int a, int b = 2) { return a; }\n\
         };\n\
         int out(int a, int b = 2);\n\
         int out(int a, int b) { return a; }\n";
@@ -337,6 +341,7 @@ fn cpp_ranges_and_counts() {
             ("v".to_string(), range(0, None)),
             ("z".to_string(), range(0, Some(0))),
             ("y".to_string(), range(0, Some(0))),
+            ("d".to_string(), range(1, Some(2))),
             ("out".to_string(), range(1, Some(2))),
             ("out".to_string(), None),
         ],
@@ -430,7 +435,8 @@ const TS: &str = "function f(a: number, b = 2, c?: number, ...d: number[]) { g(1
     class C { m(this: C, a: number) {} }\n\
     const k = (a, b) => a;\n\
     const one = x => x;\n\
-    const l = function (a) {};\n";
+    const l = function (a) {};\n\
+    function d(a: number, b = 2, c?: number) {}\n";
 
 /// TypeScript (and TSX): `= v` and `?` are optional, `...d` variadic, a `this`
 /// parameter the receiver, a lone arrow parameter its own list; `...xs`
@@ -441,6 +447,7 @@ fn typescript_ranges_and_counts() {
         assert_eq!(
             ranges(path, TS),
             map(&[
+                ("d", range(1, Some(3))),
                 ("f", range(1, None)),
                 ("k", range(2, Some(2))),
                 ("l", range(1, Some(1))),
