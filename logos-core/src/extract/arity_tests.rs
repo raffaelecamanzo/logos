@@ -405,11 +405,16 @@ fn python_ranges_and_counts() {
         class K:\n    if v:\n        def cond(self, x): pass\n    try:\n        @dec\n        def tri(self, y): pass\n\
         \x20   except E:\n        pass\n\
         def m2(*args: int): pass\n\
-        class V:\n    def var(*args: int): pass\n";
+        class V:\n    def var(*args: int): pass\n\
+        def kwonly(a, **kw): pass\n\
+        def calls(): g2(**kw); g3(1, **kw)\n\
+        class D:\n    @cache\n    @staticmethod\n    def s1(a): pass\n\
+        \x20   @staticmethod\n    @cache\n    def s2(a): pass\n";
     assert_eq!(
         ranges("pkg/a.py", src),
         map(&[
             ("c", range(1, Some(1))),
+            ("calls", range(0, Some(0))),
             ("f", range(2, None)),
             // A method under a compound statement of a class body: whether it
             // takes `self` is not visible to a query, so unknown, never `self`
@@ -417,9 +422,13 @@ fn python_ranges_and_counts() {
             ("cond", None),
             ("gen", range(0, Some(0))),
             ("k", range(1, Some(1))),
+            ("kwonly", range(1, None)),
             ("m", range(1, Some(2))),
             ("m2", range(0, None)),
             ("s", range(1, Some(1))),
+            // `@staticmethod` among other decorators, in either order.
+            ("s1", range(1, Some(1))),
+            ("s2", range(1, Some(1))),
             ("tri", None),
             // A method whose first parameter is `*args` receives `self` in it:
             // variadic, never a lone receiver.
@@ -431,6 +440,7 @@ fn python_ranges_and_counts() {
     assert_eq!(counts["h"], vec![Some(1)]);
     assert_eq!(counts["m"], vec![Some(1)]);
     assert_eq!(counts["sum"], vec![Some(1)]);
+    assert_eq!((&counts["g2"], &counts["g3"]), (&vec![None], &vec![None]), "`**kw` spreads");
 }
 
 /// PHP: the required parameters (a promoted constructor's too) set the
