@@ -13,6 +13,34 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **Rust impl blocks, trait signatures and self calls record what one
+  associated-item lookup needs (CR-202, S-606).** Every Rust `impl` block — an
+  empty `impl Greet for X {}` included — records its header: its self type as
+  written for any shape (a bare, module-relative `a::X`, `crate::` or external
+  path with its generics stripped; `()`, `str` or a slice as written; `&T` and
+  `&mut T` as `T`, flagged a reference), its trait, and an `impl Deref`'s
+  `type Target`. Each `impl` function records its receiver mode (by value,
+  `&self`, `&mut self`, typed `self: X`, or none), each `use` whether it is a
+  re-export (`pub use`, any `pub(…)`), and each enum its variant names. A
+  trait's required signature (`fn m(&self);`) is now a bodyless `Method` node
+  of its trait, with its parameter range and whether it takes `self`; it binds
+  no call yet and is never reported dead. A `self.m()` call's `Self::m` row now
+  records the `self` shape, which a written `Self::m()` does not, and a fully
+  qualified `<T as Tr>::m()` records `<T as Tr>::m` instead of the bare `m`.
+  The facts come from new `@item.*`, `@ref.use.exported` and
+  `@ref.call.qualified.*` captures in the Rust queries, so a droppable query
+  override can tune them. Recording them moves no `Calls` edge: on a
+  full-indexed export of this repository all 19,589 nodes and 46,791 edges are
+  byte-identical, the 69 signature nodes and their 69 `Contains` edges are the
+  only additions, 504 `Self::` rows gain the `self` shape, one bare `custom`
+  row becomes `<toml::de::Error as serde::de::Error>::custom` (unbound before
+  and after), non-Rust graphs are byte-identical and the quality signal is
+  unchanged. Store migration 34 adds the columns and an `impl_blocks` table and
+  clears every content hash, so the first `logos scan` (or `logos index`) after
+  upgrading re-reads every file. A bare `logos sync` reads no file.
+
 ## [1.13.0] — 2026-10-07
 
 ### Added

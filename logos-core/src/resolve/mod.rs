@@ -165,6 +165,9 @@ struct Snapshot {
     arities: Vec<NodeArity>,
     /// Every file's recorded declared namespace (S-518, `files.namespace`).
     namespaces: Vec<(String, String)>,
+    /// The required signatures (S-606, `nodes.signature`), which bind nothing
+    /// ([`binder::bindable`]).
+    signatures: HashSet<NodeId>,
     /// file_id → project-relative path, for an incremental run to test a row's
     /// owning file against the change-set. Empty on a full index.
     file_paths: HashMap<i64, String>,
@@ -213,6 +216,17 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// The required signatures the store records (S-606, `nodes.signature`): the
+/// nodes [`binder::bindable`] keeps out of every binding run.
+pub(crate) fn signature_nodes(store: &dyn GraphStore) -> Result<HashSet<NodeId>> {
+    Ok(store
+        .node_item_facts()?
+        .into_iter()
+        .filter(|f| f.signature)
+        .map(|f| f.id)
+        .collect())
+}
+
 /// Run the resolution pass: bind every ledger row it can, persist the rest.
 ///
 /// See the module docs for the snapshot → parallel-compute → serial-commit
@@ -253,6 +267,7 @@ pub fn run(
             self_types: store.node_self_types()?,
             arities: store.node_arities()?,
             namespaces: store.file_namespaces()?,
+            signatures: signature_nodes(store)?,
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
             file_paths: if want_file_paths {
@@ -289,7 +304,8 @@ pub fn run(
             .with_declared_namespaces(snap.namespaces.iter().cloned())
             .with_import_root_overrides(&resolution.import_roots)
     });
-    let index = binder::Index::build_with_layout(&snap.nodes, &snap.edges, &snap.refs, layout)
+    let (bind_nodes, bind_edges) = binder::bindable(&snap.nodes, &snap.edges, &snap.signatures);
+    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
         .with_arities(&snap.arities)
         .with_path_specifiers(specifier_targets, go_modules)
@@ -969,6 +985,8 @@ pub(crate) fn call_residue_by_language(
     }
 
     let (nodes, edges, refs) = (store.all_nodes()?, store.all_edges()?, store.unresolved_refs()?);
+    let signatures = signature_nodes(store)?;
+    let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures);
     let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
         .with_self_types(store.node_self_types()?)
         .with_arities(&store.node_arities()?);

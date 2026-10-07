@@ -148,6 +148,8 @@ fn row(source: &str, target: &str, form: RefForm, receiver: Option<ReceiverShape
     (source.to_string(), target.to_string(), form, receiver, resolved)
 }
 
+/// A Rust `self.m()`'s `Self::m` row keeps the `self` shape (S-606).
+const SELF: Option<ReceiverShape> = Some(ReceiverShape::SelfInstance);
 const OTHER: Option<ReceiverShape> = Some(ReceiverShape::Other);
 
 // ── Go ────────────────────────────────────────────────────────────────────────
@@ -370,14 +372,15 @@ fn a_rust_self_call_binds_through_the_impl_and_every_other_receiver_is_unbound()
             // method (S-588). `other.helper()` inside `A::helper` binds
             // `B::helper`: another object, no self-loop.
             row(&a(5, "helper"), "B::helper", RefForm::Path, OTHER, true),
-            // `self.helper(..)` is S-493's `Self::helper`; `other.helper()` beside
-            // it binds `B`'s, never the caller's own `helper`.
+            // `self.helper(..)` is S-493's `Self::helper`, of shape `self`
+            // (S-606); `other.helper()` beside it binds `B`'s, never the
+            // caller's own `helper`.
             row(&a(8, "run"), "B::helper", RefForm::Path, OTHER, true),
-            row(&a(8, "run"), "Self::helper", RefForm::Path, None, true),
+            row(&a(8, "run"), "Self::helper", RefForm::Path, SELF, true),
             // Genuine recursion binds; `self.peer.again(..)` does not — `B`
             // has no `again`.
             row(&a(12, "again"), "B::again", RefForm::Path, OTHER, false),
-            row(&a(12, "again"), "Self::again", RefForm::Path, None, true),
+            row(&a(12, "again"), "Self::again", RefForm::Path, SELF, true),
             // `x.helper(..)` in a free function binds `A::helper`, never the
             // free `helper` beside it.
             row(&a(24, "free"), "A::helper", RefForm::Path, OTHER, true),

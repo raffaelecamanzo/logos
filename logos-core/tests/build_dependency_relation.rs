@@ -246,14 +246,18 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// persist-failure record), 28 (S-493, the `nodes.self_type` column), 29
 /// (S-514, the ledger's `receiver` column and its identity index), 30
 /// (S-518, the `files.namespace` column), 31 (S-597, the alias in that
-/// identity index), 32 (S-587, the ledger's `peeled` column in it) and 33
-/// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it); the
-/// next open re-applies all twelve, as a real upgrade does. Duplicated from
+/// identity index), 32 (S-587, the ledger's `peeled` column in it), 33
+/// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it) and 34
+/// (S-606, the associated-item columns and the impl-block table); the next
+/// open re-applies all thirteen, as a real upgrade does. Duplicated from
 /// `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \
+        "DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
+         ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
+         ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \
+         DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
          COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, '')); \
          ALTER TABLE nodes DROP COLUMN takes_self; ALTER TABLE nodes DROP COLUMN param_max; \
@@ -332,7 +336,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 33, "{name} was opened at the latest version (v33)");
+        assert_eq!(user_version(&root.join(name)), 34, "{name} was opened at the latest version (v34)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

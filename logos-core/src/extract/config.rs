@@ -221,6 +221,9 @@ pub(super) fn emit_anchored_node(
         self_type: None,
         params: None,
         takes_self: None,
+        receiver_mode: None,
+        variants: None,
+        signature: false,
     });
     facts.edges.push(EdgeFact {
         source: parent_symbol.clone(),
@@ -263,6 +266,7 @@ pub(super) fn extract_one_config(
         forwarding: Vec::new(),
         declared_types: Vec::new(),
         namespace: None,
+        impl_blocks: Vec::new(),
     };
 
     // The committed-configuration corpus (S-380, [CR-121], [FR-WS-19]): flatten
@@ -335,6 +339,9 @@ pub(super) fn extract_one_config(
         self_type: None,
         params: None,
         takes_self: None,
+        receiver_mode: None,
+        variants: None,
+        signature: false,
     });
 
     // The generic, depth-bounded section walk runs only when the descriptor
@@ -500,6 +507,9 @@ fn walk_sections(
             self_type: None,
             params: None,
             takes_self: None,
+            receiver_mode: None,
+            variants: None,
+            signature: false,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),
@@ -642,6 +652,9 @@ fn walk_anchors(
             self_type: None,
             params: None,
             takes_self: None,
+            receiver_mode: None,
+            variants: None,
+            signature: false,
         });
         facts.edges.push(EdgeFact {
             source: config_file_symbol.clone(),

@@ -3519,6 +3519,132 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 33");
     }
 
+    /// S-606 / CR-202 / FR-EX-34: a populated v33 store upgrades to v34 forward
+    /// only. `nodes` gains `receiver_mode`, `variants` and `signature`, and the
+    /// ledger `exported`, in place — `NULL` on every existing row until
+    /// re-extraction — while every pre-existing column, and all of `edges` and
+    /// `shingles`, is byte-for-byte unchanged. The empty `impl_blocks` table
+    /// cascades with its file, the ledger identity is untouched, and every
+    /// `files.content_hash` is cleared.
+    #[test]
+    fn migration_34_adds_the_associated_item_facts_and_the_impl_block_table() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..33]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/lib.rs', 'rust', 'h-rs'), (2, 'src/b.rs', 'rust', 'h-b');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local n'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, self_type, param_min, param_max, takes_self) VALUES
+                 (10, 1, 8, 'n', 1, NULL, 0, 0, NULL), (11, 2, 8, 'm', 1, 'A', 1, 1, 1);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled, arg_count) VALUES
+                 (1, 'local n', 'Self::m', NULL, 2, 2, 6, 1, NULL, NULL, NULL, 0),
+                 (1, 'local n', 'crate::b::Store', 'Store', 2, 3, 1, 1, NULL, NULL, NULL, NULL);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..34]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 34, "33 → 34, exactly one step");
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        assert_eq!(nodes_after.len(), nodes_before.len());
+        for (old, new) in nodes_before.iter().zip(&nodes_after) {
+            assert_eq!(new.len(), old.len() + 3, "exactly three nodes columns added");
+            assert_eq!(&new[..old.len()], &old[..], "every pre-v34 nodes column is byte-for-byte unchanged");
+            assert_eq!(&new[old.len()..], ["NULL", "NULL", "NULL"], "not recorded on any existing row");
+        }
+        let tail = |table: &str, n: usize| -> Vec<String> {
+            conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid DESC LIMIT {n}"))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(tail("nodes", 3), ["signature", "variants", "receiver_mode"], "the appended columns are the S-606 adds");
+        assert_eq!(tail("unresolved_refs", 1), ["exported"]);
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        let ledger_after = read_table(&conn, "unresolved_refs", "id");
+        for (old, new) in ledger_before.iter().zip(&ledger_after) {
+            assert_eq!(&new[..old.len()], &old[..], "every ledger row and id is unchanged");
+            assert_eq!(&new[old.len()..], ["NULL"], "the export mark is NULL on every stored row");
+        }
+        let hashes: Vec<Option<String>> = conn
+            .prepare("SELECT content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(hashes, vec![None, None], "every hash is cleared so the next scan re-extracts");
+
+        // The CHECKs: a receiver mode is one of the five, the signature mark is
+        // 1 or absent, the export mark a boolean.
+        let set = |sql: &str| conn.execute(sql, []);
+        assert!(set("UPDATE nodes SET receiver_mode = 4, variants = 'A B', signature = 1 WHERE id = 11").is_ok());
+        assert!(set("UPDATE nodes SET receiver_mode = 5 WHERE id = 11").is_err(), "an unknown receiver mode");
+        assert!(set("UPDATE nodes SET receiver_mode = -1 WHERE id = 11").is_err(), "a negative receiver mode");
+        assert!(set("UPDATE nodes SET signature = 0 WHERE id = 11").is_err(), "a signature is marked 1 or not at all");
+        assert!(set("UPDATE unresolved_refs SET exported = 1 WHERE id = 2").is_ok());
+        assert!(set("UPDATE unresolved_refs SET exported = 2 WHERE id = 2").is_err(), "exported is 0 or 1");
+
+        // The export mark stays outside the identity: a second row differing
+        // only by it is a duplicate.
+        let insert = |exported: i64| {
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, exported) \
+                 VALUES (1, 'local n', 'a::X', 'X', 2, 3, 1, ?1) \
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), \
+                             COALESCE(alias, ''), COALESCE(peeled, ''), COALESCE(arg_count, -1)) DO NOTHING",
+                [exported],
+            )
+        };
+        assert_eq!(insert(1).unwrap(), 1, "a pub use is one row");
+        assert_eq!(insert(0).unwrap(), 0, "the same import, not exported, is the same row");
+
+        // The impl-block table: its CHECKs, and its rows go with their file.
+        let block = |file: i64, self_type: &str, trait_path: Option<&str>, target: Option<&str>| {
+            conn.execute(
+                "INSERT INTO impl_blocks (file_id, start_line, end_line, self_type, self_ref, trait_path, deref_target) \
+                 VALUES (?1, 3, 5, ?2, 0, ?3, ?4)",
+                rusqlite::params![file, self_type, trait_path, target],
+            )
+        };
+        assert!(block(1, "X", Some("Greet"), None).is_ok());
+        assert!(block(2, "a::X", Some("Deref"), Some("Inner")).is_ok());
+        assert!(block(1, "", None, None).is_err(), "a self type is never empty");
+        assert!(block(1, "X", None, Some("Inner")).is_err(), "a Deref target needs a trait");
+        assert!(
+            set("INSERT INTO impl_blocks (file_id, start_line, end_line, self_type, self_ref) VALUES (1, 5, 3, 'X', 0)").is_err(),
+            "a block never ends before it starts"
+        );
+        assert!(
+            set("INSERT INTO impl_blocks (file_id, start_line, end_line, self_type, self_ref) VALUES (9, 1, 1, 'X', 0)").is_err(),
+            "a block belongs to a recorded file"
+        );
+        conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
+        let left: Vec<String> = conn
+            .prepare("SELECT self_type FROM impl_blocks ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, ["X"], "removing a file cascades its impl blocks away");
+
+        // Forward-only: re-running the full ledger never re-applies migration 34.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 34", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 34 is recorded once and never re-applied");
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 34");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

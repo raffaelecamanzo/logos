@@ -866,11 +866,13 @@ fn an_ambiguous_bare_name_is_warned_about_rather_than_silently_picked() {
 
     let result = engine.precedent("extract", None);
 
+    // The three arms' `extract` and the trait's required signature, a node
+    // since S-606.
     assert!(
         result
             .warnings
             .iter()
-            .any(|w| w.contains("matched 3 symbols by name")),
+            .any(|w| w.contains("matched 4 symbols by name")),
         "the guess must be disclosed: {:?}",
         result.warnings
     );

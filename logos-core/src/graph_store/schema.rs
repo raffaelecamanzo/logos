@@ -66,6 +66,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (31, MIGRATION_31),
     (32, MIGRATION_32),
     (33, MIGRATION_33),
+    (34, MIGRATION_34),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2781,15 +2782,102 @@ CREATE UNIQUE INDEX idx_unresolved_refs_identity
 UPDATE files SET content_hash = NULL;
 ";
 
+/// Migration 34 — the facts one Rust **associated-item lookup** reads (S-606,
+/// [CR-202] F1–F3, [FR-EX-34]): every impl block's header, a callable's
+/// receiver mode and required-signature marker, an enum's variant names, and
+/// whether an import is a re-export.
+///
+/// Three nullable columns on `nodes`, one on `unresolved_refs` — added **in
+/// place**, the migration-28/33 shape — and one new table:
+///
+/// - **`nodes.receiver_mode`** — how a callable writes its receiver
+///   ([`ReceiverMode`](crate::model::ReceiverMode)): `0` none (an associated
+///   function), `1` by value, `2` `&self`, `3` `&mut self`, `4` typed
+///   `self: X`. Recorded wherever `takes_self` is; `NULL` elsewhere.
+/// - **`nodes.variants`** — an enum's variant names in declaration order,
+///   space-joined; `''` for an enum with none, `NULL` for every other node.
+/// - **`nodes.signature`** — `1` for a **required signature** (a trait's
+///   `fn m(&self);`), a bodyless `Method` node added by this story; `NULL` on
+///   every other node. The binder keeps these nodes out of every candidate set
+///   until the lookup that reads them ([FR-RS-47]) says how a call reaches one.
+/// - **`unresolved_refs.exported`** — `1` for an `Imports` row of a `pub use`
+///   (any `pub(…)`), `0` for a private one, `NULL` for every other row. Not in
+///   the ledger identity: one declaration is either exported or not, so the
+///   identity index of migration 33 is unchanged.
+/// - **`impl_blocks`** — one row per impl block a file declares, an empty one
+///   included: its self type as written (generics stripped; for a `&T`/`&mut T`
+///   header the referent, with `self_ref` 1), its trait path for a trait impl,
+///   and an `impl Deref`'s `type Target`. Keyed by the file, whose re-extraction
+///   or removal takes the file's rows with it (the migration-24
+///   `declared_types` cascade); the lines tie each block to the methods it
+///   holds.
+///
+/// **Plugin-agnostic by construction**: no column or row names a language; a
+/// plugin fills them by declaring the `@item.*` captures (`extract::assoc`) and
+/// `@ref.use.exported`, and one that declares none records nothing.
+///
+/// `NULL`, and no row, until a file is re-extracted, and **re-extraction is
+/// triggered here** as migrations 25 and 28–33 do it: every
+/// `files.content_hash` is cleared, so the next scan, index or full-walk sync
+/// re-extracts each file like a modified one. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_34_adds_the_associated_item_facts_and_the_impl_block_table` in
+/// [`super::migrate`].
+///
+/// [CR-202]: ../../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+/// [FR-EX-34]: ../../../../docs/specs/requirements/FR-EX-34.md
+/// [FR-RS-47]: ../../../../docs/specs/requirements/FR-RS-47.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_34: &str = "\
+-- 1. How a callable writes its receiver (FR-EX-34): 0 none, 1 by value, 2 &,
+-- 3 &mut, 4 typed. Recorded wherever takes_self is, NULL wherever takes_self
+-- is NULL, and on rows indexed before this migration.
+ALTER TABLE nodes ADD COLUMN receiver_mode INTEGER CHECK (receiver_mode IN (0,1,2,3,4));
+
+-- 2. An enum's variant names, space-joined in declaration order, '' for none.
+ALTER TABLE nodes ADD COLUMN variants TEXT;
+
+-- 3. A required signature (CR-202 F3): a bodyless trait member. NULL elsewhere.
+ALTER TABLE nodes ADD COLUMN signature INTEGER CHECK (signature = 1);
+
+-- 4. Whether an import row's declaration is a re-export (`pub use`). Outside
+-- the ledger identity: one declaration is exported or not.
+ALTER TABLE unresolved_refs ADD COLUMN exported INTEGER CHECK (exported IN (0,1));
+
+-- 5. Every impl block's header (CR-202 F1), an empty block included. A file's
+-- rows go with the file. trait_path is NULL for an inherent impl, and
+-- deref_target is NULL but for an impl of a trait.
+CREATE TABLE impl_blocks (
+    id           INTEGER PRIMARY KEY,
+    file_id      INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    start_line   INTEGER NOT NULL CHECK (start_line >= 1),
+    end_line     INTEGER NOT NULL CHECK (end_line >= start_line),
+    self_type    TEXT NOT NULL CHECK (self_type <> ''),
+    self_ref     INTEGER NOT NULL CHECK (self_ref IN (0,1)),
+    trait_path   TEXT,
+    deref_target TEXT,
+    CHECK (deref_target IS NULL OR trait_path IS NOT NULL)
+) STRICT;
+
+-- The cascade's lookup: re-extracting a file deletes its rows through it.
+CREATE INDEX idx_impl_blocks_file ON impl_blocks(file_id);
+
+-- 6. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the columns and the table.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
         MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_29, MIGRATION_3,
-        MIGRATION_31, MIGRATION_32, MIGRATION_33, MIGRATION_4, MIGRATION_8,
+        MIGRATION_31, MIGRATION_32, MIGRATION_33, MIGRATION_34, MIGRATION_4, MIGRATION_8,
     };
-    use crate::model::{EdgeKind, NodeKind, ReceiverShape, RefForm};
+    use crate::model::{EdgeKind, NodeKind, ReceiverMode, ReceiverShape, RefForm};
 
     /// Extract the `<column> IN (…)` discriminant list at the `nth` occurrence
     /// of the marker in the given migration SQL.
@@ -4113,6 +4201,60 @@ mod tests {
         assert!(
             !MIGRATION_32.contains("arg_count"),
             "the argument count joins the identity in migration 33, never by editing migration 32"
+        );
+    }
+
+    /// Migration 34 (S-606) adds the associated-item facts in place, creates
+    /// the impl-block table and triggers re-extraction — nothing else: the
+    /// ledger identity of migration 33 is not touched, and it is its own
+    /// migration, not an edit of 33. The receiver-mode CHECK is the model's.
+    #[test]
+    fn migration_34_adds_the_associated_item_facts_and_the_impl_block_table_only() {
+        let statements: Vec<String> = MIGRATION_34
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "ALTER TABLE nodes ADD COLUMN receiver_mode INTEGER CHECK (receiver_mode IN (0,1,2,3,4))",
+                "ALTER TABLE nodes ADD COLUMN variants TEXT",
+                "ALTER TABLE nodes ADD COLUMN signature INTEGER CHECK (signature = 1)",
+                "ALTER TABLE unresolved_refs ADD COLUMN exported INTEGER CHECK (exported IN (0,1))",
+                "CREATE TABLE impl_blocks ( id           INTEGER PRIMARY KEY, \
+                 file_id      INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE, \
+                 start_line   INTEGER NOT NULL CHECK (start_line >= 1), \
+                 end_line     INTEGER NOT NULL CHECK (end_line >= start_line), \
+                 self_type    TEXT NOT NULL CHECK (self_type <> ''), \
+                 self_ref     INTEGER NOT NULL CHECK (self_ref IN (0,1)), \
+                 trait_path   TEXT, deref_target TEXT, \
+                 CHECK (deref_target IS NULL OR trait_path IS NOT NULL) ) STRICT",
+                "CREATE INDEX idx_impl_blocks_file ON impl_blocks(file_id)",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the in-place columns, the impl-block table and the re-extraction trigger"
+        );
+        let modes: Vec<i32> = ReceiverMode::ALL.iter().map(|m| m.as_i32()).collect();
+        assert_eq!(
+            check_discriminants(MIGRATION_34, "receiver_mode IN (", 0),
+            modes,
+            "nodes.receiver_mode CHECK must equal ReceiverMode::ALL discriminants"
+        );
+        assert!(
+            !MIGRATION_34.contains("idx_unresolved_refs_identity"),
+            "the export mark stays outside the ledger identity"
+        );
+        assert!(
+            !MIGRATION_33.contains("impl_blocks") && !MIGRATION_33.contains("receiver_mode"),
+            "the associated-item facts arrive in migration 34, never by editing migration 33"
         );
     }
 }

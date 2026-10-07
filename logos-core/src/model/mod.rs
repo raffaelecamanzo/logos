@@ -12,6 +12,8 @@
 //!   `unresolved_refs` reference ledger (S-011);
 //! - [`ReceiverShape`] (3) — the frozen receiver-shape discriminants a
 //!   method-form ledger row carries (S-514);
+//! - [`ReceiverMode`] (5) — the frozen discriminants of how a Rust callable
+//!   writes its `self` parameter (S-606);
 //! - [`ParamRange`] — the argument counts a callable admits (S-591);
 //! - [`ArtifactRelation`] — the cross-artifact edge **payload** vocabulary and
 //!   its deterministic external-target classifier (CR-011, [FR-CG-07]);
@@ -47,5 +49,5 @@ pub use arity::ParamRange;
 pub use artifact::{
     ArtifactRelation, BridgeNamespace, BridgeRole, MatchDiscipline, TargetClass,
 };
-pub use kinds::{EdgeKind, NodeKind, ReceiverShape, RefForm, UnknownKind};
+pub use kinds::{EdgeKind, NodeKind, ReceiverMode, ReceiverShape, RefForm, UnknownKind};
 pub use symbol::{LogosSymbol, NodeId};

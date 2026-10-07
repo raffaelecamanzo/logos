@@ -23,8 +23,9 @@
 //!   (the `LanguagePlugin` cluster: `is_documentation`, `is_artifact`,
 //!   `filenames`, `config_extraction`, `overridden_capabilities`,
 //!   `supports_reachability`). A bodyless signature (`fn f(&self);`) is a
-//!   `function_signature_item`, never extracted as a node, so only default
-//!   *bodies* are rooted.
+//!   `function_signature_item`: a node since S-606, but no dispatch entry —
+//!   it holds no code, and the annotation pass keeps it live as a bodyless
+//!   callable — so only default *bodies* are rooted.
 //! - **closure-argument tool dispatch** — a method carrying a dispatch
 //!   attribute ([`RUST_DISPATCH_ATTRS`], rmcp's `#[tool]`). The attribute macro
 //!   generates the router that dispatches it; the body is a
@@ -203,7 +204,15 @@ pub fn run(
     let (nodes, markers) = match &changed_rs {
         // Full index: every node, and a whole-graph marker scan (within the cold
         // index budget, not the sync hot path).
-        None => runtime.submit_read(|store| Ok((store.all_nodes()?, store.dispatch_markers()?)))?,
+        // A required signature (S-606) holds no code, so it is no dispatch
+        // entry and never a handoff's handler: it is left out, as the sync
+        // read below leaves it out.
+        None => runtime.submit_read(|store| {
+            let signatures = super::signature_nodes(store)?;
+            let mut nodes = store.all_nodes()?;
+            nodes.retain(|n| !signatures.contains(&n.id));
+            Ok((nodes, store.dispatch_markers()?))
+        })?,
         // Sync: only the changed files' callable nodes, and only the markers on
         // *those* nodes (index-served), so the read is O(changed) ([NFR-PE-03]).
         Some(changed) => {

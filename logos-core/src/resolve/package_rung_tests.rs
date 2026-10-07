@@ -135,6 +135,7 @@ fn row(
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     }
 }
 

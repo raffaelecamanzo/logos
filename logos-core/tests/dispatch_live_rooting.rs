@@ -243,7 +243,12 @@ fn has_self_marker(rt: &Runtime, name: &str) -> bool {
     let Some(id) = snapshot(rt)
         .iter()
         .find(|n| {
-            !n.derived && n.name == name && matches!(n.kind, NodeKind::Function | NodeKind::Method)
+            // A trait's required signature of the same name — a bodyless node
+            // since S-606 — is no dispatch target.
+            !n.derived
+                && n.name == name
+                && matches!(n.kind, NodeKind::Function | NodeKind::Method)
+                && n.has_body != Some(false)
         })
         .map(|n| n.id)
     else {

@@ -3495,6 +3495,7 @@ mod tests {
             receiver: None,
             peeled: None,
             arg_count: None,
+            exported: None,
         };
 
         let rows = vec![
@@ -4291,6 +4292,7 @@ mod tests {
             receiver: None,
             peeled: None,
             arg_count: None,
+            exported: None,
         };
         // A gRPC-call row → a GrpcCall consumer keyed on its target.
         let consumers = invocation_refs_from(vec![row(Some("grpc-call"))]);

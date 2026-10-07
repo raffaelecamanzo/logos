@@ -660,6 +660,7 @@ fn a_capture_before_delete_row_is_in_no_figure_of_the_rust_residue() {
             receiver: None,
             peeled: None,
             arg_count: None,
+            exported: None,
         })
     })
     .expect("plant the capture");

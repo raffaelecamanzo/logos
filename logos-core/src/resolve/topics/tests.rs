@@ -57,6 +57,7 @@ fn ledger(source: &NodeRow, relation: ArtifactRelation, topic: &str, line: i64) 
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     }
 }
 

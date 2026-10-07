@@ -84,6 +84,7 @@
 //! [AR-05]: ../../../docs/specs/architecture.md#13-risk-register
 //! [`BindingPolicy`]: crate::config::BindingPolicy
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -485,6 +486,34 @@ struct NodeInfo {
     /// The defining file's project-relative path, when bound to one — the key
     /// doc-link/path references resolve against (S-035).
     file_path: Option<String>,
+}
+
+/// The nodes and edges a binding run resolves against (S-606, [CR-202] F3):
+/// every node but a **required signature** — a trait's bodyless
+/// `fn m(&self);` — and every edge but those touching one (its `Contains` from
+/// its trait). A signature is recorded so the lookup of [FR-RS-47] can read it,
+/// and until that lookup says how a call reaches one it enters no candidate
+/// set: a `self.m()` in a trait's default body, a name-unique fallback and a
+/// documentation name bind exactly what they bound before the signature was a
+/// node. Borrowed unchanged when the graph holds no signature.
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+/// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+pub(crate) fn bindable<'a>(
+    nodes: &'a [NodeRow],
+    edges: &'a [EdgeRow],
+    signatures: &HashSet<NodeId>,
+) -> (Cow<'a, [NodeRow]>, Cow<'a, [EdgeRow]>) {
+    if signatures.is_empty() {
+        return (Cow::Borrowed(nodes), Cow::Borrowed(edges));
+    }
+    let nodes = nodes.iter().filter(|n| !signatures.contains(&n.id)).cloned().collect();
+    let edges = edges
+        .iter()
+        .filter(|e| !signatures.contains(&e.source) && !signatures.contains(&e.target))
+        .cloned()
+        .collect();
+    (Cow::Owned(nodes), Cow::Owned(edges))
 }
 
 /// The immutable lookup index one resolution run binds against.

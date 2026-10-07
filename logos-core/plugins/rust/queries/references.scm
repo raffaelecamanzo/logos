@@ -58,6 +58,26 @@
   function: (generic_function
     function: (scoped_identifier) @ref.call))
 
+;   @ref.call.qualified.type / .trait — a fully qualified call
+;                 `<T as Tr>::m()` (S-606, CR-202, FR-EX-34): the path call
+;                 above captures it too, and with its type and trait the row
+;                 records `<T as Tr>::m` instead of the bare `m` the bracket
+;                 would otherwise be stripped to.
+(call_expression
+  function: (scoped_identifier
+    path: (bracketed_type
+      (qualified_type
+        type: (_) @ref.call.qualified.type
+        alias: (_) @ref.call.qualified.trait))) @ref.call)
+
+(call_expression
+  function: (generic_function
+    function: (scoped_identifier
+      path: (bracketed_type
+        (qualified_type
+          type: (_) @ref.call.qualified.type
+          alias: (_) @ref.call.qualified.trait))) @ref.call))
+
 (call_expression
   function: (field_expression
     value: (_) @_receiver
@@ -67,8 +87,9 @@
 ;   @ref.method.self — a receiver-method call whose receiver is exactly `self`
 ;                 (S-493, FR-RS-11). Its type is the enclosing impl's self type
 ;                 (`symbols.scm`'s `@symbol.self_type`), so extraction records it
-;                 as the Path-form `Self::f` — the row a written `Self::f()`
-;                 records — and the binder binds it among that type's methods in
+;                 as the Path-form `Self::f` — the target a written `Self::f()`
+;                 records, keeping the shape `self` a written one lacks (S-606)
+;                 — and the binder binds it among that type's methods in
 ;                 the caller's crate. The `#not-eq?` above keeps `@ref.method` off
 ;                 these calls, so each is captured once. `self.field.f()` and
 ;                 `other.f()` are `@ref.method`. It is a `self`-marked
@@ -192,7 +213,11 @@
       name: (field_identifier) @ref.receiver.member
       type: (_) @ref.receiver.member.type)))
 
+;   @ref.use.exported — a `use` that is a re-export: `pub use`, any `pub(…)`
+;                 included (S-606, FR-EX-34). Each row of the declaration
+;                 records it; a private `use` records that it is not.
 (use_declaration
+  (visibility_modifier)? @ref.use.exported
   argument: (_) @ref.use)
 
 (macro_invocation) @ref.macro

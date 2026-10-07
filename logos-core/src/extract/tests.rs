@@ -5361,10 +5361,12 @@ fn a_rust_file_records_no_extends_instantiates_or_type_use_rows() {
 
 // ── S-500 / FR-EX-11: the callable has-body fact ──────────────────────────────
 
-/// Fixtures for the four languages that declare no body node kind (Rust, Go,
+/// Fixtures for the four languages that declared no body node kind (Rust, Go,
 /// Python, C). Each carries functions, methods and — where the language has one
-/// — a bodyless signature that is **not** extracted as a node (a Rust trait
-/// `function_signature_item`, a Go interface method, a C prototype).
+/// — a bodyless signature that is **not** extracted as a node (a Go interface
+/// method, a C prototype). Rust declares `block` since S-606, which keeps every
+/// one of its callables bodied as before, and its trait's required
+/// `function_signature_item` is now a bodyless `Method` node (CR-202 F3).
 const NO_BODY_KIND_FIXTURES: [(&str, &str, &str); 4] = [
     (
         "rs",
@@ -5410,12 +5412,15 @@ int helper(const int *xs, int n) {\n    int t = 0;\n    for (int i = 0; i < n; i
 /// S-500 — every `NodeFact` field that existed then, plus edges, refs, the
 /// partial flag and the warnings. The has-body fact and its token count are
 /// deliberately left out: this is the "before" half of the byte-identity
-/// comparison, so it must render only what the old graph carried.
+/// comparison, so it must render only what the old graph carried. So are
+/// S-606's required-signature nodes and their `Contains` edges, which the old
+/// graph never held: every other node and edge must still render as it did.
 fn pre_s500_rendering(facts: &Facts) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(out, "{} {} partial={}", facts.path, facts.language, facts.partial).unwrap();
-    for n in &facts.nodes {
+    let signatures: HashSet<&LogosSymbol> = facts.nodes.iter().filter(|n| n.signature).map(|n| &n.symbol).collect();
+    for n in facts.nodes.iter().filter(|n| !n.signature) {
         writeln!(
             out,
             "N {} {} {} {}-{} m={:?} x={} fp={:?} te={} b={:?} nd={:?} sh={:?}",
@@ -5434,7 +5439,7 @@ fn pre_s500_rendering(facts: &Facts) -> String {
         )
         .unwrap();
     }
-    for e in &facts.edges {
+    for e in facts.edges.iter().filter(|e| !signatures.contains(&e.target)) {
         writeln!(out, "E {e:?}").unwrap();
     }
     // Every `RefFact` field but the receiver shape (S-514), which postdates
@@ -5624,18 +5629,22 @@ function helper(int $x): int { return $x + 1; }\n";
 }
 
 /// A language declaring no body node kind treats every callable as bodied —
-/// a Python `@abstractmethod` stub included.
+/// a Python `@abstractmethod` stub included. Rust, which declares `block` since
+/// S-606, keeps every callable it had bodied; only its trait's required
+/// signature, a node since CR-202 F3, records none.
 #[test]
 fn every_callable_is_bodied_in_a_language_declaring_no_body_kind() {
     for (ext, path, src) in NO_BODY_KIND_FIXTURES {
         let facts = extract_lang(ext, path, src);
         let bodies = callable_bodies(&facts);
         assert!(bodies.len() >= 2, "{path}: the fixture yields callables: {bodies:?}");
-        assert!(
-            bodies.iter().all(|(_, has_body, _)| *has_body),
-            "{path}: every callable is bodied: {bodies:?}"
-        );
+        let bodyless: Vec<&String> = bodies.iter().filter(|(_, has_body, _)| !has_body).map(|(n, _, _)| n).collect();
+        let signatures: Vec<&String> = facts.nodes.iter().filter(|n| n.signature).map(|n| &n.name).collect();
+        assert_eq!(bodyless, signatures, "{path}: every callable but a required signature is bodied: {bodies:?}");
     }
+    let rust = extract_lang("rs", NO_BODY_KIND_FIXTURES[0].1, NO_BODY_KIND_FIXTURES[0].2);
+    let signatures: Vec<&str> = rust.nodes.iter().filter(|n| n.signature).map(|n| n.name.as_str()).collect();
+    assert_eq!(signatures, ["area"], "the trait's one required signature");
 }
 
 /// The token count is the body's normalized stream — the one the near-clone
@@ -6144,10 +6153,11 @@ fn conflicting_receiver_markers_resolve_to_other() {
 fn a_rust_self_call_without_a_self_type_records_the_self_shape() {
     use crate::model::ReceiverShape::{Other, SelfInstance};
     // S-493's `@ref.method.self` is a `self`-marked `@ref.method`: inside an
-    // impl it is the `Self::` row; in a trait's default body, which records no
-    // self type, a Method-form row of shape `self`. A call on any other receiver
-    // records the `other` shape (S-517) — retyped to `A::go` where the file
-    // proves the receiver's type (S-587), and `other` still.
+    // impl it is the `Self::` row, of shape `self` (S-606); in a trait's
+    // default body, which records no self type, a Method-form row of shape
+    // `self`. A call on any other receiver records the `other` shape (S-517) —
+    // retyped to `A::go` where the file proves the receiver's type (S-587), and
+    // `other` still.
     let src = "\
 pub struct A;
 impl A {
@@ -6163,7 +6173,7 @@ trait T {
     assert_eq!(
         shape_rows(&facts),
         vec![
-            ("go".to_string(), "Self::go2".to_string(), RefForm::Path, None),
+            ("go".to_string(), "Self::go2".to_string(), RefForm::Path, Some(SelfInstance)),
             ("run".to_string(), "A::go".to_string(), RefForm::Path, Some(Other)),
             ("run".to_string(), "helper".to_string(), RefForm::Method, Some(SelfInstance)),
         ]
@@ -6457,6 +6467,7 @@ fn dedup_sort_refs_keys_on_the_alias_with_a_missing_alias_normalised() {
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     };
     let mut refs = vec![
         row(Some("B"), 1),
@@ -6539,6 +6550,321 @@ fn a_go_aliased_import_is_aliased_by_its_package_name() {
             path_row("github.com::acme::x::dots", "dots"),
             path_row("github.com::acme::x::internal::cloud", "internalcloud"),
             path_row("net::http", "http"),
+        ]
+    );
+}
+
+// ── S-606: the facts one associated-item lookup reads (CR-202, FR-EX-34) ─────
+
+/// One `(self type, reference flag, trait, Deref target)` per impl block, in
+/// source order.
+fn impl_headers(facts: &Facts) -> Vec<(&str, bool, Option<&str>, Option<&str>)> {
+    facts
+        .impl_blocks
+        .iter()
+        .map(|b| (b.self_type.as_str(), b.self_ref, b.trait_path.as_deref(), b.deref_target.as_deref()))
+        .collect()
+}
+
+/// S-606 / CR-202 F1: every impl block records its header — an empty one
+/// included — for every self-type shape: a bare, module-relative, `crate::`,
+/// `super::`, `self::`, generic or external path keeps its path, generics
+/// stripped; `&T` and `&mut T` record `T` flagged as a reference; `()`, `str`,
+/// a slice and a tuple are recorded as written. A trait impl records its trait, and an `impl Deref`
+/// its `type Target`. The narrower node-level self type (S-493) is unchanged:
+/// a module-relative header still gives its methods none.
+#[test]
+fn every_rust_impl_header_shape_records_its_self_type_reference_trait_and_deref_target() {
+    let src = "\
+pub struct X;
+pub struct Inner;
+mod a { pub struct X; }
+pub trait Greet { fn hello(&self) {} }
+impl Greet for X {}
+impl a::X { fn f(&self) {} }
+impl crate::X { fn g(&self) {} }
+impl<T> Greet for Vec<T> {}
+impl<'a> Greet for &'a X {}
+impl Greet for &mut Inner {}
+impl Greet for () {}
+impl Greet for str {}
+impl Greet for [u8] {}
+impl Greet for std::io::Error {}
+impl<M> fmt::Display for a::X<M> {}
+impl std::ops::Deref for X {
+    type Target = Inner;
+    fn deref(&self) -> &Inner { &Inner }
+}
+impl Deref for Inner { type Target = Vec<u8>; }
+impl Inner { type Target = X; }
+mod b {
+    pub struct Y<T>(T);
+    impl super::X { fn h(&self) {} }
+    impl<T> self::Y<T> {}
+}
+impl Greet for (X, Inner) {}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert_eq!(
+        impl_headers(&facts),
+        vec![
+            ("X", false, Some("Greet"), None),
+            ("a::X", false, None, None),
+            ("crate::X", false, None, None),
+            ("Vec", false, Some("Greet"), None),
+            ("X", true, Some("Greet"), None),
+            ("Inner", true, Some("Greet"), None),
+            ("()", false, Some("Greet"), None),
+            ("str", false, Some("Greet"), None),
+            ("[u8]", false, Some("Greet"), None),
+            ("std::io::Error", false, Some("Greet"), None),
+            ("a::X", false, Some("fmt::Display"), None),
+            ("X", false, Some("std::ops::Deref"), Some("Inner")),
+            ("Inner", false, Some("Deref"), Some("Vec")),
+            // An inherent impl's `type Target` is no Deref target.
+            ("Inner", false, None, None),
+            ("super::X", false, None, None),
+            ("self::Y", false, None, None),
+            ("(X, Inner)", false, Some("Greet"), None),
+        ]
+    );
+    let lines: Vec<(u32, u32)> = facts.impl_blocks.iter().map(|b| (b.start_line, b.end_line)).collect();
+    assert_eq!(lines[0], (5, 5), "an empty block keeps its own lines");
+    assert_eq!(lines[11], (16, 19), "a block spans its body");
+    let self_type = |name: &str| facts.nodes.iter().find(|n| n.name == name).and_then(|n| n.self_type.clone());
+    assert_eq!(self_type("f"), None, "a module-relative header still gives its methods no node self type (S-493)");
+    assert_eq!(self_type("g").as_deref(), Some("X"));
+}
+
+/// S-606 / CR-202 F3: a trait's required signature is a `Method` node, a
+/// member of its trait, recording no body, its range and whether it takes
+/// `self`, and marked a signature; a default method stays the bodied
+/// `Function` it was. An `extern` block's signature is no node.
+#[test]
+fn a_rust_required_trait_signature_is_a_bodyless_method_with_its_range_and_receiver() {
+    let src = "\
+pub trait Run {
+    fn go(&self, n: u8);
+    fn make(a: u8, b: u8) -> Self;
+    fn twice(&self) { self.go(2); }
+}
+extern \"C\" { fn ext(x: i32); }
+";
+    let facts = extract_src("src/lib.rs", src);
+    let node = |name: &str| facts.nodes.iter().find(|n| n.name == name).unwrap_or_else(|| panic!("no node {name}"));
+    let range = |min, max| Some(ParamRange { min, max: Some(max) });
+    let go = node("go");
+    assert_eq!(go.kind, NodeKind::Method);
+    assert_eq!(go.metrics.map(|m| (m.has_body, m.body_tokens)), Some((false, 0)), "no body");
+    assert_eq!((go.params, go.takes_self, go.receiver_mode), (range(1, 1), Some(true), Some(ReceiverMode::Ref)));
+    assert!(go.signature);
+    assert_eq!((go.start_line, go.end_line), (2, 2));
+    let make = node("make");
+    assert_eq!((make.kind, make.params, make.takes_self), (NodeKind::Method, range(2, 2), Some(false)));
+    assert_eq!((make.receiver_mode, make.signature), (Some(ReceiverMode::None), true));
+    let twice = node("twice");
+    assert_eq!((twice.kind, twice.metrics.map(|m| m.has_body), twice.signature), (NodeKind::Function, Some(true), false));
+    assert_eq!((twice.takes_self, twice.receiver_mode), (None, None), "a default body records what it did before");
+    assert!(facts.nodes.iter().all(|n| n.name != "ext"), "an extern signature is no trait member");
+    let run = node("Run").symbol.clone();
+    for member in ["go", "make", "twice"] {
+        assert!(
+            facts.edges.iter().any(|e| e.source == run && e.target == node(member).symbol && e.kind == EdgeKind::Contains),
+            "{member} is a member of its trait"
+        );
+    }
+}
+
+/// S-606 / FR-EX-34: each impl function records its receiver mode — by value
+/// (`self`, `mut self`), `&self`, `&mut self` (a lifetime between them
+/// included), typed `self: X`, or none — wherever `takes_self` is recorded; a
+/// free function records neither.
+#[test]
+fn a_rust_impl_function_records_its_receiver_mode() {
+    let src = "\
+pub struct S;
+impl S {
+    fn by_value(self) {}
+    fn by_mut_value(mut self) {}
+    fn by_ref(&self) {}
+    fn by_lifetime_ref<'a>(&'a self) {}
+    fn by_mut_ref(&mut self) {}
+    fn by_lifetime_mut_ref<'a>(&'a mut self) {}
+    fn typed(self: Box<Self>) {}
+    fn typed_pin(self: std::pin::Pin<&mut Self>) {}
+    fn associated(x: u8) -> Self { S }
+}
+fn free(x: S) {}
+";
+    let facts = extract_src("src/lib.rs", src);
+    let mode = |name: &str| {
+        let n = facts.nodes.iter().find(|n| n.name == name).unwrap();
+        (n.takes_self, n.receiver_mode)
+    };
+    use ReceiverMode::{None as NoReceiver, Ref, RefMut, Typed, Value};
+    let cases = [
+        ("by_value", Value),
+        ("by_mut_value", Value),
+        ("by_ref", Ref),
+        ("by_lifetime_ref", Ref),
+        ("by_mut_ref", RefMut),
+        ("by_lifetime_mut_ref", RefMut),
+        ("typed", Typed),
+        ("typed_pin", Typed),
+    ];
+    for (name, want) in cases {
+        assert_eq!(mode(name), (Some(true), Some(want)), "{name}");
+    }
+    assert_eq!(mode("associated"), (Some(false), Some(NoReceiver)));
+    assert_eq!(mode("free"), (None, None));
+}
+
+/// S-606 / FR-EX-34: every row of a `use` records whether it is a re-export —
+/// `pub use` and any `pub(…)` are, a private `use` is not — a group's rows and
+/// a glob's alike; no other row records it.
+#[test]
+fn a_rust_use_records_whether_it_is_exported() {
+    let src = "\
+pub use a::X;
+pub(crate) use a::{Y, z::Z as W};
+pub use inner::*;
+use std::fmt;
+use b::*;
+fn f() { fmt::format(); }
+";
+    let facts = extract_src("src/lib.rs", src);
+    let mut rows: Vec<(String, RefForm, Option<bool>)> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target.clone(), r.form, r.exported))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        rows,
+        vec![
+            ("a::X".to_string(), RefForm::Path, Some(true)),
+            ("a::Y".to_string(), RefForm::Path, Some(true)),
+            ("a::z::Z".to_string(), RefForm::Path, Some(true)),
+            ("b".to_string(), RefForm::Glob, Some(false)),
+            ("inner".to_string(), RefForm::Glob, Some(true)),
+            ("std::fmt".to_string(), RefForm::Path, Some(false)),
+        ]
+    );
+    assert!(facts.refs.iter().filter(|r| r.kind != EdgeKind::Imports).all(|r| r.exported.is_none()));
+}
+
+/// S-606: a module writing one import both privately and as a re-export —
+/// two glob `use`s, or a `use` and a `pub use` of one path under two `#[cfg]`s
+/// — records one row, exported, whichever declaration comes first.
+#[test]
+fn a_rust_import_written_both_private_and_pub_records_one_exported_row() {
+    let exports = |src: &str| -> Vec<(String, Option<bool>)> {
+        let mut rows: Vec<(String, Option<bool>)> = extract_src("src/lib.rs", src)
+            .refs
+            .into_iter()
+            .filter(|r| r.kind == EdgeKind::Imports)
+            .map(|r| (r.target, r.exported))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let private_first = "\
+pub mod prelude { pub struct A; }
+use crate::prelude::*;
+pub use crate::prelude::*;
+#[cfg(feature = \"x\")]
+use crate::prelude::A;
+#[cfg(not(feature = \"x\"))]
+pub use crate::prelude::A;
+";
+    let want = vec![("crate::prelude".to_string(), Some(true)), ("crate::prelude::A".to_string(), Some(true))];
+    assert_eq!(exports(private_first), want);
+    let pub_first = private_first.replace("use crate::prelude::*;\npub use", "pub use crate::prelude::*;\nuse");
+    assert_eq!(exports(&pub_first), want, "the order of the two declarations does not matter");
+}
+
+/// S-606 / FR-EX-34: an enum records its variant names in declaration order —
+/// unit, tuple, struct and discriminant variants alike — and an enum with none
+/// records none; no other node records any.
+#[test]
+fn a_rust_enum_records_its_variant_names() {
+    let src = "\
+pub enum E {
+    A,
+    B(u8),
+    C { x: u8 },
+    #[default]
+    D = 3,
+}
+pub enum Empty {}
+pub struct S { a: u8 }
+";
+    let facts = extract_src("src/lib.rs", src);
+    let variants = |name: &str| facts.nodes.iter().find(|n| n.name == name).and_then(|n| n.variants.clone());
+    assert_eq!(variants("E").as_deref(), Some("A B C D"));
+    assert_eq!(variants("Empty").as_deref(), Some(""));
+    assert_eq!(variants("S"), None);
+    assert_eq!(facts.nodes.iter().filter(|n| n.variants.is_some()).count(), 2, "a variant is no node");
+}
+
+/// S-606 / CR-202 F2: `self.m()` inside an impl records the `Self::m` row of
+/// shape `self`, and a written `Self::m()` records the same target with none —
+/// so a caller writing both has two rows — as a `self.m()` in a macro's token
+/// tree does.
+#[test]
+fn a_rust_self_call_records_the_self_shape_and_a_written_self_call_none() {
+    use crate::model::ReceiverShape::SelfInstance;
+    let src = "\
+pub struct A;
+impl A {
+    fn both(&self) { self.m(); Self::m(self); }
+    fn in_macro(&self) { println!(\"{}\", self.m()); }
+    fn m(&self) {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert_eq!(
+        shape_rows(&facts),
+        vec![
+            ("both".to_string(), "Self::m".to_string(), RefForm::Path, None),
+            ("both".to_string(), "Self::m".to_string(), RefForm::Path, Some(SelfInstance)),
+            ("in_macro".to_string(), "Self::m".to_string(), RefForm::Path, Some(SelfInstance)),
+        ]
+    );
+}
+
+/// S-606 / FR-EX-34: a fully qualified call `<T as Tr>::m(…)` records its type
+/// and trait — generics stripped, a turbofish or a path type alike, a
+/// qualified type kept as written — never the bare `m`; a bracketed type with
+/// no trait (`<Vec<u8>>::new()`) records what it did before.
+#[test]
+fn a_fully_qualified_rust_call_records_its_type_and_trait() {
+    let src = "\
+pub struct Q;
+pub trait Run { fn go(&self); }
+fn f(q: Q) {
+    <Q as Run>::go(&q);
+    <a::Q<u8> as b::Run<u8>>::go::<u8>(&q);
+    <<Q as Run>::Out as Run>::go(&q);
+    <Vec<u8>>::new();
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    let mut calls: Vec<(String, Option<u32>)> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Calls)
+        .map(|r| (r.target.clone(), r.arg_count))
+        .collect();
+    calls.sort();
+    assert_eq!(
+        calls,
+        vec![
+            ("<<Q as Run>::Out as Run>::go".to_string(), Some(1)),
+            ("<Q as Run>::go".to_string(), Some(1)),
+            ("<a::Q as b::Run>::go".to_string(), Some(1)),
+            ("new".to_string(), Some(0)),
         ]
     );
 }

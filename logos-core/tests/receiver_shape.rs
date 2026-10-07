@@ -301,8 +301,9 @@ fn a_self_call_in_a_module_level_method_binds_through_its_recorded_self_type() {
             // `x.helper()` in a free function: never `A`'s, `B`'s or the free one.
             row(&a(18, "free"), "helper", RefForm::Method, OTHER, false),
             row(&a(18, "free"), "helper", RefForm::Path, None, true),
-            // `self.helper()` is the S-493 row, `Self::helper`.
-            row(&a(6, "run"), "Self::helper", RefForm::Path, None, true),
+            // `self.helper()` is the S-493 row, `Self::helper`, of shape `self`
+            // (S-606).
+            row(&a(6, "run"), "Self::helper", RefForm::Path, SELF, true),
             // `other.helper()` beside the caller's own `helper`.
             row(&a(6, "run"), "helper", RefForm::Method, OTHER, false),
         ])

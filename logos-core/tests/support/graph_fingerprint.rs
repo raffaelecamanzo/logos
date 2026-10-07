@@ -7,8 +7,8 @@
 use logos_core::Runtime;
 
 /// A rowid-independent fingerprint of the whole graph (nodes with their arity
-/// facts, edges, the whole reference ledger, annotation verdicts), each section
-/// a sorted multiset of lines. `clone_group` is deliberately excluded: its representative is the
+/// and associated-item facts, edges, the whole reference ledger, the impl
+/// blocks, annotation verdicts), each section a sorted multiset of lines. `clone_group` is deliberately excluded: its representative is the
 /// component's minimum rowid, which is insertion-order-sensitive and so differs
 /// between two independently built stores even for identical clusters — and
 /// near-clone clustering is orthogonal to (and unchanged by) CR-015.
@@ -46,11 +46,20 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .map(|(id, range, takes_self)| (id.0, format!("{range:?}|{takes_self:?}")))
             .collect();
 
+        // Each node's associated-item facts (S-606, migration 34): its receiver
+        // mode, its variant names and whether it is a required signature —
+        // the facts the Rust lookup reads (S-607, S-608).
+        let item_of: std::collections::BTreeMap<i64, String> = store
+            .node_item_facts()?
+            .into_iter()
+            .map(|f| (f.id.0, format!("{:?}|{:?}|{}", f.receiver_mode, f.variants, f.signature)))
+            .collect();
+
         let mut node_lines: Vec<String> = nodes
             .iter()
             .map(|n| {
                 format!(
-                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}",
+                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}",
                     n.symbol.as_str(),
                     n.kind,
                     n.name,
@@ -58,6 +67,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     n.start_line,
                     n.end_line,
                     arity_of.get(&n.id.0).map_or("None|None", String::as_str),
+                    item_of.get(&n.id.0).map_or("None|None|false", String::as_str),
                 )
             })
             .collect();
@@ -70,8 +80,8 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
         edge_lines.sort();
 
         // Every ledger row, every column but its rowid (the file by path) —
-        // the peeled wrappers of a proven Rust receiver (S-587) and a call's
-        // argument count (S-591) included — so
+        // the peeled wrappers of a proven Rust receiver (S-587), a call's
+        // argument count (S-591) and an import's export mark (S-606) included — so
         // a synced ledger must equal a fresh index's row for row (FR-SY-10 as
         // amended by CR-187). Capture-before-delete rows (`RefForm::Symbol`,
         // ADR-10) are compared too: one that outlives its sync is a row a fresh
@@ -80,7 +90,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .iter()
             .map(|r| {
                 format!(
-                    "R {}|{}|{}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                    "R {}|{}|{}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
                     r.file_id.and_then(|id| file_of.get(&id)).map_or("", String::as_str),
                     r.source_symbol,
                     r.target,
@@ -92,11 +102,27 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     r.receiver,
                     r.peeled,
                     r.arg_count,
+                    r.exported,
                     r.line,
                 )
             })
             .collect();
         ref_lines.sort();
+
+        // Every impl block's header (S-606, migration 34), by file and line —
+        // a synced file must carry a fresh index's blocks, an emptied or
+        // re-headed one included.
+        let mut impl_lines: Vec<String> = store
+            .impl_blocks()?
+            .iter()
+            .map(|b| {
+                format!(
+                    "I {}|{}|{}|{}|{}|{:?}|{:?}",
+                    b.file_path, b.start_line, b.end_line, b.self_type, b.self_ref, b.trait_path, b.deref_target,
+                )
+            })
+            .collect();
+        impl_lines.sort();
 
         let mut ann_lines: Vec<String> = anns
             .iter()
@@ -117,7 +143,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
         ann_lines.sort();
 
         let mut out = String::new();
-        for section in [node_lines, edge_lines, ref_lines, ann_lines] {
+        for section in [node_lines, edge_lines, ref_lines, impl_lines, ann_lines] {
             for line in section {
                 out.push_str(&line);
                 out.push('\n');

@@ -209,8 +209,10 @@ impl<'tree> ParamCaptures<'tree> {
     }
 }
 
-/// The nearest captured declaration enclosing `list`.
-fn owning_decl(list: Node<'_>, decl_at: &HashMap<usize, usize>) -> Option<usize> {
+/// The nearest captured declaration enclosing `list` — a parameter list, or
+/// (for [`super::assoc`]) a receiver or an enum's variant list, none of which
+/// is itself a declaration.
+pub(super) fn owning_decl(list: Node<'_>, decl_at: &HashMap<usize, usize>) -> Option<usize> {
     let mut ancestor = list.parent();
     while let Some(n) = ancestor {
         if let Some(&idx) = decl_at.get(&n.id()) {
