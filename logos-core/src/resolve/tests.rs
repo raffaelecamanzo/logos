@@ -2952,6 +2952,25 @@ fn an_unknown_takes_self_fact_never_filters_a_candidate() {
 }
 
 #[test]
+fn an_unknown_fact_never_filters_a_path_call() {
+    // FR-RS-47 rule 2: `vague` (425) records no takes-`self` fact, so a path
+    // call passing one argument keeps it — neither counted as a receiver nor
+    // dropped — and as the inherent one it binds. With no facts at all, no
+    // range filters: `make` (424) takes any count.
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    let counted = |target: &str, args: u32| UnresolvedRefRow {
+        arg_count: Some(args),
+        ..call(100, LIB_RS, 2, target)
+    };
+    for policy in POLICIES {
+        let r = counted("Store::vague", 1);
+        bound_to(bind(&r, &self_fact_index(&r, &store, true), policy), 2, 425, EdgeKind::Calls);
+        let r = counted("Store::make", 5);
+        bound_to(bind(&r, &self_fact_index(&r, &store, false), policy), 2, 424, EdgeKind::Calls);
+    }
+}
+
+#[test]
 fn a_self_call_reads_the_takes_self_fact_by_its_syntax() {
     // From `caller` (427), S-607: a written `Self::m()` is path syntax and keeps
     // an associated function; a `self.m()` — the `Self::m` row of shape `self`

@@ -668,3 +668,114 @@ fn two_impl_blocks_on_one_line_lend_no_function_to_the_other() {
     assert!(from(&edges, "src/lib.rs:ca@4").is_empty(), "{edges:?}");
     assert!(from(&edges, "src/lib.rs:cb@5").is_empty(), "{edges:?}");
 }
+
+// ── The universe's edges, the residue's arms, and the framework seam ────────
+
+/// A function nested in one of the block's own functions is no associated
+/// item: `X::m()` binds the block's `m`, never the nested one.
+#[test]
+fn a_function_nested_in_a_method_is_no_associated_item() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "pub struct X;\nimpl X {\n    pub fn a() { fn m() {} }\n    pub fn m() {}\n}\npub fn f() { X::m(); }\n",
+    )]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert_eq!(from(&edges, "src/lib.rs:f@6"), targets(&["src/lib.rs:m@4"]));
+}
+
+/// An impl block inside a function of another block: its functions are the
+/// innermost block's, so `Y::g()` binds.
+#[test]
+fn an_impl_inside_a_method_holds_its_own_functions() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "pub struct Y;\npub struct X;\nimpl X {\n    pub fn f() {\n        impl Y { pub fn g() {} }\n    }\n}\npub fn call() { Y::g(); }\n",
+    )]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert_eq!(from(&edges, "src/lib.rs:call@8"), targets(&["src/lib.rs:g@5"]));
+}
+
+/// A header whose scope names its type twice (two globs) is
+/// `type-ambiguous`, and so is a written path whose module re-exports two
+/// types of the name.
+#[test]
+fn a_type_named_twice_is_type_ambiguous_in_a_header_and_in_a_path() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod c;\n"),
+        ("src/a.rs", "pub struct X;\n"),
+        ("src/b.rs", "pub struct X;\n"),
+        ("src/c.rs", "use crate::a::*;\nuse crate::b::*;\nimpl X {\n    pub fn m(&self) {}\n    pub fn go(&self) { self.m(); }\n}\n"),
+    ]);
+    let engine = index(tmp.path());
+    assert!(from(&call_edges(engine.runtime().unwrap()), "src/c.rs:go@5").is_empty());
+    assert_eq!(residue(&engine), reasons(&[(R::TypeAmbiguous, 1)]));
+
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod reexp;\npub fn f() { crate::reexp::X::m(); }\n"),
+        ("src/a.rs", "pub struct X;\nimpl X { pub fn m() {} }\n"),
+        ("src/b.rs", "pub struct X;\nimpl X { pub fn m() {} }\n"),
+        ("src/reexp.rs", "pub use crate::a::*;\npub use crate::b::*;\n"),
+    ]);
+    let engine = index(tmp.path());
+    assert!(from(&call_edges(engine.runtime().unwrap()), "src/lib.rs:f@4").is_empty());
+    assert_eq!(residue(&engine), reasons(&[(R::TypeAmbiguous, 1)]));
+}
+
+/// A private glob re-exports nothing: a trait one brings into `reexp` is not
+/// in scope for a file globbing `reexp`, so `w.sec()` binds the imported
+/// `Open`'s `sec` alone.
+#[test]
+fn a_private_glob_brings_no_trait_into_a_globbing_files_scope() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod hidden;\npub mod open;\npub mod reexp;\npub mod user;\npub struct W;\n"),
+        ("src/hidden.rs", "pub trait Secret { fn sec(&self); }\nimpl Secret for crate::W { fn sec(&self) {} }\n"),
+        ("src/open.rs", "pub trait Open { fn sec(&self); }\nimpl Open for crate::W { fn sec(&self) {} }\n"),
+        ("src/reexp.rs", "use crate::hidden::*;\npub fn r() {}\n"),
+        ("src/user.rs", "use crate::open::Open;\nuse crate::reexp::*;\npub fn f(w: &crate::W) { w.sec(); }\n"),
+    ]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert_eq!(from(&edges, "src/user.rs:f@3"), targets(&["src/open.rs:sec@2"]));
+}
+
+/// The reasons of the shapes no lookup decides yet or at all: a qualified
+/// `<T as Tr>::m()` on a repository type (`supertype-unreached` until S-608
+/// binds it), a trait head `Tr::m(s)` (`no-receiver-evidence`), a module path
+/// to a tuple struct and a function-local enum's variant (`not-a-callable`).
+#[test]
+fn the_shapes_no_lookup_decides_each_carry_their_reason() {
+    let cases: [(&str, R); 4] = [
+        ("pub struct T;\npub trait Tr { fn m(); }\nimpl Tr for T { fn m() {} }\npub fn f() { <T as Tr>::m(); }\n", R::SupertypeUnreached),
+        ("pub trait Tr { fn m(&self); }\npub struct S;\nimpl Tr for S { fn m(&self) {} }\npub fn f(s: &S) { Tr::m(s); }\n", R::NoReceiverEvidence),
+        ("pub mod m { pub struct W(pub u8); }\npub fn f() { m::W(1); }\n", R::NotACallable),
+        ("pub fn f() {\n    enum L { A(u8) }\n    L::A(1);\n}\n", R::NotACallable),
+    ];
+    for (source, reason) in cases {
+        let tmp = tree(&[("src/lib.rs", source)]);
+        let engine = index(tmp.path());
+        assert_eq!(residue(&engine), reasons(&[(reason, 1)]), "{source}");
+    }
+}
+
+/// The framework pass binds a handler written `T::m` through the same lookup:
+/// an axum route to `H::home` links to `home`.
+#[test]
+fn an_axum_handler_written_as_an_associated_function_routes_to_it() {
+    let tmp = tree(&[(
+        "src/main.rs",
+        "use axum::routing::get;\nuse axum::Router;\npub struct H;\nimpl H { pub async fn home() {} }\nfn app() -> Router { Router::new().route(\"/\", get(H::home)) }\n",
+    )]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let label = labels(rt);
+    let routes: Vec<String> = rt
+        .submit_read(|store| store.all_edges())
+        .expect("read runs")
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::RoutesTo && e.source != e.target)
+        .map(|e| label[&e.target].clone())
+        .collect();
+    assert_eq!(routes, ["src/main.rs:home@4"]);
+}
