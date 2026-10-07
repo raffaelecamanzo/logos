@@ -1175,6 +1175,41 @@ impl PluginManifest {
         Ok(manifest)
     }
 
+    /// The rules of the extension lists a descriptor declares beside
+    /// `extensions` — one call site, for the reason [`validate_reach`] is its
+    /// own function: with S-592's rule inline, [`validate`](Self::validate)
+    /// passed the `max_cc = 50` rule.
+    ///
+    /// - Stripping is a path-grammar rule: a name-grammar language has no file
+    ///   extension in its specifiers to strip, so `specifier_extensions` there
+    ///   is a descriptor bug rather than a no-op to tolerate; each entry is a
+    ///   bare extension.
+    /// - `arity_unchecked_extensions` names extensions the plugin claims (S-592,
+    ///   [FR-RS-43]): one it does not would never match a file of this
+    ///   language.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    fn validate_extension_lists(&self) -> Result<(), String> {
+        if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
+            return Err("`specifier_extensions` requires `import_specifier = \"path\"`".to_string());
+        }
+        if let Some(bad) = self
+            .specifier_extensions
+            .iter()
+            .find(|e| e.is_empty() || e.contains(['.', '/']))
+        {
+            return Err(format!(
+                "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
+            ));
+        }
+        match self.arity_unchecked_extensions.iter().find(|e| !self.extensions.contains(e)) {
+            Some(bad) => Err(format!(
+                "`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Semantic validation beyond what the type system enforces.
     fn validate(&self, file: &str) -> Result<(), PluginError> {
         let bail = |detail: String| {
@@ -1313,33 +1348,8 @@ impl PluginManifest {
         if self.module_separator.is_empty() {
             return bail("`module_separator` must not be empty".to_string());
         }
-        // Stripping is a path-grammar rule: a name-grammar language has no file
-        // extension in its specifiers to strip, so a list there is a descriptor
-        // bug rather than a no-op to tolerate.
-        if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
-            return bail(
-                "`specifier_extensions` requires `import_specifier = \"path\"`".to_string(),
-            );
-        }
-        if let Some(bad) = self
-            .specifier_extensions
-            .iter()
-            .find(|e| e.is_empty() || e.contains(['.', '/']))
-        {
-            return bail(format!(
-                "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
-            ));
-        }
-        // An unchecked extension the plugin does not claim would never match a
-        // file of this language, so it is a descriptor bug, not a no-op.
-        if let Some(bad) = self
-            .arity_unchecked_extensions
-            .iter()
-            .find(|e| !self.extensions.contains(e))
-        {
-            return bail(format!(
-                "`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"
-            ));
+        if let Err(detail) = self.validate_extension_lists() {
+            return bail(detail);
         }
         if let Err(detail) =
             validate_module_model(self.module_model.as_ref(), self.package_modules.as_ref())
