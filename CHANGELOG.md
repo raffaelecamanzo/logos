@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-10-07
+
 ### Added
 
 - **A callable records its parameter range and a call records its argument
