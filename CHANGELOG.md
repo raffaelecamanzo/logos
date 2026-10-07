@@ -71,8 +71,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   the new `status` `call_residue` reason `no-applicable-overload`. Defaults and
   varargs widen a range, and an unknown range or count filters nothing;
   JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`) is never filtered, `.ts`/`.tsx`
-  are. New descriptor keys `overloaded_calls`, `arity_unchecked_extensions` and
-  `implicit_call_falls_through` declare this per language. Three miscounts were fixed in the queries: a
+  are. New descriptor keys `overloaded_calls`, `arity_unchecked_extensions`,
+  `implicit_call_falls_through` and `implicit_root_members` declare this per
+  language. Three miscounts were fixed in the queries: a
   Kotlin/Scala `override` (whose defaults are inherited) and a Python
   `cls.m(…)` or PHP `f(...)` record unknown, and a comment opening a Python
   parameter list no longer hides `self`. Measured against the previous build

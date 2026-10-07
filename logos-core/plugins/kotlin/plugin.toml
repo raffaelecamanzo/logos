@@ -42,6 +42,10 @@ overloaded_calls = true
 # admits goes on to the top-level functions and imports in scope (S-592,
 # FR-RS-43). C#, Java, Scala and C++ stop at the member that hides the name.
 implicit_call_falls_through = true
+# Every class inherits `Any`'s members, which the graph never holds: a call of
+# one of these names may be `Any`'s, which a member beats a top-level function
+# to, so it never falls through.
+implicit_root_members = ["equals", "hashCode", "toString"]
 
 # Calling a class constructs it (S-521, CR-170, FR-RS-16): a free `Foo()` whose
 # one candidate is a class records `Instantiates` to that class. A top-level

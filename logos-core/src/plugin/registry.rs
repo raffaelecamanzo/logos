@@ -491,6 +491,23 @@ impl LanguageRegistry {
     }
 
     /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose plugin
+    /// declares `implicit_root_members` (S-592), each mapped to those names: a
+    /// call of one never falls through, as the root every class inherits may
+    /// hold it. Consumed through [`crate::resolve::package_key::PackageLayout`].
+    pub fn implicit_root_members(&self) -> HashMap<String, Vec<String>> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| !p.semantics().implicit_root_members.is_empty())
+            .flat_map(|p| {
+                let members = p.semantics().implicit_root_members.clone();
+                p.extensions().iter().map(move |e| (normalize_ext(e), members.clone()))
+            })
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
     /// declares `overloaded_calls = true` (S-592, [FR-RS-43]): a bare call
     /// there binds only a callable whose parameter range admits it. Consumed
@@ -1312,6 +1329,9 @@ mod tests {
         for ext in ["cs", "scala", "cpp", "rb", "java", "rs", "go", "py", "php", "ts", "js", "c"] {
             assert!(!fallthrough.contains(ext), "`{ext}`'s call never falls through");
         }
+        let roots = reg.implicit_root_members();
+        assert_eq!(roots.keys().filter(|e| e.starts_with("kt")).count(), 2, "{roots:?}");
+        assert_eq!(roots["kt"], ["equals", "hashCode", "toString"]);
         let mut unchecked: Vec<String> = reg.arity_unchecked_extensions().into_iter().collect();
         unchecked.sort();
         assert_eq!(unchecked, ["cjs", "js", "jsx", "mjs"]);
@@ -1876,7 +1896,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let reg = LanguageRegistry::load(root.path()).expect("embedded grammars load");
         let layout = crate::resolve::package_key::PackageLayout::from_registry(&reg);
-        assert!(layout.falls_through_to_free_calls("src/a.kt"), "the key is read");
+        assert!(layout.falls_through_to_free_calls("src/a.kt", "m"), "the key is read");
         let compiled: Vec<&str> =
             reg.plugins.iter().filter(|p| p.queries_compiled()).map(|p| p.name()).collect();
         assert!(compiled.is_empty(), "compiled by a layout build: {compiled:?}");

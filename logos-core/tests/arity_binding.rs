@@ -585,6 +585,33 @@ fn a_call_whose_class_has_an_unseen_supertype_never_falls_through() {
     }
 }
 
+/// A Kotlin class inherits `Any`'s `equals`, `hashCode` and `toString`, which
+/// the graph never holds (S-592, the descriptor's `implicit_root_members`):
+/// `hashCode()` that the class's own `hashCode(seed)` cannot take is
+/// `Any.hashCode()`, which a member beats the top-level `hashCode` to — so the
+/// call never falls through, while one of another name still does.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_kotlin_call_of_a_root_member_never_falls_through() {
+    let tmp = tree(&[(
+        "src/main/kotlin/app/A.kt",
+        "package app
+
+fun hashCode(): Int = 0
+fun size(): Int = 0
+
+class A {
+    fun hashCode(seed: Int): Int = seed
+    fun size(seed: Int): Int = seed
+    fun caller(): Int { return hashCode() + size() }
+}
+",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@9"), targets(&["size@4"]));
+    assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
+}
+
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit

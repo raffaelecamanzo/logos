@@ -678,6 +678,14 @@ pub struct PluginManifest {
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     #[serde(default)]
     pub implicit_call_falls_through: bool,
+    /// The members every class of the language inherits from a root the graph
+    /// never holds (S-592): Kotlin's `Any` — `equals`, `hashCode`, `toString`.
+    /// A call of one of these names that no recorded member admits may be
+    /// the root's, which a member beats a top-level function to, so it never
+    /// falls through ([`implicit_call_falls_through`](Self::implicit_call_falls_through)).
+    /// Defaults to empty; declared only beside the fall-through.
+    #[serde(default)]
+    pub implicit_root_members: Vec<String>,
     /// The methods a peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]): wrapper name → method names. A call on a receiver proven
     /// through such a wrapper (`x: Arc<T>`, recorded with `peeled = "Arc"`)
@@ -1209,12 +1217,16 @@ impl PluginManifest {
     ///   [FR-RS-43]): one it does not would never match a file of this
     ///   language.
     /// - `implicit_call_falls_through` is a rule of the unqualified in-class
-    ///   call on the instance, so it requires `implicit_receiver = "self"`.
+    ///   call on the instance, so it requires `implicit_receiver = "self"`, and
+    ///   `implicit_root_members` only qualifies it.
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     fn validate_extension_lists(&self) -> Result<(), String> {
         if self.implicit_call_falls_through && self.implicit_receiver() != ImplicitReceiver::SelfInstance {
             return Err("`implicit_call_falls_through` requires `implicit_receiver = \"self\"`".to_string());
+        }
+        if !self.implicit_root_members.is_empty() && !self.implicit_call_falls_through {
+            return Err("`implicit_root_members` requires `implicit_call_falls_through`".to_string());
         }
         if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
             return Err("`specifier_extensions` requires `import_specifier = \"path\"`".to_string());
@@ -2197,6 +2209,8 @@ mod tests {
         assert!(err.contains("requires `implicit_receiver = \"self\"`"), "{err}");
         let both = with("implicit_receiver = \"self\"\nimplicit_call_falls_through = true").unwrap();
         assert!(both.implicit_call_falls_through);
+        let err = with("implicit_root_members = [\"equals\"]").unwrap_err().to_string();
+        assert!(err.contains("requires `implicit_call_falls_through`"), "{err}");
     }
 
     /// The specifier grammar is declared apart from the member-path separator

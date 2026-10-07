@@ -2232,7 +2232,7 @@ fn bind_traced(
     let source_family = source_file.and_then(|p| ix.layout.family(p));
     let enclosing_namespaces = source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p));
     let bare_calls_free_only = source_file.is_some_and(|p| ix.layout.bare_calls_free_only(p));
-    let falls_through = source_file.is_some_and(|p| ix.layout.falls_through_to_free_calls(p));
+    let falls_through = source_file.is_some_and(|p| ix.layout.falls_through_to_free_calls(p, &r.target));
     let relation = relation_want_of(r, source_info, &ix.layout);
     let ctx = Ctx {
         source,

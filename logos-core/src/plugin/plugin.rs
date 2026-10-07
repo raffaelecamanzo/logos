@@ -69,6 +69,10 @@ pub struct Semantics {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     pub implicit_call_falls_through: bool,
+    /// The members a root the graph never holds gives every class (S-592; see
+    /// [`PluginManifest::implicit_root_members`]): names that never fall
+    /// through.
+    pub implicit_root_members: Vec<String>,
     /// The methods each peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]; see [`PluginManifest::wrapper_methods`]) — consumed by the
     /// binder's proven-receiver arm through [`crate::resolve::package_key`].
@@ -365,6 +369,7 @@ impl CompiledPlugin {
             overloaded_calls: manifest.overloaded_calls,
             arity_unchecked_extensions: manifest.arity_unchecked_extensions,
             implicit_call_falls_through: manifest.implicit_call_falls_through,
+            implicit_root_members: manifest.implicit_root_members,
             wrapper_methods: manifest.wrapper_methods,
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,

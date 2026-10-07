@@ -277,7 +277,8 @@ by each relation's payload token), read live from the graph.
 >   mismatch goes on to the top-level function or import of that name, as
 >   Kotlin's resolution does — but only when the class's supertypes are all in
 >   the graph, since an external base class or an interface's default body may
->   hold the overload it reaches. In Java, C#, Scala and C++ the member hides
+>   hold the overload it reaches, and never for `equals`, `hashCode` or
+>   `toString`, which every class inherits from `Any`. In Java, C#, Scala and C++ the member hides
 >   every outer name even when no overload applies, so such a call stays
 >   unbound. Two candidates that both admit the count
 >   stay unbound (`overload-ambiguous`): logos reads no argument types. A call

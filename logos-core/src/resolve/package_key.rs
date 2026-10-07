@@ -103,6 +103,9 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     free_call_fallthrough_exts: HashSet<String>,
+    /// Normalised extension → the members the root every class of its language
+    /// inherits declares (S-592), names that never fall through.
+    implicit_root_members: HashMap<String, HashSet<String>>,
     /// Normalised extensions whose language overloads callables by name, so a
     /// bare call binds only a callable whose parameter range admits it (S-592,
     /// [FR-RS-43]).
@@ -202,6 +205,7 @@ impl PackageLayout {
             .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
             .with_free_only_bare_calls(registry.free_only_bare_call_extensions())
             .with_free_call_fallthrough(registry.free_call_fallthrough_extensions())
+            .with_implicit_root_members(registry.implicit_root_members())
             .with_overloaded_calls(registry.overloaded_call_extensions())
             .with_arity_unchecked(registry.arity_unchecked_extensions())
             .with_wrapper_methods(registry.wrapper_methods())
@@ -239,6 +243,17 @@ impl PackageLayout {
         self.free_call_fallthrough_exts.extend(
             exts.into_iter()
                 .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
+        );
+        self
+    }
+
+    /// This layout, with the members each extension's root class declares
+    /// (S-592; the map [`LanguageRegistry::implicit_root_members`] returns).
+    pub fn with_implicit_root_members(mut self, declared: HashMap<String, Vec<String>>) -> Self {
+        self.implicit_root_members.extend(
+            declared
+                .into_iter()
+                .map(|(ext, names)| (ext.trim_start_matches('.').to_ascii_lowercase(), names.into_iter().collect())),
         );
         self
     }
@@ -505,11 +520,16 @@ impl PackageLayout {
     /// no member of its class admits it, goes on to the free functions and
     /// imports in scope (S-592, [FR-RS-43]): its language declares
     /// `implicit_call_falls_through`
-    /// ([`LanguageRegistry::free_call_fallthrough_extensions`]).
+    /// ([`LanguageRegistry::free_call_fallthrough_extensions`]), and `name` is
+    /// none of the members the root every class inherits declares — Kotlin's
+    /// `hashCode()` beside a top-level `hashCode` is `Any.hashCode()`.
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
-    pub fn falls_through_to_free_calls(&self, path: &str) -> bool {
-        extension(path).is_some_and(|ext| self.free_call_fallthrough_exts.contains(&ext))
+    pub fn falls_through_to_free_calls(&self, path: &str, name: &str) -> bool {
+        extension(path).is_some_and(|ext| {
+            self.free_call_fallthrough_exts.contains(&ext)
+                && !self.implicit_root_members.get(&ext).is_some_and(|roots| roots.contains(name))
+        })
     }
 
     /// Whether the language of the file at `path` overloads callables by name,
@@ -657,6 +677,12 @@ impl PackageLayout {
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
             .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
             .with_free_call_fallthrough(exts().filter(|_| semantics.implicit_call_falls_through))
+            .with_implicit_root_members(
+                exts()
+                    .filter(|_| !semantics.implicit_root_members.is_empty())
+                    .map(|ext| (ext, semantics.implicit_root_members.clone()))
+                    .collect(),
+            )
             .with_overloaded_calls(exts().filter(|_| semantics.overloaded_calls))
             .with_arity_unchecked(semantics.arity_unchecked_extensions.iter().cloned())
             .with_wrapper_methods(
@@ -1467,7 +1493,7 @@ mod call_target_tests {
         let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
         let full = PackageLayout::from_registry(&registry);
         let keys: [fn(&PackageLayout, &str) -> bool; 3] = [
-            PackageLayout::falls_through_to_free_calls,
+            |layout, path| layout.falls_through_to_free_calls(path, "m"),
             PackageLayout::overloads_calls,
             PackageLayout::checks_arity,
         ];
@@ -1486,6 +1512,7 @@ mod call_target_tests {
         }
         assert!(held.iter().all(|&(yes, no)| yes > 0 && no > 0), "{held:?}");
         assert!(full.checks_arity("a/b.ts") && !full.checks_arity("a/b.js"));
+        assert!(!full.falls_through_to_free_calls("a/b.kt", "hashCode"), "a root member never falls through");
     }
 
     /// The same parity for the wrapper-method table (S-588): the single-plugin
