@@ -26,6 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use logos_core::model::{EdgeKind, NodeId, NodeKind, ReceiverMode};
+use logos_core::models::{CallResidue, CallResidueReason as R};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
@@ -389,4 +390,35 @@ fn a_handoff_beside_a_same_named_signature_roots_the_handler() {
     fs::write(tmp.path().join(LIB), &edited).unwrap();
     engine.sync(&[root.join(LIB)]);
     assert_eq!(markers(engine.runtime().unwrap()), ["index@5"], "a sync roots the same handler");
+}
+
+/// S-606: `status` reads the call residue over the same signature-free graph
+/// the binder binds against, so it states what binding produced. The default
+/// body's `self.hello()` and `self.meta()` stay unbound, and each keeps the
+/// reason the trait's members give it. Over a graph that held the signatures
+/// they would read as bindable, and land in `unclassified`.
+#[test]
+fn the_call_residue_states_what_binding_left_beside_required_signatures() {
+    let src = "\
+pub struct X;
+pub trait Greet {
+    fn hello(&self);
+    fn meta(&self) -> u8;
+    fn twice(&self) { self.hello(); self.meta(); }
+}
+impl Greet for X {}
+pub fn q(x: &X) { x.twice(); }
+";
+    let tmp = tree(&[(LIB, src)]);
+    let engine = index(tmp.path());
+    let residue: CallResidue = engine
+        .status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "rust")
+        .and_then(|row| row.call_residue)
+        .expect("the rust row states its call residue");
+    let reasons: BTreeMap<R, u64> = residue.reasons.into_iter().filter(|(_, n)| *n > 0).collect();
+    assert_eq!((residue.unbound, residue.unclassified), (3, 0), "{reasons:?}");
+    assert_eq!(reasons, [(R::SupertypeUnreached, 3)].into_iter().collect());
 }
