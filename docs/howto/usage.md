@@ -198,35 +198,38 @@ by each relation's payload token), read live from the graph.
 >   `base.foo()` / `super.foo()` stay unbound (these plugins record no proven
 >   base class), and so does C++'s `Base::foo()`, which reads like any other
 >   qualified call. In a Kotlin chain `a.b.c()` only `c` is a call. One receiver
->   *is* known for Rust: a call on exactly `self` inside an `impl` method
->   (`self.helper()`, like a written `Self::helper()`) has the impl's own type,
->   so it binds to the one `helper` that type's impls define in the caller's
->   crate — and stays unbound, retried on sync, when that type defines none or
->   two ([FR-RS-11](../specs/requirements/FR-RS-11.md)). A `self.helper()` in a
->   trait's default method binds to a `helper` the trait itself provides (a
->   required, bodiless one has no node, so the call stays unbound).
->   A Rust call on any other receiver binds when the file proves the
->   receiver's type `T` — a typed parameter or `let`, `let x = T::new(…)` whose
->   `new` returns `Self`, a struct literal `T { … }`, or `self.field` of the
->   caller's own struct — after peeling `&`, `&mut`, `Box`, `Arc` and `Rc`.
->   The constructor proof holds only for a `T` the caller's own module
->   declares, so `let e = Engine::new(); e.run()` in another module stays
->   unbound; a typed `let e: Engine = Engine::new();` binds it
->   ([FR-RS-42](../specs/requirements/FR-RS-42.md)). `T` is read through the
->   file's `use` declarations (and a `pub use` re-export, so `cli` code's
->   `engine.runtime()` reaches `logos_core`'s `Engine::runtime`) to one type
->   declared in the repository, and the call binds that type's one `helper`,
->   an inherent method before a trait impl's. An associated function without
->   `self` (`fn helper() -> u8`) is never a candidate, as rustc never calls
->   one with `x.helper()`: a trait impl's `helper(&self)` beside it binds. It
->   stays unbound when `T` is not declared in the repository (`String`, `Vec`,
->   `str`, `std::io::Error`, an external crate's type), when the wrapper
->   provides the method itself (`x.clone()` on an `Arc<T>` is `Arc::clone`),
->   when no `use` names a same-named type, and when `T` has no such method
->   taking `self`, or two of one rank.
->   A glob of another crate or of a sibling module reads none of that module's
->   imports (the graph cannot tell a `pub use` from a private one), and a name
->   a file imports twice — at top level and in an inline `mod tests` — binds
+>   *is* known for Rust: `self.helper()` and `Self::helper()` inside an `impl`
+>   method have the impl's own type. A Rust call to a type's method — those
+>   two, a written `T::helper()`, `<T as Tr>::helper()`, and a call on a
+>   receiver whose type the file proves — binds through one associated-item
+>   lookup ([FR-RS-47](../specs/requirements/FR-RS-47.md)): among the
+>   functions of every `impl` block whose self type resolves to `T`, in any
+>   crate and through `pub use` re-exports (a `pub use inner::*` glob
+>   included; a private glob re-exports nothing), plus the default bodies of
+>   the traits `T` implements without overriding them. An inherent function
+>   beats a trait's, and a trait's function is a candidate only where the
+>   trait is in scope. Syntax decides the filters: `x.helper()` never reaches
+>   an associated function without `self` (`fn helper() -> u8`), while
+>   `T::helper(x)` counts `x` as an argument. A method call that finds nothing
+>   on `T` retries on its `Deref` target. A call on a trait-typed receiver
+>   (`self.m()` in a trait's default body, `&dyn Tr`, `impl Tr`, a generic
+>   bounded by `Tr`, a written `Tr::m(x)`) binds every repository impl of the
+>   method plus the default body. A required trait method (a signature with no
+>   body) is a node but binds no call. The proofs of a receiver's type are a
+>   typed parameter or `let`, `let x = T::new(…)` whose `new` returns `Self`, a
+>   struct literal `T { … }`, or `self.field` of the caller's own struct, after
+>   peeling `&`, `&mut`, `Box`, `Arc` and `Rc`
+>   ([FR-RS-42](../specs/requirements/FR-RS-42.md)). The constructor proof holds
+>   only for a `T` the caller's own module declares, so `let e = Engine::new();
+>   e.run()` in another module stays unbound, while a typed `let e: Engine =
+>   Engine::new();` binds it. A call inside a macro (`format!("{}", m.f())`,
+>   `assert!(T::make::<u8>())`) is read exactly as outside one. A call stays
+>   unbound, with the reason `status` reports per call
+>   ([commands.md](commands.md) § `call_residue`), when `T` is not declared in
+>   the repository (`String`, `Vec`, an external crate's type), when a derive
+>   or a wrapper supplies the method (`#[derive(Default)]`, `Arc::clone`), when
+>   the trait is not in scope, or when two candidates of one rank remain. A
+>   name a file imports twice (at top level and in an inline `mod tests`) binds
 >   nothing. Chained calls, closure parameters and untyped `let`s prove nothing. Go reads the
 >   receiver the same way, by name: inside `func (s *Svc) Run()` a call on `s`
 >   (`s.Work()`) is `self` and binds to the one `Work` declared on `Svc`;
@@ -278,7 +281,13 @@ by each relation's payload token), read live from the graph.
 >   Kotlin's resolution does — but only when the class's supertypes are all in
 >   the graph, since an external base class or an interface's default body may
 >   hold the overload it reaches, and never for `equals`, `hashCode` or
->   `toString`, which every class inherits from `Any`. In Java, C#, Scala and C++ the member hides
+>   `toString`, which every class inherits from `Any`. In Java and Kotlin, a call that finds no applicable method anywhere along the
+>   class's `extends` chain goes on to the bodies its implemented interfaces
+>   provide (a Java `default` method, a Kotlin interface method with a body), a
+>   superclass's method always first; a `static`, `private` or abstract
+>   interface member is never a candidate
+>   ([FR-RS-48](../specs/requirements/FR-RS-48.md)). C# does not inherit
+>   interface bodies, so its classes never reach them. In Java, C#, Scala and C++ the member hides
 >   every outer name even when no overload applies, so such a call stays
 >   unbound. Two candidates that both admit the count
 >   stay unbound (`overload-ambiguous`): logos reads no argument types. A call
