@@ -1976,12 +1976,14 @@ fn implements_ref_binds_impl_method_to_its_trait() {
 
 #[test]
 fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
-    // Two workspace traits share the name `Plug`, so `trait_by_name` returns None
-    // (never guesses one of several) and the dyn call is an honest miss — the
-    // "several" branch of the never-fabricate rule (NFR-RA-05), distinct from the
-    // "zero" (external) branch.
-    let (mut nodes, edges) = dyn_fixture();
-    nodes.push(node(80, "Plug", NodeKind::Trait, "other/src/lib.rs")); // a second `Plug`
+    // Two traits named `Plug` in the caller's own module, so the bound the call
+    // names is ambiguous (S-608 reads a bound in the caller's scope first) and
+    // the dyn call is an honest miss — the "several" branch of the
+    // never-fabricate rule (NFR-RA-05), distinct from the "zero" (external)
+    // branch.
+    let (mut nodes, mut edges) = dyn_fixture();
+    nodes.push(node(80, "Plug", NodeKind::Trait, "src/lib.rs")); // a second `Plug`
+    edges.push(contains(1, 80));
     let scope = [implements(200, 51, "Plug"), implements(201, 61, "Plug")];
     let r = dyn_call(300, 2, "Plug::run");
     let mut all = scope.to_vec();
@@ -1991,6 +1993,11 @@ fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
         bind(&r, &ix, BindingPolicy::Aggressive),
         Outcome::Unbound,
         "a dyn call to an ambiguously-named trait must stay unresolved"
+    );
+    assert_eq!(
+        super::binder::residue(&r, &ix, BindingPolicy::Aggressive),
+        Some(super::binder::Residue::TypeAmbiguous),
+        "two traits of the name: type-ambiguous, never an external trait"
     );
 }
 
