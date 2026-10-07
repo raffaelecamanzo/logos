@@ -17,6 +17,8 @@
 //! [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 
+use std::collections::HashSet;
+
 use tree_sitter::Node;
 
 use crate::model::RefForm;
@@ -243,6 +245,26 @@ pub(crate) struct MacroCall {
     ///
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
     pub arg_count: Option<u32>,
+    /// The receiver of a non-`self` method call whose type the file may prove
+    /// (S-610, [FR-RS-42]): `None` for a path call, a `self.f()` call and a
+    /// receiver no proof form reads — a chain, a path, a literal, a call result.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub receiver: Option<MacroReceiver>,
+}
+
+/// A receiver written inside a macro's token tree that [FR-RS-42]'s proof forms
+/// can type — the two the `references` query marks outside one (`variable` and
+/// `self_field`).
+///
+/// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MacroReceiver {
+    /// `x.f()`: a plain name — not preceded by a `.` (a field of something) or
+    /// a `::` (a path), and not followed by anything but the `.`.
+    Name(String),
+    /// `self.x.f()`: a field of the caller's own struct.
+    OwnField(String),
 }
 
 /// Walk a Rust `macro_invocation`'s token tree(s) for the call-shaped token
@@ -251,9 +273,9 @@ pub(crate) struct MacroCall {
 /// `field_expression` patterns never match inside it (the documented S-011
 /// limitation, lifted here for the `Calls` relation, S-162 / [CR-043] §3.2).
 ///
-/// A call is an `identifier` immediately followed by a `(`-delimited
-/// `token_tree`, with no intervening `!` (a `!` makes the identifier a *nested
-/// macro* name — `format!(…)` — not a function call). It is a receiver-method
+/// A call is an `identifier` immediately followed (past a turbofish, below) by
+/// a `(`-delimited `token_tree`, with no intervening `!` (a `!` makes the
+/// identifier a *nested macro* name — `format!(…)` — not a function call). It is a receiver-method
 /// call ([`RefForm::Method`], bare name) when the identifier is immediately
 /// preceded by a `.` token, otherwise a path call ([`RefForm::Path`]) whose
 /// leading `ident (:: ident)*` run is assembled into a `::`-joined path
@@ -269,14 +291,24 @@ pub(crate) struct MacroCall {
 /// in `unresolved_refs` ([NFR-RA-05]); the false-live bias is the resolution
 /// pass's, not extraction's.
 ///
-/// Known recall gap (never a fabrication): a **turbofish-qualified** call inside
-/// a macro (`f::<T>()`, `Vec::<u8>::new()`) is *not* recognised — the `<…>` run
-/// sits between the name and the `(`-group, so the name is no longer immediately
-/// followed by the call group and the shape is skipped. This only ever *omits* a
-/// real call (biasing toward false-live for the callee, never fabricating), and
-/// is rare for a dead-code candidate; a turbofish call outside a macro is
-/// captured normally by the `references` query. Pinned by
-/// `turbofish_call_in_a_macro_is_a_known_recall_gap`.
+/// A call written with a turbofish records the path it records outside a macro
+/// (S-610): `Vec::<u8>::new()` is `Vec::new`, `T::make::<u8>()` is `T::make`,
+/// `f::<T>()` is `f` — the `::<…>` run is skipped, both between a path's
+/// segments and between the name and its `(`-group, and never scanned for
+/// calls (`Box::<dyn Fn(u8)>::new` calls no `Fn`). The run is closed by
+/// counting `<` against `>` / `>>`, and a `::<` that never closes records
+/// nothing. A `>` before a call group that no `::<` opens (`a < b && c > (d)`)
+/// is a comparison, not a turbofish. A turbofish *method* call (`x.f::<T>()`)
+/// records no row, as outside a macro, where no query pattern captures it. A
+/// qualified path (`<T as Tr>::m()`) is not read here: its call records the
+/// bare `m`.
+///
+/// A method call also carries the receiver a proof form can type
+/// ([`MacroReceiver`]); `extract/receiver.rs` proves it, as for a call outside a
+/// macro. A name a pattern inside the macro binds (`|m| m.f()`, `let m`,
+/// `for m`, `Some(m) =>` / `Some(m) if`) is no typable receiver
+/// ([`bound_names`]): it is not the caller's `m`. A binding form of a user
+/// macro is not seen.
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 pub(crate) fn macro_call_refs(macro_node: Node<'_>, source: &[u8]) -> Vec<MacroCall> {
@@ -287,59 +319,222 @@ pub(crate) fn macro_call_refs(macro_node: Node<'_>, source: &[u8]) -> Vec<MacroC
     for child in macro_node.children(&mut cursor) {
         if child.kind() == "token_tree" {
             scan_token_tree(child, source, &mut out);
+            let mut bound = HashSet::new();
+            bound_names(child, source, &mut bound);
+            for call in &mut out {
+                if matches!(&call.receiver, Some(MacroReceiver::Name(n)) if bound.contains(n.as_str())) {
+                    call.receiver = None;
+                }
+            }
         }
     }
     out
 }
 
-/// Scan one `token_tree`'s ordered children (named and anonymous) for call
-/// shapes, recursing into every nested `token_tree`.
-fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
-    for i in 0..tt.child_count() {
+/// The identifiers of `tt`'s children in `range`, descending into groups, except
+/// the arguments of a call written with a lowercase name (`recv(rx)`), which
+/// read names and bind none; `Some(x)` and `Point(x)` still do.
+fn pattern_idents<'a>(tt: Node<'_>, range: std::ops::Range<usize>, source: &'a [u8], out: &mut HashSet<&'a str>) {
+    for i in range {
         let Some(child) = tt.child(i) else { continue };
+        match child.kind() {
+            "identifier" => out.extend(child.utf8_text(source).ok()),
+            "token_tree" => {
+                let call = i > 0
+                    && tt.child(i - 1).is_some_and(|p| {
+                        p.kind() == "identifier"
+                            && p.utf8_text(source).is_ok_and(|t| t.starts_with(|c: char| c.is_lowercase() || c == '_'))
+                    });
+                if !call {
+                    pattern_idents(child, 0..child.child_count(), source, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every name a pattern inside `tt` (recursively) may bind: the parameters
+/// between a closure's `|`s, the pattern after `let` / `for`, and the run
+/// before a match arm's `=>` or a guard's `if` back to the preceding `,`, `;`
+/// or `{ … }` (the previous arm). The run is over-read — it takes every
+/// identifier in it — because the cost of a name wrongly read as bound is an
+/// unproven receiver, and of one wrongly read as free a wrong type (S-610).
+fn bound_names<'a>(tt: Node<'_>, source: &'a [u8], out: &mut HashSet<&'a str>) {
+    let kinds: Vec<&str> = (0..tt.child_count()).filter_map(|i| tt.child(i)).map(|c| c.kind()).collect();
+    let mut idents = |from: usize, to: usize| pattern_idents(tt, from..to, source, out);
+    for (i, kind) in kinds.iter().enumerate() {
+        match *kind {
+            // `|a, (b, c): T|`: up to the closing `|` of the same group.
+            "|" => {
+                if let Some(close) = (i + 1..kinds.len()).find(|&j| kinds[j] == "|") {
+                    idents(i + 1, close);
+                }
+            }
+            "let" | "for" => {
+                // `in` is an `identifier` token, not a keyword one.
+                let ends = |j: usize| {
+                    matches!(kinds[j], "=" | ":" | ";")
+                        || (kinds[j] == "identifier" && tt.child(j).and_then(|c| c.utf8_text(source).ok()) == Some("in"))
+                };
+                let end = (i + 1..kinds.len()).find(|&j| ends(j));
+                idents(i + 1, end.unwrap_or(kinds.len()));
+            }
+            "=>" | "if" => {
+                // The pattern starts after the previous arm, statement or argument.
+                let ends = |j: usize| matches!(kinds[j], "," | ";") || tt.child(j).is_some_and(|c| c.kind() == "token_tree" && c.child(0).is_some_and(|d| d.kind() == "{"));
+                let start = (0..i).rev().find(|&j| ends(j)).map_or(0, |j| j + 1);
+                idents(start, i);
+            }
+            _ => {}
+        }
+    }
+    for c in (0..tt.child_count()).filter_map(|i| tt.child(i)).filter(|c| c.kind() == "token_tree") {
+        bound_names(c, source, out);
+    }
+}
+
+/// Scan one `token_tree`'s ordered children (named and anonymous) for call
+/// shapes, recursing into every nested `token_tree` except a turbofish's type
+/// arguments, which are types and never calls.
+fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
+    let mut i = 0;
+    while i < tt.child_count() {
+        let Some(child) = tt.child(i) else { break };
         if child.kind() == "token_tree" {
+            if opens_with_paren(child) {
+                if let Some(call) = call_before(tt, i, source) {
+                    out.push(call);
+                }
+            }
             scan_token_tree(child, source, out);
-            continue;
+        } else if child.kind() == "::" && tt.child(i + 1).is_some_and(|n| matches!(n.kind(), "<" | "<<")) {
+            // A turbofish's type arguments: `Vec::<Box<dyn Fn(u8)>>::new()`. A
+            // `{ … }` const argument holds expressions: its calls are scanned.
+            if let Some(close) = angle_close(tt, i + 1) {
+                for block in (i + 2..close).filter_map(|j| tt.child(j)).filter(|n| n.kind() == "token_tree" && !opens_with_paren(*n)) {
+                    scan_token_tree(block, source, out);
+                }
+                i = close;
+            }
         }
-        if child.kind() != "identifier" {
-            continue;
+        i += 1;
+    }
+}
+
+/// The call whose `(`-delimited argument group is `tt`'s child `group`, or
+/// `None` when no name sits before it. The name is the `identifier` immediately
+/// before the group, or, past a turbofish (`f::<T>(…)`, `x.collect::<Vec<_>>()`),
+/// the one before the `::<…>` run. A `!` before the group (a nested macro) or a
+/// `[` / `{` group (index, struct literal) is not a call; `opens_with_paren`
+/// is the caller's.
+fn call_before(tt: Node<'_>, group: usize, source: &[u8]) -> Option<MacroCall> {
+    let at = |i: usize| tt.child(i);
+    let name_idx = match group.checked_sub(1).and_then(at)?.kind() {
+        "identifier" => group - 1,
+        ">" | ">>" => {
+            let open = angle_open(tt, group - 1)?;
+            // `f::<T>(…)`: the `::` before the `<`, then the name.
+            let sep = open.checked_sub(1).filter(|&s| at(s).is_some_and(|n| n.kind() == "::"))?;
+            let name = sep.checked_sub(1).filter(|&n| at(n).is_some_and(|n| n.kind() == "identifier"))?;
+            // `x.f::<T>()` records no row outside a macro either: the query
+            // has no pattern for a generic method call, so neither does this.
+            if name.checked_sub(1).is_some_and(|d| at(d).is_some_and(|p| p.kind() == ".")) {
+                return None;
+            }
+            name
         }
-        // A call: the immediately following token is a `(`-delimited token tree.
-        // A `!` next (nested macro) or a `[`/`{` group (index / struct literal)
-        // is not a function call.
-        let Some(next) = tt.child(i + 1) else { continue };
-        if next.kind() != "token_tree" || !opens_with_paren(next) {
-            continue;
-        }
-        let Ok(name) = child.utf8_text(source) else { continue };
-        let line = child.start_position().row as u32 + 1;
-        // Receiver-method call `.name(…)`: the `.` is an anonymous prev token.
-        let preceded_by_dot = i > 0 && tt.child(i - 1).is_some_and(|p| p.kind() == ".");
-        if preceded_by_dot {
-            // `self.f()`: the receiver token is `self`, and nothing — no `.` —
-            // precedes it (`self.x.f()` reaches `f` through the field `x`).
-            let self_receiver = i >= 2
-                && tt.child(i - 2).is_some_and(|r| r.kind() == "self")
-                && (i < 3 || tt.child(i - 3).is_none_or(|p| p.kind() != "."));
-            out.push(MacroCall {
-                target: name.to_string(),
-                form: RefForm::Method,
-                line,
-                self_receiver,
-                arg_count: token_tree_arg_count(next),
-            });
-            continue;
-        }
+        _ => return None,
+    };
+    let name_node = at(name_idx)?;
+    let name = name_node.utf8_text(source).ok()?;
+    let line = name_node.start_position().row as u32 + 1;
+    let args = at(group)?;
+    // Receiver-method call `.name(…)`: the `.` is an anonymous prev token.
+    let preceded_by_dot = name_idx > 0 && at(name_idx - 1).is_some_and(|p| p.kind() == ".");
+    if !preceded_by_dot {
         // Path call: assemble the leading `ident (:: ident)*` run ending at this
         // identifier into a `::`-joined path (a bare `foo` stays a single segment).
-        out.push(MacroCall {
-            target: assemble_path(tt, i, source),
+        return Some(MacroCall {
+            target: assemble_path(tt, name_idx, source),
             form: RefForm::Path,
             line,
             self_receiver: false,
-            arg_count: token_tree_arg_count(next),
+            arg_count: token_tree_arg_count(args),
+            receiver: None,
         });
     }
+    let kind_at = |i: Option<usize>| i.and_then(at).map(|n| n.kind());
+    let before = |back: usize| name_idx.checked_sub(back);
+    // `self.f()`: the receiver token is `self`, and nothing — no `.` —
+    // precedes it (`self.x.f()` reaches `f` through the field `x`).
+    let self_receiver = kind_at(before(2)) == Some("self") && kind_at(before(3)) != Some(".");
+    // `self` is not an `identifier` token, so a `self.f()` has no typable receiver.
+    let receiver = if kind_at(before(2)) == Some("identifier") {
+        let text = at(name_idx - 2).and_then(|n| n.utf8_text(source).ok()).map(str::to_string);
+        match (kind_at(before(3)), kind_at(before(4)), kind_at(before(5))) {
+            // `self.x.f()`: a field of the caller's own struct.
+            (Some("."), Some("self"), prev) if prev != Some(".") => text.map(MacroReceiver::OwnField),
+            // `x.f()` — not `a.x.f()` (a field of something), `a::x.f()` (a path).
+            (prev, ..) if prev != Some(".") && prev != Some("::") => text.map(MacroReceiver::Name),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Some(MacroCall {
+        target: name.to_string(),
+        form: RefForm::Method,
+        line,
+        self_receiver,
+        arg_count: token_tree_arg_count(args),
+        receiver,
+    })
+}
+
+/// How a token moves the angle-bracket depth: `<` opens one, `>` closes one,
+/// `>>` closes two, `<<` opens two. Any other token — `->` included — is none.
+fn angle_depth(kind: &str) -> i32 {
+    match kind {
+        "<" => 1,
+        "<<" => 2,
+        ">" => -1,
+        ">>" => -2,
+        _ => 0,
+    }
+}
+
+/// The index of the `>` that closes the `<` at `tt`'s child `open`, counting
+/// nested generics; `None` when it never closes there.
+fn angle_close(tt: Node<'_>, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    for i in open..tt.child_count() {
+        depth += angle_depth(tt.child(i)?.kind());
+        if depth == 0 {
+            return Some(i);
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    None
+}
+
+/// The index of the `<` that opens the `>` at `tt`'s child `close`; `None` when
+/// it never opens there, or the matching token is not a `<` / `<<`.
+fn angle_open(tt: Node<'_>, close: usize) -> Option<usize> {
+    let mut depth = 0;
+    for i in (0..=close).rev() {
+        let kind = tt.child(i)?.kind();
+        depth -= angle_depth(kind);
+        if depth == 0 {
+            return matches!(kind, "<" | "<<").then_some(i);
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    None
 }
 
 /// The arguments a call's `(`-delimited token tree passes (S-591): its
@@ -373,7 +568,10 @@ fn opens_with_paren(tt: Node<'_>) -> bool {
 
 /// Assemble the `ident (:: ident)*` path run ending at child index `call_idx`
 /// into a `::`-joined string (walking left over `identifier`/`::` token pairs).
+/// A turbofish between two segments (`Vec::<u8>::new`) is skipped, as the call
+/// outside a macro records its path without it (S-610).
 fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
+    let kind_at = |i: usize| tt.child(i).map(|n| n.kind());
     let mut segs: Vec<&str> = Vec::new();
     let mut idx = call_idx as isize;
     while let Some(node) = usize::try_from(idx).ok().and_then(|u| tt.child(u)) {
@@ -383,13 +581,17 @@ fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
         let Ok(text) = node.utf8_text(source) else { break };
         segs.push(text);
         // A preceding `::` continues the path; anything else ends it.
-        let sep_idx = idx - 1;
-        let continues = usize::try_from(sep_idx)
-            .ok()
-            .and_then(|u| tt.child(u))
-            .is_some_and(|s| s.kind() == "::");
-        if !continues {
+        let mut sep_idx = idx - 1;
+        if usize::try_from(sep_idx).ok().and_then(kind_at) != Some("::") {
             break;
+        }
+        // `a::<T>::b`: the run before this `::` is a turbofish only when a
+        // `::` precedes its `<`; the segment it follows is the next one.
+        let before = usize::try_from(sep_idx - 1).ok();
+        if before.and_then(kind_at).is_some_and(|k| k == ">" || k == ">>") {
+            let open = before.and_then(|c| angle_open(tt, c));
+            let Some(open) = open.filter(|&o| o > 0 && kind_at(o - 1) == Some("::")) else { break };
+            sep_idx = open as isize - 1;
         }
         idx = sep_idx - 1;
     }
@@ -874,10 +1076,10 @@ mod tree_tests {
     }
 
     fn path(target: &str) -> MacroCall {
-        MacroCall { target: target.to_string(), form: RefForm::Path, line: 1, self_receiver: false, arg_count: None }
+        MacroCall { target: target.to_string(), form: RefForm::Path, line: 1, self_receiver: false, arg_count: None, receiver: None }
     }
     fn method(target: &str) -> MacroCall {
-        MacroCall { target: target.to_string(), form: RefForm::Method, line: 1, self_receiver: false, arg_count: None }
+        MacroCall { target: target.to_string(), form: RefForm::Method, line: 1, self_receiver: false, arg_count: None, receiver: None }
     }
 
     /// The `(target, form)` pairs, ignoring line (the snippets are one line;
@@ -986,22 +1188,177 @@ mod tree_tests {
         assert!(macro_calls(r#"println!("just {} text", value)"#).is_empty());
     }
 
+    /// A call written with a turbofish records the path the same call records
+    /// outside a macro — never a bare name, and never a `<` fragment.
     #[test]
-    fn turbofish_call_in_a_macro_is_a_known_recall_gap() {
-        // Documented limitation: a turbofish-qualified call inside a macro arg is
-        // NOT recognised — the `::<T>` run sits between the name and the
-        // `(`-group, so no identifier is immediately followed by the call group.
-        // This only omits a real call (false-live for the callee, never a
-        // fabricated edge); a `<` never leaks into a captured path either.
-        let got = macro_calls(r#"format!("{v}", v = parse::<u32>(s))"#);
-        assert!(
-            got.iter().all(|c| !c.target.contains('<')),
-            "no angle-bracket fragment ever leaks into a captured path: {got:?}"
+    fn a_turbofish_call_in_a_macro_records_its_path() {
+        for (src, want_path) in [
+            (r#"format!("{v}", v = parse::<u32>(s))"#, "parse"),
+            (r#"vec![Vec::<u8>::new()]"#, "Vec::new"),
+            (r#"assert!(T::make::<u8>())"#, "T::make"),
+            (r#"assert!(f::<T>())"#, "f"),
+            (r#"vec![a::b::<X>::c::<Y>(1)]"#, "a::b::c"),
+            (r#"vec![Vec::<Vec<u8>>::new()]"#, "Vec::new"),
+            (r#"vec![HashMap::<String, Vec<u8>>::with_capacity(4)]"#, "HashMap::with_capacity"),
+            (r#"vec![Box::<dyn Fn(u8) -> u8>::new(g)]"#, "Box::new"),
+        ] {
+            let got = macro_calls(src);
+            let paths: Vec<&str> = got.iter().filter(|c| c.form == RefForm::Path).map(|c| c.target.as_str()).collect();
+            assert!(paths.contains(&want_path), "{src}: want {want_path}, got {got:?}");
+            assert!(
+                got.iter().all(|c| !c.target.contains('<') && !c.target.contains('>')),
+                "no angle-bracket fragment ever leaks into a captured path: {got:?}"
+            );
+        }
+    }
+
+    /// The type arguments of a turbofish are types, never calls: `Fn(u8)` is a
+    /// bound, not a call of a function named `Fn`.
+    #[test]
+    fn a_turbofish_argument_list_is_not_scanned_for_calls() {
+        let got = macro_calls(r#"vec![Box::<dyn Fn(u8) -> u8>::new(g(1))]"#);
+        assert_eq!(want(&got), want(&[path("Box::new"), path("g")]));
+    }
+
+    /// A turbofish call's argument count is its call group's.
+    #[test]
+    fn a_turbofish_call_counts_its_arguments() {
+        let got = macro_calls(r#"vec![f::<T>(a, b), Vec::<u8>::new()]"#);
+        let counts: Vec<(String, Option<u32>)> = got.iter().map(|c| (c.target.clone(), c.arg_count)).collect();
+        assert_eq!(counts, vec![("f".to_string(), Some(2)), ("Vec::new".to_string(), Some(0))]);
+    }
+
+    /// A method call with a turbofish records no row — outside a macro no query
+    /// pattern captures one — while its neighbours in the chain do.
+    #[test]
+    fn a_turbofish_method_call_in_a_macro_records_no_row() {
+        let got = macro_calls(r#"assert!(xs.iter().collect::<Vec<_>>().is_empty())"#);
+        assert_eq!(want(&got), want(&[method("iter"), method("is_empty")]));
+    }
+
+    /// Near misses of a turbofish: a comparison, a shift and a generic with no
+    /// `::` before it are not turbofish calls.
+    #[test]
+    fn a_comparison_before_a_call_group_is_not_a_turbofish() {
+        assert!(macro_calls(r#"assert!(a < b && c > (d))"#).is_empty());
+        assert!(macro_calls(r#"assert!(a < b >> (d))"#).is_empty());
+        // A `<…>` run no `::` precedes, one token off a turbofish.
+        assert!(macro_calls(r#"assert!(a b < c > (d))"#).is_empty());
+        // No identifier before the `::<…>`: no name to record.
+        assert!(macro_calls(r#"assert!(::<T>(d))"#).is_empty());
+    }
+
+    /// A turbofish opened by `<<` (`::<<T as Tr>::X>`) is a turbofish, and a
+    /// `{ … }` const argument in one still holds calls.
+    #[test]
+    fn a_turbofish_opened_by_a_shift_token_or_holding_a_block_is_read() {
+        let got = macro_calls(r#"vec![Vec::<<T as Tr>::X>::new(), f::<<T as Tr>::X>(a)]"#);
+        assert_eq!(want(&got), want(&[path("Vec::new"), path("f")]));
+        let mut got: Vec<String> =
+            macro_calls(r#"vec![f::<{ g(3) }>(1)]"#).into_iter().map(|c| c.target).collect();
+        got.sort();
+        assert_eq!(got, ["f", "g"]);
+    }
+
+    /// A name the macro itself binds — a closure parameter, a `let`, a `for`
+    /// variable, a match or `matches!` pattern — is not the caller's binding of
+    /// that name: its receiver is no typable one. A name no pattern in the macro
+    /// spells stays one.
+    #[test]
+    fn a_name_the_macro_binds_is_not_a_typable_receiver() {
+        let receiver_of_f = |src: &str| -> Option<MacroReceiver> {
+            let got = macro_calls(src);
+            let calls: Vec<&MacroCall> = got.iter().filter(|c| c.target == "f").collect();
+            assert_eq!(calls.len(), 1, "{src}: {got:?}");
+            calls[0].receiver.clone()
+        };
+        let name = Some(MacroReceiver::Name("x".to_string()));
+        for src in [
+            "assert!(x.f())",
+            "assert!(v.iter().all(|y| y.g()), x.f())",
+            "assert!(a | b, x.f())",
+            "assert!(matches!(o, Some(y) if y.g()), x.f())",
+            // `recv(x)` reads `x`; only `msg` is bound.
+            "m!(select! { recv(x) -> msg => { x.f() } })",
+            // An earlier arm's body is no part of a later arm's pattern.
+            "m!(select! { recv(y) -> a => { x.g() } recv(z) -> b => { x.f() } })",
+            // The `in` ends a `for` pattern; a `,` or `;` ends a guard's run.
+            "m!({ for y in x { x.f() } })",
+            "m!(x, Some(y) if x.f())",
+            "m!({ x; if t { x.f() } })",
+            "m!({ let _y = 1; match o { Some(_y) => x.f(), None => 0 } })",
+        ] {
+            assert_eq!(receiver_of_f(src), name, "{src}");
+        }
+        for src in [
+            "assert!(v.iter().all(|x| x.f()))",
+            "assert!(v.iter().all(|x: &B| x.f()))",
+            "assert!(v.iter().any(|(a, x)| x.f()))",
+            "assert!(matches!(o, Some(x) if x.f()))",
+            "m!({ let x = g(); x.f() })",
+            "m!({ let mut x = g(); x.f() })",
+            "m!({ if let Some(x) = g() { x.f() } })",
+            "m!({ for x in v { x.f() } })",
+            "m!(match o { Some(x) => x.f(), None => 0 })",
+            "m!(match o { Point(a, x) => x.f(), None => 0 })",
+        ] {
+            assert_eq!(receiver_of_f(src), None, "{src}");
+        }
+    }
+
+    /// A fully qualified path inside a macro is no turbofish: the `<T as Tr>`
+    /// before `::m` is not opened by a `::`, so what precedes it (`a,`, `z::y,`)
+    /// is not a path segment of the call.
+    #[test]
+    fn a_qualified_path_after_a_name_is_not_joined_to_it() {
+        assert_eq!(want(&macro_calls("assert_eq!(a, <T as Tr>::m())")), want(&[path("m")]));
+        assert_eq!(want(&macro_calls("assert_eq!(z::y, <T as Tr>::m())")), want(&[path("m")]));
+    }
+
+    /// A turbofish call's line is its name token's, wherever its `>` and `(`
+    /// group sit.
+    #[test]
+    fn a_turbofish_call_is_on_the_line_of_its_name() {
+        let got = macro_calls("vec![\n    f::<\n        u8,\n    >(a),\n    Vec::<u8>\n        ::new(),\n]");
+        let lines: Vec<(String, u32)> = got.iter().map(|c| (c.target.clone(), c.line)).collect();
+        assert_eq!(lines, vec![("f".to_string(), 2), ("Vec::new".to_string(), 6)]);
+    }
+
+    /// An unclosed turbofish (`::<` with no `>`) records nothing and panics on
+    /// nothing; the scan carries on past it.
+    #[test]
+    fn an_unclosed_turbofish_records_nothing() {
+        assert!(macro_calls(r#"assert!(f::<T)"#).is_empty());
+        let got = macro_calls(r#"assert!(f::<T, g(1))"#);
+        assert_eq!(want(&got), want(&[path("g")]));
+    }
+
+    /// A plain-name receiver and a `self.field` receiver are what a call hands
+    /// `extract/receiver.rs`; a chain, a path, a literal and a call result are
+    /// not receivers it can type.
+    #[test]
+    fn only_a_plain_name_or_an_own_field_is_a_typable_receiver() {
+        let got = macro_calls(
+            r#"f!(m.a(), self.s.b(), self.c(), a.s.d(), p::m.e(), g().h(), 1.i(), &m.j(), x.k.l(), m.n::<T>(), m.o())"#,
         );
-        // The plain, non-turbofish call on the same source IS captured — proving
-        // the gap is specific to the turbofish form, not the whole expression.
-        let plain = macro_calls(r#"format!("{v}", v = parse(s))"#);
-        assert_eq!(want(&plain), want(&[path("parse")]));
+        let receivers: Vec<(String, Option<MacroReceiver>)> =
+            got.iter().filter(|c| c.form == RefForm::Method).map(|c| (c.target.clone(), c.receiver.clone())).collect();
+        let name = |n: &str| Some(MacroReceiver::Name(n.to_string()));
+        assert_eq!(
+            receivers,
+            vec![
+                ("a".to_string(), name("m")),
+                ("b".to_string(), Some(MacroReceiver::OwnField("s".to_string()))),
+                ("c".to_string(), None),
+                ("d".to_string(), None),
+                ("e".to_string(), None),
+                ("h".to_string(), None),
+                ("i".to_string(), None),
+                ("j".to_string(), name("m")),
+                ("l".to_string(), None),
+                ("o".to_string(), name("m")),
+            ]
+        );
     }
 
     #[test]

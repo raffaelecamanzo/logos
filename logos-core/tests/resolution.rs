@@ -430,12 +430,20 @@ fn dogfood_measures_resolution_accuracy_on_logos_own_source() {
         as_i32_candidates.len() >= 2,
         "the ambiguity premise holds (multiple as_i32 definitions)"
     );
-    for target in &as_i32_candidates {
-        assert!(
-            !calls.iter().any(|(_, t)| t == target),
-            "an ambiguous method name must never bind (NFR-RA-05/AR-05)"
-        );
-    }
+    // A call whose receiver the file proves (`kind: EdgeKind` → `EdgeKind::as_i32`,
+    // S-587, also inside a macro, S-610) is the Path-form `T::as_i32` and binds
+    // to `T`'s one definition: it is no ambiguity. The bare receiver call is,
+    // and must never bind.
+    let bound_bare = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.resolved && r.form == RefForm::Method && r.target == "as_i32")
+                .count())
+        })
+        .expect("read runs");
+    assert_eq!(bound_bare, 0, "an ambiguous method name must never bind (NFR-RA-05/AR-05)");
 }
 
 // ── NFR-CC-04: a resolved ref flips back when its target vanishes ────────────

@@ -477,3 +477,129 @@ fn every_peeled_wrapper_has_a_wrapper_methods_entry_and_no_other_does() {
     peeled.sort_unstable();
     assert_eq!(keys, peeled);
 }
+
+// ── A call inside a macro (S-610) ────────────────────────────────────────────
+//
+// A macro's token tree is never parsed as expressions, so the `references`
+// query marks no receiver inside one; the token-tree walk hands the receiver
+// it reads to the same proof. A fixture's `CALL` is the call, once written
+// bare and once as an argument of `format!`, and the two must record one row.
+
+/// The fixture's calls of `f` with `CALL` written outside a macro, and inside.
+fn outside_and_inside(template: &str) -> (Vec<Row>, Vec<Row>) {
+    let call = |text: &str| calls_of_f(&template.replace("CALL", text));
+    (call("x.f();"), call("let _ = format!(\"{:?}\", x.f());"))
+}
+
+/// Both spellings record `want`, and only it.
+fn assert_parity(template: &str, want: Vec<Row>) {
+    let (outside, inside) = outside_and_inside(template);
+    assert_eq!(outside, want, "outside a macro: {template}");
+    assert_eq!(inside, want, "inside a macro: {template}");
+}
+
+#[test]
+fn a_typed_parameter_or_let_proves_its_receiver_inside_a_macro() {
+    assert_parity(&with_types("fn g(x: A) { CALL }"), vec![typed("A", None)]);
+    assert_parity(&with_types("fn g() { let x: B = make(); CALL }"), vec![typed("B", None)]);
+    assert_parity(&with_types("fn g(x: &A) { CALL }"), vec![typed("A", Some("&"))]);
+    assert_parity(&with_types("fn g(x: Arc<B>) { CALL }"), vec![typed("B", Some("Arc"))]);
+}
+
+#[test]
+fn a_constructor_or_a_literal_proves_its_receiver_inside_a_macro() {
+    let src = "\
+pub struct A;
+pub struct B { n: u32 }
+impl A { pub fn new() -> Self { A } pub fn f(&self) {} }
+impl B { pub fn f(&self) {} }
+";
+    assert_parity(&format!("{src}fn g() {{ let x = A::new(); CALL }}"), vec![typed("A", None)]);
+    assert_parity(&format!("{src}fn g() {{ let x = B {{ n: 1 }}; CALL }}"), vec![typed("B", None)]);
+}
+
+#[test]
+fn an_own_field_and_self_prove_their_receiver_inside_a_macro() {
+    let src = "\
+pub struct A;
+impl A { pub fn f(&self) {} }
+pub struct Holder { x: A }
+impl Holder { fn g(&self) { CALL } }
+";
+    let (outside, inside) = (
+        calls_of_f(&src.replace("CALL", "self.x.f();")),
+        calls_of_f(&src.replace("CALL", "let _ = format!(\"{:?}\", self.x.f());")),
+    );
+    assert_eq!(outside, vec![typed("A", None)]);
+    assert_eq!(inside, outside);
+    let selfish = "\
+pub struct A;
+impl A {
+    pub fn f(&self) {}
+    fn merge(&self, x: &Self) { CALL }
+}
+";
+    assert_parity(selfish, vec![typed("A", Some("&"))]);
+}
+
+#[test]
+fn a_receiver_no_proof_form_reads_stays_other_inside_a_macro() {
+    // Shadowed, two-typed, generic, inferred, a name no binding is in scope
+    // for, and a chain: each stays the bare `other` row it records outside one.
+    for body in [
+        "fn g(x: A) { let x = convert(x); CALL }",
+        "fn g() { let x: A = make(); let x: B = make(); CALL }",
+        "fn g<G: Tr>(x: G) { CALL }",
+        "fn g() { let x: _ = make(); CALL }",
+        "fn g() { CALL }",
+        "fn g() { { let x: A = make(); } CALL }",
+    ] {
+        assert_parity(&with_types(body), vec![other()]);
+    }
+}
+
+#[test]
+fn a_chain_a_path_or_a_field_of_another_value_is_never_a_macro_receiver() {
+    let src = with_types("fn g(a: A, p: Holder) { format!(\"{:?}\", a.b().f()); format!(\"{:?}\", p.inner.f()); format!(\"{:?}\", m::a.f()); }");
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
+
+#[test]
+fn a_macro_call_and_a_plain_call_of_one_receiver_are_one_row() {
+    // The same site recorded by the query and by the token-tree walk would be
+    // two rows of one shape; they dedup to one (counted before `calls_of_f`
+    // dedups, which would hide a second).
+    let src = with_types("fn g(x: A) { x.f(); format!(\"{:?}\", x.f()); }");
+    assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
+    let rows = extract_rust(&src).refs.iter().filter(|r| r.kind == EdgeKind::Calls && r.target == "A::f").count();
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn a_macro_receiver_of_an_untyped_caller_keeps_the_other_shape() {
+    // A macro at module level has no caller: nothing to prove, nothing lost.
+    let src = with_types("static N: u32 = foo!(x.f());");
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
+
+#[test]
+fn a_turbofish_method_call_records_no_row_inside_a_macro_or_outside_one() {
+    // The query has no pattern for a generic method call, so neither spelling
+    // records one: a macro never records a row the same call lacks outside it.
+    let outside = calls_of_f(&with_types("fn g(x: A) { x.f::<u8>(); }"));
+    let inside = calls_of_f(&with_types("fn g(x: A) { let _ = format!(\"{:?}\", x.f::<u8>()); }"));
+    assert_eq!((outside, inside), (vec![], vec![]));
+}
+
+#[test]
+fn a_name_a_macro_binds_proves_nothing_from_the_callers_binding() {
+    // The closure's `x` shadows the parameter inside the macro, as outside one.
+    let src = with_types(
+        "fn g(x: A, v: Vec<B>) { assert!(v.iter().all(|x| x.f())); }\n\
+         fn h(x: A, o: Option<B>) { assert!(matches!(o, Some(x) if x.f())); }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+    // A name the macro does not bind is still the parameter.
+    let src = with_types("fn g(x: A, v: Vec<B>) { assert!(v.iter().all(|y| y.g()) && x.f()); }");
+    assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
+}

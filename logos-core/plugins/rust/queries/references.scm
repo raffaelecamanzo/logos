@@ -32,7 +32,9 @@
 ;                 longer mis-bound dead; a `self.f()` there records what
 ;                 `@ref.method.self` records (S-514), and any other method call
 ;                 there records `other`, as `@ref.receiver.other` does outside
-;                 a macro (S-517).
+;                 a macro (S-517), or the proven `T::f` when the file proves a
+;                 plain-name or `self.x` receiver, as outside one (S-610). A
+;                 turbofish call records its path, as outside one (S-610).
 ;
 ; Like every capability query, this file is droppable-on-disk: a copy at
 ; `.logos/plugins/rust/queries/references.scm` shadows it without a rebuild

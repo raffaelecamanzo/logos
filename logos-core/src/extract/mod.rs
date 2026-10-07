@@ -139,6 +139,7 @@ use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 use refs::{
     flatten_dotted_import, flatten_use_tree, from_module_segments, import_segments,
     is_relative_head, macro_call_refs, qualified_call_target, specifier_segments, split_path_text,
+    MacroReceiver,
 };
 use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, DescriptorFamily};
 
@@ -1974,8 +1975,7 @@ fn collect_refs(
                 // CR-043), attributed to the macro's enclosing declaration —
                 // see [`macro_rows`].
                 "ref.macro" => {
-                    let caller = enclosing_decl(node).map(|i| &decls[i]);
-                    out.extend(macro_rows(node, source, caller, &source_symbol));
+                    push_macro_rows(&mut out, receivers.as_mut(), node, source, enclosing_decl(node), decls, &source_symbol);
                 }
                 // A type relation (S-466, CR-149 §3.2 B, FR-EX-10): the captured
                 // node is a TYPE, recorded as a Path-form row of the capture's
@@ -2025,6 +2025,27 @@ fn collect_refs(
     out
 }
 
+/// Push one macro invocation's rows onto `out`, each row whose receiver the
+/// walk read registered with `receivers` to be typed after the walk, like a
+/// query-captured one (S-610). `caller` is the index of the enclosing
+/// declaration in `decls`.
+fn push_macro_rows<'tree>(
+    out: &mut Vec<RefFact>,
+    mut receivers: Option<&mut receiver::Receivers<'tree>>,
+    macro_node: Node<'tree>,
+    source: &[u8],
+    caller: Option<usize>,
+    decls: &[Decl<'_>],
+    source_symbol: &LogosSymbol,
+) {
+    for (fact, read) in macro_rows(macro_node, source, caller.map(|i| &decls[i]), source_symbol) {
+        if let (Some(receivers), Some(read)) = (receivers.as_deref_mut(), read) {
+            receivers.macro_site(out.len(), macro_node, caller, read);
+        }
+        out.push(fact);
+    }
+}
+
 /// The `Calls` rows of the calls nested inside one macro invocation's token
 /// tree (S-162, CR-043): tree-sitter does not parse a macro body as
 /// expressions, so the call/method-call query patterns cannot match inside it.
@@ -2035,8 +2056,16 @@ fn collect_refs(
 /// `self.state.chip_class()`) is bound, or stays honestly unresolved, exactly
 /// like any other call ([NFR-RA-05]).
 ///
+/// Each row comes with the receiver the walk read for it, if any, for
+/// [`push_macro_rows`] to hand to [`receiver::Receivers::macro_site`] (S-610).
+///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, source_symbol: &LogosSymbol) -> Vec<RefFact> {
+fn macro_rows(
+    macro_node: Node<'_>,
+    source: &[u8],
+    caller: Option<&Decl<'_>>,
+    source_symbol: &LogosSymbol,
+) -> Vec<(RefFact, Option<MacroReceiver>)> {
     let mut out = Vec::new();
     for call in macro_call_refs(macro_node, source) {
         if call.target.is_empty() {
@@ -2054,7 +2083,7 @@ fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, so
             let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
             (call.target, call.form, shape)
         };
-        out.push(RefFact {
+        let fact = RefFact {
             source: source_symbol.clone(),
             target,
             alias: None,
@@ -2066,7 +2095,8 @@ fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, so
             peeled: None,
             arg_count: call.arg_count,
             exported: None,
-        });
+        };
+        out.push((fact, call.receiver));
     }
     out
 }

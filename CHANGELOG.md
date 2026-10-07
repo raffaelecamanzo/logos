@@ -41,6 +41,37 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   clears every content hash, so the first `logos scan` (or `logos index`) after
   upgrading re-reads every file. A bare `logos sync` reads no file.
 
+### Fixed
+
+- **A Rust call inside a macro records its turbofish path and its receiver's
+  proof (CR-202, S-610).** A turbofish call inside a macro's token tree
+  (`vec![Vec::<u8>::new()]`, `assert!(T::make::<u8>())`, `f::<T>()`) used to
+  record a bare name (`new`, a path call that could bind any `new` in scope) or,
+  past the name, nothing at all; it now records the path the same call records
+  outside a macro (`Vec::new`, `T::make`, `f`), with its argument count, and
+  never scans a turbofish's type arguments for calls (`Box::<dyn Fn(u8)>::new`
+  calls no `Fn`). A method call on a plain name or an own field (`x.f()`,
+  `self.x.f()`) inside a macro is handed to the same receiver proof as one
+  outside it, so `format!("{}", m.f())` with `m: &M` in scope records `M::f`;
+  an unproven receiver (a chain, a path, a shadowed or generic name) stays the
+  `other` row it was. A turbofish method call (`x.f::<T>()`) still records no
+  row, inside or outside a macro. A name a pattern inside the macro binds (a
+  closure parameter, `let`, `for`, a match arm or `matches!` guard) is not the
+  caller's: its receiver stays `other`. A binding form of a user macro is not
+  seen.
+  On a full-indexed `git archive` export of this repository 195 `Calls` edges
+  are added and none removed (47,025 → 47,220, all from Rust test and
+  production code inside `assert!`, `format!`, `write!` and `params!`, each
+  re-judged against its source: a typed parameter, a typed or constructed
+  `let`, or an own field proves the receiver), 22 bare `new` rows become
+  `Vec::new` and 10 `serde_json::from_*::<T>` rows are newly recorded (both
+  unresolved, no edge), 606 `other` method rows become type-qualified, non-Rust
+  graphs are byte-identical and the quality signal moves 8,167 → 8,168. A
+  `logos sync` of one edited macro body equals a full re-index. No migration:
+  the extractor change is picked up by the content-hash clear migration 34
+  already makes, so a store indexed before it needs the same `logos scan` (or
+  `logos index`) after upgrading; a bare `logos sync` re-reads no file.
+
 ## [1.13.0] — 2026-10-07
 
 ### Added

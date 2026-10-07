@@ -664,6 +664,35 @@ fn alpha() {
     );
 }
 
+/// S-610: a turbofish call inside a macro's token tree records the path it
+/// records outside one — never a bare name — with the same argument count.
+#[test]
+fn a_turbofish_call_in_a_macro_records_the_row_it_records_outside_one() {
+    let calls = |body: &str| -> Vec<(String, RefForm, Option<u32>)> {
+        let facts = extract_src("src/lib.rs", &format!("fn alpha() {{\n{body}\n}}\n"));
+        let mut rows: Vec<_> = facts
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Calls)
+            .map(|r| (r.target.clone(), r.form, r.arg_count))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    };
+    for (call, path, args) in [
+        ("Vec::<u8>::new()", "Vec::new", 0),
+        ("T::make::<u8>(a)", "T::make", 1),
+        ("f::<T>(a, b)", "f", 2),
+        ("a::b::<X>::c::<Y>()", "a::b::c", 0),
+        ("HashMap::<String, Vec<u8>>::with_capacity(4)", "HashMap::with_capacity", 1),
+    ] {
+        let want = vec![(path.to_string(), RefForm::Path, Some(args))];
+        assert_eq!(calls(&format!("{call};")), want, "outside a macro: {call}");
+        assert_eq!(calls(&format!("let _ = vec![{call}];")), want, "inside vec![]: {call}");
+        assert_eq!(calls(&format!("assert!({call});")), want, "inside assert!(): {call}");
+    }
+}
+
 // ── S-014 / FR-AN-01: declaration visibility → the exported flag ─────────────
 
 #[test]
