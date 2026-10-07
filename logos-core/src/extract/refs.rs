@@ -273,9 +273,9 @@ pub(crate) enum MacroReceiver {
 /// `field_expression` patterns never match inside it (the documented S-011
 /// limitation, lifted here for the `Calls` relation, S-162 / [CR-043] §3.2).
 ///
-/// A call is an `identifier` immediately followed (past a turbofish, below) by a
-/// `(`-delimited `token_tree`, with no intervening `!` (a `!` makes the identifier a *nested
-/// macro* name — `format!(…)` — not a function call). It is a receiver-method
+/// A call is an `identifier` immediately followed (past a turbofish, below) by
+/// a `(`-delimited `token_tree`, with no intervening `!` (a `!` makes the
+/// identifier a *nested macro* name — `format!(…)` — not a function call). It is a receiver-method
 /// call ([`RefForm::Method`], bare name) when the identifier is immediately
 /// preceded by a `.` token, otherwise a path call ([`RefForm::Path`]) whose
 /// leading `ident (:: ident)*` run is assembled into a `::`-joined path
@@ -426,8 +426,9 @@ fn call_before(tt: Node<'_>, group: usize, source: &[u8]) -> Option<MacroCall> {
         }
         _ => return None,
     };
-    let name = at(name_idx)?.utf8_text(source).ok()?;
-    let line = at(name_idx)?.start_position().row as u32 + 1;
+    let name_node = at(name_idx)?;
+    let name = name_node.utf8_text(source).ok()?;
+    let line = name_node.start_position().row as u32 + 1;
     let args = at(group)?;
     // Receiver-method call `.name(…)`: the `.` is an anonymous prev token.
     let preceded_by_dot = name_idx > 0 && at(name_idx - 1).is_some_and(|p| p.kind() == ".");
@@ -448,15 +449,14 @@ fn call_before(tt: Node<'_>, group: usize, source: &[u8]) -> Option<MacroCall> {
     // `self.f()`: the receiver token is `self`, and nothing — no `.` —
     // precedes it (`self.x.f()` reaches `f` through the field `x`).
     let self_receiver = kind_at(before(2)) == Some("self") && kind_at(before(3)) != Some(".");
-    let receiver = if self_receiver {
-        None
-    } else if kind_at(before(2)) == Some("identifier") {
-        let named = |back: usize| at(name_idx - back).and_then(|n| n.utf8_text(source).ok()).map(str::to_string);
+    // `self` is not an `identifier` token, so a `self.f()` has no typable receiver.
+    let receiver = if kind_at(before(2)) == Some("identifier") {
+        let text = at(name_idx - 2).and_then(|n| n.utf8_text(source).ok()).map(str::to_string);
         match (kind_at(before(3)), kind_at(before(4)), kind_at(before(5))) {
             // `self.x.f()`: a field of the caller's own struct.
-            (Some("."), Some("self"), prev) if prev != Some(".") => named(2).map(MacroReceiver::OwnField),
+            (Some("."), Some("self"), prev) if prev != Some(".") => text.map(MacroReceiver::OwnField),
             // `x.f()` — not `a.x.f()` (a field of something), `a::x.f()` (a path).
-            (prev, ..) if prev != Some(".") && prev != Some("::") => named(2).map(MacroReceiver::Name),
+            (prev, ..) if prev != Some(".") && prev != Some("::") => text.map(MacroReceiver::Name),
             _ => None,
         }
     } else {
