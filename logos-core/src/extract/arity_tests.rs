@@ -403,8 +403,9 @@ fn python_ranges_and_counts() {
     assert_eq!(counts["sum"], vec![Some(1)]);
 }
 
-/// PHP: a default is optional (a promoted constructor parameter too) and
-/// `...$c` is variadic; `...$xs` spreads.
+/// PHP: the required parameters (a promoted constructor's too) set the
+/// minimum, and the maximum is unbounded — a user function accepts surplus
+/// arguments (`func_get_args()`); `...$xs` spreads.
 #[test]
 fn php_ranges_and_counts() {
     let src = "<?php\n\
@@ -414,9 +415,9 @@ fn php_ranges_and_counts() {
     assert_eq!(
         ranges("src/a.php", src),
         map(&[
-            ("__construct", range(0, Some(1))),
+            ("__construct", range(0, None)),
             ("f", range(1, None)),
-            ("m", range(1, Some(2))),
+            ("m", range(1, None)),
         ])
     );
     let counts = counts("src/a.php", src);

@@ -56,11 +56,14 @@
 ; covers, or one captured `@arity.unknown`, records the range unknown rather
 ; than miscounting it. Captures never name a declaration, so every symbol and
 ; node is unchanged.
-; A parameter with a default is optional; `...$xs` is variadic.
+; A parameter with a default is optional; `...$xs` is variadic. A user-defined
+; function accepts more arguments than it declares (`func_get_args()` reads
+; them), so every list is also captured variadic: the minimum is the required
+; parameters, the maximum unbounded.
 (function_definition
-  parameters: (formal_parameters) @arity.parameters)
+  parameters: (formal_parameters) @arity.parameters @arity.variadic)
 (method_declaration
-  parameters: (formal_parameters) @arity.parameters)
+  parameters: (formal_parameters) @arity.parameters @arity.variadic)
 (formal_parameters (simple_parameter) @arity.required)
 (formal_parameters (simple_parameter default_value: (_)) @arity.optional)
 (formal_parameters (variadic_parameter) @arity.variadic)
