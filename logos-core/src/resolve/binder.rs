@@ -2542,13 +2542,15 @@ fn bind_traced(
 /// among same-named callables by their arguments.
 ///
 /// The arms that do: a receiver call of shape `self` or `super` ([FR-RS-12]),
-/// in every language; a Rust call on a proven receiver (S-588); and every
-/// Path-form call — bare, or typed `T::m` — of a language that overloads
-/// callables ([`PackageLayout::overloads_calls`]: Java, Kotlin, Scala, C#,
-/// C++). None of those counts an explicit receiver among its arguments. A
-/// path a language without overloading writes — Python's `Base.__init__(self,
-/// x)`, Rust's `S::c(&self, 6)`, which pass the receiver as the first argument
-/// — and a `Self::m` call (S-493) keep binding by name, as before.
+/// in every language, and every Path-form call — bare, or typed `T::m` — of a
+/// language that overloads callables ([`PackageLayout::overloads_calls`]:
+/// Java, Kotlin, Scala, C#, C++). None of those counts an explicit receiver
+/// among its arguments. A path a language without overloading writes —
+/// Python's `Base.__init__(self, x)` — and a Go `Self::m` call (S-493) keep
+/// binding by name, as before. An impl-block language's call to a type's
+/// method (Rust's `Self::m`, a proven `x.m()`, `S::c(&self, 6)`) is filtered
+/// by its own syntax-aware count instead ([`Ctx::call_args`],
+/// [`Ctx::admitted_by_count`], S-607).
 ///
 /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
 /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
@@ -2562,7 +2564,7 @@ fn filtered_count(r: &UnresolvedRefRow, source_file: Option<&str>, layout: &Pack
     let receiver_shaped = r.form == RefForm::Method
         && matches!(r.receiver, Some(ReceiverShape::SelfInstance | ReceiverShape::Super));
     let overloaded_path = r.form == RefForm::Path && layout.overloads_calls(file);
-    (receiver_shaped || is_proven_receiver_call(r) || overloaded_path)
+    (receiver_shaped || overloaded_path)
         .then_some(r.arg_count)
         .flatten()
 }
