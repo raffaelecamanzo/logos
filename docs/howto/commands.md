@@ -481,28 +481,41 @@ member's type from a library's, so only the workspace read has a
 On the Rust row every unbound call carries a reason, so `unclassified` reads `0`
 on a fresh index. A call to a type's method — `self.m()`, `Self::m()`, a method
 call on a proven receiver ([FR-RS-42](../specs/requirements/FR-RS-42.md)), a
-written `T::m()` — binds through one associated-item lookup
-([FR-RS-47](../specs/requirements/FR-RS-47.md)) among the functions of every
-`impl` block whose self type resolves to `T`, from any crate and through `pub
-use` re-exports: `external-type` when `T` is no repository type (`String`,
-`Vec`, an external crate's, an `impl` for a primitive or a generic parameter, or
-a method the peeled `Arc`/`Rc`/`Box` provides itself, such as `clone`);
-`supertype-unreached` when `T`'s impls declare no such function the call can
-reach — a derive, a trait default or a `Deref` target supplies it, method syntax
-met only an associated function, or the trait is not in scope at the call;
-`overload-ambiguous` for two functions of one rank, or an inherent `&self`
-method beside a trait's by-value `self` one; `no-applicable-overload` when every
+written `T::m()`, a qualified `<T as Tr>::m()` — binds through one
+associated-item lookup ([FR-RS-47](../specs/requirements/FR-RS-47.md)) among
+the functions of every `impl` block whose self type resolves to `T`, from any
+crate and through `pub use` re-exports, and the default bodies of the traits
+`T` implements (an empty `impl Tr for T {}` included) that its impl does not
+override. A method call that finds nothing on `T` retries on `T`'s `Deref`
+target, each type once and at most 8 hops; a path call never does. The reasons:
+`external-type` when `T` is no repository type (`String`, `Vec`, an external
+crate's, an `impl` for a primitive or a generic parameter, a `Deref` target
+outside the repository, or a method the peeled `Arc`/`Rc`/`Box` provides
+itself, such as `clone`); `supertype-unreached` when nothing along `T`'s
+`Deref` chain declares or inherits such a function the call can reach — a
+derive supplies it, method syntax met only an associated function, or the trait
+is not in scope at the call;
+`overload-ambiguous` for two functions of one rank (two traits in scope each
+supplying the method, a default among them), or an inherent `&self` method
+beside a trait's by-value `self` one; `no-applicable-overload` when every
 such function's parameters exclude the call's argument count (a path call to a
 `self`-taking function counts its receiver); `type-ambiguous` when the file, or
 the file re-exporting `T`, imports its name twice; `not-a-callable` for an enum
-variant. A `Self::m` call in a trait's default body, and an unproven receiver,
-are `no-receiver-evidence`. Any other path call is `external-type` when its head
+variant. A trait-typed call — `self.m()` / `Self::m()` in a trait's default
+body, a receiver typed `&dyn Tr`, `impl Tr` or a generic parameter bounded by
+`Tr` (inline or in a `where` clause), a written `Tr::m(x)` — binds every impl
+of `Tr::m` plus the trait's default body; two bounds
+that each supply the method are `overload-ambiguous`, a method only a bound
+outside the repository (`Clone`, `Send`) can supply is `external-type`, and a
+trait with neither an impl nor a default of it is `supertype-unreached`. An
+unproven receiver is `no-receiver-evidence`. Any other path call is
+`external-type` when its head
 leaves the repository (`Vec::new()`, `serde_json::to_string(…)`) and
 `name-not-in-scope` when it reaches a repository module that declares no such
 item; a bare call is `name-not-in-scope` unless it names a type or a variant
 (`not-a-callable`). A required trait method — a signature with no body — is
-recorded but bound by no call yet, so a `self.m()` call to one from the trait's
-default body reads `supertype-unreached`. In `workspace status` the Rust row's
+recorded but bound by no call: a call to it reaches the impls that supply the
+body. In `workspace status` the Rust row's
 `type-in-another-member` stays `0`: a type of another member is not resolved,
 and is counted `external-type`.
 

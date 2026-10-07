@@ -17,9 +17,10 @@
 //!   the reachable set and is reported dead (`on_event`/`record_str` in
 //!   `observability/layer.rs`).
 //! - **trait-default dispatch** (S-281, [CR-073] Part C) — a *default* method
-//!   body in a `trait T { fn f(&self) { … } }` declaration. It is reached only
-//!   through `&dyn T` dispatch when an impl does not override it, so — exactly
-//!   like a trait-impl method — it has no source-visible caller and reads dead
+//!   body in a `trait T { fn f(&self) { … } }` declaration. It is reached
+//!   through dispatch on an implementor that does not override it — a type the
+//!   graph may not see, a call outside the repository — so, like a trait-impl
+//!   method, it may have no source-visible caller and read dead
 //!   (the `LanguagePlugin` cluster: `is_documentation`, `is_artifact`,
 //!   `filenames`, `config_extraction`, `overridden_capabilities`,
 //!   `supports_reachability`). A bodyless signature (`fn f(&self);`) is a
@@ -465,9 +466,11 @@ fn scan_source(
         if node.kind() == "trait_item" {
             // A trait *default* method — a `function_item` (i.e. carrying a body,
             // distinct from a bodyless `function_signature_item`) inside a
-            // `trait_item` — is reachable only through `&dyn T` dispatch and has no
-            // source-visible caller, so it falls out of the reachable set and is
-            // reported dead (the `LanguagePlugin` cluster: `is_documentation`,
+            // `trait_item` — is reached through dispatch on implementors the graph
+            // may not see (S-608 binds the calls it can: a type's lookup, a
+            // trait-typed fan-out), so it may have no source-visible caller, fall
+            // out of the reachable set and be reported dead (the `LanguagePlugin`
+            // cluster: `is_documentation`,
             // `is_artifact`, `filenames`, …). Live-root it under the same
             // false-live-biased posture as a trait-impl method ([CR-073] §3.2,
             // [AR-05]): a default body is a legitimate vtable target for any impl

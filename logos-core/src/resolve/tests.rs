@@ -1976,12 +1976,14 @@ fn implements_ref_binds_impl_method_to_its_trait() {
 
 #[test]
 fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
-    // Two workspace traits share the name `Plug`, so `trait_by_name` returns None
-    // (never guesses one of several) and the dyn call is an honest miss — the
-    // "several" branch of the never-fabricate rule (NFR-RA-05), distinct from the
-    // "zero" (external) branch.
-    let (mut nodes, edges) = dyn_fixture();
-    nodes.push(node(80, "Plug", NodeKind::Trait, "other/src/lib.rs")); // a second `Plug`
+    // Two traits named `Plug` in the caller's own module, so the bound the call
+    // names is ambiguous (S-608 reads a bound in the caller's scope first) and
+    // the dyn call is an honest miss — the "several" branch of the
+    // never-fabricate rule (NFR-RA-05), distinct from the "zero" (external)
+    // branch.
+    let (mut nodes, mut edges) = dyn_fixture();
+    nodes.push(node(80, "Plug", NodeKind::Trait, "src/lib.rs")); // a second `Plug`
+    edges.push(contains(1, 80));
     let scope = [implements(200, 51, "Plug"), implements(201, 61, "Plug")];
     let r = dyn_call(300, 2, "Plug::run");
     let mut all = scope.to_vec();
@@ -1991,6 +1993,11 @@ fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
         bind(&r, &ix, BindingPolicy::Aggressive),
         Outcome::Unbound,
         "a dyn call to an ambiguously-named trait must stay unresolved"
+    );
+    assert_eq!(
+        super::binder::residue(&r, &ix, BindingPolicy::Aggressive),
+        Some(super::binder::Residue::TypeAmbiguous),
+        "two traits of the name: type-ambiguous, never an external trait"
     );
 }
 
@@ -2341,9 +2348,9 @@ fn a_same_named_type_in_another_crate_is_never_a_candidate() {
 #[test]
 fn a_self_call_from_a_caller_in_no_impl_block_proves_no_receiver() {
     use super::binder::{residue, Residue};
-    // `lone` is in no impl block (a free function, a trait's default method):
-    // its `Self::helper` proves no type, and never reaches the scope hierarchy
-    // (S-607; a trait body's fan-out is S-608's).
+    // `lone` is in no impl block and no trait (a free function): its
+    // `Self::helper` proves no type, and never reaches the scope hierarchy
+    // (S-607; a trait default body's call fans out instead, S-608).
     let r = call(100, LIB_RS, 74, "Self::helper");
     let ix = self_type_index(&r, &[75, 78, 84]);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
@@ -2710,8 +2717,8 @@ fn an_inherent_method_outranks_a_trait_impls_and_two_of_one_rank_bind_nothing() 
     let ix = receiver_index(&close, &store, &[]);
     assert_eq!(bind(&close, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&close, &ix, BindingPolicy::Aggressive), Some(Residue::OverloadAmbiguous));
-    // None: the type records no `missing` — a trait default or a derive
-    // supplies it — and the free `helper` beside the caller is no method of it.
+    // None: the type records no `missing` — a derive supplies it — and the
+    // free `helper` beside the caller is no method of it.
     for target in ["Store::missing", "Store::helper"] {
         let none = proven(102, target, None);
         let ix = receiver_index(&none, &store, &[]);

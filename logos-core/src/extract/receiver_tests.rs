@@ -193,25 +193,29 @@ fn a_two_typed_name_proves_nothing() {
     );
 }
 
+/// A generic parameter names no type, so typing proves none. Bounded by a
+/// trait, its receiver is FR-RS-08's dispatch row, as `dyn Tr`'s is (S-608);
+/// a field of the generic type (`self.t`) is neither.
 #[test]
-fn a_generic_parameter_proves_nothing() {
+fn a_generic_parameter_proves_no_type() {
     let src = with_types(
         "fn g<G: Tr>(x: G) { x.f(); }\n\
          fn h<G: Tr>(x: &G) { x.f(); }\n\
          pub struct S<T> { t: T }\n\
          impl<T: Tr> S<T> { fn k(&self, x: T) { x.f(); self.t.f(); } }\n",
     );
-    assert_eq!(calls_of_f(&src), vec![other()]);
-}
-
-#[test]
-fn an_impl_trait_or_a_dyn_receiver_proves_nothing_here() {
-    // `impl Trait` names no type; `dyn Trait` is FR-RS-08's dispatch row.
-    let src = with_types("fn g(x: impl Tr) { x.f(); }\nfn h(x: &dyn Tr) { x.f(); }\n");
     assert_eq!(
         calls_of_f(&src),
         vec![("Tr::f".to_string(), RefForm::Method, None, None), other()]
     );
+}
+
+#[test]
+fn an_impl_trait_or_a_dyn_receiver_proves_nothing_here() {
+    // Neither `impl Trait` nor `dyn Trait` names a type: each is FR-RS-08's
+    // dispatch row (S-281; S-608 for `impl Trait`).
+    let src = with_types("fn g(x: impl Tr) { x.f(); }\nfn h(x: &dyn Tr) { x.f(); }\n");
+    assert_eq!(calls_of_f(&src), vec![("Tr::f".to_string(), RefForm::Method, None, None)]);
 }
 
 #[test]
@@ -544,17 +548,33 @@ impl A {
 
 #[test]
 fn a_receiver_no_proof_form_reads_stays_other_inside_a_macro() {
-    // Shadowed, two-typed, generic, inferred, a name no binding is in scope
-    // for, and a chain: each stays the bare `other` row it records outside one.
+    // Shadowed, two-typed, an unbounded generic, inferred, a name no binding
+    // is in scope for, and a chain: each stays the bare `other` row it records
+    // outside one.
     for body in [
         "fn g(x: A) { let x = convert(x); CALL }",
         "fn g() { let x: A = make(); let x: B = make(); CALL }",
-        "fn g<G: Tr>(x: G) { CALL }",
+        "fn g<G>(x: G) { CALL }",
         "fn g() { let x: _ = make(); CALL }",
         "fn g() { CALL }",
         "fn g() { { let x: A = make(); } CALL }",
     ] {
         assert_parity(&with_types(body), vec![other()]);
+    }
+}
+
+/// A trait-typed receiver records the trait-qualified dispatch row inside a
+/// macro as outside one (S-608): `dyn Tr`, `impl Tr`, a bounded generic.
+#[test]
+fn a_trait_typed_receiver_is_trait_qualified_inside_a_macro() {
+    let dispatch = vec![("Tr::f".to_string(), RefForm::Method, None, None)];
+    for body in [
+        "fn g(x: &dyn Tr) { CALL }",
+        "fn g(x: &impl Tr) { CALL }",
+        "fn g<G: Tr>(x: G) { CALL }",
+        "fn g<G>(x: &G) where G: Tr { CALL }",
+    ] {
+        assert_parity(&with_types(body), dispatch.clone());
     }
 }
 

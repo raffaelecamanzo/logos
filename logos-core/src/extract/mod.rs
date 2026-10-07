@@ -1877,8 +1877,10 @@ fn collect_refs(
                     }
                     // Trait-object dynamic dispatch (S-281, CR-073, FR-RS-08): when
                     // the receiver is a *provable* `&dyn T` (an explicit parameter
-                    // or `let` type in the enclosing fn), qualify the target as
-                    // `T::f` so the binder fans out to the trait method's impls. A
+                    // or `let` type in the enclosing fn) — or `impl T`, or a
+                    // generic parameter bounded by `T` (S-608, FR-RS-47) —
+                    // qualify the target as `T::f` (`A+B::f` for several bounds)
+                    // so the binder fans out to the trait method's impls. A
                     // receiver of unknown type stays the bare `f`, bound by its
                     // receiver's shape (S-514, FR-RS-12).
                     let target = match rust_dyn_receiver_trait(node, source) {
@@ -2087,17 +2089,28 @@ fn macro_rows(
         if call.target.is_empty() {
             continue;
         }
-        // `self.f()` in a macro argument: the row the same call records
-        // outside one (S-493, S-514). Any other method call is `other`, as
-        // outside one (S-517): a shapeless row would no longer merge with the
-        // query's `other` row of the same call, which the shape-keyed dedup
-        // keeps apart. Its argument count (S-591) is the token tree's, for the
-        // same reason.
-        let (target, form, receiver) = if call.self_receiver {
-            receiver::self_call(caller, &call.target, true)
+        // Each call records the row it records outside a macro. A trait-typed
+        // receiver (`&dyn Tr`, `impl Tr`, a bounded generic) is
+        // trait-qualified (S-281, S-608) and hands no receiver on to typing.
+        // `self.f()` in a macro argument is the self row (S-493, S-514). Any
+        // other method call is `other` (S-517): a shapeless row would no
+        // longer merge with the query's `other` row of the same call, which
+        // the shape-keyed dedup keeps apart. Its argument count (S-591) is the
+        // token tree's, for the same reason.
+        let trait_head = match &call.receiver {
+            Some(MacroReceiver::Name(name)) if call.form == RefForm::Method => {
+                receiver_trait_head(macro_node, name, source)
+            }
+            _ => None,
+        };
+        let (target, form, receiver, read) = if let Some(head) = trait_head {
+            (format!("{head}::{}", call.target), RefForm::Method, None, None)
+        } else if call.self_receiver {
+            let (target, form, receiver) = receiver::self_call(caller, &call.target, true);
+            (target, form, receiver, call.receiver)
         } else {
             let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
-            (call.target, call.form, shape)
+            (call.target, call.form, shape, call.receiver)
         };
         let fact = RefFact {
             source: source_symbol.clone(),
@@ -2112,7 +2125,7 @@ fn macro_rows(
             arg_count: call.arg_count,
             exported: None,
         };
-        out.push((fact, call.receiver));
+        out.push((fact, read));
     }
     out
 }
@@ -3273,36 +3286,143 @@ fn trait_simple_name(trait_node: Node<'_>, source: &[u8]) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// The trait name of a **trait-object** type `ty`, or `None` when `ty` is not a
-/// `dyn T` (S-281, [CR-073], [FR-RS-08]). Peels the transparent layers a `dyn T`
-/// can wear — `&dyn`/`&mut dyn` (`reference_type`), a `T + Send` bound list
-/// (`bounded_type`), and the smart pointers `Box`/`Rc`/`Arc<dyn T>`
-/// (`generic_type`) — down to the `dynamic_type`, then reads its principal
-/// `trait:`. Depth-bounded (4 covers `Arc<Box<dyn T>>` and beyond); anything
-/// that is not a trait object yields `None`, so the receiver stays a bare
-/// method name and never fans out (the CR-066 guard, [FR-RS-06]).
+/// The simple names of the traits a bound list names (S-608) — the `A + B` of
+/// `impl A + B` (a `bounded_type`) or of `T: A + B` (a `trait_bounds`), or the
+/// one trait of a single bound — in written order, each once. A lifetime,
+/// `?Sized`, a higher-ranked or `Fn(…)` bound names none ([`trait_simple_name`]).
+fn bound_names(bounds: Node<'_>, source: &[u8]) -> Vec<String> {
+    let parts: Vec<Node<'_>> = match bounds.kind() {
+        "bounded_type" | "trait_bounds" => (0..bounds.named_child_count()).filter_map(|i| bounds.named_child(i)).collect(),
+        _ => vec![bounds],
+    };
+    let mut names: Vec<String> = Vec::new();
+    for name in parts.into_iter().filter_map(|b| trait_simple_name(b, source)) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The trait bounds of every generic type parameter in scope in the function
+/// `fn_node` (S-608, [FR-RS-47] rule 5): its own `<T: A>` and `where T: B`,
+/// and those of the `impl` or `trait` block it is an item of — the function's
+/// own parameter shadowing a block's of the same name. A parameter bounded by
+/// no trait maps to an empty list: a generic that is no trait-typed receiver.
+///
+/// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+fn generic_trait_bounds(fn_node: Node<'_>, source: &[u8]) -> HashMap<String, Vec<String>> {
+    let block = fn_node
+        .parent()
+        .filter(|list| list.kind() == "declaration_list")
+        .and_then(|list| list.parent())
+        .filter(|owner| matches!(owner.kind(), "impl_item" | "trait_item"));
+    let mut bounds: HashMap<String, Vec<String>> = HashMap::new();
+    for scope in block.into_iter().chain([fn_node]) {
+        if let Some(params) = scope.child_by_field_name("type_parameters") {
+            for param in (0..params.named_child_count()).filter_map(|i| params.named_child(i)) {
+                if param.kind() != "type_parameter" {
+                    continue;
+                }
+                let Some(name) = param.child_by_field_name("name").and_then(|n| n.utf8_text(source).ok()) else {
+                    continue;
+                };
+                let own = param
+                    .child_by_field_name("bounds")
+                    .map(|b| bound_names(b, source))
+                    .unwrap_or_default();
+                bounds.insert(name.to_string(), own);
+            }
+        }
+        let clauses = (0..scope.named_child_count())
+            .filter_map(|i| scope.named_child(i))
+            .filter(|c| c.kind() == "where_clause");
+        for predicate in clauses.flat_map(|c| (0..c.named_child_count()).filter_map(move |i| c.named_child(i))) {
+            let left = predicate.child_by_field_name("left").filter(|l| l.kind() == "type_identifier");
+            let Some(name) = left.and_then(|l| l.utf8_text(source).ok()) else {
+                continue;
+            };
+            let Some(known) = bounds.get_mut(name) else {
+                continue;
+            };
+            for tr in predicate
+                .child_by_field_name("bounds")
+                .map(|b| bound_names(b, source))
+                .unwrap_or_default()
+            {
+                if !known.contains(&tr) {
+                    known.push(tr);
+                }
+            }
+        }
+    }
+    bounds
+}
+
+/// The traits a receiver of the **trait-typed** type `ty` is known by, or
+/// `None` when `ty` is typed by no trait — the receivers that fan out to a
+/// trait method's implementations ([FR-RS-08]):
+///
+/// - a trait object `dyn T` (S-281, [CR-073]): its principal `trait:` alone;
+/// - `impl A + B` (S-608, [FR-RS-47] rule 5): each bound it names;
+/// - a generic parameter `T` with trait bounds (`<T: A + B>`, `where T: A`),
+///   as `generics` records them for the enclosing function
+///   ([`generic_trait_bounds`]): each bound.
+///
+/// Peels the transparent layers such a type can wear — `&`/`&mut`
+/// (`reference_type`), a `dyn T + Send` bound list (`bounded_type`), and the
+/// smart pointers `Box`/`Rc`/`Arc<…>` (`generic_type`). Depth-bounded (4
+/// covers `Arc<Box<dyn T>>` and beyond). A bound is read by its simple name;
+/// a lifetime, `?Sized`, a higher-ranked or `Fn(…)` bound names no trait and
+/// is skipped. Anything else — a concrete type, a generic parameter bounded
+/// by no trait — yields `None`, so the receiver stays a bare method name and
+/// never fans out (the CR-066 guard, [FR-RS-06]).
 ///
 /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
 /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+/// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
 /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
-fn dyn_trait_of_type(ty: Node<'_>, source: &[u8]) -> Option<String> {
+fn receiver_traits_of_type(
+    ty: Node<'_>,
+    source: &[u8],
+    generics: &HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
     let mut cur = ty;
     for _ in 0..4 {
         match cur.kind() {
             "dynamic_type" => {
-                return trait_simple_name(cur.child_by_field_name("trait")?, source);
+                return trait_simple_name(cur.child_by_field_name("trait")?, source).map(|t| vec![t]);
+            }
+            "abstract_type" => {
+                let traits = bound_names(cur.child_by_field_name("trait")?, source);
+                return (!traits.is_empty()).then_some(traits);
+            }
+            "type_identifier" => {
+                let traits = generics.get(cur.utf8_text(source).ok()?)?;
+                return (!traits.is_empty()).then(|| traits.clone());
             }
             "reference_type" => cur = cur.child_by_field_name("type")?,
-            // `dyn A + Send`: the object trait sits in the reference/dynamic part.
+            // `dyn A + Send`: the object trait sits in the reference/dynamic
+            // part. `impl A + B` parses as `(impl A) + B`: every bound counts.
             "bounded_type" => {
+                let parts: Vec<Node<'_>> = (0..cur.named_child_count()).filter_map(|i| cur.named_child(i)).collect();
+                if let Some(opaque) = parts.iter().find(|c| c.kind() == "abstract_type") {
+                    let mut traits = bound_names(opaque.child_by_field_name("trait")?, source);
+                    for name in parts.iter().filter(|c| c.kind() != "abstract_type").filter_map(|c| trait_simple_name(*c, source)) {
+                        if !traits.contains(&name) {
+                            traits.push(name);
+                        }
+                    }
+                    return (!traits.is_empty()).then_some(traits);
+                }
                 cur = (0..cur.named_child_count())
                     .filter_map(|i| cur.named_child(i))
                     .find(|c| {
                         matches!(c.kind(), "reference_type" | "dynamic_type" | "generic_type")
                     })?;
             }
-            // Only the transparent smart-pointer wrappers carry a `dyn T` object;
-            // `Vec<dyn T>` and the like are not trait-object receivers.
+            // Only the transparent smart-pointer wrappers carry a trait-typed
+            // receiver; `Vec<dyn T>` and the like are not one.
             "generic_type" => {
                 let head = cur.child_by_field_name("type")?;
                 if !matches!(last_type_segment(head.utf8_text(source).ok()?), "Box" | "Rc" | "Arc") {
@@ -3313,10 +3433,16 @@ fn dyn_trait_of_type(ty: Node<'_>, source: &[u8]) -> Option<String> {
                     .filter_map(|i| args.named_child(i))
                     .find(|c| {
                         // `bounded_type` covers `Arc<dyn T + Send>`, symmetric with
-                        // the reference path that already peels `&dyn T + Send`.
+                        // the reference path that already peels `&dyn T + Send`;
+                        // `Box<T>` / `Box<impl T>` box a bounded parameter.
                         matches!(
                             c.kind(),
-                            "dynamic_type" | "reference_type" | "generic_type" | "bounded_type"
+                            "dynamic_type"
+                                | "reference_type"
+                                | "generic_type"
+                                | "bounded_type"
+                                | "type_identifier"
+                                | "abstract_type"
                         )
                     })?;
             }
@@ -3685,14 +3811,18 @@ impl ImportReader<'_> {
     }
 }
 
-/// The trait name when a receiver-method call's receiver is a **provable**
-/// workspace trait object (S-281, [CR-073], [FR-RS-08]).
+/// The trait head when a receiver-method call's receiver is **provably**
+/// trait-typed: a trait object (S-281, [CR-073], [FR-RS-08]), an `impl Tr`, or
+/// a generic parameter bounded by traits (S-608, [FR-RS-47] rule 5). One trait
+/// is its simple name (`Run`); several bounds are joined by `+` (`Run+Walk`),
+/// in written order, and the binder decides which of them provides the method.
 ///
 /// `field_ident` is the `@ref.method` capture — the method-name `field_identifier`
 /// of a `field_expression`. The receiver must be a plain named `identifier` whose
-/// `&dyn T` type is provable **from this file's own syntax**: an explicit
-/// parameter type on the enclosing `function_item`, or a `let recv: &dyn T`
-/// binding in its body. This is a superset-free, per-file-pure gate — a receiver
+/// trait-typed type ([`receiver_traits_of_type`]) is provable **from this file's
+/// own syntax**: an explicit parameter type on the enclosing `function_item`, or
+/// a `let recv: &dyn T` binding in its body, a generic parameter read against
+/// the bounds in scope there ([`generic_trait_bounds`]). This is a superset-free, per-file-pure gate — a receiver
 /// whose type comes from inference (a closure parameter, a method-chain result)
 /// is *not* provable and stays a bare method name, so the fan-out never fires on
 /// an unknown receiver ([FR-RS-06], the CR-066 guard is not loosened) and the
@@ -3703,6 +3833,7 @@ impl ImportReader<'_> {
 ///
 /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
 /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+/// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
 /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn rust_dyn_receiver_trait(field_ident: Node<'_>, source: &[u8]) -> Option<String> {
@@ -3714,10 +3845,16 @@ fn rust_dyn_receiver_trait(field_ident: Node<'_>, source: &[u8]) -> Option<Strin
     if receiver.kind() != "identifier" {
         return None; // only a simple named receiver is provable per-file
     }
-    let recv_name = receiver.utf8_text(source).ok()?;
-    // Climb to the enclosing function; its parameters and `let` bindings are the
-    // only per-file-provable sources of a receiver's `&dyn T` type.
-    let mut anc = field_expr.parent();
+    receiver_trait_head(field_expr, receiver.utf8_text(source).ok()?, source)
+}
+
+/// The trait head of the receiver named `recv_name` at `site` — a method
+/// call, or a macro invocation whose token tree holds one (S-610 parity,
+/// [`macro_rows`]): read in the function enclosing `site`, whose parameters and
+/// `let` bindings are the only per-file-provable sources of a receiver's
+/// trait-typed type ([`function_dyn_binding`]).
+fn receiver_trait_head(site: Node<'_>, recv_name: &str, source: &[u8]) -> Option<String> {
+    let mut anc = site.parent();
     while let Some(n) = anc {
         if n.kind() == "function_item" {
             return function_dyn_binding(n, recv_name, source);
@@ -3727,27 +3864,42 @@ fn rust_dyn_receiver_trait(field_ident: Node<'_>, source: &[u8]) -> Option<Strin
     None
 }
 
-/// The `&dyn T` trait bound of a name `recv` inside `fn_node` — an explicit
-/// parameter type (preferred), else a `let recv: &dyn T` binding in the body.
+/// The trait head of a name `recv` inside `fn_node` ([`rust_dyn_receiver_trait`])
+/// — an explicit parameter type (preferred), else a `let recv: &dyn T` binding
+/// in the body.
 /// A nested `function_item` is not descended (its bindings belong to its own
-/// scope), so a shadowing inner binding cannot mis-type an outer receiver.
+/// scope, and it cannot capture `recv`), so a shadowing inner binding cannot
+/// mis-type an outer receiver.
 fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Option<String> {
     // Collect EVERY binding of `recv_name` in this function's own scope — each
-    // parameter and each body `let` (not descending into a nested fn/closure,
-    // which owns its own scope) whose pattern is exactly the receiver name — as
-    // its optional type-annotation node.
+    // parameter and each body `let` whose pattern is exactly the receiver name,
+    // as its optional type-annotation node, and every other pattern that binds
+    // it (S-608): a destructuring `let`, a `for`, an `if let` / `while let`, a
+    // `match` arm or a closure's parameter, each untyped. A closure's body is
+    // walked: it shares the function's scope for every name it does not bind.
     //
     // The proof must be a *single* per-file type: a name bound more than once is
     // shadowed, and this walk is scope-blind (it cannot tell which binding is live
     // at the call site), so guessing one would fabricate a dispatch edge — e.g. a
     // `c: &Concrete` parameter shadowed by a later `let c: &dyn T` would wrongly
-    // qualify the *first* `c.method()` as `T::method`. Bail on anything but exactly
-    // one binding, and require that binding to be annotated: an unambiguous,
-    // annotated `&dyn T` binding qualifies; zero, several, or an un-annotated
-    // binding is an honest miss ([NFR-RA-05]).
+    // qualify the *first* `c.method()` as `T::method`, and a `t: T` parameter
+    // shadowed by `for t in xs` would type the loop's `t.go()` by `T`'s bound.
+    // Bail on anything but exactly one binding, and require that binding to be
+    // annotated: an unambiguous, annotated binding qualifies; zero, several, or
+    // an un-annotated binding is an honest miss ([NFR-RA-05]).
     let name_of = |n: Node<'_>| {
         n.child_by_field_name("pattern")
             .and_then(|p| p.utf8_text(source).ok())
+    };
+    let binds = |pattern: Option<Node<'_>>| {
+        let mut stack: Vec<Node<'_>> = pattern.into_iter().collect();
+        while let Some(n) = stack.pop() {
+            if n.kind() == "identifier" && n.utf8_text(source).ok() == Some(recv_name) {
+                return true;
+            }
+            stack.extend((0..n.named_child_count()).filter_map(|i| n.named_child(i)));
+        }
+        false
     };
     let mut bindings: Vec<Option<Node<'_>>> = Vec::new();
     if let Some(params) = fn_node.child_by_field_name("parameters") {
@@ -3761,12 +3913,19 @@ fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Op
     if let Some(body) = fn_node.child_by_field_name("body") {
         let mut stack = vec![body];
         while let Some(n) = stack.pop() {
-            if n.kind() == "let_declaration" && name_of(n) == Some(recv_name) {
-                bindings.push(n.child_by_field_name("type"));
+            match n.kind() {
+                "let_declaration" if name_of(n) == Some(recv_name) => bindings.push(n.child_by_field_name("type")),
+                "let_declaration" | "for_expression" | "let_condition" | "match_arm"
+                    if binds(n.child_by_field_name("pattern")) =>
+                {
+                    bindings.push(None);
+                }
+                "closure_expression" if binds(n.child_by_field_name("parameters")) => bindings.push(None),
+                _ => {}
             }
             for i in 0..n.child_count() {
                 if let Some(ch) = n.child(i) {
-                    if !matches!(ch.kind(), "function_item" | "closure_expression") {
+                    if ch.kind() != "function_item" {
                         stack.push(ch);
                     }
                 }
@@ -3774,7 +3933,8 @@ fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Op
         }
     }
     match bindings.as_slice() {
-        [Some(ty)] => dyn_trait_of_type(*ty, source),
+        [Some(ty)] => receiver_traits_of_type(*ty, source, &generic_trait_bounds(fn_node, source))
+            .map(|traits| traits.join("+")),
         _ => None, // zero, several (shadowed), or an un-annotated single binding
     }
 }
