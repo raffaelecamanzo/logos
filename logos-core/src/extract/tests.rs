@@ -6568,9 +6568,9 @@ fn impl_headers(facts: &Facts) -> Vec<(&str, bool, Option<&str>, Option<&str>)> 
 
 /// S-606 / CR-202 F1: every impl block records its header — an empty one
 /// included — for every self-type shape: a bare, module-relative, `crate::`,
-/// generic or external path keeps its path, generics stripped; `&T` and
-/// `&mut T` record `T` flagged as a reference; `()`, `str` and a slice are
-/// recorded as written. A trait impl records its trait, and an `impl Deref`
+/// `super::`, `self::`, generic or external path keeps its path, generics
+/// stripped; `&T` and `&mut T` record `T` flagged as a reference; `()`, `str`,
+/// a slice and a tuple are recorded as written. A trait impl records its trait, and an `impl Deref`
 /// its `type Target`. The narrower node-level self type (S-493) is unchanged:
 /// a module-relative header still gives its methods none.
 #[test]
@@ -6597,6 +6597,12 @@ impl std::ops::Deref for X {
 }
 impl Deref for Inner { type Target = Vec<u8>; }
 impl Inner { type Target = X; }
+mod b {
+    pub struct Y<T>(T);
+    impl super::X { fn h(&self) {} }
+    impl<T> self::Y<T> {}
+}
+impl Greet for (X, Inner) {}
 ";
     let facts = extract_src("src/lib.rs", src);
     assert_eq!(
@@ -6617,6 +6623,9 @@ impl Inner { type Target = X; }
             ("Inner", false, Some("Deref"), Some("Vec")),
             // An inherent impl's `type Target` is no Deref target.
             ("Inner", false, None, None),
+            ("super::X", false, None, None),
+            ("self::Y", false, None, None),
+            ("(X, Inner)", false, Some("Greet"), None),
         ]
     );
     let lines: Vec<(u32, u32)> = facts.impl_blocks.iter().map(|b| (b.start_line, b.end_line)).collect();
