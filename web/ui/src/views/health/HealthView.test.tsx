@@ -527,6 +527,40 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     expect(seen(part(nesting, "action"))).toContain("nesting_depth under [metric_thresholds] in .logos/rules.toml (configuration)");
   });
 
+  // Each listed action names the `[metric_thresholds]` keys docs/howto/configuration.md
+  // documents for its dimension — and Cohesion, which has none, names no key.
+  it.each([
+    ["Nesting", "nesting", /^Flatten the 1 listed function /, "nesting_depth"],
+    ["Conciseness", "conciseness", /^Split the 1 listed function into smaller ones/, "brain_complexity, brain_lines or brain_nesting"],
+    ["Cohesion", "cohesion", /^Split the 1 listed class along the groups of methods that share state\.$/, null],
+    ["Focus", "focus", /^Split the 1 listed container by responsibility/, "god_methods or god_span"],
+    ["Uniqueness", "uniqueness", /^Merge the 1 listed near-clone into shared functions/, "clone_similarity or clone_min_tokens"],
+  ] as const)("%s's listed action refactors the unit and names its threshold keys", async (name, key, refactor, keys) => {
+    const m = clone();
+    m.scan.metrics[key] = { raw: 0.1, normalized: 0.9 };
+    m.scan.worst_offenders = { ...realOffenders.recordedEmpty, [key]: [{ name: "unit", file: "src/a.rs", line: 1, detail: "d" }] };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const w = widget(name);
+    const action = seen(part(w, "action"));
+    expect(action).toMatch(refactor);
+    expect(seen(part(w, "where"))).toBe("source code");
+    if (keys === null) {
+      expect(action).not.toContain("[metric_thresholds]");
+    } else {
+      expect(action).toContain(`raise ${keys} under [metric_thresholds] in .logos/rules.toml (configuration)`);
+    }
+  });
+
+  it("Acyclicity below a full score points to logos dsm", async () => {
+    stub(HEALTH); // acyclicity 0.8
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(widget("Acyclicity"), "where"))).toBe("command logos dsm");
+    expect(seen(part(widget("Acyclicity"), "action"))).toMatch(/^Find the cycles in the Architecture dependency matrix/);
+  });
+
   it("renders an ADR-21 drop-out as a stated n/a, never a fabricated zero, with nothing to do", async () => {
     const m = clone();
     m.scan.metrics.cohesion = null;
