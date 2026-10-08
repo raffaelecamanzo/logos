@@ -414,6 +414,22 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     expect(part(widget("Equality"), "figure")!.querySelector('dfn[data-term="gini"]')).not.toBeNull();
   });
 
+  it("never rounds a non-zero share to 0.0%: one offender among thousands is <0.1%", async () => {
+    const m = clone();
+    m.scan.metrics.function_count = 2500;
+    m.scan.metrics.nesting = { raw: 1 / 2500, normalized: 1 - 1 / 2500 };
+    m.scan.metrics.redundancy = { raw: 0, normalized: 1 };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const nesting = seen(part(widget("Nesting"), "figure"));
+    expect(nesting).toContain("<0.1% of production functions are deeply nested");
+    expect(nesting).not.toContain("0.0%");
+    expect(within(part(widget("Nesting"), "title")!).getByText("1 flagged")).toBeInTheDocument();
+    // A genuine zero still reads as one.
+    expect(seen(part(widget("Redundancy"), "figure"))).toContain("0.0% of production functions are dead or duplicated");
+  });
+
   it("the five unlisted dimensions state the absence and their pointer, never an empty table", async () => {
     for (const recorded of [true, false]) {
       cleanup();

@@ -212,8 +212,12 @@ export interface DimensionCopy extends CopyEntry<DimensionState> {
   readonly unlisted?: UnitPointer;
 }
 
-/** A share of a population, stated with the population. */
-function percent(ratio: number): string {
+/** A share of a population, to one decimal place. A share that is not zero never
+ *  reads "0.0%", and one short of all never reads "100.0%": one offender among
+ *  thousands of functions is "<0.1%", not a fabricated zero (NFR-CC-04). */
+export function percent(ratio: number): string {
+  if (ratio > 0 && ratio < 0.0005) return "<0.1%";
+  if (ratio < 1 && ratio >= 0.9995) return ">99.9%";
   return `${(ratio * 100).toFixed(1)}%`;
 }
 
