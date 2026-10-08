@@ -261,20 +261,28 @@ function openAt(url: string) {
   window.history.replaceState(null, "", url);
 }
 
-describe("the /overview migration keeps the member (S-426, S-194)", () => {
+// `/dsm` → `/architecture` (S-612) shares the `/overview` migration's code path;
+// each retired route is driven separately so a target that stops carrying the
+// query fails here rather than relying on the other route's test.
+const RETIRED = [
+  { from: "/overview", to: "/" },
+  { from: "/dsm", to: "/architecture" },
+] as const;
+
+describe("the retired-route migrations keep the member (S-426, S-194, S-612)", () => {
   // `redirect` is stubbed for the specs above, which is precisely why this was
   // invisible: the one suite that drives the real shell with a roster never ran the
   // real migration. These use the real one.
   const realRouter = async () => await vi.importActual<typeof import("./router.tsx")>("./router.tsx");
 
-  it("carries a deep-linked ?repo= across /overview → /", async () => {
+  it.each(RETIRED)("carries a deep-linked ?repo= across $from → $to", async ({ from, to }) => {
     const { redirect: realRedirect } = await realRouter();
-    pathname.current = "/overview";
-    openAt("/overview?repo=web");
+    pathname.current = from;
+    openAt(`${from}?repo=web`);
     const calls = stubApi();
     vi.mocked(redirect).mockImplementation((path: string) => {
       realRedirect(path);
-      pathname.current = "/";
+      pathname.current = to;
     });
     render(app());
 
@@ -283,16 +291,17 @@ describe("the /overview migration keeps the member (S-426, S-194)", () => {
     // manifest default and paint ITS figures for a URL that asked for `web`.
     expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
     expect(scopedMember()).toBe("web");
+    expect(window.location.pathname + window.location.search).toBe(`${to}?repo=web`);
   });
 
-  it("carries an UNKNOWN ?repo= across it too, so the refusal is not bypassed", async () => {
+  it.each(RETIRED)("carries an UNKNOWN ?repo= across $from → $to too, so the refusal is not bypassed", async ({ from, to }) => {
     const { redirect: realRedirect } = await realRouter();
-    pathname.current = "/overview";
-    openAt("/overview?repo=ghost");
+    pathname.current = from;
+    openAt(`${from}?repo=ghost`);
     const calls = stubApi();
     vi.mocked(redirect).mockImplementation((path: string) => {
       realRedirect(path);
-      pathname.current = "/";
+      pathname.current = to;
     });
     render(app());
 
