@@ -128,9 +128,18 @@ npx playwright install chromium   # one-time download into Playwright's cache
 `bash scripts/gate.sh full` runs them as its `ui-e2e` leg: it builds the SPA,
 builds `logos` from the tree, serves two checked-in fixtures (a single
 repository and a two-member workspace) and prints how many specs passed. The
-fast tier never runs them. Without the browser the leg fails and says so
-(`missing_browser`); it never passes by running nothing. To run the specs alone
-after building the SPA and the binary, use `npm run test:e2e` in `web/ui`.
+fast tier never runs them. The leg never passes by running nothing; when it
+fails, its verdict says why:
+
+| Verdict | It means | Do this |
+|---|---|---|
+| `missing_browser` | Playwright found no Chromium | `npx playwright install chromium` in `web/ui` |
+| `killed` | The run passed its time limit (`UI_E2E_TIMEOUT`, default 900 s) and was stopped with every process it started | Look for a spec or fixture server that hangs; raise `UI_E2E_TIMEOUT` only for a genuinely slow machine |
+| `skipped` | A spec was listed but did not run, so a layout check went unchecked | Remove the `test.skip` (or the skip condition) that caused it |
+| `no_binaries` | There was no usable report, or nothing ran | Read the leg's log; usually the SPA or the `logos` build failed first |
+
+To run the specs alone after building the SPA and the binary, use
+`npm run test:e2e` in `web/ui`.
 
 ### Slim builds (optional)
 
