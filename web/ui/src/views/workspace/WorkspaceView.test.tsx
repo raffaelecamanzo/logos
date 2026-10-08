@@ -1911,6 +1911,8 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       ["PSS web:legacy/pss.yaml", "web", "—", "1"],
     ]);
     expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
+    // The line ends "outside egress_resolution": its lead glosses egress first.
+    expect(within(card).getByText(BOUND_EXTERNAL.headline.summary).parentElement?.querySelector('dfn[data-term="egress"]')).not.toBeNull();
   });
 
   it("the coverage tab states both server headlines in their own card, the bound call still under no provider", async () => {
@@ -1920,6 +1922,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
     expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
     expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
+    expect(within(card).getByText(BOUND_EXTERNAL.headline.summary).parentElement?.querySelector('dfn[data-term="egress"]')).not.toBeNull();
     expect(within(card).getByText(COVERAGE_TEXT.externalStaysApart)).toBeInTheDocument();
     // The figure row is in plain words from the headlines' counts; the composed
     // lines, which carry wire tokens, are the evidence (FR-UI-39).

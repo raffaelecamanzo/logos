@@ -91,6 +91,7 @@ import {
   Badge,
   Button,
   Callout,
+  CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
@@ -688,6 +689,17 @@ type DeclaredLayerExternal = DeclaredLayer["externals"][number];
  *  (each call matched to an external, with its operation and base-path
  *  source), every row naming its member and counterparty, then the named
  *  externals. No per-link disclosure: one table per kind of fact. */
+/** The server's composed named-external line, verbatim (BR-51), after a lead
+ *  that glosses the internal word it ends on (FR-UI-39) — the coverage tab's
+ *  Declared contracts and the map's Declared contracts state it alike. */
+function ExternalLine({ line }: { line: string }) {
+  return (
+    <p className="muted">
+      <CopyTextView text={COVERAGE_TEXT.externalLineLead} /> <span className="mono">{line}</span>
+    </p>
+  );
+}
+
 function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: BoundExternal }) {
   const documents: DeclaredDocumentRow[] = layer.links.flatMap((link) =>
     link.contracts.map((contract) => ({ link, contract })),
@@ -711,7 +723,7 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
     >
       {/* The server's composed join line carries wire tokens, so it is the
           evidence, verbatim (BR-51), never the figure. */}
-      {join && <p className="muted mono">{join.headline.summary}</p>}
+      {join && <ExternalLine line={join.headline.summary} />}
       {/* A relation can name externals and declare nothing: a declared `mock`
           stands in for an external no member vendors. Then there is no link to
           tabulate, and an empty twin table would read as a table that failed to
@@ -789,7 +801,7 @@ function DeclaredRelationsCard({ dashboard }: { dashboard: CoverageDashboard }) 
       {declaredContracts && <p className="muted mono">{declaredContracts.summary}</p>}
       {boundExternal && (
         <>
-          <p className="muted mono">{boundExternal.summary}</p>
+          <ExternalLine line={boundExternal.summary} />
           <p className="muted">{COVERAGE_TEXT.externalStaysApart}</p>
         </>
       )}

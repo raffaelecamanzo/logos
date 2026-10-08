@@ -224,6 +224,10 @@ export const COVERAGE_TEXT = {
   /** Leads the server's composed edge line, glossing the word that line uses
    *  ("egress") before the reader meets it there (FR-UI-39 first use). */
   edgeLineLead: ["Edges and ", gloss("egress"), " rate, as the server reports them:"] as CopyText,
+  /** Leads the server's composed named-external line, which ends "outside
+   *  egress_resolution": the word is glossed before the reader meets it there
+   *  (FR-UI-39 first use), as `edgeLineLead` does for the edge line. */
+  externalLineLead: ["Calls matched to named externals, outside the ", gloss("egress"), " rate, as the server reports them:"] as CopyText,
   /** No outbound call site was captured, so the rate has no denominator. */
   outboundNotMeasured:
     "Not measured: no outbound call site was captured in this workspace, so the rate has no denominator.",
