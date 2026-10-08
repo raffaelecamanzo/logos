@@ -13,6 +13,31 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **A shared widget frame and a browser layout check for the web UI (CR-203,
+  S-611).** A new `Widget` component lays every widget out in one order — title
+  row, figure row, explanation, action line ("What you can do" and, when there
+  is something to do, where: source code, documentation, configuration or a
+  command), evidence — and states an absence as a left-aligned sentence in the
+  figure row rather than a centred empty state. `WidgetStack` spaces widgets one
+  token apart, and `Term` glosses internal vocabulary (a `<dfn>` whose
+  explanation shows on hover and keyboard focus) from one glossary of the
+  fourteen terms FR-UI-39 names. A widget's words come from a typed catalogue
+  entry `{ what, why, action(state) }`, so a catalogue missing a part does not
+  type-check, and the test helper `expectWidgetCopy` asserts the four parts on
+  a rendered widget. No view uses the frame yet: this release changes no page.
+- **Browser tests in the full gate (S-611).** `web/ui` gains Playwright
+  (Chromium only): `npm run test:e2e` drives a `logos serve --ui` built from the
+  tree over a checked-in single-repository fixture and a two-member workspace
+  fixture, and asserts layout in computed style — equal gaps between stacked
+  widgets, left-aligned widget text, one font size for explanation and action.
+  `scripts/gate.sh full` runs it as a new `ui-e2e` leg and prints its pass
+  count; `gate.sh fast` never runs it. A missing browser, an empty run or a run
+  past its time limit is a failed leg, and `scripts/verify-evidence.sh` now
+  requires the leg for a full-tier handoff. Install the browser once with
+  `npx playwright install chromium` in `web/ui`.
+
 ## [1.14.0] — 2026-10-08
 
 ### Added

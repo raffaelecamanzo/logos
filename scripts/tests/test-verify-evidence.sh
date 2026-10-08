@@ -76,7 +76,7 @@ good_unit() {
 seed_all_valid() {
     rm -rf "$EVID"
     local g
-    for g in clippy test test-agents deny arch ui-typecheck ui-test ui-build; do
+    for g in clippy test test-agents deny arch ui-typecheck ui-test ui-build ui-e2e; do
         case "$g" in
             test | test-agents) write_gate "$g" full pass "$TREE" "$(good_unit)" ;;
             *) write_gate "$g" full pass "$TREE" "[]" ;;

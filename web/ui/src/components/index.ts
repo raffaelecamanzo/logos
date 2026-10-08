@@ -44,3 +44,14 @@ export { ThemeToggle } from "./ThemeToggle.tsx";
 
 export { ToastProvider, useToast } from "./Toast.tsx";
 export type { ToastOptions, ToastTone } from "./Toast.tsx";
+
+// The widget frame (S-611, CR-203, FR-UI-39/40): every widget renders through
+// `Widget`, stacked in one `WidgetStack`; `Term` glosses internal vocabulary.
+export { CopyTextView, Widget } from "./Widget.tsx";
+export type { WidgetProps } from "./Widget.tsx";
+
+export { WidgetStack } from "./WidgetStack.tsx";
+export type { WidgetStackProps } from "./WidgetStack.tsx";
+
+export { Term } from "./Term.tsx";
+export type { TermProps } from "./Term.tsx";
