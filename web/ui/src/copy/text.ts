@@ -7,12 +7,6 @@
 import { GLOSSARY, GLOSSARY_TERMS, type GlossaryTerm } from "./glossary.ts";
 import type { CopyEntry, CopyText } from "./types.ts";
 
-/** The plain (unglossed) segments of catalogue text. */
-export function plainSegments(text: CopyText): string[] {
-  if (typeof text === "string") return [text];
-  return text.filter((seg): seg is string => typeof seg === "string");
-}
-
 /** The text as a reader sees it: plain segments and gloss words, joined. */
 export function copyTextString(text: CopyText): string {
   if (typeof text === "string") return text;

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { Widget } from "../components/Widget.tsx";
 
 import { expectWidgetCopy } from "./expectWidgetCopy.ts";
-import { actionLiterals, findUnglossedTerms, findUnglossedUses, plainPart } from "./text.ts";
+import { actionLiterals, copyTextString, findUnglossedTerms, findUnglossedUses, isCopyEntry, plainPart } from "./text.ts";
 import { gloss, noAction, type CopyEntry } from "./types.ts";
 
 describe("the first-use rule", () => {
@@ -74,5 +74,41 @@ describe("expectWidgetCopy reads the whole widget", () => {
   it("fails on a term in an absence statement", () => {
     const { container } = render(<Widget title="Gate" copy={entry} absence="No baseline recorded yet." />);
     expect(() => expectWidgetCopy(container.firstElementChild!)).toThrow(/baseline \(in the figure\)/);
+  });
+});
+
+describe("copyTextString", () => {
+  it("reads a gloss as the word the sentence uses, else as the glossary label", () => {
+    expect(copyTextString(["3 ", gloss("scc", "SCCs"), " found."])).toBe("3 SCCs found.");
+    expect(copyTextString(["High ", gloss("fanOut"), "."])).toBe("High fan-out.");
+    expect(copyTextString("plain")).toBe("plain");
+  });
+
+  it("is what a Widget renders for a gloss with its own wording", () => {
+    const entry: CopyEntry = { what: ["3 ", gloss("scc", "SCCs"), " found."], why: "w", action: () => noAction };
+    const { container } = render(<Widget title="T" copy={entry} />);
+    expect(container.querySelector('dfn[data-term="scc"]')!.firstChild!.textContent).toBe("SCCs");
+    expectWidgetCopy(container.firstElementChild!, entry);
+  });
+});
+
+describe("isCopyEntry", () => {
+  const action = () => noAction;
+  it.each([
+    ["string copy", { what: "a", why: "b", action }],
+    ["glossed copy", { what: ["a ", gloss("arm")], why: "b", action }],
+  ])("accepts %s", (_name, value) => {
+    expect(isCopyEntry(value)).toBe(true);
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "what"],
+    ["an entry with no action", { what: "a", why: "b" }],
+    ["an entry with no why", { what: "a", action }],
+    ["an entry whose what is a number", { what: 1, why: "b", action }],
+    ["an entry whose action is not a function", { what: "a", why: "b", action: "none" }],
+  ])("rejects %s", (_name, value) => {
+    expect(isCopyEntry(value)).toBe(false);
   });
 });

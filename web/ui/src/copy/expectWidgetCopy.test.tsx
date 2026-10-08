@@ -7,6 +7,9 @@ import { Widget } from "../components/Widget.tsx";
 
 import { expectWidgetCopy } from "./expectWidgetCopy.ts";
 import { coverage, observe, thresholds } from "./fixture.copy.ts";
+import type { WidgetAction } from "./types.ts";
+
+const actThresholds = thresholds.action({ breached: 2 }) as Extract<WidgetAction, { kind: "act" }>;
 
 function frame(html: string): Element {
   const host = document.createElement("div");
@@ -68,6 +71,7 @@ describe("expectWidgetCopy", () => {
     ["a none action with other words", widgetHtml({ action: "Relax." }), /Nothing to do/],
     ["an unglossed arm", widgetHtml({ what: "Coverage by arm." }), /outside a Term gloss/],
     ["an element that is not a Widget", "<div><p>plain</p></div>", /not a Widget/],
+    ["an unknown action kind", widgetHtml({ kind: "maybe" }), /unknown action kind/],
   ])("fails on %s", (_name, html, message) => {
     expect(() => expectWidgetCopy(frame(html))).toThrow(message);
   });
@@ -87,6 +91,19 @@ describe("expectWidgetCopy", () => {
     const { container } = render(<Widget title="Observe" copy={observe} />);
     const other = { ...observe, why: "A different reason." };
     expect(() => expectWidgetCopy(container.firstElementChild!, other)).toThrow(/why/);
+  });
+
+  it.each([
+    ["what", { what: "Another figure." }, /what/],
+    ["the action text", { action: () => ({ ...actThresholds, text: "Do something else." }) }, /action/],
+    ["the where kind", { action: () => ({ ...actThresholds, where: "source code" as const }) }, /where/],
+    ["the where target", { action: () => ({ ...actThresholds, target: "logos scan" }) }, /where/],
+  ])("fails when %s differs from the named entry", (_name, override, message) => {
+    const state = { breached: 2 };
+    const { container } = render(<Widget title="Thresholds" copy={thresholds} state={state} />);
+    expect(() => expectWidgetCopy(container.firstElementChild!, { ...thresholds, ...override }, state)).toThrow(
+      message,
+    );
   });
 
   it("fails when the action kind is not the one the state calls for", () => {

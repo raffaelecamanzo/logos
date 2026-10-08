@@ -95,6 +95,11 @@ describe("Widget", () => {
     expect(container.querySelector(`.${statesStyles.emptyText}`)).toBeNull();
   });
 
+  it("labels the action line \"What you can do\"", () => {
+    const { container } = render(<Widget title="T" copy={observe} />);
+    expect(container.querySelector('[data-widget-part="action"]')).toHaveTextContent(/^What you can do: /);
+  });
+
   it("renders the where chip with its target only for an act action", () => {
     const { container, rerender } = render(<Widget title="T" copy={thresholds} state={{ breached: 1 }} />);
     const where = container.querySelector('[data-widget-copy="where"]')!;

@@ -16,8 +16,13 @@ const entries: [string, CopyEntry<never>][] = Object.entries(modules).flatMap(([
 
 describe("copy catalogues", () => {
   it("discovers the catalogues (a finding, not a floor)", () => {
-    // The fixture catalogue is always among them, so zero means discovery broke.
-    expect(entries.some(([key]) => key.startsWith("/src/copy/fixture.copy.ts#"))).toBe(true);
+    // Every entry of the fixture catalogue is found, so a discovery that drops
+    // entries of one shape (a glossed `what`, say) fails here.
+    expect(entries.filter(([key]) => key.startsWith("/src/copy/fixture.copy.ts#")).map(([key]) => key)).toEqual([
+      "/src/copy/fixture.copy.ts#observe",
+      "/src/copy/fixture.copy.ts#thresholds",
+      "/src/copy/fixture.copy.ts#coverage",
+    ]);
     console.info(`copy catalogues: ${entries.length} entries in ${Object.keys(modules).length} modules`);
   });
 
