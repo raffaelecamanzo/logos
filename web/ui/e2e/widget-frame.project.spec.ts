@@ -20,6 +20,10 @@ const TYPES: Record<string, string> = {
 };
 
 test.beforeEach(async ({ page }) => {
+  // The harness page gets the policy the logos server sends its own pages, read
+  // from the server rather than restated here.
+  const csp = (await page.request.get("/")).headers()["content-security-policy"];
+  expect(csp, "the logos server sends a content security policy").toBeTruthy();
   await page.route("**/__e2e/harness/**", async (route) => {
     const rel = new URL(route.request().url()).pathname.replace(/^\/__e2e\/harness\/?/, "") || "index.html";
     const file = normalize(join(HARNESS_DIST, rel));
@@ -32,7 +36,7 @@ test.beforeEach(async ({ page }) => {
       headers: {
         "content-type": TYPES[extname(file)] ?? "application/octet-stream",
         // The served SPA's policy: no inline script or style may run the frame.
-        "content-security-policy": "default-src 'self'",
+        "content-security-policy": csp!,
       },
     });
   });
