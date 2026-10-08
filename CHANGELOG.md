@@ -13,6 +13,18 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **Grammar entries are declared once (CR-211, S-634).** In
+  `logos-core/src/plugin/grammars.rs` each embedded query is one
+  `query!("<language>", "<name>")` and each grammar one `entry!(…)`, which build
+  the relative path, the label and the `include_str!` source from the language
+  directory and the query name, instead of a hand-written five-line block per
+  query file per language. Nothing observable changes: `compiled()` returns the
+  same entries in the same order (pinned by a test written first, over labels,
+  paths and the byte length and hash of every manifest and query), and
+  `logos languages --json` is byte-identical.
+
 ## [1.15.2] — 2026-10-09
 
 ### Changed
