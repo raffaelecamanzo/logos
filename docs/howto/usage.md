@@ -722,8 +722,8 @@ same four parts, top to bottom (CR-203, since S-617 on every view):
 
 1. **Title and figure.** The title names the widget, with at most one status
    badge beside it (`PASS`, `FAIL`, `Advisory`, …). Below it, the figure: the key
-   number, always with what it is out of (*2 of 3 members answered*, never *2*
-   alone). When there is nothing to show yet, this line says so in words, in
+   number — and a share always with what it is out of (*2 of 3 members
+   answered*, never *2* alone). When there is nothing to show yet, this line says so in words, in
    place of the figure (*No coverage ingested yet.*).
 2. **Explanation.** What the widget shows, then why it matters — which decision
    it supports or what it protects you from. A term of the project's own
