@@ -56,6 +56,17 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
   });
 });
 
+describe("the Architecture tab (S-612, FR-UI-41)", () => {
+  it("reads 'Architecture' at /architecture — the label names no hidden widget", () => {
+    // The Cycles band and list are hidden through the register, so a label naming
+    // them would point at nothing on the page (NFR-CC-04). The route is unchanged.
+    const item = NAV_ITEMS.find((i) => i.id === "architecture");
+    expect(item?.label).toBe("Architecture");
+    expect(item?.path).toBe("/architecture");
+    expect(ALL_ITEMS.some((i) => /cycles/i.test(i.label))).toBe(false);
+  });
+});
+
 describe("workspaceReplacementPath (S-485, ADR-71)", () => {
   it("lands /chat — and its sub-routes — on the Workspace Chat", () => {
     expect(workspaceReplacementPath("/chat")).toBe("/workspace-chat");

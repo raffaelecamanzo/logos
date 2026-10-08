@@ -30,9 +30,14 @@ vi.mock("./views/index.ts", async (importOriginal) => {
   const real = await importOriginal<typeof import("./views/index.ts")>();
   return {
     ...real,
-    // Override viewForPath to return a lightweight stub component for /
+    // Override viewForPath to return a lightweight stub component for / and
+    // /architecture (the `/dsm` redirect's destination).
     viewForPath: (path: string) =>
-      path === "/" ? () => <div data-testid="dashboard-view" /> : real.viewForPath(path),
+      path === "/"
+        ? () => <div data-testid="dashboard-view" />
+        : path === "/architecture"
+          ? () => <div data-testid="architecture-view" />
+          : real.viewForPath(path),
   };
 });
 
@@ -77,6 +82,30 @@ describe("App /overview redirect (S-194)", () => {
     mockPathname = "/";
     render(<App />);
     await screen.findByTestId("dashboard-view");
+    expect(mockRedirect).not.toHaveBeenCalled();
+  });
+});
+
+// The retired `/dsm` bookmark lands on Architecture (CR-038, frontend-design
+// §Navigation). S-612 relabels the sidebar entry "Architecture"; the route and
+// this redirect are unchanged by it (FR-UI-41).
+describe("App /dsm redirect", () => {
+  it("renders the Architecture view on the first settled frame", async () => {
+    mockPathname = "/dsm";
+    render(<App />);
+    expect(await screen.findByTestId("architecture-view")).toBeInTheDocument();
+  });
+
+  it("calls redirect('/architecture') when rawPathname is /dsm", async () => {
+    mockPathname = "/dsm";
+    render(<App />);
+    await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith("/architecture"));
+  });
+
+  it("does NOT call redirect when pathname is already /architecture", async () => {
+    mockPathname = "/architecture";
+    render(<App />);
+    await screen.findByTestId("architecture-view");
     expect(mockRedirect).not.toHaveBeenCalled();
   });
 });

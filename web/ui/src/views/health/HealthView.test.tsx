@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
 import { Badge, type BadgeTone, Callout, type CalloutTone } from "../../components/index.ts";
+import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { HealthView } from "./HealthView.tsx";
 import realOffenders from "./fixtures/worst-offenders.real.json";
 
@@ -140,8 +141,30 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     const details = document.querySelectorAll("details");
     expect(details.length).toBe(5);
     expect([...details].every((d) => d.hasAttribute("open"))).toBe(true);
-    // The non-gated tier points to Files & Risk (no second copy of that table).
-    expect(screen.getByRole("link", { name: /Files & Risk/i })).toHaveAttribute("href", "/files");
+  });
+
+  // S-612 (FR-UI-41): the Non-gated tier callout is hidden through the register —
+  // a static pointer to a view the sidebar already lists. Files & Risk and
+  // `logos hotspots` still serve the per-file detail it pointed at.
+  it("renders no Non-gated tier callout", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    expect(await screen.findByText("/ 10000")).toBeInTheDocument();
+    expect(screen.queryByText("Non-gated tier")).toBeNull();
+    expect(screen.queryByRole("link", { name: /Files & Risk/i })).toBeNull();
+  });
+
+  it("renders the Non-gated tier callout again when its register entry is removed", async () => {
+    const restore = removeHiddenWidgetEntry("non-gated-tier");
+    try {
+      stub(HEALTH);
+      render(<HealthView />);
+      expect(await screen.findByText("Non-gated tier")).toBeInTheDocument();
+      // It points to Files & Risk (no second copy of that table).
+      expect(screen.getByRole("link", { name: /Files & Risk/i })).toHaveAttribute("href", "/files");
+    } finally {
+      restore();
+    }
   });
 
   it("renders an ADR-21 metric drop-out as a muted n/a, never a fabricated zero", async () => {

@@ -73,9 +73,12 @@ export const NAV_ITEMS: readonly NavItem[] = [
     replacedInWorkspaceBy: "workspace-chat",
   },
   { id: "wiki", label: "Wiki", path: "/wiki", group: "A", scope: "member" },
+  // S-612 (FR-UI-41): "Architecture", not "Architecture / Cycles" — the Cycles
+  // band and list are hidden through the hidden-widget register, and a label
+  // naming them would point at nothing on the page. The route is unchanged.
   {
     id: "architecture",
-    label: "Architecture / Cycles",
+    label: "Architecture",
     path: "/architecture",
     group: "A",
     scope: "member",
@@ -97,10 +100,11 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * cross-service axis, so offering a service map there would be a fabricated
  * surface, and the sidebar must stay byte-for-byte what it has always been.
  *
- * The **Workspace** tab is one tab over three panels (service map /
- * cross-service coverage / cross-service impact): they share one member roster
- * and one binding set, so splitting them across three sidebar items would mean
- * three probes of the same read-models. The two S-428 views beside it are
+ * The **Workspace** tab is one tab over its panels (service map /
+ * cross-service coverage; cross-service impact is hidden through the
+ * hidden-widget register, S-612): they share one member roster and one binding
+ * set, so splitting them across sidebar items would mean one probe of the same
+ * read-models per item. The two S-428 views beside it are
  * separate tabs for the opposite reason — they answer two different questions
  * ("how coupled is this?", "is this current?") over two different read-model
  * pairs, and neither re-reads the other's.

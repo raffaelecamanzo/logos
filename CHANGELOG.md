@@ -13,6 +13,29 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **Four low-insight widgets are hidden from the web UI; their data is still
+  served everywhere else (CR-203, S-612).** The per-arm coverage board (Workspace
+  Dashboard and the Cross-service coverage panel), the Cross-service impact tab
+  (the Workspace tab now has two tabs), the Health page's Non-gated tier callout,
+  and the Architecture page's CYCLES band and cycle list no longer render. The
+  dependency matrix keeps its `↺` back-edge cells, and the sidebar entry reads
+  **Architecture**. `GET /api/v1/workspace/status`, `GET /api/v1/workspace/impact`
+  and `GET /api/v1/architecture`, `logos workspace status`, `logos xservice
+  impact`, `logos dsm`, `logos hotspots` and the MCP tools `workspace_status`,
+  `xservice_impact` and `dsm` answer unchanged. Every hidden widget is listed in
+  one register, `web/ui/src/views/hiddenWidgets.ts`, with its reason and the
+  surfaces that still serve it; deleting an entry brings the widget back. The
+  usage guide lists them under *Hidden widgets*.
+
+### Fixed
+
+- **The retired `/dsm` bookmark redirects to `/architecture` again (S-612).**
+  The documented redirect had been lost when the SPA replaced the server-rendered
+  views, so `/dsm` rendered no view. It is now a client-side redirect beside
+  `/overview`, carrying the query and fragment across.
+
 ## [1.14.0] — 2026-10-08
 
 ### Added

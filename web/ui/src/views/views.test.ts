@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
@@ -34,6 +35,13 @@ describe("VIEW_REGISTRY", () => {
 
   it("does NOT register /overview (that route is retired)", () => {
     expect(VIEW_REGISTRY["/overview"]).toBeUndefined();
+  });
+
+  it("registers the Architecture view at /architecture, and nothing at the retired /dsm (S-612)", () => {
+    // `/dsm` resolves through the shell's redirect to `/architecture`, never as a
+    // second registration of the same view.
+    expect(VIEW_REGISTRY["/architecture"]).toBe(ArchitectureView);
+    expect(VIEW_REGISTRY["/dsm"]).toBeUndefined();
   });
 });
 

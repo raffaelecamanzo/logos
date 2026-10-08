@@ -5,8 +5,9 @@
  *
  * Every tab is a React view mounted in the AppShell content slot keyed off the
  * client pathname (`usePathname` → `viewForPath`), registered in `views/index.ts`.
- * The Dashboard is at `/` (S-194). The retired `/overview` route is silently
- * redirected to `/` (replaceState — no extra history entry, bookmarks survive).
+ * The Dashboard is at `/` (S-194). The retired `/overview` and `/dsm` routes are
+ * silently redirected to `/` and `/architecture` (replaceState — no extra history
+ * entry, bookmarks survive).
  *
  * S-250 (CR-061, FR-UI-29) wraps the shell in the WorkspaceProvider and keys the
  * mounted view on the workspace cache key — the member. Switching members remounts
@@ -48,30 +49,42 @@ import { viewForPath } from "./views/index.ts";
 import { UnknownMember } from "./workspace/UnknownMember.tsx";
 import { useWorkspace, WorkspaceProvider } from "./workspace/WorkspaceContext.tsx";
 
+/** Retired routes and where their bookmarks land (CR-038, CR-051). Only the PATH
+ *  is retired; the query and fragment ride across (see the effect below). */
+const RETIRED_ROUTES: Readonly<Record<string, string>> = {
+  "/overview": "/",
+  "/dsm": "/architecture",
+};
+
+function retiredRouteTarget(pathname: string): string | null {
+  return Object.hasOwn(RETIRED_ROUTES, pathname) ? RETIRED_ROUTES[pathname] : null;
+}
+
 function Shell() {
   const rawPathname = usePathname();
   const { cacheKey, mode, unknownMember } = useWorkspace();
 
-  // Silently migrate the retired /overview bookmark to / without adding a
-  // back-stack entry. Only the PATH is retired, so the query and fragment are
-  // carried across verbatim: this effect fires on mount, before the workspace probe
-  // has answered, so `redirect` has no member scope to re-apply yet (S-426). A bare
-  // `redirect("/")` therefore discarded the whole query — and with it a deep-linked
-  // `?repo=`, which then resolved to the manifest default and painted ITS figures
-  // for a URL that named another member, or bypassed the unknown-member refusal
-  // outright (NFR-RA-05).
+  // Silently migrate a retired bookmark (/overview → /, /dsm → /architecture)
+  // without adding a back-stack entry. Only the PATH is retired, so the query and
+  // fragment are carried across verbatim: this effect fires on mount, before the
+  // workspace probe has answered, so `redirect` has no member scope to re-apply yet
+  // (S-426). A bare `redirect("/")` therefore discarded the whole query — and with
+  // it a deep-linked `?repo=`, which then resolved to the manifest default and
+  // painted ITS figures for a URL that named another member, or bypassed the
+  // unknown-member refusal outright (NFR-RA-05).
+  const retiredTo = retiredRouteTarget(rawPathname);
   useEffect(() => {
-    if (rawPathname === "/overview") {
-      redirect(`/${window.location.search}${window.location.hash}`);
+    if (retiredTo !== null) {
+      redirect(`${retiredTo}${window.location.search}${window.location.hash}`);
     }
-  }, [rawPathname]);
+  }, [retiredTo]);
 
   // S-485 (FR-UI-35, ADR-71): in a workspace the member Chat is not offered — the
   // chat there is the Workspace Chat — so `/chat` (and `/chat?repo=x`) lands on it.
   // Which routes are replaced, and by what, is READ off `nav.ts`, the same
   // declaration the sidebar drops the entry by. Workspace mode only, and only once
   // the probe has said so: single-root and `--standalone` serve `/chat` as always.
-  // The query and fragment ride across verbatim, as for `/overview` above — an
+  // The query and fragment ride across verbatim, as for the retired routes above — an
   // unknown `?repo=` must reach the refusal rather than be dropped on the way.
   const replacement = mode === "workspace" ? workspaceReplacementPath(rawPathname) : null;
   useEffect(() => {
@@ -82,7 +95,7 @@ function Shell() {
 
   // Canonical path: resolve the redirects synchronously so the destination view
   // renders on the first frame (no blank-content flash before the effect fires).
-  const pathname = rawPathname === "/overview" ? "/" : (replacement ?? rawPathname);
+  const pathname = retiredTo ?? replacement ?? rawPathname;
   const View = viewForPath(pathname);
 
   // An APP-scoped view reads the unscoped `workspace/*` fan-out, identical for every

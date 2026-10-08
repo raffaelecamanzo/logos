@@ -704,7 +704,7 @@ shell chrome, so they never enter the tool-usage figures.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
-- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat` (single-root and `--standalone` only — see below), Wiki `/wiki`, Architecture / Cycles `/architecture`.
+- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat` (single-root and `--standalone` only — see below), Wiki `/wiki`, Architecture `/architecture` (the retired `/dsm` bookmark redirects here).
 - **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
@@ -795,7 +795,8 @@ exposes the cross-service surfaces: an **app-level service map** — the ECharts
 graph canvas drawing services as nodes and cross-service bindings as edges,
 including first-class **topic hops** (`A → topic → B`) once broker coupling is
 promoted — a **cross-service coverage dashboard** (bound / ambiguous /
-unbound-with-reasons), and a cross-service impact view. Since logos 1.4.13 every
+unbound-with-reasons), and a cross-service impact answer (served, but hidden from the
+web UI — see [Hidden widgets](#hidden-widgets)). Since logos 1.4.13 every
 service-map link also carries its **provenance**, so an edge admitted from committed
 configuration is never drawn as though it had been observed at the call site: a link with
 any non-literal binding renders a distinct stroke while its relation colour stays the
@@ -936,9 +937,11 @@ at an unknown age (the recorded time is implausibly old — check the store)
 
 Ordinary past ages render exactly as before. These are the same two strings the
 Health page's indeterminate branch above reuses — imported, not restated, so a
-future rewording changes both surfaces or neither. The **Architecture / Cycles**
-view (`/architecture`) leads with the dependency-cycle list, then the DSM matrix;
-its cycle participants deep-link into `/graph?seed=<module>`.
+future rewording changes both surfaces or neither. The **Architecture** view
+(`/architecture`) shows the module dependency matrix (DSM); a back-edge — a
+dependency against layer order, i.e. a cycle participant — is outlined with a `↺`.
+The cycle list that used to lead the page is hidden from the web UI (see
+[Hidden widgets](#hidden-widgets)).
 
 The root `/` view is the **Dashboard**: a verdict-rich roll-up that leads with
 the gate `PASS`/`FAIL` verdict, then a hero row of at-a-glance figures — a banded
@@ -1017,6 +1020,24 @@ id, name, kind, layer, and `file:line`, plus a `total` "showing N of M" count so
 a capped result is honest rather than silently truncated. An unrecognised
 `kind`/`layer`, a no-results filter, and a leaf relational query all return `200`
 with a guidance note — never a `4xx`/`5xx` and never a fabricated hit.
+
+### Hidden widgets
+
+Four widgets are hidden from the web UI **only** (S-612). Their data is still
+served, unchanged, by every other surface, so nothing is lost — each answer is one
+command or request away:
+
+| Hidden widget | Was on | Its data is still available from |
+|---|---|---|
+| Coverage by relation arm | Workspace Dashboard; the Workspace tab's **Cross-service coverage** panel | `GET /api/v1/workspace/status` (`coverage`); `logos workspace status`; MCP `workspace_status` |
+| Cross-service impact | The **Workspace** tab, which now has two tabs: Service map and Cross-service coverage | `GET /api/v1/workspace/impact`; `logos xservice impact`; MCP `xservice_impact` |
+| Non-gated tier callout | Health | **Files & Risk** in the sidebar; `logos hotspots` |
+| Cycles band and cycle list | Architecture — the dependency matrix stays, back-edge cells still outlined `↺`; the sidebar entry reads **Architecture** | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
+
+The routes are unchanged: `/architecture` resolves, and the retired `/dsm` bookmark
+still redirects to it. Each widget is hidden through one register in the SPA source
+(`web/ui/src/views/hiddenWidgets.ts`), which records the same reason and surfaces;
+deleting a widget's entry there brings it back.
 
 ### Interacting with the dashboard
 
@@ -1132,7 +1153,7 @@ focusing, and filtering mutate no store and contact no external origin:
     divides the nodes table from the edges table. Every row traces to a real
     graph-element field — none fabricated ([FR-UI-08](../specs/requirements/FR-UI-08.md),
     [NFR-RA-05](../specs/requirements/NFR-RA-05.md)).
-- **Interactive tables.** Every data table (Rule findings, Architecture / Cycles, Health,
+- **Interactive tables.** Every data table (Rule findings, Health,
   Files & Risk, Coverage, Wiki search/anchors, Graph Decisions & docs, and the
   Graph nodes/edges accessible tables) has sortable column headers — click to sort
   the **full dataset** first, then the page is sliced — and consistent pagination.
@@ -1141,7 +1162,7 @@ focusing, and filtering mutate no store and contact no external origin:
   deliberate exception at **15**, [FR-UI-11](../specs/requirements/FR-UI-11.md),
   [FR-UI-14](../specs/requirements/FR-UI-14.md)). Sort/page state is carried in the
   client route's URL (bookmarkable) and namespaced per table (`<tid>_sort` / `_dir`
-  / `_page`), so two tables on one view (e.g. Architecture / Cycles) never collide. Numeric columns
+  / `_page`), so two tables on one view (e.g. the Graph nodes and edges tables) never collide. Numeric columns
   right-align with their headers. The React view re-renders just the table in place.
 - **Editing config (`/config`) — the one mutating view.** The Config view is a
   React hybrid editor over the two policy files: typed form fields for the

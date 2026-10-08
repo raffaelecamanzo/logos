@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type {
   BridgeEdge,
@@ -8,6 +8,7 @@ import type {
   CrossServiceCoverage,
   XserviceBuildDeps,
 } from "../../api/types.ts";
+import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { scopedMember, setScopedMember } from "../../workspace/scope.ts";
 import {
@@ -648,7 +649,34 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(screen.queryByText(/no cross-service bindings resolved yet/i)).toBeNull();
   });
 
+  // S-612 (FR-UI-41): the Cross-service impact tab is hidden through the
+  // register, so the Workspace tab offers exactly the other two.
+  it("renders exactly two tabs: Service map and Cross-service coverage", async () => {
+    stubApi({ coverage: COVERAGE, providers: [BINDING] });
+    mount();
+    await screen.findByRole("tab", { name: /service map/i });
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "Service map",
+      "Cross-service coverage",
+    ]);
+  });
+
+  // S-612 (FR-UI-41): the per-arm board is hidden through the register; the
+  // headline, spec conformance and by-intake boards stay.
+  it("renders no per-arm board on the coverage tab", async () => {
+    stubApi({ coverage: COVERAGE, providers: [BINDING] });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+    expect(screen.getByRole("heading", { name: "Coverage by intake" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Coverage by relation arm" })).toBeNull();
+    expect(screen.queryByRole("table", { name: /by relation arm/i })).toBeNull();
+    expect(screen.queryByText("Target read from")).toBeNull();
+  });
+
+  // The per-arm tests below run with the board's register entry removed: they
+  // are what proves the board returns intact when the entry goes (S-612).
   it("shows the per-arm board whose columns RECONCILE with the headline above them", async () => {
+  onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
     stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
@@ -809,6 +837,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
   // asserted to render the identical board — the widened payload informs the
   // per-reference detail, it does not move a count on this screen.
   it("renders the identical board from rows carrying the CR-118 provider fields", async () => {
+  onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
     const widened: CrossServiceCoverage = {
       ...COVERAGE,
       references: COVERAGE.references.map((ref) =>
@@ -858,6 +887,14 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
 });
 
 describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
+  // The tab is hidden through the register (S-612, FR-UI-41). Every test here
+  // removes its entry, so this block is what proves the tab returns intact.
+  let restore: () => void;
+  beforeEach(() => {
+    restore = removeHiddenWidgetEntry("cross-service-impact");
+  });
+  afterEach(() => restore());
+
   /** An impact answer: one healthy seed member, one degraded, no cross-service reach. */
   const IMPACT_DEGRADED = {
     query: "get_user",
@@ -1311,6 +1348,7 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
   });
 
   it("names where each arm's targets were read from, so an admitted value is not shown as an observed one", async () => {
+  onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
     // ADR-64 states its boundary as a condition on the SURFACES: "an admitted
     // value must never be indistinguishable from an observed one". This asserts
     // the rendered column, not the model — a label function with no caller
@@ -1603,6 +1641,10 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
      S-419 `service-map.literal-only.html` recording above, which this story
      leaves passing. */
   it("renders a manifest-less workspace's coverage tab identically to the DOM recorded before the build layer", async () => {
+    // The recording also predates S-612 and holds the per-arm board, so the board
+    // is restored for this comparison: what it pins is the build layer's absence,
+    // not the hidden-widget register.
+  onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
     stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
