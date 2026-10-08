@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.15.1] — 2026-10-08
+
 ### Changed
 
 - **Widgets drop the "What you can do" line; an absent figure names the command
