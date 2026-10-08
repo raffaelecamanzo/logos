@@ -31,3 +31,9 @@ export const actWithoutWhere: RowAction = { kind: "act", text: "Do it." };
 
 // @ts-expect-error — `where` exists only on an `act` row action.
 export const noneWithWhere: RowAction = { kind: "none", where: "command" };
+
+// @ts-expect-error — `where` is one of the row action's kinds of place.
+export const unknownWhere: RowAction = { kind: "act", where: "somewhere", text: "Do it." };
+
+// @ts-expect-error — "documentation" left with the widget action line (CR-206); no row action names it.
+export const documentationWhere: RowAction = { kind: "act", where: "documentation", text: "Do it." };
