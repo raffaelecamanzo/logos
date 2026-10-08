@@ -65,9 +65,14 @@ test("an absence is a left-aligned statement in the figure row, not a centred em
   const absence = stack.locator("[data-widget-absence]");
   await expect(absence).toHaveText("No coverage ingested yet.");
   await expect(absence).toHaveCSS("text-align", /^(start|left)$/);
-  // The statement sits IN the figure row, and no centred empty state is rendered.
+  // The statement sits IN the figure row, starting at the row's left edge: a
+  // centred row (`justify-content: center` on the flex row) would move it.
   await expect(stack.locator('[data-widget-part="figure"] > [data-widget-absence]')).toHaveCount(1);
-  await expect(absence).toHaveCSS("justify-content", "normal");
+  const [row, statement] = await Promise.all([
+    stack.locator('[data-widget-part="figure"]:has(> [data-widget-absence])').boundingBox(),
+    absence.boundingBox(),
+  ]);
+  expect(statement!.x).toBeCloseTo(row!.x, 0);
 });
 
 test("the layout check catches one widget whose margin changed", async ({ page }) => {
