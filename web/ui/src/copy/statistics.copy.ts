@@ -13,7 +13,7 @@ export interface ValueState {
 
 export const estimatedValue: CopyEntry<ValueState> = {
   what: "Tokens and ad-hoc file reads that navigating by the code graph is estimated to have saved over the selected window, with the calls and their latency.",
-  why: "It shows whether Logos pays for itself here. It is an estimate, valued at a fixed number of tokens per avoided read, not a measured figure.",
+  why: "It shows whether Logos pays for itself here — an estimate, valued at a fixed number of tokens per avoided read, not a measured figure.",
   action: ({ recorded }) =>
     recorded
       ? noAction
@@ -21,7 +21,7 @@ export const estimatedValue: CopyEntry<ValueState> = {
           kind: "act",
           where: "command",
           target: "logos stats",
-          text: "Use Logos from your agent or the command line; this view fills in as calls are recorded. The command shows what has been recorded so far.",
+          text: "Use Logos from your agent or the command line, and check with the command what has been recorded so far; this view fills in as calls are recorded.",
         },
 };
 
