@@ -861,8 +861,7 @@ the build card) with the two server lines — declared contract pairs over the s
 documents read, and bound calls over the no-provider REST rows with their
 refusals. A bound call **stays under *No provider here***: the binding is
 reported beside its row, and no runtime figure counts it. A workspace with no
-vendored spec and no `kind` shows no declared edge or legend section, and its
-**Declared contracts and named externals** card states that nothing is declared.
+vendored spec and no `kind` shows no declared edge, legend section or card.
 
 In a plain single repo
 (no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;

@@ -235,8 +235,6 @@ export const COVERAGE_TEXT = {
     "No calls were captured in this workspace — honest absence, not a resolution failure. The matched count says nothing about outbound call sites either way.",
   capturedResolves: (resolved: number, measured: number) =>
     `${resolved} of ${measured} captured call ${plural(measured, "site", "sites")} resolve.`,
-  /** The declared relation is absent: no member vendors a spec. */
-  declaredAbsent: "No member vendors another service's API document, so nothing is declared here.",
   /** The build relation is absent: no member holds a build manifest. */
   buildAbsent: "No member holds a Maven or Gradle build manifest, so no build dependency was read.",
   /** A bound external call stays in the outside-the-workspace count. */

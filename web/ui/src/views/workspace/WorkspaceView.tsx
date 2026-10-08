@@ -32,12 +32,13 @@
  * document, its identity score or external, and every call bound to the
  * external with its matched operation and base-path source. The coverage tab
  * renders both server headlines in their own widget. A declared contract is never
- * an observed call (BR-57). A workspace with no vendored spec draws no declared
- * layer on the map; since S-613 the coverage tab's widget states that absence.
+ * an observed call (BR-57), and a workspace with no vendored spec draws no
+ * declared layer and renders no declared widget (FR-UI-29 AC8, kept by CR-203).
  *
- * The coverage tab (S-613, CR-203 §3.2 D items 4 and 10): its five widgets —
- * the three coverage boards, Declared contracts and Build dependencies — sit in
- * one `WidgetStack`, with their words in `copy/coverage.copy.ts`.
+ * The coverage tab (S-613, CR-203 §3.2 D items 4 and 10): its widgets — the
+ * three coverage boards, Declared contracts (when a member vendors a spec) and
+ * Build dependencies — sit in one `WidgetStack`, with their words in
+ * `copy/coverage.copy.ts`.
  *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
@@ -686,18 +687,11 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
 /** The declared relations on the coverage tab (S-461, frontend-design §4.17;
  *  CR-203 §3.2 D item 10) — their own widget after every runtime board,
  *  rendering the server's composed lines (BR-51) and never a figure of its own.
- *  Absent both, the widget states the absence. */
+ *  Absent both, no widget: FR-UI-29's CR-203 amendment keeps AC8's condition,
+ *  "no declared widget without a vendored spec". */
 function DeclaredRelationsCard({ dashboard }: { dashboard: CoverageDashboard }) {
   const { declaredContracts, boundExternal } = dashboard;
-  if (!declaredContracts && !boundExternal) {
-    return (
-      <Widget
-        title="Declared contracts and named externals"
-        copy={declaredRelations}
-        absence={COVERAGE_TEXT.declaredAbsent}
-      />
-    );
-  }
+  if (!declaredContracts && !boundExternal) return null;
   return (
     <Widget
       title="Declared contracts and named externals"

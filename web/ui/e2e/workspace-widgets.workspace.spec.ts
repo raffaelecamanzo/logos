@@ -55,23 +55,24 @@ test("Workspace Health stacks its cards at one gap, and Workspace rules is laid 
   expect(m.bodySizes).toHaveLength(1);
 });
 
-test("the Cross-service coverage tab stacks all five widgets at one gap, the last three included", async ({ page }) => {
+test("the Cross-service coverage tab stacks its widgets at one gap, the last three included", async ({ page }) => {
   await page.goto("/workspace");
   await page.getByRole("tab", { name: "Cross-service coverage" }).click();
   const panel = page.getByRole("tabpanel");
   const stack = await stackWith(page, panel, "Build dependencies");
+  // The fixture vendors no spec, so Declared contracts is not rendered (FR-UI-29
+  // AC8); Build dependencies states its absence.
   expect(await widgetTitles(stack)).toEqual([
     "Resolved cross-service edges",
     "Spec conformance (declared endpoints vs controllers)",
     "Coverage by intake",
-    "Declared contracts and named externals",
     "Build dependencies",
   ]);
   const m = await expectWidgetStackLayout(stack);
-  expect(m.gaps).toHaveLength(4);
-  // Named, because these are the two gaps CR-203 §3.1 item 10 found at zero:
-  // Coverage by intake → Declared contracts → Build dependencies.
-  const [, , intakeToDeclared, declaredToBuild] = m.gaps;
-  expect(intakeToDeclared, "Coverage by intake → Declared contracts").toBeCloseTo(m.rowGap, 1);
-  expect(declaredToBuild, "Declared contracts → Build dependencies").toBeCloseTo(m.rowGap, 1);
+  expect(m.gaps).toHaveLength(3);
+  // The last three widgets, named: Build dependencies used to sit outside the
+  // coverage boards' wrapper with no gap at all (CR-203 §3.1 item 10).
+  const [, specToIntake, intakeToBuild] = m.gaps;
+  expect(specToIntake, "Spec conformance → Coverage by intake").toBeCloseTo(m.rowGap, 1);
+  expect(intakeToBuild, "Coverage by intake → Build dependencies").toBeCloseTo(m.rowGap, 1);
 });

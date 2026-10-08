@@ -1885,7 +1885,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     ]);
   });
 
-  it("renders no declared class, legend section or node over a workspace that declares nothing, and states the absence on the coverage tab", async () => {
+  it("renders no declared class, legend section, node or widget over a workspace that declares nothing", async () => {
     stubApi({ providers: [BINDING] });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas-edges")).toHaveTextContent("1"));
@@ -1894,16 +1894,16 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     expect(screen.queryByText("Declared contracts", { selector: "span" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Declared contracts" })).toBeNull();
     await userEvent.click(screen.getByRole("tab", { name: "Cross-service coverage" }));
-    // The coverage tab's widget states the absence rather than vanishing (FR-UI-40).
-    const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
-    expect(card.querySelector("[data-widget-absence]")?.textContent).toBe(COVERAGE_TEXT.declaredAbsent);
-    expect(card.querySelector('[data-widget-part="evidence"]')).toBeNull();
+    // FR-UI-29 AC8, kept by CR-203: no declared widget without a vendored spec.
+    expect(screen.queryByRole("heading", { name: "Declared contracts and named externals" })).toBeNull();
   });
 });
 
 // ── S-613: the Cross-service coverage tab (CR-203 §3.2 D items 4 and 10) ───────
 
-/** The coverage tab's widgets, top to bottom. The per-arm board is hidden (S-612). */
+/** The coverage tab's widgets, top to bottom. The per-arm board is hidden (S-612),
+ *  and Declared contracts renders only when a member vendors a spec (FR-UI-29
+ *  AC8, kept by CR-203). */
 const COVERAGE_TAB_WIDGETS = [
   "Resolved cross-service edges",
   "Spec conformance (declared endpoints vs controllers)",
@@ -1911,9 +1911,10 @@ const COVERAGE_TAB_WIDGETS = [
   "Declared contracts and named externals",
   "Build dependencies",
 ];
+const WITHOUT_DECLARED = COVERAGE_TAB_WIDGETS.filter((t) => !t.startsWith("Declared"));
 
-/** The four states (S-613 AC1), as what `stubApi` serves. The relation widgets
- *  are present in the healthy and partial states and absent in the empty one. */
+/** The four states (S-613 AC1), as what `stubApi` serves. The healthy and
+ *  partial states vendor a spec; the empty and degraded ones do not. */
 const COVERAGE_TAB_STATES: Record<
   "healthy" | "partial coverage" | "nothing measured" | "degraded member",
   NonNullable<Parameters<typeof stubApi>[0]>
@@ -1950,7 +1951,9 @@ describe("WorkspaceView — the coverage tab explains itself, in one stack (S-61
     async (_state, opts) => {
       const panel = await openCoverageTab(opts);
       const widgets = expectOneWidgetStack(panel);
-      expect(widgets.map(widgetTitle)).toEqual(COVERAGE_TAB_WIDGETS);
+      expect(widgets.map(widgetTitle)).toEqual(
+        opts.coverage?.declared_contracts ? COVERAGE_TAB_WIDGETS : WITHOUT_DECLARED,
+      );
       for (const w of widgets) expectWidgetCopy(w);
     },
   );

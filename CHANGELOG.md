@@ -77,9 +77,10 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
     checked and names `[[governance.boundaries]]` in `logos.workspace.toml`.
   - **Spec conformance**, **Coverage by intake** (with *intake* glossed),
     **Declared contracts and named externals** and **Build dependencies** take
-    the same four parts. A workspace with no vendored spec or no build manifest
-    now sees that absence stated in its widget, where the widget used to be
-    left out.
+    the same four parts. A workspace with no build manifest now sees that
+    absence stated in the Build dependencies widget, where the widget used to
+    be left out; Declared contracts still renders only when a member vendors a
+    spec.
 
   Each workspace view stacks its widgets at one spacing, so the coverage tab's
   last three widgets no longer touch. A Playwright spec checks the equal gaps,
