@@ -2334,7 +2334,24 @@ describe("WorkspaceView — the service map's widgets explain themselves, in one
     expectWidgetCopy(mapWidget("Cross-service bindings"), crossServiceBindings);
     expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence, { define: 0, replace: 0 });
     expectWidgetCopy(mapWidget("Declared contracts"), declaredContracts, { documents: 4 });
+    // The figure counts the widget's own tables, written out: 4 drawn links,
+    // 4 documents, 2 bound calls.
+    expect(figureOf(mapWidget("Declared contracts"))).toBe(
+      "4 declared contracts, from 4 documents · 2 calls matched to a named external",
+    );
     expectWidgetCopy(mapWidget("Cross-context model hint"), crossContextHint);
+  });
+
+  it("states no count of matched calls when no drawn link names an external — no question was asked", async () => {
+    const memberOnly = {
+      ...DECLARED_CONTRACTS,
+      contracts: DECLARED_CONTRACTS.contracts.filter((c) => c.target.kind === "member"),
+      externals: [],
+    };
+    stubApi({ providers: [BINDING], coverage: { ...EMPTY_COVERAGE, declared_contracts: memberOnly } });
+    mount();
+    const declared = (await screen.findByRole("heading", { name: "Declared contracts" })).closest("section")!;
+    expect(figureOf(declared)).toBe("1 declared contract, from 1 document");
   });
 
   it("the hint names the member's build manifest as where, and reads as a review hint, never a failure", async () => {

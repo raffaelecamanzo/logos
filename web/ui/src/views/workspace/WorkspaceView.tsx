@@ -693,6 +693,9 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
     link.contracts.map((contract) => ({ link, contract })),
   );
   const calls: BoundCallRow[] = layer.links.flatMap((link) => link.bound.map((call) => ({ link, call })));
+  // Calls are matched only against a named external; with none drawn, the
+  // figure states no count of them (the twin's "Calls bound" reads "—").
+  const anyExternal = layer.links.some((l) => l.to.kind === "external");
   return (
     <Widget
       title="Declared contracts"
@@ -701,7 +704,7 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
       figure={
         <div className={styles.figure}>
           <p className={styles.statement}>
-            {SERVICE_MAP_TEXT.declaredFigure(layer.links.length, documents.length, calls.length)}
+            {SERVICE_MAP_TEXT.declaredFigure(layer.links.length, documents.length, anyExternal ? calls.length : null)}
           </p>
         </div>
       }

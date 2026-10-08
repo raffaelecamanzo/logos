@@ -169,9 +169,14 @@ export const SERVICE_MAP_TEXT = {
   /** The one `none` an evidence row has: the value arrives at runtime. */
   arrivesAtRuntime:
     "Nothing to fix in the repository: the value arrives at runtime, from an environment variable with no committed default.",
-  /** The declared figure, from the widget's own tables. */
-  declaredFigure: (links: number, documents: number, calls: number) =>
-    `${links} declared ${plural(links, "contract", "contracts")}, from ${documents} ${plural(documents, "document", "documents")} · ${calls} ${plural(calls, "call", "calls")} matched to a named external`,
+  /** The declared figure, from the widget's own tables. `calls` is `null`
+   *  when no drawn link names an external: then no call was matched against
+   *  one, and "0 calls matched" would state an answer to a question never
+   *  asked (the contracts table's "—", NFR-CC-04). */
+  declaredFigure: (links: number, documents: number, calls: number | null) =>
+    `${links} declared ${plural(links, "contract", "contracts")}, from ${documents} ${plural(documents, "document", "documents")}${
+      calls === null ? "" : ` · ${calls} ${plural(calls, "call", "calls")} matched to a named external`
+    }`,
   /** A relation that names externals and declares nothing. */
   noDeclaredLinks:
     "No member on this map declares a contract. The externals below are still named: each is held by a declared mock member standing in for it.",

@@ -51,7 +51,7 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     bindingsShown: [[0, 1], [1, 1], [3, 12]],
     noBindings: [[0], [1], [3]],
     evidenceShown: [[0, 1], [1, 1], [2, 5]],
-    declaredFigure: [[0, 0, 0], [1, 1, 1], [3, 4, 2]],
+    declaredFigure: [[0, 0, 0], [1, 1, 1], [3, 4, 2], [1, 1, null]],
     hintFigure: [[1], [2]],
   },
 };
@@ -119,6 +119,11 @@ describe("workspace catalogue sentences", () => {
     // back from the catalogue, so only a literal here pins it.
     expect(SERVICE_MAP_TEXT.bindingsShown(3, 4)).toBe("3 of 4 bindings shown");
     expect(SERVICE_MAP_TEXT.bindingsShown(0, 1)).toBe("0 of 1 binding shown");
+    expect(SERVICE_MAP_TEXT.declaredFigure(4, 4, 2)).toBe(
+      "4 declared contracts, from 4 documents · 2 calls matched to a named external",
+    );
+    // No external drawn: no count of calls matched against one.
+    expect(SERVICE_MAP_TEXT.declaredFigure(1, 1, null)).toBe("1 declared contract, from 1 document");
     expect(SERVICE_MAP_TEXT.evidenceShown(0, 2)).toBe("Shown: 0 of 2 bindings not observed at a call site");
     expect(SERVICE_MAP_TEXT.evidenceShown(1, 1)).toBe("Shown: 1 of 1 binding not observed at a call site");
   });
