@@ -106,7 +106,7 @@
 //! change never runs this logos-core suite.
 //!
 //! **Addendum, 2026-10-08 (Sprint 93 HF-1, [CR-206]) — 0 production rows,
-//! −5 production occurrences, −11 test-scope occurrences; no correction.** The
+//! −5 production occurrences, −10 test-scope occurrences; no correction.** The
 //! widget frame dropped its action line, so `copy/health.copy.ts` lost
 //! `readingAction`: one `case` label each of `unindexed`, `unscanned`,
 //! `no-production-scope`, `moved-past` and `indeterminate`. Every row keeps its
@@ -114,9 +114,11 @@
 //! (`READING_ABSENCE`, `staleNote`) rather than in a second switch, and the arms
 //! that name none still name none. The view tests lost the state arguments that
 //! fed the removed action (`HealthView.test.tsx` −9, its `moved-past` row gone)
-//! and two Files & Risk action tests (`FilesView.test.tsx` −2 `n/a`). The census
-//! reads **84 production occurrences over 44 production rows**, beside **134** in
-//! test scope; the removal is [`HF1_REMOVAL`]. Run by the hotfix itself, since
+//! and two Files & Risk action tests (`FilesView.test.tsx` −2 `n/a`); the
+//! hotfix's review added one `indeterminate` back, naming the stale FAIL that must
+//! not name its lowest dimension (`HealthView.test.tsx` +1). The census reads **84
+//! production occurrences over 44 production rows**, beside **135** in test
+//! scope; the net removal is [`HF1_REMOVAL`]. Run by the hotfix itself, since
 //! the session's `fast` tier does not reach this suite for a web-only change.
 //!
 //! [CR-203]: ../../docs/requests/CR-203-every-web-widget-explains-itself.md
@@ -861,8 +863,8 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
         "web/ui/src/views/health/HealthView.test.tsx",
         "indeterminate",
         0,
-        3,
-        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -2354,12 +2356,13 @@ const SPRINT93_DELTA: (usize, usize, usize) = (2, 2, 24);
 /// What Sprint 93's hotfix HF-1 ([CR-206]) REMOVED from the census on
 /// 2026-10-08: `(production rows, production occurrences, test occurrences)` —
 /// `readingAction`'s five `case` labels in `copy/health.copy.ts` (no row left,
-/// each still counted once in its absence or stale sentence), and eleven
-/// test-scope occurrences that fed or asserted the removed action line. A
-/// removal, so it is ADDED back to reach the earlier readings.
+/// each still counted once in its absence or stale sentence), and a net ten
+/// test-scope occurrences: eleven that fed or asserted the removed action line,
+/// less the one `indeterminate` the hotfix's review added. A removal, so it is
+/// ADDED back to reach the earlier readings.
 ///
 /// [CR-206]: ../../docs/requests/CR-206-the-widget-frame-drops-the-action-line.md
-const HF1_REMOVAL: (usize, usize, usize) = (0, 5, 11);
+const HF1_REMOVAL: (usize, usize, usize) = (0, 5, 10);
 
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
@@ -2368,9 +2371,9 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (84, 44, 134),
+        (84, 44, 135),
         "the census as it stands after Sprint 93 HF-1's addendum, 2026-10-08: 84 \
-         production occurrences over 44 production rows, beside 134 test-scope \
+         production occurrences over 44 production rows, beside 135 test-scope \
          occurrences"
     );
     // The reading before HF-1: Sprint 93's addendum, 2026-10-08.
