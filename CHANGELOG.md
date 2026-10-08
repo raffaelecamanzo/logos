@@ -33,6 +33,13 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   remedies. The per-row action columns of **Members** and **Binding evidence**
   are unchanged.
 
+### Fixed
+
+- **Builds clean on Rust 1.99.** The agent call budget charges through
+  `AtomicUsize::try_update`, the 1.99 name for `fetch_update`, so
+  `cargo clippy -- -D warnings` passes on the current stable toolchain again
+  (CI had been failing on the deprecation since 1.8.3). Behaviour is unchanged.
+
 ## [1.15.0] — 2026-10-08
 
 ### Added
