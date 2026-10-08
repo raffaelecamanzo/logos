@@ -22,6 +22,8 @@ import type {
 } from "../../api/types.ts";
 import { WorkspaceProvider, useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
+import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { WorkspaceConfigView } from "./WorkspaceConfigView.tsx";
 
 const ROSTER: WorkspaceRoster = { workspace: "shop", default: "api", members: ["api", "web"] };
@@ -1153,3 +1155,14 @@ describe("a tier save never silently clobbers (S-451 T2, FR-UI-38 AC3)", () => {
   });
 });
 
+
+// ── S-617 (CR-203, FR-UI-39/40): each group is a registered tool panel ───────
+
+describe("the workspace Config groups render as registered tool panels in one stack (S-617)", () => {
+  it("the manifest group and the chat tier group, each under the workspaceConfigGroup key", async () => {
+    await mountedTier();
+    const panels = expectOneWidgetStack(document.body);
+    expect(panels.map(widgetTitle)).toEqual(["Workspace manifest", "Workspace chat policy and credential"]);
+    for (const panel of panels) expectToolPanel(panel, "workspaceConfigGroup");
+  });
+});

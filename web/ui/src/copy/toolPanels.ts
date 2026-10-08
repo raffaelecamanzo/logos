@@ -108,6 +108,11 @@ export const TOOL_PANELS = {
     what: "The callers that reach the symbol you traced, in one service.",
     reason: "The answer to a query form (the Cross-service impact tab, hidden from the web UI): it shows nothing until a symbol is traced.",
   },
+  impactUnresolved: {
+    name: "Unresolved calls of an impact trace",
+    what: "The outbound calls the trace could not follow, because they did not resolve to another service.",
+    reason: "Part of the Cross-service impact answer (hidden from the web UI): the server's own line about what the trace could not see.",
+  },
 } as const satisfies Record<string, ToolPanel>;
 
 export type ToolPanelKey = keyof typeof TOOL_PANELS;

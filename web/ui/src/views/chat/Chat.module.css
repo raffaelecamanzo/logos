@@ -31,10 +31,10 @@
   gap: var(--space-4);
 }
 
+/* The configured chat is a WidgetStack (S-617): the stack owns its column and
+   its one gap; this only lets it shrink inside the shell. */
 .chat {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
+  min-width: 0;
 }
 
 /* The Workspace Chat's heading (S-485, frontend-design §4.22): it names its scope in

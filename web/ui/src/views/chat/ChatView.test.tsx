@@ -65,6 +65,7 @@ import cardStyles from "../../components/Card.module.css";
 import { useWorkspace, WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import { stubApi } from "../../workspace/testFixtures.ts";
+import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
 
 const mockFetchConfig = vi.mocked(fetchChatConfig);
 const mockStreamTurn = vi.mocked(streamChatTurn);
@@ -2392,5 +2393,20 @@ describe("scope-keyed client state (S-485, FR-UI-26, NFR-SE-07)", () => {
     );
     expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Your message" })).toBeDisabled();
+  });
+});
+
+// ── S-617 (CR-203, FR-UI-39/40): the conversation is a registered tool panel ──
+
+describe("the chat renders its conversation as a registered tool panel (S-617)", () => {
+  it("one stack — the lead callout and the panes — with the conversation under chatConversation", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const { container } = render(<ChatView />);
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section")!;
+    const stacks = container.querySelectorAll("[data-widget-stack]");
+    expect(stacks).toHaveLength(1);
+    expect(banner.parentElement).toBe(stacks[0]);
+    const panel = screen.getByRole("heading", { name: "Conversation" }).closest("section")!;
+    expectToolPanel(panel, "chatConversation");
   });
 });

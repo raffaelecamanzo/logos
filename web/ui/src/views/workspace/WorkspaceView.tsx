@@ -91,7 +91,6 @@ import {
   Badge,
   Button,
   Callout,
-  Card,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
@@ -99,6 +98,7 @@ import {
   LoadingState,
   SelectField,
   Tabs,
+  Term,
   TextField,
   Widget,
   WidgetStack,
@@ -1304,7 +1304,7 @@ function ServiceMap({
       {declared && <DeclaredContractsCard layer={declared} join={coverage.bound_external} />}
 
       {layer && layer.links.length > 0 && (
-        <Card title="Build dependencies">
+        <Widget panel="buildLayerTable" title="Build dependencies">
           <DataTable
             caption="Build dependencies (the accessible twin of the build layer)"
             columns={BUILD_LINK_COLUMNS}
@@ -1312,7 +1312,7 @@ function ServiceMap({
             rowKey={(l) => `${l.from}->${l.to}`}
             pageSize={DEFAULT_TABLE_PAGE_SIZE}
           />
-        </Card>
+        </Widget>
       )}
 
       {deps && <CrossContextHintCard hints={deps.cross_context} />}
@@ -1344,7 +1344,7 @@ const IMPACT_COLUMNS: Column<ImpactEntry>[] = [
 function ImpactTable({ label, impact }: { label: string; impact: ImpactResult }) {
   const rows = impact.upstream;
   return (
-    <Card title={label}>
+    <Widget panel="impactResult" title={label}>
       {impact.resolved === null ? (
         <p className="muted">
           <span className="mono">{impact.query}</span> resolves to no symbol here.
@@ -1360,7 +1360,7 @@ function ImpactTable({ label, impact }: { label: string; impact: ImpactResult })
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
       )}
-    </Card>
+    </Widget>
   );
 }
 
@@ -1412,9 +1412,9 @@ function ImpactPanel() {
                   m.result ? (
                     <ImpactTable key={m.member} label={`${m.member} (seed)`} impact={m.result} />
                   ) : (
-                    <Card key={m.member} title={`${m.member} (seed)`}>
+                    <Widget key={m.member} panel="impactResult" title={`${m.member} (seed)`}>
                       <p className="muted">Degraded: {m.error ?? "this member could not be read"}.</p>
-                    </Card>
+                    </Widget>
                   ),
                 )}
                 {/* CR-125/BR-53: the residue rides EVERY reachability answer,
@@ -1424,9 +1424,16 @@ function ImpactPanel() {
                     is the payload's own composed line, so this view cannot state
                     a figure the API did not compute. */}
                 {model.unresolved_egress && (
-                  <Card title="Unresolved egress">
+                  <Widget
+                    panel="impactUnresolved"
+                    title={
+                      <>
+                        Unresolved <Term term="egress">egress</Term>
+                      </>
+                    }
+                  >
                     <p className="muted">{model.unresolved_egress.summary}</p>
-                  </Card>
+                  </Widget>
                 )}
                 {model.cross_service.length === 0 ? (
                   model.unresolved_egress ? null : (

@@ -14,7 +14,7 @@ import { useState } from "react";
 
 import { runQuery } from "../../api/index.ts";
 import type { QueryHit, QueryResponse } from "../../api/types.ts";
-import { Button, Card, DataTable, SelectField, TextField, type Column } from "../../components/index.ts";
+import { Button, DataTable, SelectField, TextField, Widget, type Column } from "../../components/index.ts";
 import styles from "./GraphView.module.css";
 
 /** S-197: graph query results use 15 rows/page (FR-UI-14), distinct from the shared 20. */
@@ -63,7 +63,7 @@ export function GraphQuery({ onSelect }: GraphQueryProps) {
   };
 
   return (
-    <Card title="Query the whole graph">
+    <Widget panel="graphQuery" title="Query the whole graph">
       <div className={styles.query} onKeyDown={onKeyDown}>
         <TextField
           label="Search"
@@ -118,7 +118,7 @@ export function GraphQuery({ onSelect }: GraphQueryProps) {
         {error && <p className={styles.notice}>{error}</p>}
         {results && <QueryResults results={results} onSelect={onSelect} />}
       </div>
-    </Card>
+    </Widget>
   );
 }
 

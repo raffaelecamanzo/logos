@@ -28,7 +28,6 @@
 
 import {
   Badge,
-  Card,
   CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
@@ -40,6 +39,7 @@ import {
 import type { BridgeIntake, ClassificationCounts, DegradedRollup } from "../../api/types.ts";
 import {
   COVERAGE_TEXT,
+  coverageByArm,
   coverageByIntake,
   resolvedEdges,
   specConformance,
@@ -538,7 +538,14 @@ export function CoveragePanel({
           data stays on `GET /api/v1/workspace/status`, `logos workspace status`
           and MCP `workspace_status`. */}
       {!isWidgetHidden("coverage-by-relation-arm") && !dashboard.isEmpty && (
-        <Card title="Coverage by relation arm">
+        <Widget
+          title={
+            <>
+              Coverage by relation <Term term="arm">arm</Term>
+            </>
+          }
+          copy={coverageByArm}
+        >
           <DataTable
             caption="Cross-service coverage by relation arm"
             columns={ARM_COLUMNS}
@@ -546,7 +553,7 @@ export function CoveragePanel({
             rowKey={(a) => a.relation}
             pageSize={DEFAULT_TABLE_PAGE_SIZE}
           />
-        </Card>
+        </Widget>
       )}
     </>
   );

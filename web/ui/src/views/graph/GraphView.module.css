@@ -6,12 +6,6 @@
  * and reads its hues from graphModel).
  */
 
-.view {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-
 .canvasArea {
   display: flex;
   flex-direction: column;

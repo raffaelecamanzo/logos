@@ -25,7 +25,16 @@ import {
 import { fetchWikiConfig } from "../../api/wikiGenClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type { ConfigReadModel, WikiHit, WikiNav, WikiPageView } from "../../api/types.ts";
-import { Badge, Button, Callout, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, EmptyState, TextField } from "../../components/index.ts";
+import {
+  Badge,
+  Button,
+  Callout,
+  DataTable,
+  DEFAULT_TABLE_PAGE_SIZE,
+  TextField,
+  Widget,
+  WidgetStack,
+} from "../../components/index.ts";
 import type { BadgeTone, Column } from "../../components/index.ts";
 import { navigate, useNavigationState, usePathname } from "../../router.tsx";
 import { renderMermaidIn, unadoptMermaidStyleFor } from "./mermaid.ts";
@@ -273,7 +282,7 @@ function WikiLanding({ nav, refreshKey }: { nav: WikiNav; refreshKey: number }) 
   const status = useApiResource(() => fetchWikiStatus(), [refreshKey]);
   const firstSummary = nav.tiers[0]?.items[0];
   return (
-    <div className={styles.content}>
+    <WidgetStack className={styles.content}>
       <AsyncResource resource={status} loadingLabel="Loading the wiki…">
         {(s) => {
           const summary = freshnessSummary(s);
@@ -285,7 +294,7 @@ function WikiLanding({ nav, refreshKey }: { nav: WikiNav; refreshKey: number }) 
                 </span>
               </Callout>
               {firstSummary && (
-                <Card title="Start here">
+                <Widget panel="wikiStartHere" title="Start here">
                   <p className={styles.landingIntro}>
                     New to this codebase? Start with the <strong>Summary</strong> —
                     synthesized prose that orients you before you dive into the design
@@ -300,9 +309,9 @@ function WikiLanding({ nav, refreshKey }: { nav: WikiNav; refreshKey: number }) 
                       Begin with {firstSummary.label} →
                     </a>
                   </p>
-                </Card>
+                </Widget>
               )}
-              <Card title="Welcome to the wiki">
+              <Widget panel="wikiWelcome" title="Welcome to the wiki">
                 <p className={styles.landingIntro}>
                   The wiki is a per-page documentation site. Browse it from the menu:
                   the <strong>Summary</strong> (synthesized prose),{" "}
@@ -312,13 +321,15 @@ function WikiLanding({ nav, refreshKey }: { nav: WikiNav; refreshKey: number }) 
                   acceptance tests), and a top-level <strong>Search</strong> link. Agent
                   prose carries its generated-content marker.
                 </p>
-                <p className={styles.landingMeta}>{s.page_count} agent page(s) stored.</p>
-              </Card>
+                <p className={styles.landingMeta}>
+                  {s.page_count} agent {s.page_count === 1 ? "page" : "pages"} stored.
+                </p>
+              </Widget>
             </>
           );
         }}
       </AsyncResource>
-    </div>
+    </WidgetStack>
   );
 }
 
@@ -341,8 +352,8 @@ function WikiSearch() {
   const term = useDebounced(query.trim(), 200);
   const results = useApiResource<WikiHit[]>(() => searchWiki(term), [term]);
   return (
-    <div className={styles.content}>
-      <Card title="Search">
+    <WidgetStack className={styles.content}>
+      <Widget panel="wikiSearch" title="Search">
         <TextField
           label="Search the wiki"
           type="search"
@@ -359,14 +370,14 @@ function WikiSearch() {
               resource={results}
               loadingLabel="Searching…"
               isEmpty={(hits) => hits.length === 0}
-              empty={<EmptyState message={`No wiki pages match “${term}”.`} />}
+              empty={<p className={styles.tocEmpty}>No wiki pages match “{term}”.</p>}
             >
               {(hits) => <SearchResults hits={hits} term={term} />}
             </AsyncResource>
           )}
         </div>
-      </Card>
-    </div>
+      </Widget>
+    </WidgetStack>
   );
 }
 
@@ -515,19 +526,20 @@ function WikiPageBody({ page, highlightTerm }: { page: WikiPageView; highlightTe
   if (page.placeholder) {
     return (
       <>
-        <div className={styles.content}>
+        <WidgetStack className={styles.content}>
           <Callout label="WIKI" tone="muted">
             <span>not yet generated</span>
           </Callout>
-          <Card title={page.title}>
+          <Widget panel="wikiPage" title="Wiki page">
+            <h1 className={styles.title}>{page.title}</h1>
             <Callout label="Not yet generated" tone="muted">
               <span>
                 No agent prose for this section yet — the embedded logos-wiki skill
                 generates it off the <code>wiki status</code> work-list.
               </span>
             </Callout>
-          </Card>
-        </div>
+          </Widget>
+        </WidgetStack>
         <TocRail entries={toc} />
       </>
     );
@@ -535,7 +547,7 @@ function WikiPageBody({ page, highlightTerm }: { page: WikiPageView; highlightTe
 
   return (
     <>
-      <div className={styles.content}>
+      <WidgetStack className={styles.content}>
         <Callout label="WIKI" tone={signal ? "signal" : "muted"}>
           <span className={styles.provenance}>
             generator: {page.generator ?? "—"} · {headLabel(page.written_head)} · built
@@ -549,7 +561,9 @@ function WikiPageBody({ page, highlightTerm }: { page: WikiPageView; highlightTe
             </span>
           )}
         </Callout>
-        <Card>
+        {/* The page's own title stays its document heading (h1); the panel's
+            title row names what the panel is. */}
+        <Widget panel="wikiPage" title="Wiki page">
           <h1 className={styles.title}>{page.title}</h1>
           {page.regen_pending && (
             <Callout label="WIKI" tone="signal">
@@ -569,9 +583,9 @@ function WikiPageBody({ page, highlightTerm }: { page: WikiPageView; highlightTe
             ref={proseRef}
             dangerouslySetInnerHTML={{ __html: page.rendered_html }}
           />
-        </Card>
+        </Widget>
         {page.anchors.length > 0 && <AnchorsCard page={page} />}
-      </div>
+      </WidgetStack>
       <TocRail entries={toc} />
     </>
   );
@@ -596,7 +610,7 @@ function AnchorsCard({ page }: { page: WikiPageView }) {
     { key: "entity", header: "Entity", mono: true, cell: (a) => a.entity_id },
   ];
   return (
-    <Card title="Anchors">
+    <Widget panel="wikiAnchors" title="Anchors">
       <DataTable
         caption="Page anchors"
         columns={columns}
@@ -604,7 +618,7 @@ function AnchorsCard({ page }: { page: WikiPageView }) {
         rowKey={(a, i) => `${a.entity_id}#${i}`}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-    </Card>
+    </Widget>
   );
 }
 

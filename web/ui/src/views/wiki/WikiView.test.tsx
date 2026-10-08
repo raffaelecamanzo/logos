@@ -13,6 +13,8 @@ vi.mock("./mermaid.ts", () => ({
   VENDORED_MERMAID_URL: "/assets/vendor/mermaid.min.js",
 }));
 
+import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { renderMermaidIn } from "./mermaid.ts";
 import { WikiView } from "./WikiView.tsx";
 
@@ -94,7 +96,7 @@ describe("WikiView landing over mocked /api/v1 (S-189, FR-UI-06)", () => {
     // be awaited (`findByText`) — a synchronous `getByText` races the status
     // resolution and flakes under full-suite parallel load.
     expect(await screen.findByText(/all fresh/i)).toBeInTheDocument();
-    expect(screen.getByText(/agent page\(s\) stored/i)).toBeInTheDocument();
+    expect(screen.getByText("3 agent pages stored.")).toBeInTheDocument();
   });
 });
 
@@ -441,5 +443,71 @@ describe("WikiView search result jump-to-match (S-271, FR-WK-28)", () => {
     fireEvent.click(within(menu).getByRole("link", { name: "Project Overview" }));
 
     await waitFor(() => expect(document.querySelector("mark.wiki-search-hit")).toBeNull());
+  });
+});
+
+// ── S-617 (CR-203, FR-UI-39/40): the Wiki panels are registered tool panels ──
+
+describe("the Wiki panels render as registered tool panels in one stack (S-617)", () => {
+  const PAGE: WikiPageView = {
+    slug: "overview/project-overview",
+    title: "Project Overview",
+    rendered_html: "<p>Intro prose.</p>",
+    placeholder: false,
+    generator: "logos-wiki",
+    written_head: "abcdef0123456789",
+    marker: "generated content — not extracted",
+    built_at_revision: 9,
+    anchors: [{ kind: "function", entity_id: "scip::f", freshness: "fresh" }],
+    stale: false,
+    has_missing: false,
+    regen_pending: false,
+    current_revision: 9,
+  };
+
+  /** The panels in the view's one stack, by title. */
+  function panels(): Map<string, HTMLElement> {
+    return new Map(expectOneWidgetStack(document.body).map((w) => [widgetTitle(w), w]));
+  }
+
+  it("the landing: Start here and Welcome to the wiki", async () => {
+    stubRoutes({ "/api/v1/wiki/nav": NAV, "/api/v1/wiki": FRESH_STATUS });
+    renderWiki();
+    await screen.findByText("3 agent pages stored.");
+    const found = panels();
+    expect([...found.keys()]).toEqual(["Start here", "Welcome to the wiki"]);
+    expectToolPanel(found.get("Start here")!, "wikiStartHere");
+    expectToolPanel(found.get("Welcome to the wiki")!, "wikiWelcome");
+  });
+
+  it("the search page: a search panel, its no-match answer left-aligned in it", async () => {
+    go("/wiki/search?q=nothing");
+    stubRoutes({ "/api/v1/wiki/nav": NAV, "/api/v1/wiki/search": [] });
+    renderWiki();
+    const none = await screen.findByText(/No wiki pages match/);
+    expectToolPanel(panels().get("Search")!, "wikiSearch");
+    expect(none.closest('[data-widget-part="evidence"]')).not.toBeNull();
+  });
+
+  it("a page: its body and its anchors, the page title still its h1", async () => {
+    go("/wiki/page/overview/project-overview");
+    stubRoutes({ "/api/v1/wiki/nav": NAV, "/api/v1/wiki/page/": PAGE });
+    renderWiki();
+    await screen.findByRole("heading", { level: 1, name: "Project Overview" });
+    const found = panels();
+    expect([...found.keys()]).toEqual(["Wiki page", "Anchors"]);
+    expectToolPanel(found.get("Wiki page")!, "wikiPage");
+    expectToolPanel(found.get("Anchors")!, "wikiAnchors");
+  });
+
+  it("a placeholder page: the same page panel", async () => {
+    go("/wiki/page/overview/getting-started");
+    stubRoutes({
+      "/api/v1/wiki/nav": NAV,
+      "/api/v1/wiki/page/": { ...PAGE, title: "Getting Started", rendered_html: "", placeholder: true, anchors: [] },
+    });
+    renderWiki();
+    await screen.findByRole("heading", { level: 1, name: "Getting Started" });
+    expectToolPanel(panels().get("Wiki page")!, "wikiPage");
   });
 });

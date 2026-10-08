@@ -434,14 +434,15 @@ describe("the per-arm coverage board is hidden through the register (S-612, FR-U
     await mount();
     // The title glosses "intake", so its accessible name carries the gloss after it.
     expect(card(/^Coverage by intake/)).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Coverage by relation arm$/ })).toBeNull();
+    // A prefix: the title glosses "arm", so its accessible name carries the gloss after it.
+    expect(screen.queryByRole("heading", { name: /^Coverage by relation arm/ })).toBeNull();
     expect(screen.queryByRole("table", { name: /by relation arm/i })).toBeNull();
   });
 
   it("renders the per-arm board again when its register entry is removed", async () => {
     onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
     await mount();
-    const board = card(/^Coverage by relation arm$/);
+    const board = card(/^Coverage by relation arm/);
     expect(within(board).getByRole("table", { name: /by relation arm/i })).toBeInTheDocument();
   });
 });

@@ -13,7 +13,7 @@ import { useMemo, useRef, useState } from "react";
 
 import { fetchGraph } from "../../api/index.ts";
 import type { GraphElements, GraphGranularity, GraphLayer } from "../../api/types.ts";
-import { Callout } from "../../components/index.ts";
+import { Callout, WidgetStack } from "../../components/index.ts";
 import { GraphCanvas, type GraphCanvasHandle } from "./GraphCanvas.tsx";
 import { GraphControls, type EdgeFilter } from "./GraphControls.tsx";
 import { GraphQuery } from "./GraphQuery.tsx";
@@ -308,8 +308,10 @@ export function GraphExplorer({ initial }: { initial: GraphElements }) {
     ? `${meta.seed} — neighbourhood`
     : "Whole graph";
 
+  // One stack (S-617, FR-UI-40): the scope callout, the query panel, the
+  // canvas, and the Decisions and table panels, one gap apart.
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="Graph" tone="signal">
         <span>
           {scopeText}: {meta.totalNodes} node(s), {meta.totalEdges} edge(s)
@@ -354,6 +356,6 @@ export function GraphExplorer({ initial }: { initial: GraphElements }) {
         loaded={tableSet ?? loaded}
         hoodOf={lockedId ? labelFor(lockedId) : undefined}
       />
-    </div>
+    </WidgetStack>
   );
 }

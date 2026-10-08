@@ -172,6 +172,25 @@ export const coverageByIntake: CopyEntry<{ finding: IntakeFinding }> = {
       : noAction,
 };
 
+// ── Coverage by relation arm (item 1: hidden, S-612) ─────────────────────────
+
+/**
+ * The per-arm board is hidden through the hidden-widget register (S-612); it
+ * carries its entry so removing the register entry brings it back explained
+ * (S-617). Its not-bound reasons are acted on through Resolved cross-service
+ * edges, which aggregates them across every arm (item 1), so this board itself
+ * is informational.
+ */
+export const coverageByArm: CopyEntry = {
+  what: [
+    "The same references split by ",
+    gloss("arm", "relation arm"),
+    " — HTTP, gRPC and broker — each with how many resolved, are ambiguous or did not resolve, and why.",
+  ],
+  why: "It shows which kind of cross-service call the service map sees least of.",
+  action: () => noAction,
+};
+
 // ── Declared contracts and named externals (item 10, the coverage tab) ───────
 
 export const declaredRelations: CopyEntry = {

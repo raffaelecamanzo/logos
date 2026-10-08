@@ -13,7 +13,7 @@
 
 import { AsyncResource, fetchImpact, useApiResource } from "../../api/index.ts";
 import type { ImpactResult, TraceLink } from "../../api/types.ts";
-import { Badge, Button, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, type Column } from "../../components/index.ts";
+import { Badge, Button, DataTable, DEFAULT_TABLE_PAGE_SIZE, Widget, type Column } from "../../components/index.ts";
 import { layerLabel, prettify } from "./graphModel.ts";
 import styles from "./GraphView.module.css";
 
@@ -27,11 +27,11 @@ export interface DecisionsPanelProps {
 export function DecisionsPanel({ seed, onFocus }: DecisionsPanelProps) {
   if (!seed) {
     return (
-      <Card title="Decisions & docs">
+      <Widget panel="decisions" title="Decisions & docs">
         <p className="muted">
           Lock a symbol to see the requirements, ADRs, and stories it traces to.
         </p>
-      </Card>
+      </Widget>
     );
   }
   return <DecisionsForNode seed={seed} onFocus={onFocus} />;
@@ -40,11 +40,11 @@ export function DecisionsPanel({ seed, onFocus }: DecisionsPanelProps) {
 function DecisionsForNode({ seed, onFocus }: { seed: string; onFocus: (id: string) => void }) {
   const resource = useApiResource<ImpactResult>(() => fetchImpact(seed), [seed]);
   return (
-    <Card title="Decisions & docs">
+    <Widget panel="decisions" title="Decisions & docs">
       <AsyncResource resource={resource} loadingLabel="Loading decisions…">
         {(impact) => <DecisionsBody impact={impact} seed={seed} onFocus={onFocus} />}
       </AsyncResource>
-    </Card>
+    </Widget>
   );
 }
 
