@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-10-08
+
 ### Added
 
 - **Rust impl blocks, trait signatures and self calls record what one
