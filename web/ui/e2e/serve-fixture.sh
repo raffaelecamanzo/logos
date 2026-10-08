@@ -61,15 +61,29 @@ git_repo() { # make <dir> a one-commit git repository
         -c maintenance.auto=false -c gc.auto=0 commit -q -m fixture
 }
 
+# Fail closed BEFORE logos runs: the root it will resolve (git's toplevel for
+# the copy) must be the copy itself for a repository, and must not exist for
+# the workspace parent. Anything else means the lookup would land outside .run/.
+expect_root() { # expect_root <wanted-toplevel-or-empty>
+    local top
+    top="$(git -C "$RUN" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ "$top" != "$1" ]; then
+        echo "serve-fixture.sh: $RUN resolves to project root '${top:-<none>}', not '${1:-<none>}'; refusing to run logos" >&2
+        exit 2
+    fi
+}
+
 if [ "$KIND" = single ]; then
     git_repo "$RUN"
+    expect_root "$(cd "$RUN" && pwd -P)"
     "$BIN" --project "$RUN" index --quiet
 else
     for member in "$RUN"/*/; do
         git_repo "${member%/}"
     done
+    expect_root ""
     "$BIN" --project "$RUN" init --workspace --yes --quiet
-    # Fail closed: a manifest anywhere but the copy means the root escaped.
+    # Backstop: a manifest anywhere but the copy means the root escaped anyway.
     if [ ! -f "$RUN/logos.workspace.toml" ]; then
         echo "serve-fixture.sh: init --workspace wrote no manifest in $RUN; refusing to serve" >&2
         exit 2
