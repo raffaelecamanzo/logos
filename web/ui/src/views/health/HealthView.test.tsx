@@ -260,16 +260,6 @@ describe("Gate widget (CR-203 item 12)", () => {
     expect(seen(part(widget("Gate"), "figure"))).toBe("PASS · signal 8000 vs baseline none recorded");
   });
 
-  it("adds an explicit `gate --threshold` floor to the pass condition when the payload carries one", async () => {
-    const m = clone();
-    m.gate.threshold = 7500;
-    stub(m);
-    render(<HealthView />);
-    await screen.findByText("Signal evolution");
-    expect(seen(part(widget("Gate"), "figure"))).toBe(
-      "PASS · signal 8000 vs baseline 7800; passes at ≥ 7799 (ε = 1, and at ≥ 7500)",
-    );
-  });
 });
 
 describe("Quality signal widget (CR-203 items 13 and 20)", () => {

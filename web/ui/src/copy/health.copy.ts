@@ -111,8 +111,23 @@ export const gate: CopyEntry<GateState> = {
   },
 };
 
-/** "no baseline" in the Gate figure: an informational pass, never a fabricated floor. */
-export const GATE_NO_BASELINE = "none recorded";
+/**
+ * The Gate figure: the verdict, the signal against the baseline, and the pass
+ * condition `baseline − ε` (BR-10). Every number arrives formatted, so this is
+ * words only; "baseline" and ε are glossed here because the figure is a Gate
+ * widget's first use of them. No baseline → no floor: nothing is fabricated.
+ */
+export function gateFigureText(f: {
+  readonly verdict: "PASS" | "FAIL";
+  readonly signal: string;
+  readonly baseline: string | null;
+  readonly floor: string | null;
+  readonly epsilon: string;
+}): CopyText {
+  const head = [`${f.verdict} · signal ${f.signal} vs `, gloss("baseline")];
+  if (f.baseline === null || f.floor === null) return [...head, " none recorded"];
+  return [...head, ` ${f.baseline}; passes at ≥ ${f.floor} (`, gloss("epsilon", "ε"), ` = ${f.epsilon})`];
+}
 
 // ── Quality signal (items 13 and 20) ─────────────────────────────────────────
 

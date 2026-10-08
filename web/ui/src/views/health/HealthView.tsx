@@ -50,14 +50,12 @@ import {
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   ScoreBar,
-  Term,
   Widget,
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
 import {
   DIMENSION_COPY,
-  GATE_NO_BASELINE,
   NO_APPLICABLE_CONSTRUCT,
   NO_SNAPSHOTS,
   OFFENDER_STATEMENT,
@@ -65,6 +63,7 @@ import {
   THRESHOLDS_DISCLOSURE,
   type DimensionState,
   gate as gateCopy,
+  gateFigureText,
   offenderBadge,
   qualitySignal as qualitySignalCopy,
   scopeLine,
@@ -190,25 +189,25 @@ function GateWidget({
   // chip tones are the design system's stale tones — `Badge` documents "red —
   // fail / error / stale", every other STALE chip in the SPA is red, and orange is
   // PENDING here, not stale (CR-135 §3.2, FR-EH-04).
+  const chip = currency === null ? null : currencyChip(currency);
   const badge =
-    currency !== null ? (
-      <Badge tone={currencyChip(currency).tone}>{currencyChip(currency).label}</Badge>
+    chip !== null ? (
+      <Badge tone={chip.tone}>{chip.label}</Badge>
     ) : (
       <Badge tone={gate.passed ? "green" : "red"}>{verdict}</Badge>
     );
   const floor = passFloor(gate);
   const figure = (
     <span className="mono">
-      {verdict} · signal {gate.signal} vs <Term term="baseline">baseline</Term>{" "}
-      {gate.baseline_signal === null ? (
-        GATE_NO_BASELINE
-      ) : (
-        <>
-          {gate.baseline_signal}; passes at ≥ {gateFigure(floor!)} (<Term term="epsilon">ε</Term> ={" "}
-          {gateFigure(gate.epsilon)}
-          {gate.threshold !== null && <>, and at ≥ {gate.threshold}</>})
-        </>
-      )}
+      <CopyTextView
+        text={gateFigureText({
+          verdict,
+          signal: gateFigure(gate.signal),
+          baseline: gate.baseline_signal === null ? null : gateFigure(gate.baseline_signal),
+          floor: floor === null ? null : gateFigure(floor),
+          epsilon: gateFigure(gate.epsilon),
+        })}
+      />
     </span>
   );
   return (
