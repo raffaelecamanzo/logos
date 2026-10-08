@@ -29,6 +29,15 @@ describe("abbreviatePaths", () => {
     );
   });
 
+  it("treats the budget as inclusive: 40 characters render whole, 41 abbreviate", () => {
+    const forty = "src/aaaa/bbbb/cccc/dddd/eeee/ffff/gg.rsx";
+    const fortyOne = "src/aaaa/bbbb/cccc/dddd/eeee/ffff/gg.rsxx";
+    expect([forty.length, fortyOne.length]).toEqual([PATH_BUDGET, PATH_BUDGET + 1]);
+    const labels = abbreviatePaths([forty, fortyOne]);
+    expect(labels.get(forty)).toBe(forty);
+    expect(labels.get(fortyOne)).toBe("src/…/ffff/gg.rsxx");
+  });
+
   it("keeps a long path whole when it has no middle segment to drop", () => {
     const flat = "a-very-long-directory-name-for-a-fixture/another-long-one/file.rs";
     expect(flat.length).toBeGreaterThan(PATH_BUDGET);
