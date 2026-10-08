@@ -173,9 +173,9 @@ export function scopeLine(scored: number, excluded: number): string {
 export const THRESHOLDS_DISCLOSURE: { readonly summary: string; readonly body: CopyText } = {
   summary: "Thresholds fingerprint",
   body: [
-    "A fingerprint of the detection thresholds this snapshot was scored with: the defaults plus any [metric_thresholds] keys set in .logos/rules.toml. It changes when one of those keys changes, and a change re-baselines the gate: the next logos gate run saves the new score as the ",
+    "A fingerprint of the detection thresholds this snapshot was scored with: the defaults plus any [metric_thresholds] keys set in .logos/rules.toml. It changes when one of those keys changes; when it does, the next logos gate run saves the new score as the ",
     gloss("baseline"),
-    " by itself and passes informationally, with a notice, and until then this page shows an informational pass. Nothing to do unless the change was unintended.",
+    " by itself — a change re-baselines the gate — and passes informationally, with a notice; until that run, this page shows an informational pass. Nothing to do unless the change was unintended.",
   ],
 };
 
