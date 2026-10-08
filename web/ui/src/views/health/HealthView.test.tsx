@@ -296,6 +296,41 @@ describe("Gate widget (CR-203 item 12)", () => {
 
 });
 
+/** A payload whose every applicable dimension scores a full 1 — no dimension to start with. */
+function allFull(): HealthModel {
+  const m = clone();
+  for (const key of ["modularity", "acyclicity", "depth", "equality", "redundancy", "nesting", "conciseness", "focus", "uniqueness"] as const) {
+    m.scan.metrics[key] = { raw: 0, normalized: 1 };
+  }
+  m.scan.metrics.cohesion = null;
+  m.scan.worst_offenders = realOffenders.recordedEmpty;
+  return m;
+}
+
+describe("no dimension below a full score", () => {
+  it("the Quality signal has nothing to do", async () => {
+    stub(allFull());
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const q = widget("Quality signal");
+    expect(seen(part(q, "action"))).toBe(NOTHING_TO_DO);
+    expect(part(q, "where")).toBeNull();
+  });
+
+  it("a Gate FAIL names no dimension it cannot point to, and still offers logos gate --save", async () => {
+    const m = allFull();
+    m.gate.passed = false;
+    m.gate.signal = 7700;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const action = seen(part(widget("Gate"), "action"));
+    expect(action).toMatch(/^Start with the lowest-scoring dimension below\./);
+    for (const name of DIMENSION_TITLES) expect(action, name).not.toContain(name);
+    expect(action).toContain("logos gate --save (command)");
+  });
+});
+
 describe("Quality signal widget (CR-203 items 13 and 20)", () => {
   it("states n / 10000 as the geometric mean of the k applicable dimensions, with the scope line", async () => {
     stub(HEALTH);
