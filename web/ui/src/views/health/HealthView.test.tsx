@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
 import { Badge, type BadgeTone } from "../../components/index.ts";
-import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import {
   DIMENSION_COPY,
   NO_APPLICABLE_CONSTRUCT,
@@ -131,12 +131,9 @@ function part(frame: Element, name: string): HTMLElement | null {
   );
 }
 
-/** Text a reader sees in an element: Term tooltips excluded, whitespace collapsed. */
+/** Text a reader sees in an element — `expectWidgetCopy`'s own reading — or "". */
 function seen(el: Element | null): string {
-  if (el === null) return "";
-  const clone = el.cloneNode(true) as Element;
-  clone.querySelectorAll('[role="tooltip"]').forEach((t) => t.remove());
-  return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  return el === null ? "" : readerText(el);
 }
 
 /** The state a dimension widget's entry is checked at, for a scored dimension. */

@@ -29,8 +29,10 @@ function collapse(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-/** Text a reader sees: tooltips (a Term's definition) excluded. */
-function readerText(el: Element): string {
+/** Text a reader sees: tooltips (a Term's definition) excluded, whitespace
+ *  collapsed. Exported so a view test reads rendered text the way this helper
+ *  does, rather than keeping a twin of it. */
+export function readerText(el: Element): string {
   const clone = el.cloneNode(true) as Element;
   clone.querySelectorAll('[role="tooltip"]').forEach((tip) => tip.remove());
   return collapse(clone.textContent ?? "");
