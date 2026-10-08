@@ -472,6 +472,9 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     expectWidgetCopy(widget("Depth"), DIMENSION_COPY.depth, scored(0.7, "unlisted"));
     expect(seen(part(widget("Depth"), "where"))).toBe("command logos dsm");
     expect(seen(part(widget("Equality"), "where"))).toBe("command logos hotspots");
+    // Files & Risk and `logos hotspots` rank FILES by summed complexity, not functions.
+    expect(seen(part(widget("Equality"), "action"))).toMatch(/^Find the files that hold the most complexity/);
+    expect(seen(part(widget("Equality"), "evidence"))).toContain("The files that hold the most complexity are ranked in");
     expect(seen(part(widget("Redundancy"), "where"))).toBe("command logos node <symbol>");
     expect(seen(part(widget("Modularity"), "where"))).toBe("source code");
   });

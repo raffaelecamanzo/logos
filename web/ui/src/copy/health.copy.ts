@@ -321,11 +321,12 @@ export const equality: DimensionCopy = {
       kind: "act",
       where: "command",
       target: "logos hotspots",
-      text: "Find the most complex functions in the Complexity column of Files & Risk, or with logos hotspots, and split them.",
+      text: "Find the files that hold the most complexity in the Complexity column of Files & Risk, or with logos hotspots, then split the most complex functions inside them.",
     }),
   raw: (raw) => [gloss("gini"), ` ${raw.toFixed(2)} of function complexity (0 is even)`],
   unlisted: {
-    statement: "No list of the most complex functions is recorded with this snapshot. They are in the Complexity column of",
+    statement:
+      "No list of the most complex functions is recorded with this snapshot. The files that hold the most complexity are ranked in the Complexity column of",
     view: { label: "Files & Risk", href: "/files" },
     command: "logos hotspots",
   },
