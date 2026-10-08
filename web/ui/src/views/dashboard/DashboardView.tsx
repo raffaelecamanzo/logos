@@ -4,12 +4,18 @@
  * in `views/index.ts` at the `/` root route (S-194), mounted by `App.tsx` in the
  * AppShell content slot, rendering exclusively through the S-193 design system.
  *
- * It preserves the server-rendered Dashboard's verdict-first layout
- * (web/src/views/overview.rs, frontend-design §4.1): a freshness statement leads,
- * then the full-width Project Overview, then three equal-width pairs (Quality |
- * Languages, Graph | Activity, Rule findings | Code coverage) — and its honest empty
- * states (an un-indexed root is one card naming `logos index`; every figure traces
- * to a read-model field, none fabricated; NFR-RA-05, NFR-CC-04). CR-079 retired the
+ * It keeps the server-rendered Dashboard's verdict-first order (frontend-design
+ * §4.1): a freshness statement leads, then Project Overview, Quality index,
+ * Languages, Graph, Activity, Rule findings and Code coverage — and its honest
+ * empty states (an un-indexed root is one empty state naming `logos index`; every
+ * figure traces to a read-model field, none fabricated; NFR-RA-05, NFR-CC-04).
+ *
+ * S-617 (CR-203, FR-UI-39/40): every widget renders through `Widget` with its
+ * catalogue entry (`copy/dashboard.copy.ts`; Rule findings shares
+ * `copy/ruleFindings.copy.ts` with the Rule findings view), stacked in ONE
+ * `WidgetStack`. The former equal-width pairs are one column: a stack's widgets
+ * are its direct children, one gap apart. An absence inside a widget is a
+ * left-aligned statement in its figure row with the command in its action. CR-079 retired the
  * Coverage-trust card and the reachability roll-up, promoting the architecture
  * Rule findings into that former slot. Every read is GET-only — loading the view
  * mutates no store (ADR-28).
@@ -27,7 +33,18 @@ import type {
   StatusInfo,
   WikiPage,
 } from "../../api/types.ts";
-import { Badge, Callout, Card, EmptyState, ScoreBar } from "../../components/index.ts";
+import { Badge, Callout, EmptyState, ScoreBar, Widget, WidgetStack } from "../../components/index.ts";
+import {
+  activity as activityCopy,
+  codeCoverage,
+  DASHBOARD_ABSENCE,
+  graph as graphCopy,
+  languages as languagesCopy,
+  projectOverview,
+  qualityIndex,
+} from "../../copy/dashboard.copy.ts";
+import { RULE_FINDINGS_TEXT, ruleFindings } from "../../copy/ruleFindings.copy.ts";
+import { plural } from "../../copy/types.ts";
 import {
   bandOf,
   fmtInt,
@@ -51,7 +68,7 @@ export function DashboardView() {
       resource={overview}
       loadingLabel="Loading the dashboard…"
       // An un-indexed root renders the single honest empty state, never zeroed
-      // roll-ups (frontend-design §4.1, NFR-CC-04).
+      // roll-ups (frontend-design §4.1, NFR-CC-04): a view with no widget at all.
       isEmpty={(data) => !data.status.indexed}
       empty={<EmptyState message="No index yet — run" command="logos index" />}
     >
@@ -63,28 +80,22 @@ export function DashboardView() {
 /** The verdict-first Dashboard over a loaded, indexed overview read-model. */
 function Dashboard({ data }: { data: OverviewModel }) {
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="Index" tone="signal">
         <span>{freshnessStatement(data.status, nowUnix())}</span>
       </Callout>
       <ProjectOverviewCard page={data.overview_page} />
-      <div className={styles.pair}>
-        <QualityCard gate={data.gate} />
-        <LanguagesCard composition={data.composition} languages={data.languages} />
-      </div>
-      <div className={styles.pair}>
-        <GraphCard status={data.status} />
-        <ActivityCard stats={data.stats} />
-      </div>
-      <div className={styles.pair}>
-        <RuleFindingsCard rules={data.rules} />
-        <CodeCoverageCard coverage={data.coverage} />
-      </div>
-    </div>
+      <QualityCard gate={data.gate} />
+      <LanguagesCard composition={data.composition} languages={data.languages} />
+      <GraphCard status={data.status} />
+      <ActivityCard stats={data.stats} />
+      <RuleFindingsCard rules={data.rules} />
+      <CodeCoverageCard coverage={data.coverage} />
+    </WidgetStack>
   );
 }
 
-/** A same-origin GET link pinned to a card's bottom-left (CSP-safe, no JS needed). */
+/** A same-origin GET link to the view that details a widget (CSP-safe, no JS needed). */
 function DetailLink({ href, label }: { href: string; label: string }) {
   return (
     <a className={styles.cardLink} href={href}>
@@ -93,7 +104,8 @@ function DetailLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-/** *Quality index* — the BR-34-banded signal + raw figure + PASS/FAIL badge.
+/** *Quality index* — the BR-34-banded signal + raw figure, with the PASS/FAIL
+ *  badge on the title row.
  *
  *  The signal comes from the last persisted snapshot, which `scan` writes, so a null
  *  one is never an empty graph — the un-indexed root is already the view's own single
@@ -102,61 +114,81 @@ function DetailLink({ href, label }: { href: string; label: string }) {
  *  It states only the absence, not its cause. `OverviewModel` carries no fact that
  *  separates "no scan has ever run" from "a scan ran and scored nothing in production
  *  scope" (FR-QM-08) — the health tab has `evolution.snapshots` for that and says
- *  which it is; this card does not, so it does not guess. `logos scan` is named as the
- *  step that records a signal, which is what the card reports missing. */
+ *  which it is; this widget does not, so it does not guess. `logos scan` is named as
+ *  the step that records a signal, which is what the widget reports missing. */
 function QualityCard({ gate }: { gate: GateResult }) {
+  const signal = gate.signal;
+  const link = <DetailLink href="/health" label="Health" />;
+  if (signal === null) {
+    return (
+      <Widget
+        title="Quality index"
+        copy={qualityIndex}
+        state={{ recorded: false, passed: false }}
+        absence={DASHBOARD_ABSENCE.noSignal}
+      >
+        {link}
+      </Widget>
+    );
+  }
+  const band = bandOf(signal);
   return (
-    <Card title="Quality index">
-      {gate.signal === null ? (
-        <EmptyState message="No quality signal recorded yet — run" command="logos scan" />
-      ) : (
+    <Widget
+      title="Quality index"
+      badge={<Badge tone={gate.passed ? "green" : "red"}>{gate.passed ? "PASS" : "FAIL"}</Badge>}
+      copy={qualityIndex}
+      state={{ recorded: true, passed: gate.passed }}
+      figure={
         <>
-          <div className={styles.heroFigure}>
-            <span className={styles.heroBand}>{bandOf(gate.signal).label}</span>
-            <span className={`${styles.heroRaw} mono num`}>{fmtInt(gate.signal)} / {fmtInt(10_000)}</span>
-            <Badge tone={gate.passed ? "green" : "red"}>{gate.passed ? "PASS" : "FAIL"}</Badge>
-          </div>
-          <ScoreBar
-            value={gate.signal}
-            max={10_000}
-            tone={bandOf(gate.signal).tone}
-            label={`${fmtInt(gate.signal)} / ${fmtInt(10_000)}`}
-          />
+          <span>{band.label}</span>
+          <span className="mono num">
+            {fmtInt(signal)} / {fmtInt(10_000)}
+          </span>
         </>
-      )}
-      <DetailLink href="/health" label="Health" />
-    </Card>
+      }
+    >
+      <ScoreBar value={signal} max={10_000} tone={band.tone} label={`${fmtInt(signal)} / ${fmtInt(10_000)}`} />
+      {link}
+    </Widget>
   );
 }
 
 /** *Code coverage* — the overall line-% as a green (never banded) bar. */
 function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
   const bp = coverage.overall_coverage_bp;
+  const link = <DetailLink href="/coverage" label="Coverage" />;
+  if (bp === null) {
+    return (
+      <Widget title="Code coverage" copy={codeCoverage} state={{ ingested: false }} absence={DASHBOARD_ABSENCE.noCoverage}>
+        {link}
+      </Widget>
+    );
+  }
   return (
-    <Card title="Code coverage">
-      {bp === null ? (
-        <EmptyState message="No coverage ingested — run" command="logos coverage ingest <report>" />
-      ) : (
-        <>
-          <div className={styles.heroFigure}>
-            <span className={`${styles.heroRaw} num`}>{pctBp(bp)}</span>
-          </div>
-          <ScoreBar value={bp} max={10_000} label={pctBp(bp)} />
-        </>
-      )}
-      <DetailLink href="/coverage" label="Coverage" />
-    </Card>
+    <Widget
+      title="Code coverage"
+      copy={codeCoverage}
+      state={{ ingested: true }}
+      figure={
+        <span>
+          <span className="num">{pctBp(bp)}</span> <span className="muted">of lines covered</span>
+        </span>
+      }
+    >
+      <ScoreBar value={bp} max={10_000} label={pctBp(bp)} />
+      {link}
+    </Widget>
   );
 }
 
 /** *Rule findings* — the architecture-rules verdict projected from `overview.rules`
- *  (CR-079), in the former test-coverage slot. Three honest states (NFR-CC-04):
- *  a muted onboarding prompt when no `.logos/rules.toml` is authored yet, or when
- *  one is authored but declares zero rules (`!rules_present || checked_rules ===
- *  0`) — the `logos init` default is not a clean check, it is nothing evaluated
- *  (CR-141, S-438); a red FAIL naming the violation count when there are
- *  findings; a green PASS only once at least one rule was actually checked.
- *  Never a fabricated figure.
+ *  (CR-079). Three honest states (NFR-CC-04): an absence and a configuration
+ *  action when no `.logos/rules.toml` is authored yet, or when one is authored
+ *  but declares zero rules (`!rules_present || checked_rules === 0`) — the
+ *  `logos init` default is not a clean check, it is nothing evaluated (CR-141,
+ *  S-438); a red FAIL naming the finding count when there are findings; a green
+ *  PASS only once at least one rule was actually checked. Never a fabricated
+ *  figure.
  *
  *  Findings are checked FIRST, before the onboarding condition (S-354): the
  *  always-on structural/admission fold-ins fire independent of a loaded
@@ -164,47 +196,29 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
  *  violations — those must win over the onboarding prompt, never be hidden
  *  behind it. */
 function RuleFindingsCard({ rules }: { rules: RulesReport }) {
-  const violations = rules.violations.length;
-  let body;
-  if (violations > 0) {
-    body = (
-      <>
-        <div className={styles.heroFigure}>
-          <span className={`${styles.heroRaw} num`}>{violations}</span>
-          <Badge tone="red">FAIL</Badge>
-        </div>
-        <p className="muted">
-          {violations} rule finding(s) across {rules.checked_rules} checked rule(s)
-        </p>
-      </>
-    );
-  } else if (!rules.rules_present || rules.checked_rules === 0) {
-    // Onboarding: no rules authored yet, or a contract that authors none — a
-    // check over zero rules is not a pass, so this reuses the same prompt to
-    // write them rather than rendering an empty PASS (CR-141, S-438).
-    body = (
-      <EmptyState
-        message="No architecture rules yet — author them in .logos/rules.toml, then run"
-        command="logos check"
-      />
-    );
-  } else {
-    body = (
-      <>
-        <div className={styles.heroFigure}>
-          <Badge tone="green">PASS</Badge>
-        </div>
-        <p className="muted">
-          No findings — {rules.checked_rules} rule(s) checked
-        </p>
-      </>
+  const findings = rules.violations.length;
+  const checked = findings === 0 && !rules.rules_present ? 0 : rules.checked_rules;
+  const state = { findings, checked };
+  const link = <DetailLink href="/gaps" label="Rule findings" />;
+  if (findings === 0 && checked === 0) {
+    return (
+      <Widget title="Rule findings" copy={ruleFindings} state={state} absence={RULE_FINDINGS_TEXT.noRules}>
+        {link}
+      </Widget>
     );
   }
   return (
-    <Card title="Rule findings">
-      {body}
-      <DetailLink href="/gaps" label="Rule findings" />
-    </Card>
+    <Widget
+      title="Rule findings"
+      badge={findings > 0 ? <Badge tone="red">FAIL</Badge> : <Badge tone="green">PASS</Badge>}
+      copy={ruleFindings}
+      state={state}
+      figure={
+        <span>{findings > 0 ? RULE_FINDINGS_TEXT.findings(findings, rules.checked_rules) : RULE_FINDINGS_TEXT.clean(checked)}</span>
+      }
+    >
+      {link}
+    </Widget>
   );
 }
 
@@ -218,15 +232,23 @@ function LanguagesCard({
 }) {
   if (composition.languages.length === 0) {
     return (
-      <Card title="Languages">
-        <EmptyState message="No languages indexed — run" command="logos index" />
-      </Card>
+      <Widget title="Languages" copy={languagesCopy} state={{ indexed: false }} absence={DASHBOARD_ABSENCE.noLanguages} />
     );
   }
+  const n = composition.languages.length;
   const max = Math.max(1, ...composition.languages.map((l) => l.nodes));
+  const skipped = languages.skipped.length;
   return (
-    <Card title="Languages">
-      <p className="muted">Counts are indexed symbols, not files.</p>
+    <Widget
+      title="Languages"
+      copy={languagesCopy}
+      state={{ indexed: true }}
+      figure={
+        <span>
+          {n} <span className="muted">{plural(n, "language", "languages")} indexed</span>
+        </span>
+      }
+    >
       {composition.languages.map((l) => (
         <div className={styles.langRow} key={l.language}>
           <span className={`${styles.langName} mono`}>{l.language}</span>
@@ -234,25 +256,26 @@ function LanguagesCard({
           <span className={`${styles.langCount} mono num`}>{fmtInt(l.nodes)}</span>
         </div>
       ))}
-      {languages.skipped.length > 0 && (
-        <p className="muted">{languages.skipped.length} grammar(s) skipped at load</p>
+      {skipped > 0 && (
+        <p className="muted">
+          {skipped} {plural(skipped, "grammar", "grammars")} skipped at load
+        </p>
       )}
-    </Card>
+    </Widget>
   );
 }
 
-/** *Graph (compact)* — structural counts + resolution coverage from `status`,
- *  plus the CR-085 total/source/test physical-LOC roll-up. The roll-up is
- *  computed only at full-index time ([FR-IX-12]); on a graph where it is not
- *  yet computed, all three figures are `null` in lock-step, so the rows
- *  degrade to a single honest empty state rather than a fabricated `0`
- *  ([NFR-CC-04]). */
+/** *Graph (compact)* — structural counts from `status`, plus the CR-085
+ *  total/source/test physical-LOC roll-up, with the reference resolution as the
+ *  figure. The roll-up is computed only at full-index time ([FR-IX-12]); on a
+ *  graph where it is not yet computed, all three figures are `null` in lock-step,
+ *  so the rows are left out and the action names the full index rather than a
+ *  fabricated `0` ([NFR-CC-04]). */
 function GraphCard({ status }: { status: StatusInfo }) {
   const resolution = resolutionStatement(status);
   // Bind the LOC roll-up as a narrowed object so the figures are `number` (not
   // `number | null`) at the render site — the three fields are null in lock-step
-  // ([FR-IX-12]), so either all three are present or the rows degrade to the
-  // honest empty state below.
+  // ([FR-IX-12]), so either all three are present or the rows are left out.
   const loc =
     status.total_line_count !== null &&
     status.source_line_count !== null &&
@@ -264,7 +287,16 @@ function GraphCard({ status }: { status: StatusInfo }) {
         }
       : null;
   return (
-    <Card title="Graph">
+    <Widget
+      title="Graph"
+      copy={graphCopy}
+      state={{ linesCounted: loc !== null }}
+      figure={
+        <span>
+          <span className="mono">{resolution}</span> <span className="muted">of references resolved</span>
+        </span>
+      }
+    >
       <dl className={styles.statList}>
         <dt>Files</dt>
         <dd className="mono num">{fmtInt(status.file_count)}</dd>
@@ -288,33 +320,34 @@ function GraphCard({ status }: { status: StatusInfo }) {
         <dd className="mono num">{fmtInt(status.node_count)}</dd>
         <dt>Edges</dt>
         <dd className="mono num">{fmtInt(status.edge_count)}</dd>
-        <dt>
-          Resolution <sup className={styles.footnoteMark}>**</sup>
-        </dt>
-        <dd className="mono">{resolution}</dd>
       </dl>
       <div className={styles.footnotes}>
-        {loc !== null && <p>* LOC figures reflect the last full index</p>}
-        <p>** A partial resolution figure is expected, many references resolve lazily</p>
+        {loc !== null ? <p>* LOC figures reflect the last full index</p> : <p>{DASHBOARD_ABSENCE.noLines}</p>}
+        <p>A partial resolution figure is expected: many references resolve lazily.</p>
       </div>
-      {loc === null && (
-        <EmptyState message="LOC figures not yet computed — run a full" command="logos index" />
-      )}
-    </Card>
+    </Widget>
   );
 }
 
-/** *Activity (compact)* — usage telemetry from `stats`; no telemetry → honest note. */
+/** *Activity (compact)* — usage telemetry from `stats`; no telemetry → an honest absence. */
 function ActivityCard({ stats }: { stats: StatsInfo }) {
   if (stats.calls_total === 0) {
-    return (
-      <Card title="Activity">
-        <EmptyState message="No telemetry yet — populate it by running" command="logos <command>" />
-      </Card>
-    );
+    return <Widget title="Activity" copy={activityCopy} state={{ recorded: false }} absence={DASHBOARD_ABSENCE.noTelemetry} />;
   }
   return (
-    <Card title="Activity">
+    <Widget
+      title="Activity"
+      copy={activityCopy}
+      state={{ recorded: true }}
+      figure={
+        <span>
+          <span className="num">{fmtInt(stats.calls_total)}</span>{" "}
+          <span className="muted">
+            {plural(stats.calls_total, "call", "calls")} in the last {stats.window_days} days
+          </span>
+        </span>
+      }
+    >
       <dl className={styles.statList}>
         <dt>Window</dt>
         <dd className="mono">{stats.window_days} days</dd>
@@ -325,38 +358,37 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
         <dt>Reads saved (est)</dt>
         <dd className="mono num">{fmtInt(stats.reads_saved_estimate)}</dd>
       </dl>
-    </Card>
+    </Widget>
   );
 }
 
 /** *Project Overview* — a prose snippet of the agent wiki page, or an honest
- *  "not yet generated" empty state naming the producing command.
+ *  "not yet generated" absence naming the producing command.
  *
  *  The page is agent-authored prose the binary never writes itself (ADR-57), and
  *  `wiki status` is a pure read that only *lists* the work — running it leaves the
- *  page just as absent. So the state names the write that ends it (FR-EH-04,
+ *  page just as absent. So the action names the write that ends it (FR-EH-04,
  *  CR-130), which is also the command `wiki status` hands out for this slug. */
 function ProjectOverviewCard({ page }: { page: WikiPage | null }) {
   if (page === null) {
     return (
-      <Card title="Project Overview">
-        <EmptyState
-          message="No project overview generated yet — an agent writes it with"
-          command="logos wiki write overview/project-overview"
-        />
-      </Card>
+      <Widget
+        title="Project Overview"
+        copy={projectOverview}
+        state={{ written: false }}
+        absence={DASHBOARD_ABSENCE.noOverview}
+      />
     );
   }
   const snippet = snippetOf(page.body);
   return (
-    <Card title="Project Overview">
+    <Widget title="Project Overview" copy={projectOverview} state={{ written: true }}>
       {snippet === "" ? (
         <p className="muted">A project overview is available in the wiki.</p>
       ) : (
         <p className={styles.snippet}>{snippet}</p>
       )}
       <DetailLink href="/wiki" label="Open wiki" />
-    </Card>
+    </Widget>
   );
 }
-

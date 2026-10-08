@@ -7,13 +7,29 @@
  * Consumes the shared `/api/v1` data-access layer (the S-186 pattern) and renders
  * exclusively through the S-193 design system. Every read is GET-only — loading the
  * view mutates no store (ADR-28).
+ *
+ * S-617 (CR-203, FR-UI-39/40): the panel is a `Widget` with the catalogue entry it
+ * shares with the member Dashboard (`copy/ruleFindings.copy.ts`), in one
+ * `WidgetStack` under the verdict callout. A contract that declares no rule is
+ * the onboarding state here too, as on the Dashboard (CR-141): a check over zero
+ * rules is not a pass.
  */
 
 import { fetchGaps } from "../../api/client.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type { GapsModel, RulesReport } from "../../api/types.ts";
-import { Badge, Callout, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, EmptyState } from "../../components/index.ts";
+import {
+  Badge,
+  Callout,
+  DataTable,
+  DEFAULT_TABLE_PAGE_SIZE,
+  EmptyState,
+  Widget,
+  WidgetStack,
+} from "../../components/index.ts";
 import type { BadgeTone, Column } from "../../components/index.ts";
+import { RULE_FINDINGS_TEXT, ruleFindings } from "../../copy/ruleFindings.copy.ts";
+import { plural } from "../../copy/types.ts";
 import styles from "./GapsView.module.css";
 
 export function GapsView() {
@@ -34,12 +50,14 @@ function RuleFindings({ model }: { model: GapsModel }) {
   const findings = model.rules.violations.length;
   const clean = findings === 0;
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="RULE FINDINGS" tone={clean ? "muted" : "signal"}>
-        <span>{findings} rule finding(s)</span>
+        <span>
+          {findings} rule {plural(findings, "finding", "findings")}
+        </span>
       </Callout>
       <RulesCard report={model.rules} />
-    </div>
+    </WidgetStack>
   );
 }
 
@@ -58,11 +76,15 @@ function severityTone(severity: string): BadgeTone {
   return "muted";
 }
 
-/** The rule-findings panel — three honest states (NFR-CC-04): findings table,
- *  clean "No rule findings.", or the no-rules onboarding empty state. Findings are
- *  checked first so a populated report always renders its table. */
+/** The rule-findings widget — three honest states (NFR-CC-04): the findings
+ *  table, a clean check over at least one rule, or the no-rules onboarding (no
+ *  `.logos/rules.toml`, or one declaring no rule). Findings are checked first so
+ *  a populated report always renders its table (S-354). */
 function RulesCard({ report }: { report: RulesReport }) {
-  if (report.violations.length > 0) {
+  const findings = report.violations.length;
+  const checked = findings === 0 && !report.rules_present ? 0 : report.checked_rules;
+  const state = { findings, checked };
+  if (findings > 0) {
     const rows: ViolationRow[] = report.violations.map((v) => ({
       rule: v.rule,
       severity: v.severity,
@@ -81,8 +103,13 @@ function RulesCard({ report }: { report: RulesReport }) {
       { key: "msg", header: "Message", sortValue: (r) => r.message, cell: (r) => r.message },
     ];
     return (
-      <Card title="Rule findings">
-        <p className={styles.note}>{report.checked_rules} rule(s) checked.</p>
+      <Widget
+        title="Rule findings"
+        badge={<Badge tone="red">FAIL</Badge>}
+        copy={ruleFindings}
+        state={state}
+        figure={<span>{RULE_FINDINGS_TEXT.findings(findings, report.checked_rules)}</span>}
+      >
         <DataTable
           caption="Rule findings"
           columns={columns}
@@ -90,21 +117,24 @@ function RulesCard({ report }: { report: RulesReport }) {
           rowKey={(r, i) => `${r.rule}#${i}`}
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
-      </Card>
+      </Widget>
     );
   }
-  if (!report.rules_present) {
+  if (checked === 0) {
     return (
-      <Card title="Rule findings">
+      <Widget title="Rule findings" copy={ruleFindings} state={state} absence={RULE_FINDINGS_TEXT.noRules}>
         <RulesOnboarding />
-      </Card>
+      </Widget>
     );
   }
   return (
-    <Card title="Rule findings">
-      <p className={styles.note}>{report.checked_rules} rule(s) checked.</p>
-      <p className={styles.note}>No rule findings.</p>
-    </Card>
+    <Widget
+      title="Rule findings"
+      badge={<Badge tone="green">PASS</Badge>}
+      copy={ruleFindings}
+      state={state}
+      figure={<span>{RULE_FINDINGS_TEXT.clean(checked)}</span>}
+    />
   );
 }
 
@@ -127,25 +157,19 @@ from   = "src/api/**"
 to     = "src/db/**"
 reason = "the API layer must reach the database through core"`;
 
-/** The no-rules onboarding empty state (NFR-CC-04, frontend-design §4.6) — explain
- *  what rules buy you, name the file to author, show a runnable example, and name
- *  the evaluating command, rather than an always-empty findings table. */
+/** The no-rules onboarding (NFR-CC-04, frontend-design §4.6), as the widget's
+ *  evidence: what rules buy you and a runnable example contract, rather than an
+ *  always-empty findings table. The file and the evaluating command are the
+ *  widget's action. */
 function RulesOnboarding() {
   return (
     <div className={styles.onboarding}>
       <p>
-        No <code>.logos/rules.toml</code> yet — architecture rules are not
-        configured. Author rules to enforce layering, ban forbidden imports, and
-        require tested or documented surfaces; findings then appear here with
-        severity badges.
+        Architecture rules enforce layering, ban forbidden imports, and require tested or
+        documented surfaces; findings then appear here with severity badges.
       </p>
-      <p className={styles.note}>
-        Create <code>.logos/rules.toml</code>, for example:
-      </p>
+      <p className={styles.note}>For example:</p>
       <pre className={styles.example}>{EXAMPLE_RULES}</pre>
-      <p className={styles.note}>
-        Then run <code>logos check</code> to evaluate them.
-      </p>
     </div>
   );
 }

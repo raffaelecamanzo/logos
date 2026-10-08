@@ -23,6 +23,11 @@
  * particular there is no aggregate of per-member quality signals anywhere on it
  * (BR-56) — the member table reports each member's own figure, named.
  *
+ * S-617 (CR-203, FR-UI-39/40): every card is a `Widget` with its entry in
+ * `copy/workspaceHealth.copy.ts` (S-613 converted Workspace rules; S-497, which
+ * replaces the duplicated sections with the member table, has not landed), all
+ * in the view's one `WidgetStack`.
+ *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
  * the closed sentinel vocabulary and the rules (R0-R5) every absence-
@@ -46,7 +51,6 @@ import type {
 import {
   Badge,
   Callout,
-  Card,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
@@ -56,7 +60,14 @@ import {
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
-import { HEALTH_TEXT, workspaceRules } from "../../copy/workspaceHealth.copy.ts";
+import {
+  brokerTopics,
+  HEALTH_TEXT,
+  memberFreshness,
+  membersAnswering,
+  warmState,
+  workspaceRules,
+} from "../../copy/workspaceHealth.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { freshnessStatement, resolutionStatement } from "../dashboard/dashboardModel.ts";
 import styles from "./Workspace.module.css";
@@ -140,28 +151,27 @@ function AnsweringCard({ status }: { status: WorkspaceStatus }) {
   const failed = rollup.degraded_members;
   const complete = failed.length === 0;
   return (
-    <Card
+    <Widget
       title="Members answering"
-      aside={
+      badge={
         <Badge tone={complete ? "green" : "red"}>
-          {complete ? "complete" : "incomplete — a partial fan-out"}
+          {complete ? "complete" : "incomplete — not every member answered"}
         </Badge>
       }
+      copy={membersAnswering}
+      state={{ failed: failed.length }}
+      figure={
+        <div className={styles.figure}>
+          <p>{HEALTH_TEXT.answered(rollup.opened, rollup.members)}</p>
+          {rollup.not_attempted > 0 && (
+            <p className={styles.note}>
+              {rollup.not_attempted} not attempted (nothing needed{" "}
+              {rollup.not_attempted === 1 ? "it" : "them"} — outside this answer&apos;s scope, not a failure).
+            </p>
+          )}
+        </div>
+      }
     >
-      <p>
-        <strong>
-          {rollup.opened} of {rollup.members} members answered
-        </strong>
-        {rollup.not_attempted > 0 && (
-          <>
-            {" "}
-            · {rollup.not_attempted} not attempted (nothing needed{" "}
-            {rollup.not_attempted === 1 ? "it" : "them"} — outside this answer's scope, not a
-            failure)
-          </>
-        )}
-        .
-      </p>
       {failed.length > 0 && (
         <p className="muted">
           {failed.length} member{failed.length === 1 ? "" : "s"} could not be opened:{" "}
@@ -170,7 +180,7 @@ function AnsweringCard({ status }: { status: WorkspaceStatus }) {
           members and is a lower bound (FR-WS-16).
         </p>
       )}
-    </Card>
+    </Widget>
   );
 }
 
@@ -268,8 +278,14 @@ const MEMBER_COLUMNS: Column<MemberRow>[] = [
 function MemberTable({ status }: { status: WorkspaceStatus }) {
   const nowUnix = Math.floor(Date.now() / 1000);
   const rows = status.members.map((m) => memberRow(m, nowUnix));
+  const degraded = rows.filter((r) => r.degraded).length;
   return (
-    <Card title="Members">
+    <Widget
+      title="Members"
+      copy={memberFreshness}
+      state={{ degraded }}
+      figure={<span className={styles.statement}>{HEALTH_TEXT.degraded(degraded, rows.length)}</span>}
+    >
       <DataTable
         caption="Per-member index freshness, warm state and open state"
         columns={MEMBER_COLUMNS}
@@ -277,12 +293,10 @@ function MemberTable({ status }: { status: WorkspaceStatus }) {
         rowKey={(r) => r.member}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-      <p className="muted">
-        Each figure is that member's own. There is no workspace-wide roll-up of them here: the
-        per-repository quality signal is defined against one repository's baseline, so a mean
-        across members would have no referent (BR-56).
-      </p>
-    </Card>
+      {/* BR-56: the per-repository signal is defined against one repository's
+          baseline, so there is no workspace-wide roll-up of these figures. */}
+      <p className="muted">{HEALTH_TEXT.perMember}</p>
+    </Widget>
   );
 }
 
@@ -298,22 +312,30 @@ function WarmCard({ status }: { status: WorkspaceStatus }) {
   const warm = status.warm_rollup;
   const partial = !status.degraded_rollup.covers_all_members;
   return (
-    <Card title="Warm state across the workspace">
-      <p>
-        {warm.warm} of {warm.members} members are warm · {warm.deferred} deferred ·{" "}
-        {warm.degraded} degraded ·{" "}
-        {warm.warming === undefined
-          ? "members indexing right now: not knowable (no live signal source)"
-          : `${warm.warming} indexing right now`}
-        .
-      </p>
+    <Widget
+      title="Warm state across the workspace"
+      copy={warmState}
+      state={{ degraded: warm.degraded }}
+      figure={
+        <div className={styles.figure}>
+          <p>{HEALTH_TEXT.warm(warm.warm, warm.members)}</p>
+          <p className={styles.note}>
+            {warm.deferred} deferred · {warm.degraded} degraded ·{" "}
+            {warm.warming === undefined
+              ? "members indexing right now: not knowable (no live signal source)"
+              : `${warm.warming} indexing right now`}
+            .
+          </p>
+        </div>
+      }
+    >
       {partial && (
         <p className="muted">
           Computed over fewer than all members — a member that could not be opened contributes no
           warm state, so these counts are a lower bound (FR-WS-16).
         </p>
       )}
-    </Card>
+    </Widget>
   );
 }
 
@@ -412,7 +434,7 @@ function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
   );
 }
 
-// ── The promoted topic inventory (FR-WS-11) ──────────────────────────────────
+// ── The broker topic inventory (FR-WS-11) ──────────────────────────────────
 
 /** One topic row, repo-qualified — the identity two members meet on (FR-WS-03). */
 interface TopicRow extends TopicSummary {
@@ -445,27 +467,37 @@ function topicRows(topics: MemberTopics[]): TopicRow[] {
 }
 
 function TopicsCard({ status }: { status: WorkspaceStatus }) {
-  const rows = topicRows(status.topics ?? []);
+  const topics = status.topics ?? [];
+  const rows = topicRows(topics);
   const partial = !status.degraded_rollup.covers_all_members;
+  const lowerBound = partial && (
+    <p className="muted">
+      Read over fewer than all members — a member that could not be opened contributes no
+      topics, so this inventory is a lower bound (FR-WS-16).
+    </p>
+  );
+  if (rows.length === 0) {
+    return (
+      <Widget title="Broker topics" copy={brokerTopics} absence={HEALTH_TEXT.noTopics}>
+        {lowerBound}
+      </Widget>
+    );
+  }
+  const members = topics.filter((m) => m.topics.length > 0).length;
   return (
-    <Card title="Promoted broker topics">
-      {rows.length === 0 ? (
-        <EmptyState message="No member has promoted a broker topic — honest absence, not a resolution failure. A topic appears here as soon as one member publishes or subscribes to it, before any cross-repo match." />
-      ) : (
-        <DataTable
-          caption="Promoted broker topics by member"
-          columns={TOPIC_COLUMNS}
-          rows={rows}
-          rowKey={(t) => `${t.member}:${t.topic}`}
-          pageSize={DEFAULT_TABLE_PAGE_SIZE}
-        />
-      )}
-      {partial && (
-        <p className="muted">
-          Read over fewer than all members — a member that could not be opened contributes no
-          topics, so this inventory is a lower bound (FR-WS-16).
-        </p>
-      )}
-    </Card>
+    <Widget
+      title="Broker topics"
+      copy={brokerTopics}
+      figure={<span className={styles.statement}>{HEALTH_TEXT.topics(rows.length, members)}</span>}
+    >
+      <DataTable
+        caption="Broker topics by member"
+        columns={TOPIC_COLUMNS}
+        rows={rows}
+        rowKey={(t) => `${t.member}:${t.topic}`}
+        pageSize={DEFAULT_TABLE_PAGE_SIZE}
+      />
+      {lowerBound}
+    </Widget>
   );
 }

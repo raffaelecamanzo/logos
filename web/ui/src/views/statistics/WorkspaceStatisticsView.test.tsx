@@ -41,6 +41,16 @@ vi.mock("./echarts.ts", () => ({
   }),
 }));
 
+import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import type { CopyEntry } from "../../copy/types.ts";
+import {
+  membersNotSummed,
+  workspaceDevVsMain,
+  workspaceEstimatedValue,
+  workspaceTopTools,
+  workspaceUsageOverTime,
+} from "../../copy/workspaceStatistics.copy.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { isStatsEmpty, type UsageProjections } from "./statsModel.ts";
 import { WorkspaceStatisticsView } from "./WorkspaceStatisticsView.tsx";
 
@@ -317,11 +327,11 @@ describe("the aggregate's four projections are rendered (AC1)", () => {
     const sentence = (lead.textContent ?? "").replace(/\s+/g, " ");
     expect(sentence).toMatch(/12,345 tokens and 88 ad-hoc file reads/);
     // The word carries the honesty (NFR-CC-04); a figure alone reads as measured.
-    // Matched on the sentence rather than on "an estimate", which the `<em>` splits
-    // across two nodes — and on the disclaimer, so a view that drops the word but
-    // keeps the styling still fails.
-    expect(screen.getByText(/Not a measured figure/i)).toBeInTheDocument();
-    expect(screen.getByText("estimate")).toBeInTheDocument();
+    // Since S-617 it is the widget's why (catalogue copy), read off the rendered
+    // part so a view that drops the part fails.
+    const why = lead.closest("[data-widget]")?.querySelector('[data-widget-copy="why"]');
+    expect(why?.textContent).toMatch(/an estimate\b/i);
+    expect(why?.textContent).toMatch(/not a measured figure/i);
   });
 
   it("renders the window's total calls, the figure every other surface is a part of", async () => {
@@ -962,5 +972,95 @@ describe("the guard this view owes because it SHARES rather than copies", () => 
       "zzz",
       "aaa",
     ]);
+  });
+});
+
+// ── S-617 (CR-203, FR-UI-39/40): every widget explains itself, in one stack ──
+
+const ENTRIES: Record<string, CopyEntry<never>> = {
+  "Estimated value": workspaceEstimatedValue as CopyEntry<never>,
+  "Usage over time": workspaceUsageOverTime as CopyEntry<never>,
+  "Top tools": workspaceTopTools as CopyEntry<never>,
+  "Dev vs main": workspaceDevVsMain as CopyEntry<never>,
+  "Members not summed": membersNotSummed as CopyEntry<never>,
+};
+
+/** Each covered state, with every widget's state and action kind written out. */
+const WIDGET_STATES: [name: string, build: (d: number) => WorkspaceStatistics, Record<string, [unknown, "act" | "none"]>][] = [
+  [
+    "every member read",
+    aggregate,
+    {
+      "Estimated value": [{ recorded: true, failed: 0 }, "none"],
+      "Usage over time": [undefined, "none"],
+      "Top tools": [undefined, "none"],
+      "Dev vs main": [undefined, "none"],
+    },
+  ],
+  [
+    "a member could not be read",
+    partial,
+    {
+      "Estimated value": [{ recorded: true, failed: 1 }, "none"],
+      "Usage over time": [undefined, "none"],
+      "Top tools": [undefined, "none"],
+      "Dev vs main": [undefined, "none"],
+      "Members not summed": [{ failed: 1 }, "act"],
+    },
+  ],
+  [
+    "the only unread member is absent",
+    absentOnly,
+    {
+      "Estimated value": [{ recorded: true, failed: 0 }, "none"],
+      "Usage over time": [undefined, "none"],
+      "Top tools": [undefined, "none"],
+      "Dev vs main": [undefined, "none"],
+      "Members not summed": [{ failed: 0 }, "none"],
+    },
+  ],
+  [
+    "every member read, nothing recorded",
+    readButEventless,
+    { "Estimated value": [{ recorded: false, failed: 0 }, "act"] },
+  ],
+  [
+    "nothing summed, and members could not be read",
+    emptyWithFailedRead,
+    {
+      "Estimated value": [{ recorded: false, failed: 2 }, "act"],
+      "Members not summed": [{ failed: 2 }, "act"],
+    },
+  ],
+];
+
+describe("Workspace Statistics widgets explain themselves (S-617, FR-UI-39/40)", () => {
+  it.each(WIDGET_STATES)("%s: one stack, each widget its catalogue entry at its state", async (_name, build, expected) => {
+    const { container } = await mount(build);
+    await screen.findByRole("heading", { name: "Estimated value" });
+    const widgets = expectOneWidgetStack(container);
+    expect(widgets.map(widgetTitle)).toEqual(Object.keys(expected));
+    for (const widget of widgets) {
+      const title = widgetTitle(widget);
+      const [state, kind] = expected[title];
+      expect(actionKind(widget), title).toBe(kind);
+      expectWidgetCopy(widget, ENTRIES[title], state as never);
+    }
+  });
+
+  it("a failed read names the member's store as the remedy, never logos stats", async () => {
+    const { container } = await mount(emptyWithFailedRead);
+    await screen.findByRole("heading", { name: "Estimated value" });
+    for (const widget of expectOneWidgetStack(container)) {
+      expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration .logos/telemetry.db");
+    }
+  });
+
+  it("nothing recorded anywhere names logos stats, in the Estimated value widget's figure-row absence", async () => {
+    const { container } = await mount(readButEventless);
+    const [widget] = expectOneWidgetStack(container);
+    expect(widget.querySelector("[data-widget-absence]")).toHaveTextContent(/No member recorded any telemetry/);
+    expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos stats");
+    expect(container.querySelector('[class*="empty"]')).toBeNull();
   });
 });

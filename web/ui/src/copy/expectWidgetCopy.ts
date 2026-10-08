@@ -22,6 +22,7 @@ import { expect } from "vitest";
 
 import type { GlossaryTerm } from "./glossary.ts";
 import { copyTextString, findUnglossedUses, type PlainPart } from "./text.ts";
+import { isToolPanelKey, TOOL_PANELS, type ToolPanelKey } from "./toolPanels.ts";
 import { NOTHING_TO_DO, type CopyEntry } from "./types.ts";
 
 /** Whitespace as a browser renders it: runs collapsed, ends trimmed. */
@@ -126,4 +127,26 @@ export function expectWidgetCopy<S>(widget: Element, entry?: CopyEntry<S>, state
     const expectedWhere = collapse([action.where, action.target].filter(Boolean).join(" "));
     expect(readerText(where!), `${label}: where`).toBe(expectedWhere);
   }
+}
+
+/**
+ * expectToolPanel (S-617) — the panel-mode twin of `expectWidgetCopy`. Asserts a
+ * rendered widget is the tool panel `key`: it is registered in `TOOL_PANELS`, its
+ * frame names that key, its one line IS the register's `what`, and it carries no
+ * figure, why, action or where (FR-UI-39: tool panels are exempt from them). The
+ * vocabulary rule still holds over its title and its line.
+ */
+export function expectToolPanel(widget: Element, key: ToolPanelKey): void {
+  const frame = frameOf(widget);
+  const label = readerText(frame.querySelector('[data-widget-part="title"]') ?? frame) || "widget";
+  expect(isToolPanelKey(key), `${label}: ${key} is registered in TOOL_PANELS`).toBe(true);
+  expect(frame.getAttribute("data-widget-panel"), `${label}: the panel it renders`).toBe(key);
+  expect(readerText(part(frame, "what")!), `${label}: what`).toBe(collapse(copyTextString(TOOL_PANELS[key].what)));
+  for (const name of ["why", "action", "where"] as const) {
+    expect(part(frame, name), `${label}: a tool panel has no ${name}`).toBeNull();
+  }
+  expect(frame.querySelector('[data-widget-part="figure"]'), `${label}: a tool panel has no figure`).toBeNull();
+  const parts = [frame.querySelector('[data-widget-part="title"]'), part(frame, "what")].map(renderedPart);
+  const unglossed = findUnglossedUses(parts).map((u) => u.term);
+  expect(unglossed, `${label}: internal vocabulary used outside a Term gloss`).toEqual([]);
 }
