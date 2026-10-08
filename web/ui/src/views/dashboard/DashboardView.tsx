@@ -43,7 +43,7 @@ import {
   projectOverview,
   qualityIndex,
 } from "../../copy/dashboard.copy.ts";
-import { RULE_FINDINGS_TEXT, ruleFindings } from "../../copy/ruleFindings.copy.ts";
+import { RULE_FINDINGS_TEXT, ruleFindings, ruleFindingsState } from "../../copy/ruleFindings.copy.ts";
 import { plural } from "../../copy/types.ts";
 import {
   bandOf,
@@ -196,9 +196,8 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
  *  violations — those must win over the onboarding prompt, never be hidden
  *  behind it. */
 function RuleFindingsCard({ rules }: { rules: RulesReport }) {
-  const findings = rules.violations.length;
-  const checked = findings === 0 && !rules.rules_present ? 0 : rules.checked_rules;
-  const state = { findings, checked };
+  const state = ruleFindingsState(rules);
+  const { findings, checked } = state;
   const link = <DetailLink href="/gaps" label="Rule findings" />;
   if (findings === 0 && checked === 0) {
     return (

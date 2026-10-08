@@ -8,6 +8,8 @@
  * the action is to declare rules, never "nothing to do".
  */
 
+import type { RulesReport } from "../api/types.ts";
+
 import { noAction, plural, type CopyEntry } from "./types.ts";
 
 export interface RuleFindingsState {
@@ -15,6 +17,17 @@ export interface RuleFindingsState {
   readonly findings: number;
   /** Rules the contract declares and the check evaluated. */
   readonly checked: number;
+}
+
+/**
+ * The widget's state from the report, for both views, so "a check over zero
+ * rules is not a pass" is decided in one place. A report with no contract
+ * counts as zero rules checked; findings are kept as they are, since the
+ * always-on structural checks fire without a contract (S-354).
+ */
+export function ruleFindingsState(report: RulesReport): RuleFindingsState {
+  const findings = report.violations.length;
+  return { findings, checked: findings === 0 && !report.rules_present ? 0 : report.checked_rules };
 }
 
 export const ruleFindings: CopyEntry<RuleFindingsState> = {

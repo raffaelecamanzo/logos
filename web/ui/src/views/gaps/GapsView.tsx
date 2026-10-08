@@ -28,7 +28,7 @@ import {
   WidgetStack,
 } from "../../components/index.ts";
 import type { BadgeTone, Column } from "../../components/index.ts";
-import { RULE_FINDINGS_TEXT, ruleFindings } from "../../copy/ruleFindings.copy.ts";
+import { RULE_FINDINGS_TEXT, ruleFindings, ruleFindingsState } from "../../copy/ruleFindings.copy.ts";
 import { plural } from "../../copy/types.ts";
 import styles from "./GapsView.module.css";
 
@@ -81,9 +81,8 @@ function severityTone(severity: string): BadgeTone {
  *  `.logos/rules.toml`, or one declaring no rule). Findings are checked first so
  *  a populated report always renders its table (S-354). */
 function RulesCard({ report }: { report: RulesReport }) {
-  const findings = report.violations.length;
-  const checked = findings === 0 && !report.rules_present ? 0 : report.checked_rules;
-  const state = { findings, checked };
+  const state = ruleFindingsState(report);
+  const { findings, checked } = state;
   if (findings > 0) {
     const rows: ViolationRow[] = report.violations.map((v) => ({
       rule: v.rule,
