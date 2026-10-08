@@ -87,6 +87,15 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expect(figure).toHaveTextContent("2 files ranked");
     expect(figure).toHaveTextContent("top: src/hot.rs, score 40");
     expect(within(table).getByText("src/hot.rs")).toBeInTheDocument();
+  });
+
+  it("counts every ranked file, not the ones the board returned under its limit", async () => {
+    stubFetch(() => model({ ranked_files: 5 }));
+    render(<FilesView />);
+    await screen.findByRole("table", { name: "Files ranked by risk" });
+    expect(widget("Files ranked by risk").querySelector('[data-widget-part="figure"]')).toHaveTextContent(
+      "5 files ranked",
+    );
     expect(screen.getByText(/Defect column: heuristic/)).toBeInTheDocument();
   });
 
