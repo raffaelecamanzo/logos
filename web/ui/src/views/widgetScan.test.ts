@@ -153,6 +153,18 @@ export const B = () => <Widget title="B" copy={HEALTH_TEXT} />;
       ]);
     });
 
+    it("fails an indexed copy whose base is not imported, or not a record of entries (review fix)", () => {
+      const src = `import { HEALTH_TEXT } from "../../copy/workspaceHealth.copy.ts";
+const LOCAL = { x: { what: "w", why: "y", action: () => ({ kind: "none" }) } };
+export const A = () => <Widget title="A" copy={LOCAL.x} />;
+export const B = ({ k }: { k: "noRules" }) => <Widget title="B" copy={HEALTH_TEXT[k]} />;
+`;
+      expect(names(src).problems).toEqual([
+        expect.stringMatching(/LOCAL is not imported from a catalogue/),
+        expect.stringMatching(/HEALTH_TEXT is not a record of catalogue entries/),
+      ]);
+    });
+
     it("accepts a registered panel key and fails an unregistered or computed one", () => {
       const src = `export const A = () => <Widget panel="graphQuery" title="Q" />;
 export const B = () => <Widget panel="notAPanel" title="N" />;
