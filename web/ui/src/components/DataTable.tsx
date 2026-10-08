@@ -31,7 +31,8 @@ export interface Column<Row> {
   /**
    * Gloss the header through `Term` (S-616, FR-UI-39): the term renders beside
    * the sort button, never inside it — a focusable `<dfn>` cannot nest in a
-   * `<button>` — and the button keeps the header as its name.
+   * `<button>` — and the button keeps the header as its name. The column is
+   * named by the header alone (a string header), not by the definition.
    */
   gloss?: GlossaryTerm;
   /** Cell renderer. */
@@ -150,6 +151,10 @@ export function DataTable<Row>({
                   scope="col"
                   className={col.numeric ? styles.num : undefined}
                   aria-sort={ariaSort}
+                  // A glossed header holds the term (whose tip is content) and the
+                  // button's copy of the header: named from content it would read
+                  // "Co-change <definition> Co-change". Name it once, explicitly.
+                  aria-label={col.gloss && typeof col.header === "string" ? col.header : undefined}
                 >
                   {col.gloss && (
                     <>
