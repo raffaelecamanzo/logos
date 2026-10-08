@@ -271,6 +271,9 @@ const MEMBER_COLUMNS: Column<MemberRow>[] = [
   {
     key: "resolution",
     header: "Its reference resolution",
+    // Glossed as on the Workspace Dashboard's Members table, beside the sort
+    // control (S-616's DataTable slot), never inside it.
+    gloss: "referenceResolution",
     cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
     sortValue: (r) => r.resolution ?? "",
   },

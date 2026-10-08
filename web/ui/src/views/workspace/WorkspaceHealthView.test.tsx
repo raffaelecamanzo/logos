@@ -251,6 +251,11 @@ describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
     // The mean of the three is 0.6, which `orders` legitimately owns — so the
     // roll-up is pinned by counting rather than by absence.
     expect(within(members).getAllByText(/60\.0%/)).toHaveLength(1);
+    // The header is glossed, as on the Workspace Dashboard's Members table —
+    // beside its sort control, never inside it (sprint review).
+    const header = within(members).getByRole("columnheader", { name: "Its reference resolution" });
+    expect(header.querySelector('dfn[data-term="referenceResolution"]')).not.toBeNull();
+    expect(header.querySelector("button dfn")).toBeNull();
   });
 
   it("renders no element announcing itself as a workspace-wide quality signal", async () => {
