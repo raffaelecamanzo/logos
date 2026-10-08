@@ -2,9 +2,9 @@
  * Pure Health model (S-187, FR-UI-04) — the presentation logic ported from the
  * server-rendered Health view (web/src/views/health.rs) into framework-free,
  * unit-testable functions: the canonical metric-row projection (with the ADR-21
- * applicability drop-outs kept as `null`, never a fabricated zero), the five CR-005
- * structural drill-down dimensions joined to their worst offenders, and the
- * evolution-row formatting (signed deltas, abbreviated sha, empty-graph `n/a`). No
+ * applicability drop-outs kept as `null`, never a fabricated zero), the ten
+ * dimension widgets joined to their worst offenders where the payload lists them
+ * (S-615, FR-UI-43), the gate's pass floor, and the evolution-row formatting (signed deltas, abbreviated sha, empty-graph `n/a`). No
  * DOM, no React — every figure is a projection of a read-model field (NFR-RA-05).
  *
  * Absence wording here follows the one taxonomy rather than restating it:
@@ -16,6 +16,7 @@
 
 import type {
   EvolutionReport,
+  GateResult,
   MetricSnapshot,
   MetricValue,
   Offender,
@@ -273,9 +274,23 @@ function snapshotDate(evolution: EvolutionReport): string | null {
   return lastSnapshot(evolution)?.date ?? null;
 }
 
+/** The ten quality dimensions, by key. */
+export type DimensionKey =
+  | "modularity"
+  | "acyclicity"
+  | "depth"
+  | "equality"
+  | "redundancy"
+  | "nesting"
+  | "conciseness"
+  | "cohesion"
+  | "focus"
+  | "uniqueness";
+
 /** One row of the quality-signal grid: a metric name and its value, or `null` for
  *  an applicability drop-out (Cohesion/Focus with no applicable construct). */
 export interface MetricRow {
+  key: DimensionKey;
   name: string;
   /** `null` renders a muted `n/a`, never a zero (ADR-21, NFR-CC-04). */
   value: MetricValue | null;
@@ -288,35 +303,80 @@ export interface MetricRow {
 /**
  * The ten quality metrics in canonical order (matching the grid + the Dashboard
  * roll-up). `cohesion`/`focus` are `Option` drop-outs carried through as `null`.
+ * The ONE list: the Quality signal table and the ten dimension widgets are both
+ * enumerated from it (FR-UI-43), so neither can show a dimension the other lacks.
  */
 export function metricRows(m: MetricSnapshot): MetricRow[] {
   const rows: Omit<MetricRow, "notApplicable">[] = [
-    { name: "Modularity", value: m.modularity },
-    { name: "Acyclicity", value: m.acyclicity },
-    { name: "Depth", value: m.depth },
-    { name: "Equality", value: m.equality },
-    { name: "Redundancy", value: m.redundancy },
-    { name: "Nesting", value: m.nesting },
-    { name: "Conciseness", value: m.conciseness },
-    { name: "Cohesion", value: m.cohesion },
-    { name: "Focus", value: m.focus },
-    { name: "Uniqueness", value: m.uniqueness },
+    { key: "modularity", name: "Modularity", value: m.modularity },
+    { key: "acyclicity", name: "Acyclicity", value: m.acyclicity },
+    { key: "depth", name: "Depth", value: m.depth },
+    { key: "equality", name: "Equality", value: m.equality },
+    { key: "redundancy", name: "Redundancy", value: m.redundancy },
+    { key: "nesting", name: "Nesting", value: m.nesting },
+    { key: "conciseness", name: "Conciseness", value: m.conciseness },
+    { key: "cohesion", name: "Cohesion", value: m.cohesion },
+    { key: "focus", name: "Focus", value: m.focus },
+    { key: "uniqueness", name: "Uniqueness", value: m.uniqueness },
   ];
   return rows.map((r) => ({
     ...r,
-    notApplicable: r.name === "Modularity" ? (m.modularity_not_applicable?.reason ?? null) : null,
+    notApplicable: r.key === "modularity" ? (m.modularity_not_applicable?.reason ?? null) : null,
   }));
 }
 
+/** Whether a row is in the geometric mean: it has a value and no drop-out reason. */
+function isApplicable(row: MetricRow): row is MetricRow & { value: MetricValue } {
+  return row.value !== null && row.notApplicable === null;
+}
+
+/** `k` in "the geometric mean of the k applicable dimensions" (FR-QM-14): the
+ *  rows the aggregate is taken over — ADR-21 and CR-156 drop-outs excluded. */
+export function applicableCount(rows: MetricRow[]): number {
+  return rows.filter(isApplicable).length;
+}
+
 /**
- * What a structural drill-down says about its worst offenders (S-499, CR-162):
+ * The applicable dimension with the lowest normalized score — the one the Gate and
+ * Quality signal widgets tell the reader to start with — or `null` when none
+ * applies or the lowest already scores a full 1 (nothing to start with). A tie
+ * keeps the first in canonical order, so the answer is stable.
+ */
+export function lowestDimension(rows: MetricRow[]): (MetricRow & { value: MetricValue }) | null {
+  let lowest: (MetricRow & { value: MetricValue }) | null = null;
+  for (const row of rows) {
+    if (isApplicable(row) && (lowest === null || row.value.normalized < lowest.value.normalized)) lowest = row;
+  }
+  return lowest !== null && lowest.value.normalized < 1 ? lowest : null;
+}
+
+/**
+ * The lowest signal that still passes the gate, `baseline − ε` (BR-10: the gate
+ * fails iff `current < baseline − ε`), or `null` with no baseline to compare
+ * against. ε is `GateResult.epsilon`, read from the payload, never restated.
+ */
+export function passFloor(gate: Pick<GateResult, "baseline_signal" | "epsilon">): number | null {
+  return gate.baseline_signal === null ? null : gate.baseline_signal - gate.epsilon;
+}
+
+/** A gate figure (signal, floor, ε) as text: an integer as-is, otherwise to two
+ *  decimal places at most — ε is a float on the wire (≈1.0). */
+export function gateFigure(n: number): string {
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+}
+
+/**
+ * What a dimension widget says about its worst offenders (S-499, CR-162):
  *  - `not-applicable` — the dimension dropped out (ADR-21); no offender concept;
  *  - `not-recorded`   — the snapshot never recorded offenders (FR-QM-15), so its
  *    empty lists mean nothing and are never shown as a clean result (NFR-CC-04);
  *  - `none-flagged`   — recorded, and nothing crossed a threshold;
- *  - `listed`         — recorded, with entries to tabulate in persisted order.
+ *  - `listed`         — recorded, with entries to tabulate in persisted order;
+ *  - `unlisted`       — the payload carries no offender list for this dimension
+ *    at all (Modularity … Redundancy, FR-UI-43): a named absence, never `[]`.
  */
 export type OffenderState = "not-applicable" | "not-recorded" | "none-flagged" | "listed";
+export type DimensionOffenderState = OffenderState | "unlisted";
 
 /**
  * Decide a drill-down's offender state. `recorded` is read FIRST and is the only
@@ -335,38 +395,36 @@ export function offenderState(
   return offenders.length === 0 ? "none-flagged" : "listed";
 }
 
-/** One structural dimension's drill-down source, projected from the scan. */
-export interface MetricDetail {
-  name: string;
-  definition: string;
-  /** `null` for an applicability drop-out — rendered muted, never a zero/table. */
-  value: MetricValue | null;
+/** The five dimensions whose worst offenders the payload carries (`WorstOffenders`,
+ *  `DIMENSIONS` in logos-core/src/models/quality.rs). */
+const OFFENDER_LISTS = ["nesting", "conciseness", "cohesion", "focus", "uniqueness"] as const;
+type OffenderListKey = (typeof OFFENDER_LISTS)[number];
+
+function hasOffenderList(key: DimensionKey): key is OffenderListKey {
+  return (OFFENDER_LISTS as readonly DimensionKey[]).includes(key);
+}
+
+/** One dimension widget's source, projected from the scan. */
+export interface DimensionDetail extends MetricRow {
+  /** The persisted worst offenders; `[]` for a dimension with no list. */
   offenders: Offender[];
-  /** Which drill-down state this is: the three offender states or the n/a drop-out (see [`OffenderState`]). */
-  offenderState: OffenderState;
+  /** Which offender state this is (see [`DimensionOffenderState`]). */
+  offenderState: DimensionOffenderState;
 }
 
 /**
- * The five CR-005 structural dimensions (FR-QM-09..FR-QM-13) joined to their worst
- * offenders — the only dimensions carrying per-symbol offenders. Canonical order,
- * matching the metric grid.
+ * All ten dimensions, in canonical order, each joined to its worst offenders where
+ * the payload carries a list (FR-UI-43). Enumerated from `metricRows`, the list the
+ * Quality signal table renders, so the widgets and the table cannot disagree about
+ * which dimensions exist or in what order.
  */
-export function structuralDetails(scan: ScanResult): MetricDetail[] {
-  const m = scan.metrics;
+export function dimensionDetails(scan: ScanResult): DimensionDetail[] {
   const w = scan.worst_offenders;
-  const detail = (
-    name: string,
-    definition: string,
-    value: MetricValue | null,
-    offenders: Offender[],
-  ): MetricDetail => ({ name, definition, value, offenders, offenderState: offenderState(value, w, offenders) });
-  return [
-    detail("Nesting", "1 − deep-nesting ratio (FR-QM-09)", m.nesting, w.nesting),
-    detail("Conciseness", "1 − brain-method ratio (FR-QM-10)", m.conciseness, w.conciseness),
-    detail("Cohesion", "mean 1/LCOM4 over classes (FR-QM-11)", m.cohesion, w.cohesion),
-    detail("Focus", "1 − god-container ratio (FR-QM-12)", m.focus, w.focus),
-    detail("Uniqueness", "1 − near-clone ratio (FR-QM-13)", m.uniqueness, w.uniqueness),
-  ];
+  return metricRows(scan.metrics).map((row) => {
+    if (!hasOffenderList(row.key)) return { ...row, offenders: [], offenderState: "unlisted" };
+    const offenders = w[row.key];
+    return { ...row, offenders, offenderState: offenderState(row.value, w, offenders) };
+  });
 }
 
 /** The aggregate quality signal: the scan signal, else the snapshot aggregate,

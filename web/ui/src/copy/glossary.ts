@@ -1,7 +1,8 @@
 /*
  * The web UI glossary (S-611, CR-203, FR-UI-39 "Vocabulary").
  *
- * The internal terms a reader cannot be expected to know. In catalogue text each
+ * The internal terms a reader cannot be expected to know: the FR-UI-39 list,
+ * then the terms a view's catalogue added. In catalogue text each
  * is either replaced by plain words or rendered through a `Term` gloss at its
  * first use in a widget. This module is the one list: the catalogue test and
  * `expectWidgetCopy` both apply the rule through `findUnglossedUses` (text.ts),
@@ -111,6 +112,24 @@ export const GLOSSARY = {
     // Known limit: a predicate adjective at a sentence end ("the call is
     // bound.") is flagged too; write "linked" there.
     pattern: /\b\d[\d,]*\s+(?:un)?bound\b|\b(?:un)?bound\b(?=\s*(?:$|[.,;:!?)/]|(?:and|or|vs\.?|versus)\b))/i,
+  },
+  // Added by the Health catalogue (S-615): the structural dimensions' own words.
+  brainMethod: {
+    label: "brain method",
+    definition:
+      "A function that is long, has many branches and is deeply nested, all at once — too much to hold in your head.",
+    pattern: /\bbrain[\s-]+methods?\b/i,
+  },
+  godContainer: {
+    label: "god container",
+    definition: "A class or struct with so many methods, or so many lines, that it gathers unrelated work.",
+    // "god container" and "god-object"; the threshold keys (`god_methods`) are not the term.
+    pattern: /\bgod[\s-]+(?:containers?|objects?)\b/i,
+  },
+  nearClone: {
+    label: "near-clone",
+    definition: "A function that is a near copy of another: the same structure, with different names or values.",
+    pattern: /\bnear[\s-]+clones?\b/i,
   },
 } as const satisfies Record<string, GlossaryEntry>;
 

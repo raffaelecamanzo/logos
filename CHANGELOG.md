@@ -56,6 +56,26 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   one register, `web/ui/src/views/hiddenWidgets.ts`, with its reason and the
   surfaces that still serve it; deleting an entry brings the widget back. The
   usage guide lists them under *Hidden widgets*.
+- **Health explains its gate and its signal, and every quality dimension has its
+  own widget (CR-203, S-615).** The page now renders through the shared widget
+  frame. The Gate reads "PASS/FAIL · signal *s* vs baseline *b*; passes at ≥
+  *b − ε*", with ε taken from the gate result; on FAIL it names the
+  lowest-scoring dimension to start with and `logos gate --save` for an
+  intended drop, and on PASS it says there is nothing to do. The stale and
+  absent states keep their wording and commands. The Quality signal reads
+  "*n* / 10000, geometric mean of the *k* applicable dimensions", with the
+  production functions scored and test functions excluded beneath it and a
+  disclosure explaining the thresholds fingerprint: it changes when
+  `[metric_thresholds]` in `.logos/rules.toml` changes, and a change resets the
+  gate's baseline. The separate Aggregate scope card is gone. All ten
+  dimensions — Modularity through Uniqueness, in the table's order — now have a
+  widget with their plain question, score, raw value with its unit, any
+  not-applicable reason, and what to do and where. Nesting, Conciseness,
+  Cohesion, Focus and Uniqueness keep their offender lists and their three
+  states; the other five say no list is recorded and point to where their units
+  are found (the Architecture dependency matrix and `logos dsm`, Files & Risk
+  and `logos hotspots`, `logos node`). "Brain method", "god container" and
+  "near-clone" join the glossary. `GET /api/v1/health` is unchanged.
 
 ### Fixed
 

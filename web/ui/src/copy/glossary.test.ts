@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { findTermsInPlainText, GLOSSARY, GLOSSARY_TERMS } from "./glossary.ts";
 
 describe("glossary", () => {
-  it("lists exactly the FR-UI-39 vocabulary, each with a plain-words definition", () => {
+  it("lists the FR-UI-39 vocabulary, then the terms the catalogues added, each with a plain-words definition", () => {
     expect(GLOSSARY_TERMS.map((t) => GLOSSARY[t].label)).toEqual([
       "arm",
       "intake",
@@ -21,6 +21,10 @@ describe("glossary", () => {
       "baseline",
       "epsilon",
       "bound",
+      // Health (S-615).
+      "brain method",
+      "god container",
+      "near-clone",
     ]);
     for (const term of GLOSSARY_TERMS) {
       expect(GLOSSARY[term].definition.length, term).toBeGreaterThan(20);
@@ -55,6 +59,12 @@ describe("glossary", () => {
     // Known limit, documented beside the pattern: a predicate adjective at a
     // sentence end is flagged too.
     ["the call is bound.", "bound"],
+    ["3 brain methods", "brainMethod"],
+    ["a brain-method", "brainMethod"],
+    ["god containers", "godContainer"],
+    ["Are containers god-objects?", "godContainer"],
+    ["near-clones", "nearClone"],
+    ["a near clone", "nearClone"],
   ])("detects %j as %s", (text, term) => {
     expect(findTermsInPlainText(text)).toContain(term);
   });
@@ -71,6 +81,9 @@ describe("glossary", () => {
     "a tiered list",
     "the scc of an ordinary word",
     "intaken",
+    "the god_methods threshold",
+    "brainstorm methods",
+    "a near copy",
   ])("does not flag the near miss %j", (text) => {
     expect(findTermsInPlainText(text)).toEqual([]);
   });
