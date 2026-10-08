@@ -881,8 +881,8 @@ reads n/a, `logos hotspots` when nothing is ranked yet, and an owner in
 bar — the same widget the Dashboard roll-ups use; applicability drop-outs
 (Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042).
 
-Since logos 1.4.14 the Health page's two cards — the gate band and the quality
-grid — are built from **one** read of the last persisted snapshot rather than two
+Since logos 1.4.14 the Health page's two cards — the gate and the quality
+signal — are built from **one** read of the last persisted snapshot rather than two
 independent ones, so a `logos scan` landing while the page loads can no longer
 render two cards describing different generations of the same figures. The
 interleaving window does not exist rather than being narrowed. The same change
@@ -914,22 +914,39 @@ what the comparison establishes. Where the ordering cannot be established at all
 **neither** `current` nor a stale date. The de-indexed branch is unchanged and
 takes precedence, and no fourth state was added.
 
-**Worst offenders are the ones the snapshot computed (since logos 1.9.0).** Each
-Health drill-down (Nesting, Conciseness, Cohesion, Focus, Uniqueness) lists the
+**Worst offenders are the ones the snapshot computed (since logos 1.9.0).** The
+Nesting, Conciseness, Cohesion, Focus and Uniqueness widgets on Health list the
 offenders the last `scan`, `gate` or session snapshot persisted, in the order it
-computed them, read in the same single snapshot read as the signal and gate band.
-The page never recomputes them. A drill-down renders one of three states and never
-infers the state from an empty list:
+computed them, read in the same single snapshot read as the signal and the gate.
+The page never recomputes them. Each of these widgets renders one of three states
+and never infers the state from an empty list:
 
-| State | What the drill-down shows |
+| State | What the widget shows |
 |---|---|
 | Offenders recorded | The offender table, in persisted order |
 | Recorded, none flagged | *No offenders flagged within thresholds.* — the only state that means a clean result |
-| Not recorded | *Offenders were not recorded for this snapshot — run `logos scan`.* — a snapshot written before 1.9.0, or a store never scanned |
+| Not recorded | *Offenders were not recorded for this snapshot.*, with `logos scan` as what to do — a snapshot written before 1.9.0, or a store never scanned |
 
 A not-applicable dimension (Cohesion or Focus with no classes) keeps its `n/a`
 rendering in every state. After upgrading, the existing snapshot reads "not
 recorded" until the next `logos scan`.
+
+**Every dimension has a widget, and every widget says what to do (unreleased,
+CR-203).** Health renders the Gate, the Quality signal, one widget per quality
+dimension — all ten, in the Quality signal table's order — and the Signal trend,
+each stating what it shows, why it matters, and what you can do and where (source
+code, configuration or a command), or "Nothing to do". The Gate states its pass
+condition, *passes at ≥ baseline − ε*, with ε read from the gate result; a pass
+the gate reached without comparing (no baseline, or one recorded under other
+thresholds or metric semantics) is stated as an informational pass instead. When
+the snapshot is not current, every dimension widget says so and names the Gate's
+command rather than a code change. The Quality signal folds in what the Aggregate scope card used to show: the functions
+scored and excluded, and the thresholds fingerprint with what a change to
+`[metric_thresholds]` does to the gate. Modularity, Acyclicity, Depth, Equality
+and Redundancy carry no offender list in the payload; their widgets say so and
+point to where their units are found — the Architecture dependency matrix and
+`logos dsm`, Files & Risk and `logos hotspots`, or `logos node` for one symbol's
+dead and duplicate flags — never an empty table.
 
 **The same release stops the dashboard inventing an age it cannot establish.**
 Every relative age the SPA renders (`just now`, `5m ago`, `6d ago`) is derived

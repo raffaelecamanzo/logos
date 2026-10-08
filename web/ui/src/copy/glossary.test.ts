@@ -32,6 +32,12 @@ describe("glossary", () => {
     }
   });
 
+  it("enforces the Health catalogue's terms (S-615) through the vocabulary rule", () => {
+    for (const term of ["brainMethod", "godContainer", "nearClone"] as const) {
+      expect(VOCABULARY_TERMS, term).toContain(term);
+    }
+  });
+
   it("adds the column-header glosses (S-616) outside the vocabulary rule", () => {
     // Glossed where a table uses them as headers; ordinary English in prose, so
     // no detector: "the answered calls" in a catalogue sentence is not a violation.
@@ -68,6 +74,12 @@ describe("glossary", () => {
     // Known limit, documented beside the pattern: a predicate adjective at a
     // sentence end is flagged too.
     ["the call is bound.", "bound"],
+    ["3 brain methods", "brainMethod"],
+    ["a brain-method", "brainMethod"],
+    ["god containers", "godContainer"],
+    ["Are containers god-objects?", "godContainer"],
+    ["near-clones", "nearClone"],
+    ["a near clone", "nearClone"],
   ])("detects %j as %s", (text, term) => {
     expect(findTermsInPlainText(text)).toContain(term);
   });
@@ -84,6 +96,9 @@ describe("glossary", () => {
     "a tiered list",
     "the scc of an ordinary word",
     "intaken",
+    "the god_methods threshold",
+    "brainstorm methods",
+    "a near copy",
   ])("does not flag the near miss %j", (text) => {
     expect(findTermsInPlainText(text)).toEqual([]);
   });

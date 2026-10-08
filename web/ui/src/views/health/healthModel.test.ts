@@ -10,12 +10,18 @@ import type {
 } from "../../api/types.ts";
 import {
   aggregateSignal,
+  applicableCount,
+  dimensionDetails,
+  gateFigure,
+  isInformationalPass,
+  lowestDimension,
   metricRows,
   optDelta,
   optSignal,
+  passFloor,
   shortSha,
   snapshotStaleness,
-  structuralDetails,
+  type DimensionDetail,
 } from "./healthModel.ts";
 import realOffenders from "./fixtures/worst-offenders.real.json";
 import { UNKNOWN_AGE_AHEAD_OF_NOW } from "../dashboard/dashboardModel.ts";
@@ -133,54 +139,143 @@ describe("metricRows", () => {
   });
 });
 
-describe("structuralDetails", () => {
-  it("joins the five structural dimensions to their worst offenders", () => {
+describe("applicableCount / lowestDimension (FR-QM-14, FR-UI-43)", () => {
+  it("counts the dimensions in the geometric mean: drop-outs and CR-156 excluded", () => {
+    expect(applicableCount(metricRows(snapshot()))).toBe(10);
+    expect(applicableCount(metricRows(snapshot({ cohesion: null, focus: null })))).toBe(8);
+    const na = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
+    expect(applicableCount(metricRows(snapshot({ cohesion: null, modularity_not_applicable: na })))).toBe(8);
+  });
+  it("names the lowest applicable dimension, the first in canonical order on a tie", () => {
+    // Redundancy 0.5 is the lowest of the fixture.
+    expect(lowestDimension(metricRows(snapshot()))?.name).toBe("Redundancy");
+    // Equality and Cohesion tie at 0.3: the canonically earlier one wins.
+    expect(lowestDimension(metricRows(snapshot({ equality: mv(0.3), cohesion: mv(0.3) })))?.name).toBe("Equality");
+  });
+  it("never names a dimension that is out of the mean, however low its computed value", () => {
+    const na = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
+    const rows = metricRows(snapshot({ modularity: mv(0), modularity_not_applicable: na }));
+    expect(lowestDimension(rows)?.name).toBe("Redundancy");
+  });
+  it("names none when every applicable dimension scores a full 1, or none applies", () => {
+    const full = snapshot({
+      modularity: mv(1), acyclicity: mv(1), depth: mv(1), equality: mv(1), redundancy: mv(1),
+      nesting: mv(1), conciseness: mv(1), cohesion: null, focus: mv(1), uniqueness: mv(1),
+    });
+    expect(lowestDimension(metricRows(full))).toBeNull();
+    expect(lowestDimension([])).toBeNull();
+  });
+});
+
+describe("passFloor / gateFigure (BR-10)", () => {
+  it("is baseline − ε, read from the payload", () => {
+    expect(passFloor({ baseline_signal: 8165, epsilon: 1 })).toBe(8164);
+    expect(passFloor({ baseline_signal: 8165, epsilon: 2.5 })).toBe(8162.5);
+  });
+  it("is null with no baseline to compare against", () => {
+    expect(passFloor({ baseline_signal: null, epsilon: 1 })).toBeNull();
+  });
+  it("prints an integer as-is and a float to two places at most", () => {
+    expect(gateFigure(8164)).toBe("8164");
+    expect(gateFigure(1.0)).toBe("1");
+    expect(gateFigure(8162.5)).toBe("8162.5");
+    expect(gateFigure(0.123)).toBe("0.12");
+  });
+});
+
+describe("isInformationalPass (FR-GV-05, FR-GV-10)", () => {
+  const gate = (over: { passed?: boolean; baseline_signal?: number | null; message?: string }) => ({
+    passed: true,
+    baseline_signal: 7800,
+    message: "",
+    ...over,
+  });
+  it("is every informational arm of the read-only verdict", () => {
+    for (const message of [
+      "no baseline saved — informational pass (save one with `gate --save`)",
+      "baseline recorded under different metric semantics — informational pass (re-save with `gate --save`)",
+      "baseline thresholds differ — informational pass (re-save with `gate --save`)",
+      "signal or baseline is n/a — informational pass",
+    ]) {
+      expect(isInformationalPass(gate({ message })), message).toBe(true);
+    }
+  });
+  it("is a missing baseline whatever the message says", () => {
+    expect(isInformationalPass(gate({ baseline_signal: null }))).toBe(true);
+  });
+  it("is never a compared verdict, passed or failed", () => {
+    expect(isInformationalPass(gate({ message: "signal 8000 holds the baseline 7800 (ε 1)" }))).toBe(false);
+    expect(isInformationalPass(gate({ passed: false, message: "signal regressed: 7000 < baseline 7800 − ε (1)" }))).toBe(false);
+    // Near miss: the words apart are not the marker.
+    expect(isInformationalPass(gate({ message: "informational; pass" }))).toBe(false);
+  });
+});
+
+describe("dimensionDetails (FR-UI-43)", () => {
+  const OFFENDER_BACKED = ["Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness"];
+  const byName = (dims: DimensionDetail[], name: string) => dims.find((d) => d.name === name)!;
+
+  it("enumerates all ten dimensions from the Quality signal table's own list, in its order", () => {
+    const s = scan();
+    expect(dimensionDetails(s).map((d) => d.key)).toEqual(metricRows(s.metrics).map((r) => r.key));
+    expect(dimensionDetails(s)).toHaveLength(10);
+  });
+  it("joins the five offender-backed dimensions to their worst offenders", () => {
     const s = scan();
     s.worst_offenders.nesting = [{ name: "deep_fn", file: "src/a.rs", line: 42, detail: "nesting depth 6" }];
-    const dims = structuralDetails(s);
-    expect(dims.map((d) => d.name)).toEqual(["Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness"]);
-    expect(dims[0].offenders).toHaveLength(1);
-    expect(dims[0].offenders[0].name).toBe("deep_fn");
+    const dims = dimensionDetails(s);
+    expect(byName(dims, "Nesting").offenders).toHaveLength(1);
+    expect(byName(dims, "Nesting").offenders[0].name).toBe("deep_fn");
+  });
+  it("marks the other five as unlisted — a named absence, never an empty list read as clean", () => {
+    for (const recorded of [true, false]) {
+      const s = scan();
+      s.worst_offenders.recorded = recorded;
+      const unlisted = dimensionDetails(s).filter((d) => d.offenderState === "unlisted").map((d) => d.name);
+      expect(unlisted).toEqual(["Modularity", "Acyclicity", "Depth", "Equality", "Redundancy"]);
+    }
   });
   it("keeps an n/a dimension's value null", () => {
-    const dims = structuralDetails(scan({ metrics: snapshot({ cohesion: null }) }));
-    expect(dims.find((d) => d.name === "Cohesion")?.value).toBeNull();
+    const dims = dimensionDetails(scan({ metrics: snapshot({ cohesion: null }) }));
+    expect(byName(dims, "Cohesion").value).toBeNull();
+  });
+  it("carries a CR-156 Modularity drop-out's reason beside its computed value", () => {
+    const na = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
+    const m = byName(dimensionDetails(scan({ metrics: snapshot({ modularity: mv(0), modularity_not_applicable: na }) })), "Modularity");
+    expect(m.notApplicable).toBe(na.reason);
+    expect(m.value).toEqual(mv(0));
+    expect(m.offenderState).toBe("unlisted");
   });
 
   // CR-162 / S-499: the offender state comes from `recorded`, never from `[]`.
   describe("offender state", () => {
     const entry = { name: "deep_fn", file: "src/a.rs", line: 42, detail: "nesting depth 6" };
+    const backed = (s: ScanResult) =>
+      dimensionDetails(s).filter((d) => OFFENDER_BACKED.includes(d.name)).map((d) => d.offenderState);
 
     it("recorded with entries lists the offenders; the other recorded dimensions are none-flagged", () => {
       const s = scan();
       s.worst_offenders.nesting = [entry];
-      const dims = structuralDetails(s);
-      expect(dims.map((d) => d.offenderState)).toEqual([
-        "listed",
-        "none-flagged",
-        "none-flagged",
-        "none-flagged",
-        "none-flagged",
-      ]);
+      expect(backed(s)).toEqual(["listed", "none-flagged", "none-flagged", "none-flagged", "none-flagged"]);
     });
     it("not recorded is never none-flagged — every dimension, whatever the lists hold", () => {
       const s = scan();
       s.worst_offenders.recorded = false;
-      expect(structuralDetails(s).map((d) => d.offenderState)).toEqual(Array(5).fill("not-recorded"));
+      expect(backed(s)).toEqual(Array(5).fill("not-recorded"));
       // Even a (contradictory) non-empty list under recorded:false is not presented as recorded.
       s.worst_offenders.nesting = [entry];
-      expect(structuralDetails(s)[0].offenderState).toBe("not-recorded");
+      expect(backed(s)[0]).toBe("not-recorded");
     });
     it("a payload without the flag is treated as not recorded, never as a clean result", () => {
       const s = scan();
       delete (s.worst_offenders as Partial<typeof s.worst_offenders>).recorded;
-      expect(structuralDetails(s).map((d) => d.offenderState)).toEqual(Array(5).fill("not-recorded"));
+      expect(backed(s)).toEqual(Array(5).fill("not-recorded"));
     });
     it("an n/a dimension keeps its n/a state regardless of the recorded flag", () => {
       for (const recorded of [true, false]) {
         const s = scan({ metrics: snapshot({ cohesion: null }) });
         s.worst_offenders.recorded = recorded;
-        expect(structuralDetails(s).find((d) => d.name === "Cohesion")?.offenderState).toBe("not-applicable");
+        expect(byName(dimensionDetails(s), "Cohesion").offenderState).toBe("not-applicable");
       }
     });
   });
@@ -188,22 +283,21 @@ describe("structuralDetails", () => {
   // The real `/api/v1/health` payloads, captured by the Rust guard in web/tests/api_v1.rs.
   describe("over the real /api/v1/health payload", () => {
     it("a scanned fixture's recorded offenders list in persisted order", () => {
-      const dims = structuralDetails(scan({ worst_offenders: realOffenders.recorded }));
-      expect(dims[0].offenderState).toBe("listed");
-      expect(dims[0].offenders.map((o) => o.name)).toEqual([
+      const dims = dimensionDetails(scan({ worst_offenders: realOffenders.recorded }));
+      const nesting = byName(dims, "Nesting");
+      expect(nesting.offenderState).toBe("listed");
+      expect(nesting.offenders.map((o) => o.name)).toEqual([
         "beta_depth_six",
         "gamma_depth_five",
         "alpha_depth_four",
       ]);
-      expect(dims.slice(1).map((d) => d.offenderState)).toEqual(Array(4).fill("none-flagged"));
+      expect(OFFENDER_BACKED.slice(1).map((n) => byName(dims, n).offenderState)).toEqual(Array(4).fill("none-flagged"));
     });
     it("a clean scan is recorded-empty and a never-scanned store is not recorded", () => {
-      expect(
-        structuralDetails(scan({ worst_offenders: realOffenders.recordedEmpty })).map((d) => d.offenderState),
-      ).toEqual(Array(5).fill("none-flagged"));
-      expect(
-        structuralDetails(scan({ worst_offenders: realOffenders.notRecorded })).map((d) => d.offenderState),
-      ).toEqual(Array(5).fill("not-recorded"));
+      const states = (w: ScanResult["worst_offenders"]) =>
+        OFFENDER_BACKED.map((n) => byName(dimensionDetails(scan({ worst_offenders: w })), n).offenderState);
+      expect(states(realOffenders.recordedEmpty)).toEqual(Array(5).fill("none-flagged"));
+      expect(states(realOffenders.notRecorded)).toEqual(Array(5).fill("not-recorded"));
     });
   });
 });

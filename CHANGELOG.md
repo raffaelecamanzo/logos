@@ -74,6 +74,32 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   column, ordered by class and then by calls, with "Answered" explained. The
   read-model's own coverage notes stay verbatim, in the widget's explanation.
   No HTTP, CLI or MCP answer changes.
+- **Health explains its gate and its signal, and every quality dimension has its
+  own widget (CR-203, S-615).** The page now renders through the shared widget
+  frame. The Gate reads "PASS/FAIL · signal *s* vs baseline *b*; passes at ≥
+  *b − ε*", with ε taken from the gate result; on FAIL it names the
+  lowest-scoring dimension to start with and `logos gate --save` for an
+  intended drop, and on PASS it says there is nothing to do. A pass the gate
+  reached without comparing — no baseline, or one recorded under other
+  thresholds or metric semantics — says so instead of showing a pass floor it
+  never applied. The stale and absent states keep their classification and
+  commands; the command now sits on the widget's action line, and when the
+  snapshot is not current the dimension widgets say so and name the same
+  command. The Quality signal reads
+  "*n* / 10000, geometric mean of the *k* applicable dimensions", with the
+  production functions scored and test functions excluded beneath it and a
+  disclosure explaining the thresholds fingerprint: it changes when
+  `[metric_thresholds]` in `.logos/rules.toml` changes, and the next `logos
+  gate` then saves the new score as the baseline by itself. The separate
+  Aggregate scope card is gone. All ten
+  dimensions — Modularity through Uniqueness, in the table's order — now have a
+  widget with their plain question, score, raw value with its unit, any
+  not-applicable reason, and what to do and where. Nesting, Conciseness,
+  Cohesion, Focus and Uniqueness keep their offender lists and their three
+  states; the other five say no list is recorded and point to where their units
+  are found (the Architecture dependency matrix and `logos dsm`, Files & Risk
+  and `logos hotspots`, `logos node`). "Brain method", "god container" and
+  "near-clone" join the glossary. `GET /api/v1/health` is unchanged.
 
 ### Fixed
 
