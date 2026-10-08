@@ -241,6 +241,19 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expectWidgetCopy(w, ownershipDispersion, { multiAuthor: true });
     expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("documentation CODEOWNERS");
     expect(w.querySelector('[data-widget-part="figure"]')).toHaveTextContent("1 of 1 files have more than one author");
+    cleanup();
+
+    // The denominator is every file with history, not the multi-author ones.
+    stubFetch(() => {
+      const m = model();
+      m.temporal.files.push({ ...m.temporal.files[0], path: "src/solo.rs", ownership_dispersion_bp: 0, change_entropy_bp: 0 });
+      return m;
+    });
+    render(<FilesView />);
+    await screen.findByRole("table", { name: "Ownership dispersion" });
+    expect(widget("Ownership dispersion").querySelector('[data-widget-part="figure"]')).toHaveTextContent(
+      "1 of 2 files have more than one author",
+    );
   });
 
   it("reads a single-author history as nothing to do", async () => {
