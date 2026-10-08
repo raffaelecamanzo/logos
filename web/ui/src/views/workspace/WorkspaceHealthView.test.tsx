@@ -11,6 +11,10 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import statesStyles from "../../components/States.module.css";
+import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { HEALTH_TEXT, workspaceRules } from "../../copy/workspaceHealth.copy.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import {
@@ -23,6 +27,7 @@ import {
   stubAppApi,
   warmRollup,
   workspaceStatus,
+  WIDGET_STATES,
   type AppStubOptions,
 } from "./appViewFixtures.ts";
 import { WorkspaceHealthView } from "./WorkspaceHealthView.tsx";
@@ -166,7 +171,8 @@ describe("per-member freshness and warm state (FR-WS-15, AC3)", () => {
 describe("governance is advisory and its empty is honest (ADR-56, AC3)", () => {
   it("labels the findings advisory on the surface", async () => {
     await mount();
-    expect(within(card(/^Workspace rules$/)).getByText(/advisory/i)).toBeInTheDocument();
+    // The badge — the why sentence says "advisory" too, so the badge is matched exactly.
+    expect(within(card(/^Workspace rules$/)).getByText("Advisory")).toBeInTheDocument();
   });
 
   it("renders a workspace declaring NO rules as nothing checked — not as a pass", async () => {
@@ -365,5 +371,85 @@ describe("a failed read is stated, never papered over (NFR-RA-05)", () => {
       expect(screen.getByText(/could not be read/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/Not a workspace/)).toBeNull();
+  });
+});
+
+// ── S-613: Workspace rules (CR-203 §3.2 D item 5, FR-UI-39, FR-UI-40) ──────────
+
+/** The Workspace rules widget, once the governance read has settled. */
+async function rulesWidget(): Promise<HTMLElement> {
+  await screen.findByRole("heading", { name: /^Workspace rules$/ });
+  const found = expectOneWidgetStack(document.body).filter((w) => widgetTitle(w) === "Workspace rules");
+  expect(found).toHaveLength(1);
+  return found[0];
+}
+
+function figureOf(w: HTMLElement): string {
+  return (w.querySelector('[data-widget-part="figure"]')?.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+describe("Workspace rules explains itself, in the view's one stack (S-613)", () => {
+  it("has a state to check for each of the four the story names", () => {
+    expect(Object.keys(WIDGET_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
+  });
+
+  /** The where each state calls for, written out rather than read back from the
+   *  catalogue, so a wrong branch or priority in it fails here. `null` is a
+   *  `none` action. */
+  const EXPECTED_WHERE: Record<keyof typeof WIDGET_STATES, string | null> = {
+    healthy: null,
+    // An unknown member outranks the finding beside it: fix the rule first.
+    "partial coverage": "configuration logos.workspace.toml",
+    "nothing measured": "configuration logos.workspace.toml [[governance.boundaries]]",
+    "degraded member": "source code",
+  };
+
+  it.each(Object.entries(WIDGET_STATES))(
+    "%s: Workspace rules is a Widget under the view's one WidgetStack and carries the message standard",
+    async (state, { status, governance }) => {
+      await mount({ status, governance });
+      const w = await rulesWidget();
+      expectWidgetCopy(w);
+      const where = EXPECTED_WHERE[state as keyof typeof WIDGET_STATES];
+      expect(actionKind(w)).toBe(where === null ? "none" : "act");
+      expect(w.querySelector('[data-widget-copy="where"]')?.textContent ?? null).toBe(where);
+    },
+  );
+
+  it("carries the Advisory badge and the figure 'r rules checked over b bindings · v findings'", async () => {
+    await mount();
+    const w = await rulesWidget();
+    expectWidgetCopy(w, workspaceRules, { declared: true, findings: 1, unknownMembers: 0 });
+    expect(w.querySelector('[data-widget-part="title"]')?.textContent).toBe("Workspace rulesAdvisory");
+    expect(figureOf(w)).toBe("2 rules checked over 9 bindings · 1 finding");
+    expect(within(w).getByRole("table", { name: /rule findings/i })).toBeInTheDocument();
+  });
+
+  it("with no rules, states the absence left-aligned and names the configuration to declare", async () => {
+    await mount({ governance: governanceAnswer(null) });
+    const w = await rulesWidget();
+    expectWidgetCopy(w, workspaceRules, { declared: false, findings: 0, unknownMembers: 0 });
+    expect(w.querySelector("[data-widget-absence]")?.textContent).toBe(HEALTH_TEXT.noRules);
+    expect(w.querySelector(`.${statesStyles.empty}`)).toBeNull();
+    const where = w.querySelector('[data-widget-copy="where"]')?.textContent ?? "";
+    expect(where).toContain("configuration");
+    expect(where).toContain("logos.workspace.toml");
+    expect(where).toContain("[[governance.boundaries]]");
+  });
+
+  it("a clean report over checked bindings has nothing to do", async () => {
+    await mount({ governance: governanceAnswer(governanceReport({ violations: [] })) });
+    const w = await rulesWidget();
+    expectWidgetCopy(w, workspaceRules, { declared: true, findings: 0, unknownMembers: 0 });
+    expect(figureOf(w)).toBe("2 rules checked over 9 bindings · 0 findings");
+    expect(w.querySelector('[data-widget-part="evidence"]')).toBeNull();
+  });
+
+  it("a rule naming an unknown member asks for the configuration to be corrected first", async () => {
+    await mount({ governance: governanceAnswer(governanceReport({ unknown_member_refs: ["billing"] })) });
+    const w = await rulesWidget();
+    expectWidgetCopy(w, workspaceRules, { declared: true, findings: 1, unknownMembers: 1 });
+    expect(w.querySelector('[data-widget-copy="action"]')?.textContent).toMatch(/^Correct each rule/);
+    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration logos.workspace.toml");
   });
 });

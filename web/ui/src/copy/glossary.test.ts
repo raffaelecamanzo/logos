@@ -2,7 +2,7 @@
 // each term's detector matches the term and rejects its one-character near misses.
 import { describe, expect, it } from "vitest";
 
-import { findTermsInPlainText, GLOSSARY, GLOSSARY_TERMS, VOCABULARY_TERMS } from "./glossary.ts";
+import { findTermsInPlainText, FR_UI_39_TERMS, GLOSSARY, GLOSSARY_TERMS, VOCABULARY_TERMS } from "./glossary.ts";
 
 describe("glossary", () => {
   it("enforces every FR-UI-39 term, and defines every entry in plain words", () => {
@@ -25,10 +25,24 @@ describe("glossary", () => {
       "epsilon",
       "bound",
     ]));
+    // The requirement's list is declared first, in the order FR-UI-39 gives it (S-613).
+    expect(GLOSSARY_TERMS.slice(0, FR_UI_39_TERMS.length)).toEqual([...FR_UI_39_TERMS]);
     for (const term of GLOSSARY_TERMS) {
       expect(GLOSSARY[term].definition.length, term).toBeGreaterThan(20);
       // A definition that used its own term would explain nothing.
       expect(findTermsInPlainText(GLOSSARY[term].definition), term).not.toContain(term);
+    }
+  });
+
+  it("enforces the Members table's header terms (S-613) through the vocabulary rule", () => {
+    for (const term of [
+      "referenceResolution",
+      "entryPointsFromOtherServices",
+      "unusedInOwnGraph",
+      "usedByAnotherService",
+      "unusedAcrossWorkspace",
+    ] as const) {
+      expect(VOCABULARY_TERMS, term).toContain(term);
     }
   });
 
@@ -53,6 +67,7 @@ describe("glossary", () => {
     ["two arms", "arm"],
     ["split by intake", "intake"],
     ["egress sites", "egress"],
+    ["outside egress_resolution", "egress"],
     ["the unresolved residue", "residue"],
     ["the non-gated tier", "tier"],
     ["the union view", "unionView"],
@@ -80,6 +95,12 @@ describe("glossary", () => {
     ["Are containers god-objects?", "godContainer"],
     ["near-clones", "nearClone"],
     ["a near clone", "nearClone"],
+    ["its own reference resolution", "referenceResolution"],
+    ["entry points added by other services", "entryPointsFromOtherServices"],
+    ["one entry point added by other services", "entryPointsFromOtherServices"],
+    ["unused in its own graph", "unusedInOwnGraph"],
+    ["…of which used by another service", "usedByAnotherService"],
+    ["callables unused across the workspace", "unusedAcrossWorkspace"],
   ])("detects %j as %s", (text, term) => {
     expect(findTermsInPlainText(text)).toContain(term);
   });
@@ -99,6 +120,12 @@ describe("glossary", () => {
     "the god_methods threshold",
     "brainstorm methods",
     "a near copy",
+    "egressive",
+    "a reference that resolves",
+    "entry points added by this service",
+    "unused in its own service",
+    "unused by another service",
+    "unused across services",
   ])("does not flag the near miss %j", (text) => {
     expect(findTermsInPlainText(text)).toEqual([]);
   });

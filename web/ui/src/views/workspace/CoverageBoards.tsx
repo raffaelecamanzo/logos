@@ -5,7 +5,7 @@
  * restyled second copy of them.
  *
  * That is the whole reason this module exists. A hand-mirrored twin would show
- * the same cards from two implementations free to diverge, and the figures
+ * the same widgets from two implementations free to diverge, and the figures
  * on them are exactly the ones this product has already had to correct twice
  * (CR-100's fabricated `1.0`, CR-127's self-contradicting headline). One
  * implementation, two call sites: `WorkspaceView`'s coverage tab and the
@@ -14,6 +14,10 @@
  * Every figure here is the SERVER's, displayed and never recomputed — including
  * the two composed lines (`resolvedEdgesSummary`, `specConformanceSummary`) that
  * make BR-51's and CR-111's pairings structural rather than remembered.
+ *
+ * Since S-613 (CR-203) each board is a `Widget` whose words come from the shared
+ * catalogue `copy/coverage.copy.ts`, and an absence is stated in the widget's
+ * figure row rather than as a centred empty state.
  *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
@@ -25,18 +29,28 @@
 import {
   Badge,
   Card,
+  CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
-  EmptyState,
   ScoreBar,
+  Term,
+  Widget,
   type Column,
 } from "../../components/index.ts";
 import type { BridgeIntake, ClassificationCounts, DegradedRollup } from "../../api/types.ts";
+import {
+  COVERAGE_TEXT,
+  coverageByIntake,
+  resolvedEdges,
+  specConformance,
+  type IntakeFinding,
+} from "../../copy/coverage.copy.ts";
 import {
   armLabel,
   classificationTotal,
   measuredInPopulation,
   reasonLabel,
+  resolvedEdgesState,
   type ArmCoverage,
   type CoverageDashboard,
 } from "./coverageModel.ts";
@@ -145,15 +159,22 @@ const INTAKE_COLUMNS: Column<IntakePopulation>[] = [
   },
 ];
 
+/** The captured-call half of the split, as one of its four findings. */
+function intakeFinding(captured: IntakePopulation): IntakeFinding {
+  if (captured.total === 0) return "captured-absent";
+  if (captured.measured === 0) return "captured-outside";
+  return captured.bound === 0 ? "captured-unresolved" : "captured-resolves";
+}
+
 /** The coverage-by-intake board (S-377, CR-120).
  *
- *  Its own component so each population is built once and named — the narrative
+ *  Its own component so each population is built once and named — the finding
  *  below is *about* the `invocation` row, and recovering it from `rows[1]` (or
  *  `find(...)!`) would tie a sentence to a sort order and put a non-null
  *  assertion in a render path, which this codebase's wire-type docs tell views
  *  not to do.
  *
- *  # Three states, because `invocation.bound === 0` means three different things
+ *  # Four findings, because `invocation.bound === 0` means three different things
  *  A zero over no captured call sites at all is **honest absence**. A zero over
  *  call sites that every one of them left this workspace is **not a failure** —
  *  `no-provider-in-workspace` is deliberately outside the ratio's denominator
@@ -173,8 +194,24 @@ export function IntakeCard({ dashboard }: { dashboard: CoverageDashboard }) {
     "Captured call site (client call, publish/subscribe)",
     dashboard.byIntake.invocation,
   );
+  const finding = intakeFinding(captured);
+  const title = (
+    <>
+      Coverage by <Term term="intake" />
+    </>
+  );
+  if (dashboard.isEmpty) {
+    return (
+      <Widget
+        title={title}
+        copy={coverageByIntake}
+        state={{ finding }}
+        absence={COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)}
+      />
+    );
+  }
   return (
-    <Card title="Coverage by intake">
+    <Widget title={title} copy={coverageByIntake} state={{ finding }} figure={<IntakeFigure finding={finding} captured={captured} />}>
       <DataTable
         caption="Cross-service coverage by intake population"
         columns={INTAKE_COLUMNS}
@@ -182,29 +219,30 @@ export function IntakeCard({ dashboard }: { dashboard: CoverageDashboard }) {
         rowKey={(p) => p.intake}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-      {captured.measured > 0 && captured.bound === 0 && (
-        <p className="muted">
-          No captured call site in this workspace resolves: every one of the {captured.measured}{" "}
-          <span className="mono">invocation</span> references that could bind here is ambiguous or
-          unbound. The bound count above is entirely declared-contract matches.
-        </p>
-      )}
-      {captured.measured === 0 && captured.noProvider > 0 && (
-        <p className="muted">
-          Every captured <span className="mono">invocation</span> reference in this workspace ({captured.noProvider}) points
-          at a service outside it — reported apart, and not a broken binding. Nothing here failed to
-          resolve.
-        </p>
-      )}
-      {captured.total === 0 && (
-        <p className="muted">
-          No <span className="mono">invocation</span> references were captured in this workspace —
-          honest absence, not a resolution failure. Its bound count says nothing about outbound call
-          sites either way.
-        </p>
-      )}
-    </Card>
+    </Widget>
   );
+}
+
+/** The captured-call finding, in words — never left to be read off two zeros. */
+function IntakeFigure({ finding, captured }: { finding: IntakeFinding; captured: IntakePopulation }) {
+  return (
+    <div className={styles.figure}>
+      <p className={styles.statement}>{intakeStatement(finding, captured)}</p>
+    </div>
+  );
+}
+
+function intakeStatement(finding: IntakeFinding, captured: IntakePopulation): string {
+  switch (finding) {
+    case "captured-absent":
+      return COVERAGE_TEXT.capturedAbsent;
+    case "captured-outside":
+      return COVERAGE_TEXT.capturedOutside(captured.noProvider);
+    case "captured-unresolved":
+      return COVERAGE_TEXT.capturedUnresolved(captured.measured);
+    case "captured-resolves":
+      return COVERAGE_TEXT.capturedResolves(captured.bound, captured.measured);
+  }
 }
 
 const ARM_COLUMNS: Column<ArmCoverage>[] = [
@@ -295,7 +333,10 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
  * false when a member opened perfectly well and its surface read failed. Naming
  * "could not be opened" here would send an operator to `ulimit -n` for a read
  * fault. Members that genuinely could not be OPENED are named separately, from
- * `degraded_rollup` — the field that actually knows. */
+ * `degraded_rollup` — the field that actually knows.
+ *
+ * Inline content (spans), so it can sit in the figure row's paragraph or in an
+ * absence statement alike; `null` when there is nothing to say. */
 export function CoverageShortfall({
   dashboard,
   degraded,
@@ -305,25 +346,173 @@ export function CoverageShortfall({
 }) {
   if (dashboard.coversAllMembers && degraded.degraded_members.length === 0) return null;
   return (
-    <p className="muted">
+    <>
       {!dashboard.coversAllMembers && (
-        <>
-          Partial: computed over {dashboard.membersRead} of {dashboard.membersTotal} workspace
-          members — the rest did not contribute (their store could not be opened, or their
-          contract surface could not be read), so every figure here is a lower bound (FR-WS-16).{" "}
-        </>
+        <span>{COVERAGE_TEXT.shortfall(dashboard.membersRead, dashboard.membersTotal)} </span>
       )}
       {degraded.degraded_members.length > 0 && (
-        <>
-          {degraded.degraded_members.length} member
-          {degraded.degraded_members.length === 1 ? "" : "s"} could not be opened:{" "}
+        <span>
+          {COVERAGE_TEXT.degradedPrefix(degraded.degraded_members.length)}{" "}
           <span className="mono">{degraded.degraded_members.join(", ")}</span>.
-        </>
+        </span>
       )}
+    </>
+  );
+}
+
+/** The server's composed edge line, verbatim, after a lead that glosses the
+ *  internal word it uses. The line is the edge count AND the rate in one string
+ *  (BR-51), so rendering it cannot show the count without the rate. */
+function EdgeLine({ line }: { line: string }) {
+  return (
+    <p className={styles.note}>
+      <CopyTextView text={COVERAGE_TEXT.edgeLineLead} /> <span className="mono">{line}</span>
     </p>
   );
 }
 
+/** The headline (S-376/CR-120, CR-203 §3.2 D item 4): resolved outbound call
+ *  sites of those captured, drawn first because it is the figure a reader takes
+ *  away. `bound_ratio` used to sit here and read 0.287 over an estate with zero
+ *  caller→callee edges.
+ *
+ *  The figure is two server fields (the rate's own numerator and denominator),
+ *  never recomputed, and beside it the edge count in the server's composed
+ *  `resolvedEdgesSummary` line, so BR-51's pairing — the count never without
+ *  the rate — is the server's, not a fourth place that could forget it. Below
+ *  100% the action lists the not-resolved reasons across every relation arm,
+ *  largest first, with their remedies. The coverage shortfall is stated once,
+ *  on Spec conformance, the board computed over the walk it describes. */
+function ResolvedEdgesWidget({ dashboard }: { dashboard: CoverageDashboard }) {
+  const state = resolvedEdgesState(dashboard);
+  const common = {
+    title: "Resolved cross-service edges",
+    badge: <Badge tone="muted">Advisory</Badge>,
+    copy: resolvedEdges,
+    state,
+  } as const;
+  if (dashboard.isEmpty || dashboard.egressResolution === null) {
+    return (
+      <Widget
+        {...common}
+        absence={
+          dashboard.isEmpty
+            ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
+            : state.outside > 0
+              ? COVERAGE_TEXT.outboundAllOutside(state.outside)
+              : COVERAGE_TEXT.outboundNotMeasured
+        }
+      >
+        <EdgeLine line={dashboard.resolvedEdgesSummary} />
+      </Widget>
+    );
+  }
+  return (
+    <Widget
+      {...common}
+      figure={
+        <div className={styles.figure}>
+          <div className={styles.ratio}>
+            <ScoreBar value={dashboard.egressResolution} max={1} tone="default" label={pct(dashboard.egressResolution)} />
+            <span>{COVERAGE_TEXT.outboundResolved(state.resolved, state.measured)}</span>
+          </div>
+          <EdgeLine line={dashboard.resolvedEdgesSummary} />
+        </div>
+      }
+    />
+  );
+}
+
+/** Spec conformance (CR-203 §3.2 D item 10). Advisory only — never a gate input
+ *  (ADR-53). The ratio is the server's, displayed verbatim:
+ *  `no-provider-in-workspace` is deliberately outside its denominator, so
+ *  recomputing it here would contradict the CLI.
+ *
+ *  An ABSENT ratio gets no bar at all (FR-WS-05, NFR-CC-04): a bar is a
+ *  quantity, and there is no quantity here — a 0-width bar would read "nothing
+ *  bound" and a full one "everything bound", when the truth is that nothing was
+ *  measured. The reason is stated precisely: references DO exist and every one
+ *  of them is bucketed out of the denominator, so "nothing to bind" would
+ *  replace a fabricated number with a fabricated explanation.
+ *
+ *  CR-111: the ratio is never presented without its denominator and excluded
+ *  count — the figure row states both from the server's fields, and the
+ *  server's own composed line rides beside it in the evidence. The coverage
+ *  shortfall rides in the figure row too, its one place among the boards:
+ *  `covers_all_members` is about the contract-surface walk, the very
+ *  population this ratio is computed over. */
+function SpecConformanceWidget({
+  dashboard,
+  degraded,
+}: {
+  dashboard: CoverageDashboard;
+  degraded: DegradedRollup;
+}) {
+  const partial = !dashboard.coversAllMembers || degraded.degraded_members.length > 0;
+  const shortfall = <CoverageShortfall dashboard={dashboard} degraded={degraded} />;
+  const common = {
+    title: "Spec conformance (declared endpoints vs controllers)",
+    badge: <Badge tone="muted">Advisory</Badge>,
+    copy: specConformance,
+    state: { notMatched: dashboard.ambiguous + dashboard.unbound },
+  } as const;
+  const evidence = <p className="muted mono">{dashboard.specConformanceSummary}</p>;
+  if (dashboard.isEmpty || dashboard.specConformanceRatio === null) {
+    return (
+      <Widget
+        {...common}
+        absence={
+          <>
+            {dashboard.isEmpty
+              ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
+              : COVERAGE_TEXT.specNotMeasured(dashboard.noProviderInWorkspace)}{" "}
+            {shortfall}
+          </>
+        }
+      >
+        {evidence}
+      </Widget>
+    );
+  }
+  return (
+    <Widget
+      {...common}
+      figure={
+        <div className={styles.figure}>
+          <div className={styles.ratio}>
+            <ScoreBar
+              value={dashboard.specConformanceRatio}
+              max={1}
+              tone={dashboard.ratioDominatedByExcluded ? "muted" : "default"}
+              label={pct(dashboard.specConformanceRatio)}
+            />
+            <span>
+              {pct(dashboard.specConformanceRatio)} ·{" "}
+              {COVERAGE_TEXT.specMatched(dashboard.bound, dashboard.specConformanceMeasured)}
+            </span>
+          </div>
+          <p className={styles.note}>
+            {COVERAGE_TEXT.specBreakdown(
+              dashboard.bound,
+              dashboard.ambiguous,
+              dashboard.unbound,
+              dashboard.noProviderInWorkspace,
+            )}
+          </p>
+          {partial && <p className={styles.note}>{shortfall}</p>}
+        </div>
+      }
+    >
+      {evidence}
+    </Widget>
+  );
+}
+
+/** The coverage boards, as sibling widgets. A FRAGMENT, never a wrapper: each
+ *  call site renders them inside its own one `WidgetStack`, so every widget's
+ *  parent is that stack and every gap is its one token (FR-UI-40). The old
+ *  `.panel` wrapper had its own smaller gap, and the coverage tab's two relation
+ *  cards sat outside it with none (CR-203 §3.1 item 10). */
 export function CoveragePanel({
   dashboard,
   degraded,
@@ -331,123 +520,24 @@ export function CoveragePanel({
   dashboard: CoverageDashboard;
   degraded: DegradedRollup;
 }) {
-  if (dashboard.isEmpty) {
-    return (
-      <div className={styles.panel}>
-        <EmptyState
-          message={
-            dashboard.coversAllMembers
-              ? "No cross-boundary references found in this workspace — nothing to bind, so no coverage is reported (never a fabricated 100%)."
-              : `No cross-boundary references found among the ${dashboard.membersRead} of ${dashboard.membersTotal} workspace members that could be read — this is NOT a statement about the whole workspace.`
-          }
-        />
-        <CoverageShortfall dashboard={dashboard} degraded={degraded} />
-      </div>
-    );
-  }
-
   return (
-    <div className={styles.panel}>
-      {/* S-376/CR-120: the HEADLINE is the resolved-edge count, and it is drawn
-          first because it is the figure a reader takes away. `bound_ratio` used to
-          sit here and read 0.287 over an estate with zero caller→callee edges.
+    <>
+      <ResolvedEdgesWidget dashboard={dashboard} />
+      <SpecConformanceWidget dashboard={dashboard} degraded={degraded} />
 
-          The count and the rate are rendered from the server's composed
-          `resolvedEdgesSummary` line, not assembled here from two fields: BR-51
-          says the count is never published without the rate beside it, and a view
-          that composed them itself would be a fourth place that could forget. */}
-      <Card title="Resolved cross-service edges">
-        <div className={styles.ratio}>
-          {dashboard.egressResolution === null ? (
-            <span className="mono">
-              egress resolution not measured — no outbound call site was captured in this
-              workspace, so the rate has no denominator
-            </span>
-          ) : (
-            <>
-              <ScoreBar
-                value={dashboard.egressResolution}
-                max={1}
-                tone="default"
-                label={pct(dashboard.egressResolution)}
-              />
-              <span className="mono">{pct(dashboard.egressResolution)} of egress sites resolve</span>
-            </>
-          )}
-        </div>
-        <p className="muted mono">{dashboard.resolvedEdgesSummary}</p>
-        <p className="muted">
-          Edges resolved from a captured <span className="mono">invocation</span> — a caller→callee
-          call, a producer→consumer publish. Not the same as <span className="mono">bound</span>{" "}
-          below, which also counts declared-contract matches, and not a count of sites: one fan-out
-          publish binds every cross-member subscriber and is several edges. Advisory: never a
-          quality-gate input.
-        </p>
-      </Card>
-
-      <Card title="Spec conformance (declared endpoints vs controllers)">
-        {/* Advisory only — never a gate input (ADR-53). The ratio is the server's,
-            displayed verbatim: `no-provider-in-workspace` is deliberately outside its
-            denominator, so recomputing it here would contradict the CLI.
-
-            An ABSENT ratio gets no bar at all (FR-WS-05, NFR-CC-04): a bar is a
-            quantity, and there is no quantity here — a 0-width bar would read "nothing
-            bound" and a full one "everything bound", when the truth is that nothing
-            was measured.
-
-            The reason is stated precisely rather than as "nothing to bind": the
-            `isEmpty` branch above already took the no-references case, so reaching
-            here means references DO exist and every one of them is bucketed out of
-            the denominator. Saying "nothing to bind" would replace a fabricated
-            number with a fabricated explanation. */}
-        <div className={styles.ratio}>
-          {dashboard.specConformanceRatio === null ? (
-            <span className="mono">
-              spec conformance not measured — all {dashboard.noProviderInWorkspace} cross-boundary
-              references have no provider in this workspace, so the ratio has no denominator
-            </span>
-          ) : (
-            <>
-              <ScoreBar
-                value={dashboard.specConformanceRatio}
-                max={1}
-                tone={dashboard.ratioDominatedByExcluded ? "muted" : "default"}
-                label={pct(dashboard.specConformanceRatio)}
-              />
-              <span className="mono">{pct(dashboard.specConformanceRatio)} bound</span>
-            </>
-          )}
-        </div>
-        {/* CR-111: the ratio is never presented without its denominator and excluded
-            count — the server's own composed line, adjacent to the bar, verbatim
-            (the same "displayed, never recomputed" discipline as the ratio itself). */}
-        <p className="muted mono">{dashboard.specConformanceSummary}</p>
-        <CoverageShortfall dashboard={dashboard} degraded={degraded} />
-        <p className="muted">
-          {dashboard.bound} bound · {dashboard.ambiguous} ambiguous · {dashboard.unbound} unbound ·{" "}
-          {dashboard.noProviderInWorkspace} with no provider in this workspace (reported apart, and
-          excluded from the ratio — a call to a service outside this workspace is not a broken
-          binding). This ratio is dominated by declared-contract matches and is not a measure of
-          cross-service coupling. Advisory: this figure is never a quality-gate input.
-        </p>
-      </Card>
-
-      {/* S-377/CR-120: the headline above counts TWO populations as one. A declared
+      {/* S-377/CR-120: the headline counts TWO populations as one. A declared
           endpoint matched to a controller and a resolved outbound call site are
-          different claims, and the reference workspace's `bound: 81` is 81 of the
-          first and 0 of the second — which a bare headline reads as healthy.
-
-          The per-arm board (hidden through the hidden-widget register, S-612)
-          does not answer this and cannot: `route` carries both populations,
-          because an OpenAPI operation and an HTTP client call are the same arm. So
-          the split is its own board, adjacent to the headline it decomposes. Counts
-          are the server's, displayed verbatim. */}
+          different claims, and the reference workspace's `bound: 81` is 81 of
+          the first and 0 of the second — which a bare headline reads as healthy.
+          `route` carries both populations, because an OpenAPI operation and an
+          HTTP client call are the same arm, so the split is its own board,
+          adjacent to the headline it decomposes. Counts are the server's. */}
       <IntakeCard dashboard={dashboard} />
 
       {/* S-612 (FR-UI-41): hidden through the register on both call sites. Its
           data stays on `GET /api/v1/workspace/status`, `logos workspace status`
           and MCP `workspace_status`. */}
-      {!isWidgetHidden("coverage-by-relation-arm") && (
+      {!isWidgetHidden("coverage-by-relation-arm") && !dashboard.isEmpty && (
         <Card title="Coverage by relation arm">
           <DataTable
             caption="Cross-service coverage by relation arm"
@@ -458,6 +548,6 @@ export function CoveragePanel({
           />
         </Card>
       )}
-    </div>
+    </>
   );
 }

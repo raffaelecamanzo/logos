@@ -7,12 +7,16 @@ import type {
   ReferenceCoverage,
   UnboundReason,
 } from "../../api/types.ts";
-import { BOUND_EXTERNAL, DECLARED_CONTRACTS } from "../../workspace/testFixtures.ts";
+import { BOUND_EXTERNAL, DECLARED_CONTRACTS, EMPTY_COVERAGE } from "../../workspace/testFixtures.ts";
+import { COVERAGE_TEXT } from "../../copy/coverage.copy.ts";
+import { HEALTHY_COVERAGE, MULTI_REASON_COVERAGE } from "./appViewFixtures.ts";
 import {
   armLabel,
   buildCoverageDashboard,
+  NOT_ITEMISED,
   provenanceLabel,
   reasonLabel,
+  resolvedEdgesState,
 } from "./coverageModel.ts";
 
 function bound(relation: string, n = 1, intake: BridgeIntake = "contract-surface"): ReferenceCoverage[] {
@@ -681,5 +685,84 @@ describe("buildCoverageDashboard — declared relations (S-461)", () => {
     const model = buildCoverageDashboard(coverage([]));
     expect(model.declaredContracts).toBeNull();
     expect(model.boundExternal).toBeNull();
+  });
+});
+
+// ── S-613: the not-resolved reasons behind the headline (CR-203 §3.2 D item 4) ──
+
+describe("egressNotResolved / resolvedEdgesState (S-613)", () => {
+  it("pools the captured calls' reasons across every arm, largest first, ties by name", () => {
+    const dashboard = buildCoverageDashboard(MULTI_REASON_COVERAGE);
+    expect(dashboard.egressNotResolved).toEqual([
+      { reason: "base-url-runtime", count: 3 },
+      { reason: "topic-not-literal", count: 2 },
+      { reason: "ambiguous", count: 1 },
+      { reason: "path-not-composed", count: 1 },
+    ]);
+  });
+
+  it("leaves out declared endpoints and calls to a service outside the workspace", () => {
+    // Both sit outside the egress rate: a declared endpoint is not a call site,
+    // and a call to a service we do not host is not a broken one (ADR-53).
+    const dashboard = buildCoverageDashboard(MULTI_REASON_COVERAGE);
+    expect(dashboard.egressNotResolved.map((r) => r.reason)).not.toContain("no-provider-in-workspace");
+    const withDeclaredMiss = buildCoverageDashboard({
+      ...MULTI_REASON_COVERAGE,
+      references: [
+        ...MULTI_REASON_COVERAGE.references,
+        { ...MULTI_REASON_COVERAGE.references[2], intake: "contract-surface" },
+      ],
+    });
+    expect(withDeclaredMiss.egressNotResolved[0]).toEqual({ reason: "base-url-runtime", count: 3 });
+  });
+
+  it("sums to the server's unresolved count: measured minus the invocation half's resolved", () => {
+    const state = resolvedEdgesState(buildCoverageDashboard(MULTI_REASON_COVERAGE));
+    expect(state).toMatchObject({ measured: 9, resolved: 2, unresolved: 7, outside: 1 });
+    expect(state.reasons.reduce((n, r) => n + r.count, 0)).toBe(state.unresolved);
+    expect(state.reasons.map((r) => r.label)).toEqual([
+      "Base URL resolved at runtime",
+      "Broker topic is not a static literal",
+      "Two or more providers (ambiguous)",
+      "Path could not be composed",
+    ]);
+  });
+
+  it("carries a shortfall between the rows and the counters as not itemised, so the list still sums", () => {
+    // The server gives every non-bound row a reason, so this needs rows and
+    // counters that disagree — the case the remainder exists for.
+    const state = resolvedEdgesState(
+      buildCoverageDashboard({ ...MULTI_REASON_COVERAGE, egress_resolution_measured: 12 }),
+    );
+    expect(state.unresolved).toBe(10);
+    expect(state.reasons.find((r) => r.reason === NOT_ITEMISED)).toEqual({
+      reason: NOT_ITEMISED,
+      label: COVERAGE_TEXT.notItemised,
+      count: 3,
+    });
+    expect(state.reasons.reduce((n, r) => n + r.count, 0)).toBe(10);
+  });
+
+  it("places the not-itemised remainder in the largest-first order, not always last", () => {
+    // 7 itemised against a figure of 20: the remainder (13) is the largest.
+    const state = resolvedEdgesState(
+      buildCoverageDashboard({ ...MULTI_REASON_COVERAGE, egress_resolution_measured: 22 }),
+    );
+    expect(state.reasons.map((r) => [r.reason, r.count])).toEqual([
+      [NOT_ITEMISED, 13],
+      ["base-url-runtime", 3],
+      ["topic-not-literal", 2],
+      ["ambiguous", 1],
+      ["path-not-composed", 1],
+    ]);
+  });
+
+  it("has nothing unresolved when every captured call resolves, or none was captured", () => {
+    expect(resolvedEdgesState(buildCoverageDashboard(HEALTHY_COVERAGE))).toMatchObject({ unresolved: 0, reasons: [] });
+    expect(resolvedEdgesState(buildCoverageDashboard(EMPTY_COVERAGE))).toMatchObject({
+      measured: 0,
+      unresolved: 0,
+      reasons: [],
+    });
   });
 });

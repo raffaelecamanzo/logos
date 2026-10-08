@@ -52,8 +52,11 @@ import {
   EmptyState,
   ErrorPanel,
   LoadingState,
+  Widget,
+  WidgetStack,
   type Column,
 } from "../../components/index.ts";
+import { HEALTH_TEXT, workspaceRules } from "../../copy/workspaceHealth.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { freshnessStatement, resolutionStatement } from "../dashboard/dashboardModel.ts";
 import styles from "./Workspace.module.css";
@@ -95,8 +98,10 @@ export function WorkspaceHealthView() {
     );
   }
 
+  // One stack for the whole view (S-613, FR-UI-40): `AsyncResource` renders its
+  // children unwrapped, so every widget below is a direct child of this stack.
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="Workspace" tone="signal">
         <span>
           <span className="mono">{workspace}</span> · {members.length} service
@@ -118,7 +123,7 @@ export function WorkspaceHealthView() {
           </>
         )}
       </AsyncResource>
-    </div>
+    </WidgetStack>
   );
 }
 
@@ -334,45 +339,64 @@ const VIOLATION_COLUMNS: Column<WorkspaceViolation>[] = [
   { key: "message", header: "Finding", cell: (v) => v.message, sortValue: (v) => v.message },
 ];
 
-/** The workspace rule findings — reported, never gating.
+/** The workspace rule findings — reported, never gating (CR-203 §3.2 D item 5).
  *
  *  A violation's `severity` is `"error"` because checked-in policy is a real
  *  breach; the FAMILY is still advisory and can move neither an exit code nor any
- *  member's gated signal (ADR-56). The label says so on the surface, because a
+ *  member's gated signal (ADR-56). The badge says so on the surface, because a
  *  finding a reader takes for a gate verdict is the same untruth as a gate
- *  verdict a reader takes for advice. */
+ *  verdict a reader takes for advice.
+ *
+ *  A workspace declaring no rules gets NO report — `governance` is `null` — and
+ *  renders a left-aligned absence plus the configuration action, never a passing
+ *  check: a green verdict over an unchecked workspace is the defect S-437 and
+ *  S-438 removed from the two surfaces that had it (ADR-56, NFR-CC-04). */
 function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
   const report = answer.governance;
+  const unknown = report?.unknown_member_refs ?? [];
+  const degraded = answer.degraded_rollup.degraded_members;
+  const incomplete = !answer.complete && (
+    <p className="muted">
+      {HEALTH_TEXT.incomplete(degraded.length)} <span className="mono">{degraded.join(", ")}</span>.
+    </p>
+  );
+  const common = {
+    title: "Workspace rules",
+    badge: <Badge tone="muted">Advisory</Badge>,
+    copy: workspaceRules,
+    state: {
+      declared: report !== null,
+      findings: report?.violations.length ?? 0,
+      unknownMembers: unknown.length,
+    },
+  } as const;
+  if (report === null) {
+    return (
+      <Widget {...common} absence={HEALTH_TEXT.noRules}>
+        {incomplete}
+      </Widget>
+    );
+  }
   return (
-    <Card
-      title="Workspace rules"
-      aside={<Badge tone="muted">advisory — moves no exit code and no member's signal</Badge>}
-    >
-      {report === null ? (
-        // The honest empty. NOT a passing report: nothing was checked, and a
-        // green verdict over an unchecked workspace is the defect S-437 and
-        // S-438 removed from the two surfaces that had it (ADR-56, NFR-CC-04).
-        <EmptyState message="No workspace rules are declared, so nothing was checked — this is not a pass. Declare [[governance.boundaries]] or [[governance.no_cross_service_callers]] in logos.workspace.toml to have cross-service bindings checked." />
-      ) : (
-        <>
-          <p className="muted">
-            {report.rules_checked} rule{report.rules_checked === 1 ? "" : "s"} evaluated over{" "}
-            {report.bindings_checked} bindings
-            {report.bindings_checked === 0 &&
-              " — nothing was bound to check, so a clean result here says nothing about this workspace"}
-            .
-          </p>
-          {report.unknown_member_refs && report.unknown_member_refs.length > 0 && (
-            <p className="muted">
-              {report.unknown_member_refs.length} rule reference
-              {report.unknown_member_refs.length === 1 ? "" : "s"} name a member this workspace
-              does not have, so the rule was silently narrowed and can never match:{" "}
-              <span className="mono">{report.unknown_member_refs.join(", ")}</span>.
+    <Widget
+      {...common}
+      figure={
+        <div className={styles.figure}>
+          <p>{HEALTH_TEXT.rulesChecked(report.rules_checked, report.bindings_checked, report.violations.length)}</p>
+          {report.bindings_checked === 0 && <p className={styles.note}>{HEALTH_TEXT.nothingToCheck}</p>}
+          {unknown.length > 0 && (
+            <p className={styles.note}>
+              {HEALTH_TEXT.unknownMembers(unknown.length)} <span className="mono">{unknown.join(", ")}</span>.
             </p>
           )}
-          {report.violations.length === 0 ? (
-            <p>No rule was breached by the {report.bindings_checked} bindings checked.</p>
-          ) : (
+        </div>
+      }
+    >
+      {/* One node or none: a list of `false`s would still render an empty
+          evidence part, which takes a gap in the frame. */}
+      {(report.violations.length > 0 || incomplete) && (
+        <>
+          {report.violations.length > 0 && (
             <DataTable
               caption="Workspace rule findings"
               columns={VIOLATION_COLUMNS}
@@ -381,17 +405,10 @@ function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
               pageSize={DEFAULT_TABLE_PAGE_SIZE}
             />
           )}
+          {incomplete}
         </>
       )}
-      {!answer.complete && (
-        <p className="muted">
-          This answer is incomplete: {answer.degraded_rollup.degraded_members.length} member
-          {answer.degraded_rollup.degraded_members.length === 1 ? "" : "s"} could not be opened (
-          <span className="mono">{answer.degraded_rollup.degraded_members.join(", ")}</span>), so
-          a rule quantified over their bindings was quantified over fewer than all of them.
-        </p>
-      )}
-    </Card>
+    </Widget>
   );
 }
 

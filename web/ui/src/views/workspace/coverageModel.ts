@@ -41,6 +41,7 @@ import type {
   ReferenceCoverage,
   UnboundReason,
 } from "../../api/types.ts";
+import { COVERAGE_TEXT, type NotResolvedReason, type ResolvedEdgesState } from "../../copy/coverage.copy.ts";
 
 /** The human label for each unbound reason (the wire tokens are kebab-case). */
 export const REASON_LABEL: Record<UnboundReason, string> = {
@@ -250,6 +251,17 @@ export interface CoverageDashboard {
    *  statements from the same zero, which is exactly what NFR-CC-04 asks a
    *  surface to keep apart. */
   hasInvocationReferences: boolean;
+  /** Why the captured outbound call sites that did not resolve did not, across
+   *  every relation arm, largest first (S-613, CR-203 §3.2 D item 4).
+   *
+   *  Grouped from the `invocation` rows only, and only from the ones INSIDE the
+   *  egress-resolution denominator — ambiguous or unbound for a reason other
+   *  than `no-provider-in-workspace`, which sits outside it (ADR-53). The server
+   *  gives every non-bound row a reason, so the counts sum to
+   *  `egressResolutionMeasured − byIntake.invocation.bound`: the unresolved
+   *  sites the headline states. The same projection {@link ArmCoverage.reasons}
+   *  makes per arm, pooled across arms. */
+  egressNotResolved: ReasonCount[];
   /** No cross-boundary reference exists at all — the honest awaiting-data state. */
   isEmpty: boolean;
   /** Whether every workspace member's contract surface contributed to the counts
@@ -298,13 +310,30 @@ export function measuredInPopulation(counts: ClassificationCounts): number {
   return counts.bound + counts.ambiguous + counts.unbound;
 }
 
+/** A reason tally as rows, commonest first; ties broken by name so the order is
+ *  deterministic. One comparator for the per-arm reasons and the pooled egress
+ *  reasons, so the two lists can never order the same counts differently. */
+function reasonCounts(tally: Map<UnboundReason, number>): ReasonCount[] {
+  return [...tally].map(([reason, count]) => ({ reason, count })).sort(byCountThenReason);
+}
+
+/** Largest count first; ties by reason token, so the order is deterministic. */
+function byCountThenReason(a: { reason: string; count: number }, b: { reason: string; count: number }): number {
+  return b.count - a.count || a.reason.localeCompare(b.reason);
+}
+
 /** Group a coverage read-model into the per-arm, per-reason dashboard model. */
 export function buildCoverageDashboard(coverage: CrossServiceCoverage): CoverageDashboard {
   const byArm = new Map<string, ArmCoverage>();
   const reasonsByArm = new Map<string, Map<UnboundReason, number>>();
   const provenanceByArm = new Map<string, Map<string, number>>();
+  const egressReasons = new Map<UnboundReason, number>();
 
   for (const ref of coverage.references) {
+    if (ref.intake === "invocation" && ref.bucket !== "bound" && ref.reason && ref.reason !== NO_PROVIDER) {
+      egressReasons.set(ref.reason, (egressReasons.get(ref.reason) ?? 0) + 1);
+    }
+
     let arm = byArm.get(ref.relation);
     if (!arm) {
       arm = {
@@ -346,10 +375,7 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
   }
 
   for (const [relation, arm] of byArm) {
-    arm.reasons = [...(reasonsByArm.get(relation) ?? new Map())]
-      .map(([reason, count]) => ({ reason, count }))
-      // Commonest reason first; ties broken by name so the order is deterministic.
-      .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
+    arm.reasons = reasonCounts(reasonsByArm.get(relation) ?? new Map());
     arm.provenance = [...(provenanceByArm.get(relation) ?? new Map())]
       .map(([label, count]) => ({ label, count }))
       // Commonest first; ties broken by label so the order is deterministic.
@@ -388,6 +414,7 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     // rests on, free to disagree with it inches away on the same screen.
     byIntake: coverage.by_intake,
     hasInvocationReferences: classificationTotal(coverage.by_intake.invocation) > 0,
+    egressNotResolved: reasonCounts(egressReasons),
     isEmpty: coverage.references.length === 0,
     // No `??` fallbacks: these three are non-optional in `CrossServiceCoverage`
     // and the SPA ships inside the same binary that serves them, so there is no
@@ -402,5 +429,47 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     // declares nothing, which the view renders as no card at all.
     declaredContracts: coverage.declared_contracts?.headline ?? null,
     boundExternal: coverage.bound_external?.headline ?? null,
+  };
+}
+
+/** The pseudo-reason for unresolved sites the payload counts but does not
+ *  itemise. Not a wire token: the server gives every non-bound row a reason, so
+ *  this appears only if its rows and its counters ever disagree — and then the
+ *  list still sums to the figure it explains instead of silently falling short. */
+export const NOT_ITEMISED = "not-itemised";
+
+/** The state the Resolved cross-service edges widget renders (S-613, CR-203 §3.2
+ *  D item 4): the captured outbound sites the rate is over, how many of them did
+ *  not resolve, and why — largest first.
+ *
+ *  `unresolved` is the SERVER's (`egress_resolution_measured` minus the
+ *  invocation population's `bound`, the rate's own numerator), and the reasons
+ *  are the rows grouped. The server files each row and counts it in one body
+ *  (`Tally::record`) and debug-asserts that the two agree (`Tally::finish` in
+ *  `logos-core/src/federation/coverage.rs`), so the rows do not itemise more
+ *  than `unresolved`; should they ever itemise less, the shortfall is carried
+ *  as {@link NOT_ITEMISED},
+ *  in its place in the largest-first order, so the list still sums to the
+ *  figure it explains. */
+export function resolvedEdgesState(dashboard: CoverageDashboard): ResolvedEdgesState & { readonly resolved: number } {
+  const measured = dashboard.egressResolutionMeasured;
+  const resolved = dashboard.byIntake.invocation.bound;
+  const unresolved = Math.max(0, measured - resolved);
+  const reasons: NotResolvedReason[] = dashboard.egressNotResolved.map((r) => ({
+    reason: r.reason,
+    label: reasonLabel(r.reason),
+    count: r.count,
+  }));
+  const itemised = reasons.reduce((n, r) => n + r.count, 0);
+  if (itemised < unresolved) {
+    reasons.push({ reason: NOT_ITEMISED, label: COVERAGE_TEXT.notItemised, count: unresolved - itemised });
+    reasons.sort(byCountThenReason);
+  }
+  return {
+    measured,
+    resolved,
+    unresolved,
+    reasons,
+    outside: dashboard.byIntake.invocation.no_provider_in_workspace,
   };
 }

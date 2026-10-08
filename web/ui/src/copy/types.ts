@@ -65,5 +65,11 @@ export function gloss(term: GlossaryTerm, text?: string): Gloss {
   return text === undefined ? { term } : { term, text };
 }
 
+/** The word for a count: `one` when `n` is 1, `many` otherwise. One helper for
+ *  every catalogue, so agreement is spelled one way. */
+export function plural(n: number, one: string, many: string): string {
+  return n === 1 ? one : many;
+}
+
 /** Shorthand for an action with nothing to do. */
 export const noAction: WidgetAction = { kind: "none" };
