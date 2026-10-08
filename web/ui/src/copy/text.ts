@@ -69,9 +69,9 @@ export function findUnglossedTerms(...texts: CopyText[]): GlossaryTerm[] {
 }
 
 /**
- * The text a sentence function can return — a figure or absence sentence, a
- * table row's own action — read from its source: every string literal in `fn`,
- * with `gloss(…)` calls removed first, joined into one plain part. `fn` cannot be
+ * The text a sentence function can return — a figure or absence sentence —
+ * read from its source: every string literal in `fn`, with `gloss(…)` calls
+ * removed first, joined into one plain part. `fn` cannot be
  * enumerated over its arguments, but the words it can say are all literals in
  * its body — so the catalogue test holds them to the vocabulary rule without
  * each catalogue declaring sample arguments.

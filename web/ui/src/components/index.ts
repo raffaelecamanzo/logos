@@ -47,7 +47,7 @@ export type { ToastOptions, ToastTone } from "./Toast.tsx";
 
 // The widget frame (S-611, CR-203, FR-UI-39/40): every widget renders through
 // `Widget`, stacked in one `WidgetStack`; `Term` glosses internal vocabulary.
-export { ActionCell, CopyTextView, FigureNote, Widget } from "./Widget.tsx";
+export { CopyTextView, FigureNote, Widget } from "./Widget.tsx";
 export type { WidgetProps } from "./Widget.tsx";
 
 export { WidgetStack } from "./WidgetStack.tsx";

@@ -782,7 +782,8 @@ other four widgets since S-617). **Resolved cross-service edges** shows why the
 unresolved outbound calls did not resolve as a table of reason and count, largest
 reason first, whose counts sum to the unresolved figure; **Cross-service
 reachability** leads with the callables to keep because another service calls
-them; **Members** gives each row its own action; and **Workspace rules** with no
+them; **Members** draws a member that could not be opened with a red *degraded*
+State badge and the reason beside it; and **Workspace rules** with no
 rules declared says so and names `[[governance.boundaries]]` in
 `logos.workspace.toml` in that sentence. Every ratio on these views
 carries its denominator and its exclusion — a zero denominator renders the ratio
@@ -842,10 +843,11 @@ breakdown (`literal` / `config-bound` / `config-unresolved` / `unstated`) rather
 labelling an aggregated link as a single kind, and the edge detail names the evidence —
 for each `config-bound` end the key, its defining source paths and the profile set, one row
 per overlay; for a `config-unresolved` end its keys and the refusal. Rows identical in
-every column are merged into one, with a **Calls** count of how many calls it stands for,
-and each row says what to do: define the key, or replace the placeholder value, in the
-member's configuration; nothing, when the value arrives at runtime; otherwise, if the
-value is wrong, correct the file named under *Defining sources* (since S-614). The legend's
+every column are merged into one, with a **Calls** count of how many calls it stands for
+(since S-614). A row with no value states why in its *Committed value* cell — *No committed
+source defines it*, *The committed value is itself a placeholder*, *Not committed by the
+repository*, or a newer refusal named as the server sent it — and *Defining sources* names
+the files that define the key. The legend's
 provenance section, the Provenance column and filter, and the **Binding evidence** widget
 render only when at least one link is non-literal, so a workspace with no admitted binding
 gains none of them (S-419, CR-132).

@@ -87,7 +87,6 @@ import type {
   XserviceRouteProviders,
 } from "../../api/types.ts";
 import {
-  ActionCell,
   Badge,
   Button,
   Callout,
@@ -116,7 +115,6 @@ import {
   crossContextHint,
   crossServiceBindings,
   declaredContracts,
-  evidenceRowAction,
   SERVICE_MAP_TEXT,
 } from "../../copy/serviceMap.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
@@ -864,7 +862,8 @@ function linkColumns(withProvenance: boolean): Column<ServiceLink>[] {
 
 /** The evidence detail's columns (S-419, CR-132 AC4; FR-WS-19 AC2/AC6), over
  *  grouped rows (S-614): each states one fact once, with how many calls it
- *  stands for and what its refusal asks of the reader. "Calls" is explained in
+ *  stands for. A refusal is stated in Committed value and its files under
+ *  Defining sources; there is no per-row action (CR-207). "Calls" is explained in
  *  the widget's what rather than glossed: a `Term` inside the sort button
  *  would nest one interactive element in another. */
 const EVIDENCE_COLUMNS: Column<EvidenceGroup>[] = [
@@ -914,12 +913,6 @@ const EVIDENCE_COLUMNS: Column<EvidenceGroup>[] = [
     sortValue: (r) => r.sources.join(","),
   },
   { key: "calls", header: "Calls", numeric: true, cell: (r) => r.calls, sortValue: (r) => r.calls },
-  {
-    key: "action",
-    header: "What you can do",
-    // The one `none` a row has is a value that arrives at runtime.
-    cell: (r) => <ActionCell action={evidenceRowAction(r)} none={SERVICE_MAP_TEXT.arrivesAtRuntime} />,
-  },
 ];
 
 /** The evidence behind every non-literal link (S-419, CR-132 AC4; CR-203

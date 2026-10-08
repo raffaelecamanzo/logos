@@ -12,35 +12,9 @@
  * the prose.
  */
 
-import type { UnboundReason } from "../api/types.ts";
-
-import { gloss, plural, type CopyEntry, type CopyText, type WhereKind } from "./types.ts";
+import { gloss, plural, type CopyEntry, type CopyText } from "./types.ts";
 
 // ── Resolved cross-service edges (item 4) ────────────────────────────────────
-
-/** A remedy a Binding evidence row's action takes (S-614): the clause and the
- *  kind of place it happens in. */
-export interface Remedy {
-  /** The remedy, as a clause that follows the reason ("define the named key…"). */
-  readonly remedy: string;
-  /** The kind of place the remedy happens in. */
-  readonly where: WhereKind;
-}
-
-/** The remedies for the two not-bound reasons a repository can fix in its
- *  configuration, which the Binding evidence rows' own actions take
- *  (`evidenceRowAction`). Only these two: the Resolved cross-service edges
- *  widget states its reasons as evidence, with no remedy (CR-206). */
-export const NOT_RESOLVED_REMEDY: Readonly<Record<Extract<UnboundReason, "config-key-missing" | "config-placeholder-value">, Remedy>> = {
-  "config-key-missing": {
-    remedy: "define the named key in a committed configuration source",
-    where: "configuration",
-  },
-  "config-placeholder-value": {
-    remedy: "replace the placeholder with the real committed value",
-    where: "configuration",
-  },
-};
 
 /** One row of the not-resolved evidence table: a reason, its words and its count. */
 export interface NotResolvedReason {

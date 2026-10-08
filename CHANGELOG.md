@@ -30,8 +30,20 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   names its lowest-scoring dimension under the figure. **Resolved cross-service
   edges** below 100% shows its not-resolved reasons as an evidence table of
   reason and count, largest first, summing to the unresolved figure, without
-  remedies. The per-row action columns of **Members** and **Binding evidence**
-  are unchanged.
+  remedies. (The per-row action columns this entry left in **Members** and
+  **Binding evidence** are removed too; see the next entry.)
+- **Members and Binding evidence drop the "What you can do" column (CR-207,
+  S-630).** On the Workspace Dashboard, **Members** now ends at *Unused across
+  the workspace*: a member that could not be opened is still shown by its red
+  *degraded* State badge and its reason, and no row reads *Nothing to do —
+  informational.* any more. On Workspace → Service map, **Binding evidence**
+  ends at *Calls*: a refusal is still stated in words in *Committed value* (no
+  committed source defines it, a placeholder value, not committed by the
+  repository, or a newer refusal as the server named it), and *Defining sources*
+  still names the files. Nothing those columns said moves elsewhere. No
+  "What you can do" text renders anywhere in the web UI, and the widget test
+  helper, the widget source scan and the browser layout check now refuse it in
+  tables too.
 
 ### Fixed
 

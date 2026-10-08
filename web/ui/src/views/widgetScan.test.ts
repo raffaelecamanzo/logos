@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { isCopyEntry } from "../copy/text.ts";
 import { TOOL_PANELS } from "../copy/toolPanels.ts";
+import { REMOVED_ACTION_TEXT } from "../test/removedActionText.ts";
 import { scanViewSources, type CatalogueExport, type CatalogueIndex } from "../test/widgetScan.ts";
 
 const sources = import.meta.glob<string>(["/src/views/**/*.tsx", "!/src/views/**/*.test.tsx"], {
@@ -50,6 +51,38 @@ const ACTION_LINE_MARKER = /data-widget-part=["{]?\W*action|data-widget-copy=["{
 function actionLineMarkers(files: Record<string, string>): string[] {
   return Object.entries(files).flatMap(([file, src]) =>
     src.split("\n").flatMap((line, i) => (ACTION_LINE_MARKER.test(line) ? [`${file}:${i + 1}`] : [])),
+  );
+}
+
+/** Every source the bundle renders text from — views, components, catalogues —
+ *  tests, test helpers (`src/test/` holds the removed text in order to refuse
+ *  it) and compile-time probes left out. */
+const renderedSources = import.meta.glob<string>(
+  [
+    "/src/**/*.ts",
+    "/src/**/*.tsx",
+    "!/src/**/*.test.ts",
+    "!/src/**/*.test.tsx",
+    "!/src/**/*.typecheck.ts",
+    "!/src/test/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+/** A source with its comments blanked, line numbers kept: a doc comment may
+ *  name the removed text to record its removal. A trailing `//` after code is
+ *  kept, so the strip can only over-report, never hide a rendered string. */
+function withoutComments(src: string): string[] {
+  const blanked = src.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " "));
+  return blanked.split("\n").map((line) => (line.trimStart().startsWith("//") ? "" : line));
+}
+
+/** The sources that still write action text CR-206/CR-207 removed, as `file:line`. */
+function removedActionTextSites(files: Record<string, string>): string[] {
+  return Object.entries(files).flatMap(([file, src]) =>
+    withoutComments(src).flatMap((line, i) =>
+      REMOVED_ACTION_TEXT.some((t) => line.includes(t)) ? [`${file}:${i + 1}`] : [],
+    ),
   );
 }
 
@@ -110,6 +143,39 @@ describe("widget source scan (S-617)", () => {
     }
     // A near miss is not the marker: a data attribute naming another part, or a word.
     expect(actionLineMarkers({ x: '<div data-widget-part="evidence">actionable where</div>\n<td data-row-action="">' })).toEqual([]);
+  });
+
+  it("no source the UI renders from writes \"What you can do\" or the empty-row sentence (CR-207 AC-4)", () => {
+    for (const file of [
+      "/src/views/workspace/WorkspaceDashboardView.tsx",
+      "/src/views/workspace/WorkspaceView.tsx",
+      "/src/components/Widget.tsx",
+      "/src/copy/types.ts",
+      "/src/copy/serviceMap.copy.ts",
+    ]) {
+      expect(Object.keys(renderedSources), "the scan reads every view, component and catalogue").toContain(file);
+    }
+    expect(Object.keys(renderedSources).some((f) => f.includes(".test.")), "tests are not rendered").toBe(false);
+    expect(removedActionTextSites(renderedSources)).toEqual([]);
+    console.info(`removed-action-text scan: ${Object.keys(renderedSources).length} source files`);
+  });
+
+  it("finds the removed text written back into a source, in code or JSX, never in a comment (falsifiable)", () => {
+    const view = "/src/views/workspace/WorkspaceDashboardView.tsx";
+    const lines = renderedSources[view].split("\n").length;
+    for (const added of [
+      '  { key: "action", header: "What you can do", cell: () => null },',
+      '      <span className="muted">Nothing to do — informational.</span>',
+      'const emptyRow = "Nothing to do — informational."; // a trailing comment does not hide it',
+    ]) {
+      expect(removedActionTextSites({ [view]: `${renderedSources[view]}\n${added}` }), added).toEqual([`${view}:${lines + 1}`]);
+    }
+    // A comment recording the removal is not rendered text, nor is a near miss.
+    expect(
+      removedActionTextSites({
+        x: '/* CR-207 removed "What you can do". */\n// Nothing to do — informational. (gone)\nconst s = "Nothing to do unless the change was unintended.";',
+      }),
+    ).toEqual([]);
   });
 
   it("every registered tool panel is rendered by some view", () => {

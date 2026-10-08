@@ -12,6 +12,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { CrossServiceCoverage } from "../../api/types.ts";
+import badgeStyles from "../../components/Badge.module.css";
 import statesStyles from "../../components/States.module.css";
 import { COVERAGE_TEXT, resolvedEdges } from "../../copy/coverage.copy.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
@@ -484,7 +485,7 @@ describe("every widget explains itself, in one stack (S-613)", () => {
     },
   );
 
-  it("Members carries its entry and no widget action line; a degraded member's re-index stays in its row (CR-206)", async () => {
+  it("Members carries its entry and no widget action line (CR-206)", async () => {
     const { container } = await mount(WIDGET_STATES["degraded member"]);
     const w = widget(container, "Members");
     expectWidgetCopy(w, members);
@@ -569,7 +570,7 @@ describe("every widget explains itself, in one stack (S-613)", () => {
     ]);
   });
 
-  it("Members gives each row its own action: re-index a degraded member, review deletions, or nothing", async () => {
+  it("Members has no per-row action column; a degraded member still shows its red State badge and reason (CR-207 AC-1)", async () => {
     const { container } = await mount({
       status: WIDGET_STATES["degraded member"].status,
       reachability: reachabilityAnswer({
@@ -582,13 +583,21 @@ describe("every widget explains itself, in one stack (S-613)", () => {
     });
     const w = widget(container, "Members");
     expectWidgetCopy(w, members);
-    const actionCell = (member: string) => {
-      const row = within(w).getByRole("row", { name: new RegExp(`^${member}\\b`) });
-      return [...row.querySelectorAll("td")].at(-1)?.textContent ?? "";
-    };
-    expect(actionCell("web")).toMatch(/^Run logos index in this member\.command logos index$/);
-    expect(actionCell("api")).toMatch(/^Review 7 callables for deletion\.source code$/);
-    expect(actionCell("orders")).toBe("Nothing to do — informational.");
+    // The table ends at "Unused across the workspace": no header and no cell past it.
+    const headers = within(w).getAllByRole("columnheader");
+    expect(headers).toHaveLength(7);
+    expect(headers.at(-1)?.querySelector("dfn[data-term]")?.getAttribute("data-term")).toBe("unusedAcrossWorkspace");
+    expect(w).not.toHaveTextContent(/What you can do|Nothing to do|Run logos index|Review \d+ callables? for deletion/);
+    const row = (member: string) => within(w).getByRole("row", { name: new RegExp(`^${member}\\b`) });
+    for (const m of ["api", "orders", "web"]) expect(row(m).querySelectorAll("td")).toHaveLength(7);
+    // The degraded member is still told apart by its State cell: the red badge, then its reason.
+    const state = row("web").querySelectorAll("td")[1];
+    const badge = state.querySelector("span")!;
+    expect(badge).toHaveTextContent("degraded — could not be opened");
+    expect(badge).toHaveClass(badgeStyles.red);
+    expect(state).toHaveTextContent("the process ran out of file descriptors");
+    // A healthy member's badge is green: the colour is the badge's, not the page's.
+    expect(row("api").querySelectorAll("td")[1].querySelector("span")).toHaveClass(badgeStyles.green);
   });
 
   it("Members states BR-56 as one plain sentence", async () => {
