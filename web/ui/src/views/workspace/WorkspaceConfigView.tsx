@@ -92,7 +92,6 @@ import {
   Badge,
   Button,
   Callout,
-  Card,
   DataTable,
   EmptyState,
   ErrorPanel,
@@ -100,6 +99,8 @@ import {
   SelectField,
   TextField,
   TextareaField,
+  Widget,
+  WidgetStack,
 } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { WORKSPACE_CONFIG_FILE, WORKSPACE_SECRETS_FILE } from "../chat/chatModel.ts";
@@ -108,8 +109,9 @@ import styles from "../config/ConfigView.module.css";
 
 // ── The group frame (shared by every group this view will hold) ───────────────
 
-/** One group of the workspace Config view: a card titled with what it configures
- *  and naming the file it writes, so no group can be mistaken for another's. */
+/** One group of the workspace Config view: a tool panel (S-617) titled with
+ *  what it configures and naming the file it writes, so no group can be mistaken
+ *  for another's. */
 export function ConfigGroup({
   title,
   file,
@@ -121,12 +123,12 @@ export function ConfigGroup({
   children: ReactNode;
 }) {
   return (
-    <Card title={title}>
+    <Widget panel="workspaceConfigGroup" title={title}>
       <div className={styles.fileHead}>
         <span className={styles.path}>{file}</span>
       </div>
       {children}
-    </Card>
+    </Widget>
   );
 }
 
@@ -1133,8 +1135,9 @@ export function WorkspaceConfigView() {
     );
   }
 
+  // One stack (S-617, FR-UI-40): the advisory, then each group's panel.
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="WORKSPACE CONFIG" tone="muted">
         This view answers for the whole workspace, not the selected service: it edits the
         workspace&apos;s own files, each named beside its group. A service&apos;s{" "}
@@ -1144,6 +1147,6 @@ export function WorkspaceConfigView() {
       {/* Each group is a sibling ConfigGroup owning its own reads and saves. */}
       <ManifestGroup />
       <TierGroup />
-    </div>
+    </WidgetStack>
   );
 }

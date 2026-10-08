@@ -37,12 +37,6 @@
   min-width: 12rem;
 }
 
-.surfaces {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-
 /* The ECharts mount (filled imperatively by StatChart). Width-driven; a fixed
    min-height keeps the layout stable before the canvas paints. */
 .chart {

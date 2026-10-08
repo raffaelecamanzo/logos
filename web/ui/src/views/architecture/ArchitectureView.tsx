@@ -11,13 +11,25 @@
  * `useApiResource`, honest loading/empty/error states through `AsyncResource`,
  * rendering exclusively through the S-193 design system. Every read is GET-only —
  * loading the view mutates no store (ADR-28).
+ *
+ * S-617 (CR-203, FR-UI-39/40): the matrix and the (hidden) cycle list are
+ * `Widget`s with `copy/architecture.copy.ts` entries, in one `WidgetStack`.
  */
 
 import { fetchArchitecture } from "../../api/client.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type { ArchitectureModel, DsmReport } from "../../api/types.ts";
-import { Callout, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, EmptyState } from "../../components/index.ts";
+import {
+  Callout,
+  DataTable,
+  DEFAULT_TABLE_PAGE_SIZE,
+  EmptyState,
+  Widget,
+  WidgetStack,
+} from "../../components/index.ts";
 import type { Column } from "../../components/index.ts";
+import { cycles, dependencyMatrix } from "../../copy/architecture.copy.ts";
+import { plural as pluralWord } from "../../copy/types.ts";
 import { navigate } from "../../router.tsx";
 import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
@@ -52,11 +64,11 @@ function ArchitectureReport({ report }: { report: DsmReport }) {
   const edges = backEdges(report);
   const showCycles = !isWidgetHidden("architecture-cycles");
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       {showCycles && <CyclesVerdict count={edges.length} />}
       {showCycles && <CyclesCard report={report} edges={edges} />}
-      <MatrixCard report={report} />
-    </div>
+      <MatrixCard report={report} backEdges={edges.length} />
+    </WidgetStack>
   );
 }
 
@@ -91,12 +103,12 @@ interface CycleRow {
 function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] }) {
   if (edges.length === 0) {
     return (
-      <Card title="Cycles">
-        <p className={styles.note}>
-          No cycles detected — every dependency respects layer order. The full
-          dependency matrix is available below.
-        </p>
-      </Card>
+      <Widget
+        title="Cycles"
+        copy={cycles}
+        state={{ backEdges: 0 }}
+        absence="No cycles detected — every dependency respects layer order. The full dependency matrix is available below."
+      />
     );
   }
   const rows: CycleRow[] = edges.map(([i, j]) => ({
@@ -129,7 +141,19 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
     },
   ];
   return (
-    <Card title="Cycles">
+    <Widget
+      title="Cycles"
+      copy={cycles}
+      state={{ backEdges: edges.length }}
+      figure={
+        <span>
+          {edges.length}{" "}
+          <span className="muted">
+            {pluralWord(edges.length, "module pair", "module pairs")} against layer order
+          </span>
+        </span>
+      }
+    >
       <DataTable
         caption="Cycles"
         columns={columns}
@@ -137,7 +161,7 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
         rowKey={(r) => `${r.from} ${r.to}`}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-    </Card>
+    </Widget>
   );
 }
 
@@ -160,13 +184,25 @@ function FocusLink({ name }: { name: string }) {
 /** The demoted full matrix in a collapsible `<details>`: at/below the module-count
  *  threshold the disclosure auto-opens; above it stays collapsed with a note
  *  pointing at the Graph view (the matrix is unreadable past ~20 modules, §4.5). */
-function MatrixCard({ report }: { report: DsmReport }) {
+function MatrixCard({ report, backEdges }: { report: DsmReport; backEdges: number }) {
   const n = report.rows.length;
   const open = n <= MATRIX_MODULE_THRESHOLD;
   const plural = n === 1 ? "" : "s";
   const max = offDiagonalMax(report);
   return (
-    <Card title="Dependency matrix">
+    <Widget
+      title="Dependency matrix"
+      copy={dependencyMatrix}
+      state={{ backEdges }}
+      figure={
+        <span>
+          {n}{" "}
+          <span className="muted">
+            module{plural} · {backEdges} {pluralWord(backEdges, "module pair", "module pairs")} against layer order
+          </span>
+        </span>
+      }
+    >
       <details className={styles.disclosure} open={open}>
         <summary>
           Full dependency matrix · {n} module{plural}
@@ -184,7 +220,7 @@ function MatrixCard({ report }: { report: DsmReport }) {
           </div>
         </div>
       </details>
-    </Card>
+    </Widget>
   );
 }
 

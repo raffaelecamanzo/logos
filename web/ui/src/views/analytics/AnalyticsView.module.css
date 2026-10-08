@@ -4,14 +4,6 @@
  * so the self-only CSP stays byte-identical.
  */
 
-/* Section stack — the verdict Callout over each Card, evenly spaced (matches the
-   Rule-findings tab's `.view`). Without this the bare fragment stacked sections flush. */
-.view {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-
 /* Per-file coverage bar cell (a native <meter> + a percent figure), rendered
    inside the paginated Per-file coverage DataTable's Coverage column. */
 .covFigure {

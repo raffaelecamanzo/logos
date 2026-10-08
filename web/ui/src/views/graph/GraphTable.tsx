@@ -7,7 +7,7 @@
  * captioned), so it inherits the system's a11y semantics.
  */
 
-import { Badge, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, type Column } from "../../components/index.ts";
+import { Badge, DataTable, DEFAULT_TABLE_PAGE_SIZE, Widget, type Column } from "../../components/index.ts";
 import type { GraphElementEdge, GraphElementNode } from "../../api/types.ts";
 import { layerLabel, prettify, type LoadedSet } from "./graphModel.ts";
 import styles from "./GraphTable.module.css";
@@ -81,12 +81,13 @@ export function GraphTable({ loaded, hoodOf }: GraphTableProps) {
   const title = hoodOf
     ? `1-hop neighbourhood of ${hoodOf}`
     : "Graph nodes & edges (accessible table)";
-  const description = hoodOf
-    ? `Nodes and edges directly connected to ${hoodOf}, for keyboard and screen-reader traversal.`
-    : "The interactive graph's nodes and edges, listed for keyboard and screen-reader access.";
+  // The panel's own line (TOOL_PANELS) says what the tables are for; a locked
+  // node narrows them, which only this note can say.
   return (
-    <Card title={title}>
-      <p className="muted">{description}</p>
+    <Widget panel="graphTable" title={title}>
+      {hoodOf && (
+        <p className="muted">Only the nodes and edges directly connected to {hoodOf}.</p>
+      )}
       <DataTable
         caption="Graph nodes"
         captionVisible
@@ -109,6 +110,6 @@ export function GraphTable({ loaded, hoodOf }: GraphTableProps) {
           />
         </>
       )}
-    </Card>
+    </Widget>
   );
 }

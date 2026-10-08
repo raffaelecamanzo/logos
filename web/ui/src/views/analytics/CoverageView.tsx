@@ -9,6 +9,12 @@
  * ([FR-CV-05]). The <meter> drives its fill from its `value` attribute, so no inline
  * style is needed — the self-only CSP stays intact. Every read is GET-only (ADR-28).
  *
+ * S-617 (CR-203, FR-UI-39/40): Untested hotspots and Per-file coverage are
+ * `Widget`s with `copy/coverageView.copy.ts` entries, in one `WidgetStack` under
+ * the status callout. With no report ingested both state that absence in their
+ * figure rows and name the ingest command — no centred empty state, since the
+ * view still has widgets.
+ *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
  * the closed sentinel vocabulary and the rules (R0-R5) every absence-
@@ -21,12 +27,14 @@ import type { CoverageFileStatus, CoverageModel, Hotspot } from "../../api/types
 import {
   Badge,
   Callout,
-  Card,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
-  EmptyState,
+  Widget,
+  WidgetStack,
   type Column,
 } from "../../components/index.ts";
+import { COVERAGE_VIEW_ABSENCE, perFileCoverage, untestedHotspots } from "../../copy/coverageView.copy.ts";
+import { plural } from "../../copy/types.ts";
 import { pctBp } from "./analyticsModel.ts";
 import { CoverageCellView, Na } from "./cells.tsx";
 import styles from "./AnalyticsView.module.css";
@@ -89,61 +97,111 @@ export function CoverageView() {
 function CoverageContent({ model }: { model: CoverageModel }) {
   const { coverage, untested } = model;
 
-  // No coverage ingested → the read-model's own `n/a` notice, surfaced as the
-  // empty state naming the producing command ([FR-CV-06], NFR-CC-04).
+  // No coverage ingested → the read-model's own `n/a` notice; each widget states
+  // the absence and names the producing command ([FR-CV-06], NFR-CC-04).
   if (coverage.notice) {
     return (
-      <div className={styles.view}>
+      <WidgetStack>
         <Callout label="Coverage" tone="muted">
           <Na /> — no data ingested
         </Callout>
-        <EmptyState message="No coverage ingested — run" command="logos coverage ingest <report>" />
-      </div>
+        <Widget
+          title="Untested hotspots"
+          copy={untestedHotspots}
+          state={{ ingested: false, ranked: false, files: 0 }}
+          absence={COVERAGE_VIEW_ABSENCE.notIngested}
+        />
+        <Widget
+          title="Per-file coverage"
+          copy={perFileCoverage}
+          state={{ ingested: false, stale: 0 }}
+          absence={COVERAGE_VIEW_ABSENCE.notIngested}
+        />
+      </WidgetStack>
     );
   }
 
   const freshness = coverage.freshness_bp != null ? pctBp(coverage.freshness_bp) : "n/a";
   const head = coverage.head_sha ?? "n/a";
+  const untestedCount = untested.files.length;
 
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="Coverage" tone="signal">
         <span>
           {coverage.fresh_files}/{coverage.total_files} files fresh · {freshness} fresh ·{" "}
-          {coverage.report_count} report(s) [{coverage.formats.join(", ")}] ·{" "}
-          <span className="mono">HEAD {head}</span>
+          {coverage.report_count} {plural(coverage.report_count, "report", "reports")} [
+          {coverage.formats.join(", ")}] · <span className="mono">HEAD {head}</span>
         </span>
       </Callout>
 
-      <Card title="Untested hotspots">
-        {untested.files.length === 0 ? (
-          <p className="muted">
-            <Na /> untested hotspots
-          </p>
-        ) : (
-          <>
-            <DataTable
-              caption="Untested hotspots"
-              columns={UNTESTED_COLUMNS}
-              rows={untested.files}
-              rowKey={(r) => r.path}
-              pageSize={DEFAULT_TABLE_PAGE_SIZE}
-            />
-            {untested.coverage_label && (
-              <p className="muted">
-                Basis: {untested.coverage_basis} — {untested.coverage_label}.
-              </p>
-            )}
-          </>
-        )}
-      </Card>
+      {untested.ranked_files === 0 ? (
+        // Nothing was ranked (no git history, a shallow clone…): an empty board
+        // here measured nothing, so it is not "no untested file" (NFR-CC-04).
+        <Widget
+          title="Untested hotspots"
+          copy={untestedHotspots}
+          state={{ ingested: true, ranked: false, files: 0 }}
+          absence={untested.notice ?? COVERAGE_VIEW_ABSENCE.notRanked}
+        />
+      ) : untestedCount === 0 ? (
+        <Widget
+          title="Untested hotspots"
+          copy={untestedHotspots}
+          state={{ ingested: true, ranked: true, files: 0 }}
+          absence={COVERAGE_VIEW_ABSENCE.noUntested}
+        />
+      ) : (
+        <Widget
+          title="Untested hotspots"
+          copy={untestedHotspots}
+          state={{ ingested: true, ranked: true, files: untestedCount }}
+          figure={
+            <span>
+              {untestedCount}{" "}
+              <span className="muted">
+                untested {plural(untestedCount, "file", "files")} among the {untested.ranked_files} ranked
+              </span>
+            </span>
+          }
+        >
+          <DataTable
+            caption="Untested hotspots"
+            columns={UNTESTED_COLUMNS}
+            rows={untested.files}
+            rowKey={(r) => r.path}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+          {untested.coverage_label && (
+            <p className="muted">
+              Basis: {untested.coverage_basis} — {untested.coverage_label}.
+            </p>
+          )}
+        </Widget>
+      )}
 
-      <Card title="Per-file coverage">
-        {coverage.files.length === 0 ? (
-          <p className="muted">
-            <Na /> — no covered files
-          </p>
-        ) : (
+      {coverage.files.length === 0 ? (
+        <Widget
+          title="Per-file coverage"
+          copy={perFileCoverage}
+          state={{ ingested: true, stale: coverage.stale_files }}
+          absence={COVERAGE_VIEW_ABSENCE.noFiles}
+        />
+      ) : (
+        <Widget
+          title="Per-file coverage"
+          copy={perFileCoverage}
+          state={{ ingested: true, stale: coverage.stale_files }}
+          figure={
+            <span>
+              {coverage.overall_coverage_bp != null ? pctBp(coverage.overall_coverage_bp) : "n/a"}{" "}
+              <span className="muted">
+                of lines covered · {coverage.stale_files} of {coverage.total_files} {plural(coverage.total_files, "file", "files")}{" "}
+                stale
+              </span>
+            </span>
+          }
+        >
           <DataTable
             caption="Per-file coverage"
             columns={PERFILE_COLUMNS}
@@ -151,8 +209,8 @@ function CoverageContent({ model }: { model: CoverageModel }) {
             rowKey={(f) => f.path}
             pageSize={DEFAULT_TABLE_PAGE_SIZE}
           />
-        )}
-      </Card>
-    </div>
+        </Widget>
+      )}
+    </WidgetStack>
   );
 }

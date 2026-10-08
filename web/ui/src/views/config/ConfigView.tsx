@@ -70,13 +70,14 @@ import {
   Badge,
   Button,
   Callout,
-  Card,
   DataTable,
   ErrorPanel,
   LoadingState,
   SelectField,
   TextField,
   TextareaField,
+  Widget,
+  WidgetStack,
 } from "../../components/index.ts";
 import { patch, type TomlFieldType } from "./toml.ts";
 import styles from "./ConfigView.module.css";
@@ -555,7 +556,7 @@ function FileEditor({
     : "Reconciles the graph to the saved config.toml admission policy. Save first if you have unsaved edits.";
 
   return (
-    <Card title={title}>
+    <Widget panel="policyFile" title={title}>
       <div className={styles.fileHead}>
         <Badge tone={view.exists ? "green" : "muted"}>{view.exists ? "on disk" : "not yet created"}</Badge>
         <span className={styles.path}>{view.path}</span>
@@ -616,7 +617,7 @@ function FileEditor({
       </div>
       <p className={styles.help}>{applyHelp}</p>
       <ResultPanel result={applyResult} />
-    </Card>
+    </Widget>
   );
 }
 
@@ -666,7 +667,7 @@ function SecretEditor({
   }
 
   return (
-    <Card title="chat API key">
+    <Widget panel="chatKey" title="chat API key">
       <div className={styles.fileHead}>
         {masked.present ? (
           <Badge tone="green">set · ends …{masked.last4 ?? ""}</Badge>
@@ -720,7 +721,7 @@ function SecretEditor({
         </Button>
       </div>
       <ResultPanel result={result} />
-    </Card>
+    </Widget>
   );
 }
 
@@ -822,7 +823,7 @@ function GraphConsistencyCard() {
   }
 
   return (
-    <Card title="Graph consistency check">
+    <Widget panel="graphConsistency" title="Graph consistency check">
       <p className={styles.help}>
         Re-indexes the project into a throwaway shadow copy and compares it to the live graph —
         this can take a while on a large repo.
@@ -835,7 +836,7 @@ function GraphConsistencyCard() {
       {checking && <LoadingState label="Re-indexing a shadow copy…" />}
       {!checking && error && <ErrorPanel>{error}</ErrorPanel>}
       {!checking && report && <VerifyReportPanel report={report} />}
-    </Card>
+    </Widget>
   );
 }
 
@@ -853,8 +854,9 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       () => setEffective(null),
     );
   }, []);
+  // One stack (S-617, FR-UI-40): the advisory, then each editor panel.
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="CONFIG EDITOR" tone="muted">
         Edit <code>.logos/config.toml</code> and <code>.logos/rules.toml</code> in place.{" "}
         <strong>Save</strong> validates the whole document and writes it atomically — an invalid
@@ -885,7 +887,7 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
         groups={rulesGroups(model.rules.parsed, model.defaults.rules)}
         isRules
       />
-    </div>
+    </WidgetStack>
   );
 }
 

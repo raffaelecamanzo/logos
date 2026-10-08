@@ -2,7 +2,10 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ArchitectureModel } from "../../api/types.ts";
+import { cycles, dependencyMatrix } from "../../copy/architecture.copy.ts";
+import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { ArchitectureView } from "./ArchitectureView.tsx";
 import { MATRIX_MODULE_THRESHOLD } from "./dsmModel.ts";
 
@@ -169,5 +172,58 @@ describe("ArchitectureView with the cycles register entry removed (S-612, FR-UI-
     // 20 body rows + the header row — no page renders more than 20 rows.
     expect(within(cyclesTable).getAllByRole("row").length).toBe(20 + 1);
     expect(screen.getByText(/Showing 1–20 of 28/)).toBeInTheDocument();
+  });
+});
+
+// ── S-617 (CR-203, FR-UI-39/40): the widgets explain themselves ──────────────
+
+function acyclicModel(): ArchitectureModel {
+  const m = withCycle();
+  m.dsm.matrix = [
+    [0, 0],
+    [3, 0],
+  ];
+  return m;
+}
+
+describe("the Architecture widgets explain themselves (S-617, FR-UI-39/40)", () => {
+  it.each([
+    ["a cycle", withCycle, 1, "act"],
+    ["acyclic", acyclicModel, 0, "none"],
+  ] as const)("Dependency matrix, %s: its catalogue entry, alone in the view's one stack", async (_n, build, backEdges, kind) => {
+    stub(build());
+    const { container } = render(<ArchitectureView />);
+    await screen.findByText(/Full dependency matrix · 2 modules/i);
+    const [matrix, ...rest] = expectOneWidgetStack(container);
+    expect(rest).toEqual([]);
+    expect(widgetTitle(matrix)).toBe("Dependency matrix");
+    expect(actionKind(matrix)).toBe(kind);
+    expectWidgetCopy(matrix, dependencyMatrix, { backEdges });
+    expect(matrix.querySelector('[data-widget-part="figure"]')).toHaveTextContent(
+      // A count of module pairs (cells marked ↺), not of the dependencies in them:
+      // the one ↺ cell here holds 4.
+      `2 modules · ${backEdges} ${backEdges === 1 ? "module pair" : "module pairs"} against layer order`,
+    );
+  });
+
+  describe("with the cycles register entry removed", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = removeHiddenWidgetEntry("architecture-cycles");
+    });
+    afterEach(() => restore());
+
+    it.each([
+      ["a cycle", withCycle, 1, "act"],
+      ["acyclic", acyclicModel, 0, "none"],
+    ] as const)("Cycles, %s: returns already explained, in the same stack", async (_n, build, backEdges, kind) => {
+      stub(build());
+      const { container } = render(<ArchitectureView />);
+      await screen.findByText(/Full dependency matrix · 2 modules/i);
+      const widgets = expectOneWidgetStack(container);
+      expect(widgets.map(widgetTitle)).toEqual(["Cycles", "Dependency matrix"]);
+      expect(actionKind(widgets[0])).toBe(kind);
+      expectWidgetCopy(widgets[0], cycles, { backEdges });
+    });
   });
 });

@@ -13,7 +13,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import statesStyles from "../../components/States.module.css";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
-import { HEALTH_TEXT, workspaceRules } from "../../copy/workspaceHealth.copy.ts";
+import {
+  brokerTopics,
+  HEALTH_TEXT,
+  memberFreshness,
+  membersAnswering,
+  warmState,
+  workspaceRules,
+} from "../../copy/workspaceHealth.copy.ts";
+import type { CopyEntry } from "../../copy/types.ts";
 import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -278,21 +286,21 @@ describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
 });
 
 describe("the topic inventory (FR-WS-11)", () => {
-  it("lists each member's promoted topics, repo-qualified", async () => {
+  it("lists each member's broker topics, repo-qualified", async () => {
     await mount({
       status: workspaceStatus({
         topics: [{ member: "orders", topics: [{ topic: "orders.created", producers: 1, consumers: 2 }] }],
       }),
     });
-    const topics = card(/^Promoted broker topics$/);
+    const topics = card(/^Broker topics$/);
     expect(within(topics).getByText("orders.created")).toBeInTheDocument();
     expect(within(topics).getByText("orders")).toBeInTheDocument();
   });
 
-  it("renders the honest empty when no member promoted a topic", async () => {
+  it("states the honest absence when no member uses a topic", async () => {
     await mount({ status: workspaceStatus({ topics: [] }) });
     expect(
-      within(card(/^Promoted broker topics$/)).getByText(/no member has promoted/i),
+      within(card(/^Broker topics$/)).getByText(/no member publishes or subscribes to a broker topic/i),
     ).toBeInTheDocument();
   });
 });
@@ -452,4 +460,99 @@ describe("Workspace rules explains itself, in the view's one stack (S-613)", () 
     expect(w.querySelector('[data-widget-copy="action"]')?.textContent).toMatch(/^Correct each rule/);
     expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration logos.workspace.toml");
   });
+});
+
+// ── S-617: the view's other four widgets (CR-203, FR-UI-39/40) ───────────────
+
+const ENTRIES: Record<string, CopyEntry<never>> = {
+  "Members answering": membersAnswering as CopyEntry<never>,
+  Members: memberFreshness as CopyEntry<never>,
+  "Warm state across the workspace": warmState as CopyEntry<never>,
+  "Workspace rules": workspaceRules as CopyEntry<never>,
+  "Broker topics": brokerTopics as CopyEntry<never>,
+};
+
+/** Each widget's state and action kind per WIDGET_STATES entry, written out so a
+ *  wrong branch in the catalogue fails here. Workspace rules is S-613's, above. */
+const EXPECTED: Record<keyof typeof WIDGET_STATES, Record<string, [state: unknown, kind: "act" | "none"]>> = {
+  healthy: {
+    "Members answering": [{ failed: 0 }, "none"],
+    Members: [{ degraded: 0 }, "none"],
+    "Warm state across the workspace": [{ degraded: 0 }, "none"],
+    "Broker topics": [undefined, "none"],
+  },
+  "partial coverage": {
+    "Members answering": [{ failed: 0 }, "none"],
+    Members: [{ degraded: 0 }, "none"],
+    "Warm state across the workspace": [{ degraded: 0 }, "none"],
+    "Broker topics": [undefined, "none"],
+  },
+  "nothing measured": {
+    "Members answering": [{ failed: 0 }, "none"],
+    Members: [{ degraded: 0 }, "none"],
+    "Warm state across the workspace": [{ degraded: 0 }, "none"],
+    "Broker topics": [undefined, "none"],
+  },
+  "degraded member": {
+    "Members answering": [{ failed: 1 }, "act"],
+    Members: [{ degraded: 1 }, "act"],
+    "Warm state across the workspace": [{ degraded: 0 }, "none"],
+    "Broker topics": [undefined, "none"],
+  },
+};
+
+describe("every Workspace Health widget explains itself, in one stack (S-617)", () => {
+  it.each(Object.entries(WIDGET_STATES))("%s: each widget its catalogue entry at its state", async (name, { status, governance }) => {
+    await mount({ status, governance });
+    await screen.findByRole("heading", { name: /^Workspace rules$/ });
+    const widgets = expectOneWidgetStack(document.body);
+    expect(widgets.map(widgetTitle)).toEqual(Object.keys(ENTRIES));
+    const expected = EXPECTED[name as keyof typeof WIDGET_STATES];
+    for (const widget of widgets) {
+      const title = widgetTitle(widget);
+      if (title === "Workspace rules") continue;
+      const [state, kind] = expected[title];
+      expect(actionKind(widget), `${title} (${name})`).toBe(kind);
+      expectWidgetCopy(widget, ENTRIES[title], state as never);
+    }
+  });
+
+  it("a member whose indexing failed asks for the index in that member", async () => {
+    await mount(PARTIAL);
+    const warm = expectOneWidgetStack(document.body).find((w) => widgetTitle(w) === "Warm state across the workspace")!;
+    expectWidgetCopy(warm, warmState, { degraded: 1 });
+    expect(warm.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos index");
+    expect(warm.querySelector('[data-widget-part="figure"]')).toHaveTextContent("2 of 3 members are warm");
+  });
+
+  it("the members figure and the topic figure state their denominators", async () => {
+    await mount({
+      ...PARTIAL,
+      status: {
+        ...PARTIAL.status!,
+        topics: [
+          { member: "orders", topics: [{ topic: "orders.created", producers: 1, consumers: 2 }] },
+          { member: "api", topics: [] },
+        ],
+      },
+    });
+    const widgets = expectOneWidgetStack(document.body);
+    const figure = (title: string) =>
+      widgets.find((w) => widgetTitle(w) === title)!.querySelector('[data-widget-part="figure"]');
+    expect(figure("Members")).toHaveTextContent("1 of 3 members degraded");
+    expect(figure("Broker topics")).toHaveTextContent("1 topic across 1 member");
+  });
+});
+
+it("counts a topic two members use once in the Broker topics figure (review fix)", async () => {
+  await mount({
+    status: workspaceStatus({
+      topics: [
+        { member: "orders", topics: [{ topic: "orders.created", producers: 1, consumers: 0 }] },
+        { member: "billing", topics: [{ topic: "orders.created", producers: 0, consumers: 1 }] },
+      ],
+    }),
+  });
+  const topics = expectOneWidgetStack(document.body).find((w) => widgetTitle(w) === "Broker topics")!;
+  expect(topics.querySelector('[data-widget-part="figure"]')).toHaveTextContent("1 topic across 2 members");
 });

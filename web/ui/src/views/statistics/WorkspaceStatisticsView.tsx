@@ -50,6 +50,12 @@
  * dependency array, so nothing re-fetches when one changes. Unreachable and
  * unrendered in single-root mode.
  *
+ * S-617 (CR-203, FR-UI-39/40): every figure surface is a `Widget` with its
+ * entry in `copy/workspaceStatistics.copy.ts`, in one `WidgetStack` under the
+ * population callout. The awaiting-data state is the Estimated value widget's
+ * stated absence (the member-scoped view's S-616 shape), not a centred empty
+ * state, since the view still holds widgets.
+ *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
  * the closed sentinel vocabulary and the rules (R0-R5) every absence-
@@ -71,16 +77,25 @@ import type { UnreadMember, UnreadReason, WorkspaceStatistics } from "../../api/
 import {
   Badge,
   Callout,
-  Card,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
   ErrorPanel,
   LoadingState,
   SelectField,
+  Widget,
+  WidgetStack,
   type BadgeTone,
   type Column,
 } from "../../components/index.ts";
+import {
+  membersNotSummed,
+  WORKSPACE_STATISTICS_ABSENCE,
+  workspaceDevVsMain,
+  workspaceEstimatedValue,
+  workspaceTopTools,
+  workspaceUsageOverTime,
+} from "../../copy/workspaceStatistics.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { StatChart } from "./StatChart.tsx";
 import {
@@ -271,26 +286,28 @@ function PopulationCallout({ agg }: { agg: WorkspaceStatistics }) {
 
 // ── Value estimate ─────────────────────────────────────────────────────────────
 
-/** The headline value callout: the window's estimated reads/tokens saved by
+/** The headline value widget: the window's estimated reads/tokens saved by
  *  navigation summed across the read members, honestly labeled as an estimate
- *  (NFR-CC-04, NFR-OO-03).
+ *  in its why (NFR-CC-04, NFR-OO-03).
  *
  *  No latency percentiles, unlike its member-scoped twin. A summed p95 is a
  *  fabricated figure rather than a coarser one, so the endpoint does not carry the
  *  percentiles and this view must not fall back to the per-member shape for them. */
-function ValueCallout({ agg }: { agg: WorkspaceStatistics }) {
+function ValueWidget({ agg }: { agg: WorkspaceStatistics }) {
   return (
-    <Callout label="Estimated value" tone="signal">
-      <p className={styles.valueLead}>
-        <strong className={styles.valueBig}>{fmtInt(agg.tokens_saved_estimate)}</strong> tokens and{" "}
-        <strong className={styles.valueBig}>{fmtInt(agg.reads_saved_estimate)}</strong> ad-hoc file
-        reads estimated saved by navigation across this workspace over the last {agg.window_days}{" "}
-        days.
-      </p>
-      <p className={styles.valueNote}>
-        An <em>estimate</em> — reads avoided by structural navigation, valued at the ratified
-        net-tokens-per-read constant. Not a measured figure.
-      </p>
+    <Widget
+      title="Estimated value"
+      copy={workspaceEstimatedValue}
+      state={{ recorded: true, failed: splitUnread(agg).failed.length }}
+      figure={
+        <p className={styles.valueLead}>
+          <strong className={styles.valueBig}>{fmtInt(agg.tokens_saved_estimate)}</strong> tokens and{" "}
+          <strong className={styles.valueBig}>{fmtInt(agg.reads_saved_estimate)}</strong> ad-hoc file
+          reads estimated saved by navigation across this workspace over the last {agg.window_days}{" "}
+          days.
+        </p>
+      }
+    >
       <dl className={styles.glance}>
         <div>
           <dt>Calls</dt>
@@ -302,11 +319,11 @@ function ValueCallout({ agg }: { agg: WorkspaceStatistics }) {
             the shape `DenominatorNote` exists to prevent). */}
       </dl>
       <DenominatorNote agg={agg} />
-    </Callout>
+    </Widget>
   );
 }
 
-// ── Surface cards ───────────────────────────────────────────────────────────────
+// ── Surface widgets ─────────────────────────────────────────────────────────────
 
 /** Usage over time — the daily-activity line + its accessible data-table twin.
  *  The series is the per-day sum across members, so a day on which two members
@@ -315,31 +332,32 @@ function ActivityCard({ points, agg }: { points: ActivityPoint[]; agg: Workspace
   // Memoise the option so `setOption` re-fires only when the data changes, not on
   // every ancestor re-render (which would replay the entry animation).
   const option = useMemo(() => activityLineOption(points), [points]);
+  if (points.length === 0) {
+    return (
+      <Widget title="Usage over time" copy={workspaceUsageOverTime} absence={WORKSPACE_STATISTICS_ABSENCE.activity}>
+        <DenominatorNote agg={agg} />
+      </Widget>
+    );
+  }
   return (
-    <Card title="Usage over time">
-      {points.length === 0 ? (
-        <EmptyState message="No activity in this window." />
-      ) : (
-        <>
-          <StatChart
-            option={option}
-            label={`Daily calls across the workspace over the last ${points.length} recorded day${points.length === 1 ? "" : "s"} (the table below carries the same data)`}
-          />
-          <DataTable<ActivityPoint>
-            columns={[
-              textCol("day", "Day", (r) => r.day),
-              numCol("calls", "Calls", (r) => r.calls),
-              numCol("ok", "OK", (r) => r.ok_calls),
-            ]}
-            rows={points}
-            rowKey={(r) => r.day}
-            caption="Daily activity across the workspace"
-            pageSize={15}
-          />
-        </>
-      )}
+    <Widget title="Usage over time" copy={workspaceUsageOverTime}>
+      <StatChart
+        option={option}
+        label={`Daily calls across the workspace over the last ${points.length} recorded day${points.length === 1 ? "" : "s"} (the table below carries the same data)`}
+      />
+      <DataTable<ActivityPoint>
+        columns={[
+          textCol("day", "Day", (r) => r.day),
+          numCol("calls", "Calls", (r) => r.calls),
+          numCol("ok", "OK", (r) => r.ok_calls),
+        ]}
+        rows={points}
+        rowKey={(r) => r.day}
+        caption="Daily activity across the workspace"
+        pageSize={15}
+      />
       <DenominatorNote agg={agg} />
-    </Card>
+    </Widget>
   );
 }
 
@@ -358,69 +376,66 @@ function ToolsCard({
     () => rankedBarOption(tools.map((t) => t.tool), tools.map((t) => t.calls)),
     [tools],
   );
+  if (tools.length === 0) {
+    return (
+      <Widget title="Top tools" copy={workspaceTopTools} absence={WORKSPACE_STATISTICS_ABSENCE.tools}>
+        <DenominatorNote agg={agg} />
+      </Widget>
+    );
+  }
   return (
-    <Card title="Top tools">
-      {tools.length === 0 ? (
-        <EmptyState message="No tool calls in this window." />
-      ) : (
-        <>
-          <StatChart
-            option={option}
-            label="Most-used tools across the workspace, ranked by calls (the table below carries the same data)"
-          />
-          {truncated && (
-            <p className={styles.capNote}>
-              Showing the top {tools.length} tools; lower-ranked tools are not charted.
-            </p>
-          )}
-          <DataTable<ToolRow>
-            columns={[
-              textCol("tool", "Tool", (r) => r.tool),
-              numCol("calls", "Calls", (r) => r.calls),
-            ]}
-            rows={tools}
-            rowKey={(r) => r.tool}
-            caption="Top tools across the workspace"
-          />
-        </>
+    <Widget title="Top tools" copy={workspaceTopTools}>
+      <StatChart
+        option={option}
+        label="Most-used tools across the workspace, ranked by calls (the table below carries the same data)"
+      />
+      {truncated && (
+        <p className={styles.capNote}>
+          Showing the top {tools.length} tools; lower-ranked tools are not charted.
+        </p>
       )}
+      <DataTable<ToolRow>
+        columns={[
+          textCol("tool", "Tool", (r) => r.tool),
+          numCol("calls", "Calls", (r) => r.calls),
+        ]}
+        rows={tools}
+        rowKey={(r) => r.tool}
+        caption="Top tools across the workspace"
+      />
       <DenominatorNote agg={agg} />
-    </Card>
+    </Widget>
   );
 }
 
 /** Dev vs main — the origin split bar + its accessible data-table twin. */
 function OriginCard({ origins, agg }: { origins: OriginRow[]; agg: WorkspaceStatistics }) {
   const option = useMemo(() => originBarOption(origins), [origins]);
+  if (origins.length === 0) {
+    return (
+      <Widget title="Dev vs main" copy={workspaceDevVsMain} absence={WORKSPACE_STATISTICS_ABSENCE.origins}>
+        <DenominatorNote agg={agg} />
+      </Widget>
+    );
+  }
   return (
-    <Card title="Dev vs main">
-      {origins.length === 0 ? (
-        <EmptyState message="No attributed usage in this window." />
-      ) : (
-        <>
-          <p className={styles.capNote}>
-            Usage during development increments (all worktree branches combined, warm) versus{" "}
-            <code>main</code> (neutral), summed across members. Rolled-up days carry no origin, so
-            this split can sum to less than total calls.
-          </p>
-          <StatChart
-            option={option}
-            label="Calls by event origin across the workspace — development branches combined versus main (the table below carries the same data)"
-          />
-          <DataTable<OriginRow>
-            columns={[
-              textCol("origin", "Origin", (r) => r.origin),
-              numCol("calls", "Calls", (r) => r.calls),
-              numCol("ok", "OK", (r) => r.ok_calls),
-            ]}
-            rows={origins}
-            rowKey={(r) => r.origin}
-            caption="Usage by origin across the workspace"
-          />
-        </>
-      )}
+    <Widget title="Dev vs main" copy={workspaceDevVsMain}>
+      <StatChart
+        option={option}
+        label="Calls by event origin across the workspace — development branches combined versus main (the table below carries the same data)"
+      />
+      <DataTable<OriginRow>
+        columns={[
+          textCol("origin", "Origin", (r) => r.origin),
+          numCol("calls", "Calls", (r) => r.calls),
+          numCol("ok", "OK", (r) => r.ok_calls),
+        ]}
+        rows={origins}
+        rowKey={(r) => r.origin}
+        caption="Usage by origin across the workspace"
+      />
       <DenominatorNote agg={agg} />
-    </Card>
+    </Widget>
   );
 }
 
@@ -513,13 +528,15 @@ const UNREAD_COLUMNS: Column<UnreadMember>[] = [
  *  only that some of it is (FR-UI-37). */
 function UnreadCard({ agg }: { agg: WorkspaceStatistics }) {
   return (
-    <Card
+    <Widget
       title="Members not summed"
-      aside={
+      badge={
         <Badge tone="muted">
           {agg.unread.length} of {agg.members_total} contributed nothing
         </Badge>
       }
+      copy={membersNotSummed}
+      state={{ failed: splitUnread(agg).failed.length }}
     >
       <DataTable
         // Not "could not be read": an absent store WAS read, successfully, and found
@@ -531,7 +548,7 @@ function UnreadCard({ agg }: { agg: WorkspaceStatistics }) {
         rowKey={(u) => u.member}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-    </Card>
+    </Widget>
   );
 }
 
@@ -546,7 +563,7 @@ function Surfaces({ agg }: { agg: WorkspaceStatistics }) {
   const origins = useMemo(() => originSplit(agg), [agg]);
   return (
     <>
-      <ValueCallout agg={agg} />
+      <ValueWidget agg={agg} />
       <ActivityCard points={points} agg={agg} />
       <ToolsCard tools={tools} truncated={truncated} agg={agg} />
       <OriginCard origins={origins} agg={agg} />
@@ -555,40 +572,40 @@ function Surfaces({ agg }: { agg: WorkspaceStatistics }) {
 }
 
 /**
- * The honest awaiting-data state (NFR-CC-04): nothing was recorded, so the view
- * names that fact rather than render a grid of zeros — zeros here would read as a
- * measured "nobody uses Logos", which is not what an empty store says.
+ * The honest awaiting-data state (NFR-CC-04): nothing was recorded, so the
+ * Estimated value widget states that absence rather than render a grid of zeros
+ * — zeros here would read as a measured "nobody uses Logos", which is not what
+ * an empty store says.
  *
  * It takes the aggregate because the sentence it is entitled to say depends on WHY
  * the sum is zero (review finding A3-F1). `calls_total` is the server's sum over
  * the members it could READ, so with a locked or unreadable member in the roster a
  * zero is not evidence that nothing was recorded anywhere — and `logos stats` is
  * then the wrong remedy, because the blocker is the store rather than a shortage of
- * usage.
+ * usage. The catalogue's action follows the same split.
  */
 function AwaitingData({ agg }: { agg: WorkspaceStatistics }) {
   const { failed } = splitUnread(agg);
-  if (failed.length === 0) {
-    // Every member either has a store that recorded nothing, or has no store at
-    // all. Both mean nothing was recorded, so the universal claim is earned.
-    return (
-      <EmptyState
-        message="No member recorded any telemetry in this window — use Logos in any service and this view will fill in. Try"
-        command="logos stats"
-      />
+  const absence =
+    failed.length === 0 ? (
+      // Every member either has a store that recorded nothing, or has no store at
+      // all. Both mean nothing was recorded, so the universal claim is earned.
+      "No member recorded any telemetry in this window — use Logos in any service and this view will fill in."
+    ) : (
+      <>
+        {agg.members_read > 0 &&
+          `None of the ${agg.members_read} member${s(agg.members_read)} whose telemetry could be read recorded anything in this window. `}
+        {failed.length} member{s(failed.length)} could not be read at all, so this view knows
+        nothing about {failed.length === 1 ? "its" : "their"} usage —{" "}
+        {failed.length === 1 ? "it is" : "they are"} named below, with the reason.
+      </>
     );
-  }
   return (
-    <EmptyState
-      message={
-        <>
-          {agg.members_read > 0 &&
-            `None of the ${agg.members_read} member${s(agg.members_read)} whose telemetry could be read recorded anything in this window. `}
-          {failed.length} member{s(failed.length)} could not be read at all, so this view knows
-          nothing about {failed.length === 1 ? "its" : "their"} usage —{" "}
-          {failed.length === 1 ? "it is" : "they are"} named below, with the reason.
-        </>
-      }
+    <Widget
+      title="Estimated value"
+      copy={workspaceEstimatedValue}
+      state={{ recorded: false, failed: failed.length }}
+      absence={absence}
     />
   );
 }
@@ -658,11 +675,11 @@ export function WorkspaceStatisticsView() {
           unconditionally. So only the FIGURE surfaces are gated on the predicate. */}
       <AsyncResource resource={stats} loadingLabel="Reading every member's telemetry…">
         {(agg) => (
-          <div className={styles.surfaces}>
+          <WidgetStack>
             <PopulationCallout agg={agg} />
             {isStatsEmpty(agg) ? <AwaitingData agg={agg} /> : <Surfaces agg={agg} />}
             {agg.unread.length > 0 && <UnreadCard agg={agg} />}
-          </div>
+          </WidgetStack>
         )}
       </AsyncResource>
     </div>

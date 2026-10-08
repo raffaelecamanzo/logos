@@ -15,10 +15,17 @@
  * `state`, so a view never writes copy inline and a wording change edits one
  * catalogue. An absence renders as a left-aligned statement in the figure row;
  * the centred `EmptyState` is for a view with no widget at all, never here.
+ *
+ * PANEL MODE (S-617): a tool panel — a query form, an editor, the chat, a wiki
+ * page — presents no figure, so it is exempt from why, action and where. It is
+ * rendered as `<Widget panel="key" title=…>`: the title row, the panel's one
+ * line from the `TOOL_PANELS` register as its explanation (`what`), then the
+ * tool itself in the evidence part. The frame is marked `data-widget-panel`.
  */
 
 import type { ReactNode } from "react";
 
+import { TOOL_PANELS, type ToolPanelKey } from "../copy/toolPanels.ts";
 import { NOTHING_TO_DO, type CopyEntry, type CopyText, type WidgetAction } from "../copy/types.ts";
 
 import { Card } from "./Card.tsx";
@@ -37,24 +44,41 @@ type FigureRow =
 /** `state` may be omitted only when the entry's action takes none. */
 type StateProp<S> = undefined extends S ? { state?: S } : { state: S };
 
-export type WidgetProps<S> = {
-  /** The title (≤8 words), left on the title row. */
-  title: ReactNode;
-  /** At most one status badge, right on the title row. */
-  badge?: ReactNode;
+/** A figure widget: its words from a catalogue entry at its state. */
+type CopyMode<S> = {
   /** The widget's catalogue entry. */
   copy: CopyEntry<S>;
+  panel?: undefined;
   /**
    * Secondary detail for the explanation, after why: text the read-model
    * supplies (its own caveats, rendered verbatim), which a catalogue cannot
    * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
    */
   note?: ReactNode;
-  /** The evidence: a table, chart or list. */
-  children?: ReactNode;
-  className?: string;
 } & FigureRow &
   StateProp<S>;
+
+/** A tool panel: its one line from the `TOOL_PANELS` register, and no figure,
+ *  why, action or where. */
+type PanelMode = {
+  /** The panel's key in `TOOL_PANELS`. */
+  panel: ToolPanelKey;
+  copy?: undefined;
+  state?: undefined;
+  note?: undefined;
+  figure?: undefined;
+  absence?: undefined;
+};
+
+export type WidgetProps<S> = {
+  /** The title (≤8 words), left on the title row. */
+  title: ReactNode;
+  /** At most one status badge, right on the title row. */
+  badge?: ReactNode;
+  /** The evidence: a table, chart or list — or, for a panel, the tool itself. */
+  children?: ReactNode;
+  className?: string;
+} & (CopyMode<S> | PanelMode);
 
 /** Renders catalogue text, glossing each `Gloss` segment through `Term`. */
 export function CopyTextView({ text }: { text: CopyText }) {
@@ -113,18 +137,54 @@ function isRendered(node: ReactNode): boolean {
   return !(Array.isArray(node) && node.length === 0);
 }
 
+/** The title row: the title left, at most one badge right. */
+function TitleRow({ title, badge }: { title: ReactNode; badge?: ReactNode }) {
+  return (
+    <div className={styles.titleRow} data-widget-part="title">
+      <h3 className={styles.title}>{title}</h3>
+      {isRendered(badge) && <div className={styles.badge}>{badge}</div>}
+    </div>
+  );
+}
+
+/** The evidence part, left out when it holds nothing. */
+function Evidence({ children }: { children?: ReactNode }) {
+  if (!isRendered(children)) return null;
+  return (
+    <div className={styles.evidence} data-widget-part="evidence">
+      {children}
+    </div>
+  );
+}
+
 export function Widget<S>(props: WidgetProps<S>) {
-  const { title, badge, copy, note, figure, absence, children, className } = props;
+  const { title, badge, children, className } = props;
+  const cardClass = [styles.widget, className].filter(Boolean).join(" ");
+
+  if (props.panel !== undefined) {
+    return (
+      <Card className={cardClass}>
+        <div className={styles.frame} data-widget="" data-widget-panel={props.panel}>
+          <TitleRow title={title} badge={badge} />
+          <div className={styles.explanation} data-widget-part="explanation">
+            <p className={styles.body} data-widget-copy="what">
+              <CopyTextView text={TOOL_PANELS[props.panel].what} />
+            </p>
+          </div>
+          <Evidence>{children}</Evidence>
+        </div>
+      </Card>
+    );
+  }
+
+  const { copy, note, figure, absence } = props;
   const action = copy.action((props as { state: S }).state);
   const hasAbsence = isRendered(absence);
 
   return (
-    <Card className={[styles.widget, className].filter(Boolean).join(" ")}>
+    <Card className={cardClass}>
       <div className={styles.frame} data-widget="">
-        <div className={styles.titleRow} data-widget-part="title">
-          <h3 className={styles.title}>{title}</h3>
-          {isRendered(badge) && <div className={styles.badge}>{badge}</div>}
-        </div>
+        <TitleRow title={title} badge={badge} />
 
         {(hasAbsence || isRendered(figure)) && (
           <div className={styles.figureRow} data-widget-part="figure">
@@ -172,11 +232,7 @@ export function Widget<S>(props: WidgetProps<S>) {
           )}
         </div>
 
-        {isRendered(children) && (
-          <div className={styles.evidence} data-widget-part="evidence">
-            {children}
-          </div>
-        )}
+        <Evidence>{children}</Evidence>
       </div>
     </Card>
   );

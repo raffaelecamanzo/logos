@@ -45,15 +45,21 @@ test("the Workspace Dashboard stacks its widgets at one gap, left-aligned, in on
   expect(m.bodySizes).toHaveLength(5);
 });
 
-test("Workspace Health stacks its cards at one gap, and Workspace rules is laid out as a widget", async ({ page }) => {
+test("Workspace Health stacks its widgets at one gap, every one laid out as a widget", async ({ page }) => {
   await page.goto("/workspace-health");
   const stack = await stackWith(page, page.locator("main#view-root"), "Workspace rules");
-  expect(await widgetTitles(stack)).toEqual(["Workspace rules"]);
+  // S-617 converted the four cards S-613 left beside Workspace rules.
+  expect(await widgetTitles(stack)).toEqual([
+    "Members answering",
+    "Members",
+    "Warm state across the workspace",
+    "Workspace rules",
+    "Broker topics",
+  ]);
   const m = await expectWidgetStackLayout(stack);
-  // The callout, then Members answering, Members, Warm state, Workspace rules and
-  // Promoted broker topics: every card a child of the one stack.
+  // The callout, then the five widgets: every one a child of the one stack.
   expect(m.gaps).toHaveLength(5);
-  expect(m.bodySizes).toHaveLength(1);
+  expect(m.bodySizes).toHaveLength(5);
 });
 
 test("the Cross-service coverage tab stacks its widgets at one gap, the last three included", async ({ page }) => {

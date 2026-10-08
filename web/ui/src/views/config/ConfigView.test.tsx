@@ -20,6 +20,8 @@ import { ConfigView } from "./ConfigView.tsx";
 import styles from "./ConfigView.module.css";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
+import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
+import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
 
 afterEach(() => {
   cleanup();
@@ -683,8 +685,9 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     mockFetch({});
     const { container } = renderView();
     await screen.findByText(/CONFIG EDITOR/);
-    const cards = Array.from(container.querySelectorAll("section")).filter((s) => s.querySelector(":scope > div > h3"));
-    const titles = cards.map((c) => c.querySelector("h3")?.textContent);
+    // Each editor is a tool panel (S-617): read them through the widget frame.
+    const cards = widgetsIn(container);
+    const titles = cards.map(widgetTitle);
     const chatCard = screen.getByText("[chat]", { selector: "legend" }).closest("section");
     const at = cards.indexOf(chatCard as HTMLElement);
     expect(titles[at]).toBe("config.toml");
@@ -1172,5 +1175,21 @@ describe("ConfigView load failure names the repair surface (HF-2, Sprint 77 revi
       "repairs an invalid <workspace-root>/.logos/config.toml in place; an unreadable <workspace-root>/.logos/secrets.toml is repaired by hand.",
     );
     expect(panel).not.toHaveTextContent(/repair the workspace-root files/);
+  });
+});
+
+// ── S-617 (CR-203, FR-UI-39/40): the editors are registered tool panels ──────
+
+describe("the Config editors render as registered tool panels in one stack (S-617)", () => {
+  it("config.toml, the chat API key, the consistency check and rules.toml, each under its TOOL_PANELS key", async () => {
+    mockFetch({});
+    const { container } = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    const panels = expectOneWidgetStack(container);
+    expect(panels.map(widgetTitle)).toEqual(["config.toml", "chat API key", "Graph consistency check", "rules.toml"]);
+    expectToolPanel(panels[0], "policyFile");
+    expectToolPanel(panels[1], "chatKey");
+    expectToolPanel(panels[2], "graphConsistency");
+    expectToolPanel(panels[3], "policyFile");
   });
 });

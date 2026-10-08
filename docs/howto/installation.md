@@ -115,8 +115,8 @@ every target, so an installed `logos` needs nothing from you.
 ### Browser layout tests (contributors)
 
 The web UI's layout rules — equal gaps between stacked widgets, left-aligned
-widget text, one body font size — are checked in a real browser by Playwright
-specs under `web/ui/e2e/`. They need a Chromium build, installed **once** per
+widget text, one body font size — are checked in a real browser, on every view
+of both sidebars, by Playwright specs under `web/ui/e2e/`. They need a Chromium build, installed **once** per
 machine:
 
 ```bash

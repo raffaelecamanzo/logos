@@ -715,6 +715,36 @@ honest empty state naming the producing command:
   In workspace mode the Service section lists **no** Chat: the chat there is the
   Workspace Chat, and `/chat` (with or without `?repo=`) lands on `/workspace-chat`.
 
+### Reading a widget
+
+Every figure on every view sits in a **widget**, and every widget reads in the
+same four parts, top to bottom (CR-203, since S-617 on every view):
+
+1. **Title and figure.** The title names the widget, with at most one status
+   badge beside it (`PASS`, `FAIL`, `Advisory`, …). Below it, the figure: the key
+   number — and a share always with what it is out of (*2 of 3 members
+   answered*, never *2* alone). When there is nothing to show yet, this line says so in words, in
+   place of the figure (*No coverage ingested yet.*).
+2. **Explanation.** What the widget shows, then why it matters — which decision
+   it supports or what it protects you from. A term of the project's own
+   vocabulary is underlined where it is first used; hover over it or focus it
+   with the keyboard for its meaning in plain words.
+3. **What you can do.** The action for the state the widget is in: what to change
+   and where — **source code**, **documentation**, **configuration** or
+   **command**, naming the file, setting or command when it is known (*Command
+   `logos scan`*). When nothing needs doing it reads *Nothing to do —
+   informational.*
+4. **Evidence.** The table, chart or list the figure comes from.
+
+The widgets on a view are stacked in one column, an equal gap apart, every part
+left-aligned and the explanation and action in one text size.
+
+**Tool panels** — the graph query form, the Graph view's accessible tables and
+Decisions & docs, the wiki's pages and search, the Config editors, the chat API
+key and the chat itself — present no figure. They keep the same frame and say in
+one line what they are for, and have no explanation of why, no action and no
+evidence of their own.
+
 **Workspace mode.** When `logos serve --ui` starts at a workspace parent (a
 `logos.workspace.toml` is discovered up-tree), the app shell renders a **member
 selector** that scopes the per-member views to one member (the member is part of
@@ -746,11 +776,12 @@ The three workspace-scoped views answer questions the per-member views cannot:
 edge-count/egress-rate line (never the count without the rate beside it) with
 coverage by intake (the per-arm board is hidden — see [Hidden widgets](#hidden-widgets)); **Workspace Health** renders the degraded roll-up in
 words with a per-member table, the advisory governance findings and the topic
-inventory, drawing every unopenable member as degraded and naming it; and
+inventory (the **Broker topics** widget, formerly *Promoted broker topics*),
+drawing every unopenable member as degraded and naming it; and
 **Workspace Statistics** sums telemetry over members. On the Workspace Dashboard,
-the Workspace tab's **Cross-service coverage** tab and Workspace Health's
-**Workspace rules** card, each card states what it shows, why it matters and what
-you can do, with where to do it (since S-613). **Resolved cross-service edges**
+the Workspace tab's **Cross-service coverage** tab and Workspace Health, each
+widget states what it shows, why it matters and what you can do, with where to do
+it (since S-613; Workspace Health's other four widgets since S-617). **Resolved cross-service edges**
 lists why the unresolved outbound calls did not resolve, largest reason first, each
 with its remedy; **Cross-service reachability** leads with the callables to keep
 because another service calls them; **Members** gives each row its own action; and
@@ -995,28 +1026,31 @@ dependency against layer order, i.e. a cycle participant — is outlined with a 
 The cycle list that used to lead the page is hidden from the web UI (see
 [Hidden widgets](#hidden-widgets)).
 
-The root `/` view is the **Dashboard**: a verdict-rich roll-up that leads with
-the gate `PASS`/`FAIL` verdict, then a hero row of at-a-glance figures — a banded
-*Quality index* (the 0–10000 signal), *Code coverage* (the overall line-%
-aggregate), and the per-project **language composition** — each fed by a
-read-only accessor, never a fabricated number. The body is recomposed (CR-037)
-into **equal-size paired widget rows** plus a **full-width Project Overview**:
-the `overview/project-overview` wiki page snippet with a link into `/wiki`
-(CR-034); when that page has not been generated yet it shows an honest "not yet
-generated" empty state rather than a fabricated overview. One widget slot holds
-the **Rule findings** card projecting `check_rules` (FR-GV-02): it reads **green**
-when a contract was evaluated and there are zero rule violations, **red** when there
-are findings, and a muted **onboarding** state both when no `.logos/rules.toml`
-exists and when a contract authored **zero rules** — a check that evaluated nothing
-is not a pass, so no green badge is rendered over it. Violations still win: a finding
-raised by an always-on fold-in renders red even on a zero-rule contract. There is a
-link into the Rule findings view (`/gaps`). The **Graph card** lists Files / Nodes / Edges /
-Resolution and, below them, the source/test **lines-of-code roll-up** — Total,
-Source, and Test LOC — mirrored from the `status` read-model's
-`total_line_count` / `source_line_count` / `test_line_count`, with a caption
-noting the figures reflect the last full index. When the roll-up has not been
-computed the card renders an honest empty state for those rows rather than a
-fabricated `0`. Loading the Dashboard writes nothing to any store.
+The root `/` view is the **Dashboard**: a roll-up that leads with the index's
+freshness, then one column of widgets (since S-617; the equal-size pairs of CR-037
+are gone, because every view stacks its widgets in one column): **Project
+Overview** — the `overview/project-overview` wiki page snippet with a link into
+`/wiki` (CR-034), or, when that page has not been generated yet, the statement
+that it is absent and the `logos wiki write` command that writes it; the banded
+**Quality index** (the 0–10000 signal) with the gate's `PASS`/`FAIL` badge;
+**Languages**, the per-project language composition; **Graph**; **Activity**;
+**Rule findings**; and **Code coverage** (the overall line-% aggregate) — each
+fed by a read-only accessor, never a fabricated number. **Rule findings** projects
+`check_rules` (FR-GV-02): it reads **PASS** when a contract was evaluated and there
+are zero rule violations, **FAIL** when there are findings, and states that
+nothing was checked — naming `.logos/rules.toml` as the place to declare rules —
+both when no `.logos/rules.toml` exists and when a contract authored **zero
+rules**: a check that evaluated nothing is not a pass, so no PASS badge is
+rendered over it. Violations still win: a finding raised by an always-on fold-in
+reads FAIL even on a zero-rule contract. The Rule findings view (`/gaps`) shares
+this widget's words and treats a zero-rule contract the same way. **Graph** leads
+with the share of references resolved and lists Files / Nodes / Edges and, between
+them, the source/test **lines-of-code roll-up** — Total, Source, and Test LOC —
+mirrored from the `status` read-model's `total_line_count` / `source_line_count` /
+`test_line_count`, with a caption noting the figures reflect the last full index.
+When the roll-up has not been computed the widget says so and names a full
+`logos index` rather than printing a fabricated `0`. Loading the Dashboard writes
+nothing to any store.
 
 **The `/api/v1/*` data API.** The SPA reads every view's data from a same-origin
 JSON read-model API under `/api/v1/*` — one read-only endpoint per view's data,

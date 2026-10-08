@@ -28,6 +28,8 @@ vi.mock("./echarts.ts", () => ({
   }),
 }));
 
+import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { GraphView } from "./GraphView.tsx";
 
 // ── Canned /api/v1 read-models ────────────────────────────────────────────────
@@ -286,5 +288,20 @@ describe("GraphView migration (S-186, FR-UI-08 / FR-UI-21)", () => {
     // node label as a select-to-lock button in the "Name" column (no longer "1. alpha · function").
     const results = screen.getByRole("region", { name: "Query results" });
     expect(within(results).getByRole("button", { name: "alpha" })).toBeInTheDocument();
+  });
+});
+
+// ── S-617 (CR-203, FR-UI-39/40): the Graph view's tool panels ────────────────
+
+describe("the Graph view's panels are registered tool panels in one stack (S-617)", () => {
+  it("renders Query, Decisions & docs and the accessible table as panels, each under its TOOL_PANELS key", async () => {
+    stubApi();
+    const { container } = render(<GraphView />);
+    await screen.findByRole("application");
+    const panels = expectOneWidgetStack(container);
+    expect(panels.map(widgetTitle)).toEqual(["Query the whole graph", "Decisions & docs", "Graph nodes & edges (accessible table)"]);
+    expectToolPanel(panels[0], "graphQuery");
+    expectToolPanel(panels[1], "decisions");
+    expectToolPanel(panels[2], "graphTable");
   });
 });

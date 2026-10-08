@@ -63,7 +63,7 @@ import {
   WORKSPACE_CHAT_ROUTES,
 } from "../../api/chatClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
-import { Button, Callout, Card } from "../../components/index.ts";
+import { Button, Callout, Widget, WidgetStack } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { MarkdownAnswer } from "./MarkdownAnswer.tsx";
 import { ThreadList } from "./ThreadList.tsx";
@@ -270,8 +270,9 @@ export function ChatConfigured({
     setRailOpen(false);
   }, [newChat]);
 
+  // One stack (S-617, FR-UI-40): the lead callout, then the two panes.
   return (
-    <div className={styles.chat}>
+    <WidgetStack className={styles.chat}>
       {/* The lead callout (frontend-design §4.13): one slot, full width above the
           two panes, whose state moves from the first-use consent gate to the
           persistent status band (S-309, [FR-UI-33]) once consented. Here rather
@@ -317,10 +318,11 @@ export function ChatConfigured({
         <div className={styles.main}>
           {/* The view's ONE card (S-308, [FR-UI-33]): it wraps the whole transcript
               and the composer, never a turn — the turns inside stay flat, so the
-              signal-red edge appears once per view, not once per answer. The
-              viewport inside stays a bounded scroll box; assistant-ui drives its
-              `scrollTop` to follow the stream. */}
-          <Card>
+              signal-red edge appears once per view, not once per answer. Since
+              S-617 it is the `chatConversation` tool panel. The viewport inside
+              stays a bounded scroll box; assistant-ui drives its `scrollTop` to
+              follow the stream. */}
+          <Widget panel="chatConversation" title="Conversation">
             <AssistantRuntimeProvider runtime={runtime}>
               <ThreadPrimitive.Root className={styles.threadRoot}>
                 <ThreadPrimitive.Viewport className={styles.log}>
@@ -332,10 +334,10 @@ export function ChatConfigured({
                 <Composer consented={consented} />
               </ThreadPrimitive.Root>
             </AssistantRuntimeProvider>
-          </Card>
+          </Widget>
         </div>
       </div>
-    </div>
+    </WidgetStack>
   );
 }
 

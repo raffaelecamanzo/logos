@@ -4,7 +4,9 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { expectToolPanel } from "../copy/expectWidgetCopy.ts";
 import { coverage, observe, thresholds } from "../copy/fixture.copy.ts";
+import { TOOL_PANELS } from "../copy/toolPanels.ts";
 import { NOTHING_TO_DO } from "../copy/types.ts";
 
 import { Badge } from "./Badge.tsx";
@@ -139,6 +141,46 @@ describe("Widget", () => {
     const { container } = render(<Widget title="T" copy={thresholds} state={{ breached: 0 }} />);
     const dfn = container.querySelector('[data-widget-copy="what"] dfn')!;
     expect(dfn).toHaveAttribute("data-term", "arm");
+  });
+});
+
+describe("Widget in panel mode (S-617, a tool panel)", () => {
+  it("renders the title, the register's one line, then the tool — no figure, why or action", () => {
+    const { container } = render(
+      <Widget panel="graphQuery" title="Query the whole graph" badge={<Badge tone="muted">idle</Badge>}>
+        <form aria-label="query" />
+      </Widget>,
+    );
+    expect(parts(container)).toEqual(["title", "explanation", "evidence"]);
+    const frame = container.querySelector("[data-widget]")!;
+    expect(frame).toHaveAttribute("data-widget-panel", "graphQuery");
+    expect(frame.querySelector('[data-widget-copy="what"]')).toHaveTextContent(TOOL_PANELS.graphQuery.what as string);
+    expect(frame.querySelector('[data-widget-copy="why"]')).toBeNull();
+    expect(frame.querySelector('[data-widget-part="action"]')).toBeNull();
+    expect(screen.getByRole("form", { name: "query" }).closest("[data-widget-part]")).toHaveAttribute(
+      "data-widget-part",
+      "evidence",
+    );
+    expectToolPanel(container.querySelector("section")!, "graphQuery");
+  });
+
+  it("places the same classes as a figure widget: one frame, one body size", () => {
+    const { container } = render(<Widget panel="chatKey" title="Chat API key" />);
+    expect(container.querySelector("section")).toHaveClass(styles.widget);
+    expect(container.querySelector("[data-widget]")).toHaveClass(styles.frame);
+    expect(container.querySelector('[data-widget-part="explanation"]')).toHaveClass(styles.explanation);
+    expect(container.querySelector('[data-widget-copy="what"]')).toHaveClass(styles.body);
+    // No tool inside: no empty evidence part to take a gap.
+    expect(container.querySelector('[data-widget-part="evidence"]')).toBeNull();
+  });
+
+  it("expectToolPanel rejects a figure widget, and a panel rendered under another key", () => {
+    const figure = render(<Widget title="Observe" copy={observe} />);
+    expect(() => expectToolPanel(figure.container.querySelector("section")!, "graphQuery")).toThrow();
+    const other = render(<Widget panel="graphTable" title="Graph nodes" />);
+    expect(() => expectToolPanel(other.container.querySelector("section")!, "graphQuery")).toThrow(
+      /the panel it renders/,
+    );
   });
 });
 

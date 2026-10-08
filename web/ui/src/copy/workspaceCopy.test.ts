@@ -46,6 +46,10 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     rulesChecked: [[1, 1, 1], [2, 9, 0]],
     unknownMembers: [[1], [2]],
     incomplete: [[1], [2]],
+    answered: [[1, 1], [2, 3]],
+    warm: [[1, 1], [2, 3]],
+    degraded: [[0, 1], [1, 3]],
+    topics: [[1, 1], [4, 2]],
   },
   SERVICE_MAP_TEXT: {
     bindingsShown: [[0, 1], [1, 1], [3, 12]],

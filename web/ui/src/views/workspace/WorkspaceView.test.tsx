@@ -11,11 +11,12 @@ import type {
 import {
   buildDependencies,
   COVERAGE_TEXT,
+  coverageByArm,
   coverageByIntake,
   declaredRelations,
   specConformance,
 } from "../../copy/coverage.copy.ts";
-import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { expectToolPanel, expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import {
   bindingEvidence,
   crossContextHint,
@@ -719,7 +720,8 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
     // The title glosses "intake", so its accessible name carries the gloss after it.
     expect(screen.getByRole("heading", { name: /^Coverage by intake/ })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Coverage by relation arm" })).toBeNull();
+    // A prefix: the title glosses "arm", so its accessible name carries the gloss after it.
+    expect(screen.queryByRole("heading", { name: /^Coverage by relation arm/ })).toBeNull();
     expect(screen.queryByRole("table", { name: /by relation arm/i })).toBeNull();
     expect(screen.queryByText("Target read from")).toBeNull();
   });
@@ -746,6 +748,12 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(cells.slice(1, 5)).toEqual(["1", "0", "1", "2"]);
     // In the arm row; the headline's action names the same reason across arms.
     expect(within(routeRow).getByText(/Path could not be composed/)).toBeInTheDocument();
+    // S-617: restored, the board returns already explained, in the tab's one stack.
+    const board = routeRow.closest("section")!;
+    expect(widgetTitle(board)).toBe("Coverage by relation arm");
+    expectWidgetCopy(board, coverageByArm, undefined);
+    const tab = screen.getByRole("tabpanel", { name: /cross-service coverage/i });
+    expect(expectOneWidgetStack(tab)).toContain(board);
   });
 
   // S-377/CR-120: the headline counts two populations as one, and the arm board
@@ -998,6 +1006,8 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     await traceSymbol();
     // A member that could not be read has UNKNOWN impact, not none (NFR-RA-05).
     expect(await screen.findByText(/Degraded: engine failed to start/)).toBeInTheDocument();
+    // S-617: a degraded seed is the same registered tool panel as a result table.
+    expectToolPanel(screen.getByText(/Degraded: engine failed to start/).closest("section")!, "impactResult");
     // The healthy member's impact is still shown.
     expect(screen.getByRole("cell", { name: "handler" })).toBeInTheDocument();
   });
@@ -1037,6 +1047,8 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     // composed line, so a locally-recomposed substitute cannot pass.
     expect(await screen.findByText(RESIDUE_SUMMARY)).toBeInTheDocument();
     expect(screen.queryByText(/no cross-service impact —/i)).not.toBeInTheDocument();
+    // S-617: the residue renders as the registered tool panel of the impact answer.
+    expectToolPanel(screen.getByText(RESIDUE_SUMMARY).closest("section")!, "impactUnresolved");
   });
 
   it("still reports the residue when the answer is NOT empty", async () => {
@@ -1119,6 +1131,9 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "route_handler" })).toBeInTheDocument();
+    // S-617: each result table is the registered tool panel of the impact answer.
+    const far = screen.getByRole("heading", { name: /web — reached across a HTTP \(OpenAPI ↔ route\) binding/ });
+    expectToolPanel(far.closest("section")!, "impactResult");
   });
 
   // ── S-326 / FR-WS-05 / FR-WS-16 / NFR-CC-04 ───────────────────────────────
@@ -1539,6 +1554,8 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     const table = screen.getByRole("table", { name: /accessible twin of the build layer/i });
     const cells = [...within(table).getAllByRole("cell")].map((c) => c.textContent);
     expect(cells).toEqual(["web", "api", "dependency", "com.acme:api-client", "2"]);
+    // S-617: the twin is a registered tool panel, not a second figure widget.
+    expectToolPanel(table.closest("section")!, "buildLayerTable");
     expect(screen.getByText("Builds against (from its build manifest)")).toBeInTheDocument();
 
     // And off again: the layer leaves the canvas entirely.
