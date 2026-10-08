@@ -305,7 +305,7 @@ export const depth: DimensionCopy = {
       target: "logos dsm",
       text: "Find the longest chains in the Architecture dependency matrix, or with logos dsm, and shorten them by removing layers that only pass calls through.",
     }),
-  raw: (raw) => `longest chain ${raw}`,
+  raw: (raw) => `longest chain of ${raw} ${raw === 1 ? "unit" : "units"}, each cycle counted as one`,
   unlisted: {
     statement: "No list of the longest chains is recorded with this snapshot. They are shown in",
     view: ARCHITECTURE,

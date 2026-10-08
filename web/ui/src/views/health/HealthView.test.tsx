@@ -409,7 +409,7 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     }
     expect(seen(part(widget("Nesting"), "figure"))).toContain("10.0% of production functions are deeply nested");
     expect(seen(part(widget("Acyclicity"), "figure"))).toContain("2 dependency cycles");
-    expect(seen(part(widget("Depth"), "figure"))).toContain("longest chain 1");
+    expect(seen(part(widget("Depth"), "figure"))).toContain("longest chain of 1 unit, each cycle counted as one");
     // Equality's raw value is a Gini coefficient, glossed at its first use.
     expect(part(widget("Equality"), "figure")!.querySelector('dfn[data-term="gini"]')).not.toBeNull();
   });
