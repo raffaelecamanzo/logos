@@ -88,6 +88,28 @@
 //!
 //! [S-499]: ../../docs/planning/journal.md#s-499-health-drill-downs-render-the-persisted-offenders-in-three-honest-states
 //!
+//! **Addendum, 2026-10-08 (Sprint 93, [CR-203]) — net +2 production rows,
+//! +2 occurrences, +24 test-scope occurrences; no correction.** The Health
+//! rewrite ([S-615]) moved fifteen production occurrences out of
+//! `HealthView.tsx` into the new catalogue `copy/health.copy.ts` (sixteen there:
+//! the three `READING_ABSENCE` sentences, the stale notes, the reading actions,
+//! the Gate's absent baseline and the ADR-21 drop-out badge), so four
+//! `HealthView.tsx` rows left and six `health.copy.ts` rows arrived, each keeping
+//! the verdict it had. The band's former `no baseline` wording is now the Gate's
+//! `baseline n/a; informational pass`, counted under `n/a`. [S-617] added one
+//! `n/a` to `CoverageView.tsx` (the Per-file coverage widget's absent overall
+//! percentage). The widget stories' tests ([S-615], [S-616], [S-617]) add 24
+//! test-scope assertions on those same sites. The census reads **89 production
+//! occurrences over 44 production rows**, beside **145** in test scope; the
+//! delta is [`SPRINT93_DELTA`]. Caught by `gate.sh full` on merged main: every
+//! session's `fast` tier tested only the packages it touched, and a web-only
+//! change never runs this logos-core suite.
+//!
+//! [CR-203]: ../../docs/requests/CR-203-every-web-widget-explains-itself.md
+//! [S-615]: ../../docs/planning/journal.md#s-615-health-explains-its-gate-and-signal-and-gives-each-of-the-ten-dimensions-a-widget
+//! [S-616]: ../../docs/planning/journal.md#s-616-files--risk-abbreviates-long-paths-and-statistics-explains-its-figures
+//! [S-617]: ../../docs/planning/journal.md#s-617-every-remaining-web-widget-states-what-it-shows-why-it-matters-and-what-to-do
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -346,7 +368,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 85] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -617,7 +639,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "no-resolved-edges",
         0,
         1,
-        "NO PRODUCTION SITE — 1 test occurrence(s): `surface_parity`'s `RELATIONAL_SCOPE`, the one wording the three guidance texts are checked against, asserting the site declared on `logos-core/src/init/mod.rs` (S-444); enumerated, never truncated away",
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "cli",
@@ -633,7 +655,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "same-file-only",
         0,
         1,
-        "NO PRODUCTION SITE — 1 test occurrence(s): `surface_parity`'s `RELATIONAL_SCOPE`, the one wording the three guidance texts are checked against, asserting the site declared on `logos-core/src/init/mod.rs` (S-444); enumerated, never truncated away",
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -642,6 +664,62 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         1,
         0,
         "CONFORMANT — the `Freshness` union declares the sentinel as a value of the read-model; it renders nothing itself. Enumerated because a vocabulary declaration is where a fifth spelling would first appear",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/health.copy.ts",
+        "indeterminate",
+        2,
+        0,
+        "CONFORMANT — moved from `HealthView.tsx` with the Health rewrite (S-615, 2026-10-08): `staleNote`'s third arm and `readingAction`'s `noAction`. Neither `current` nor a date, and `detail` names the fact that is missing; no command, because none establishes currency (R1, R3, R4)",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/health.copy.ts",
+        "moved-past",
+        2,
+        0,
+        "CONFORMANT — moved from `HealthView.tsx` (S-615): `staleNote` claims only that the graph was indexed or synced since the snapshot, never that the figures changed, and `readingAction` names `logos scan`, which records a current snapshot. R1: exactly what the timestamp pair establishes and no more",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/health.copy.ts",
+        "n/a",
+        6,
+        0,
+        "CONFORMANT — moved from `HealthView.tsx` (S-615): the three `READING_ABSENCE` sentences, the Gate's absent baseline (`baseline n/a; informational pass`, which replaces the band's former `no baseline` wording), `NO_APPLICABLE_CONSTRUCT` and the offender badge of an ADR-21 drop-out. R4: a named `n/a` and an informational pass, never a fabricated zero or a delta from an absent baseline",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/health.copy.ts",
+        "no-production-scope",
+        2,
+        0,
+        "CONFORMANT — moved from `HealthView.tsx` (S-615): the `READING_ABSENCE` key and `readingAction`'s `noAction` arm. R3: names no command, because no command changes the state — the conclusion `SignalAbsence::NoProductionScope` follows",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/health.copy.ts",
+        "unindexed",
+        2,
+        0,
+        "CONFORMANT — moved from `HealthView.tsx` (S-615): the `READING_ABSENCE` key and `readingAction`'s arm. R3: names `logos index`, and may, because this condition is exactly \"nothing is indexed\"",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/health.copy.ts",
+        "unscanned",
+        2,
+        0,
+        "CONFORMANT — moved from `HealthView.tsx` (S-615): the `READING_ABSENCE` key and `readingAction`'s arm. R3: names `logos scan`, and may, for the same reason",
+    ),
+    (
+        "spa",
+        "web/ui/src/copy/text.test.tsx",
+        "no baseline",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -655,17 +733,17 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "spa",
         "web/ui/src/views/analytics/CoverageView.tsx",
         "n/a",
-        2,
+        3,
         0,
-        "CONFORMANT — an absent freshness percentage and an absent `HEAD`. R4: never a shifted number, never a guessed 0 (FR-CV-05)",
+        "CONFORMANT — an absent freshness percentage, an absent `HEAD`, and (S-617, 2026-10-08) the Per-file coverage widget's absent overall percentage. R4: never a shifted number, never a guessed 0% (FR-CV-05)",
     ),
     (
         "spa",
         "web/ui/src/views/analytics/FilesView.test.tsx",
         "n/a",
         0,
-        3,
-        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        6,
+        "NO PRODUCTION SITE — 6 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -695,6 +773,14 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "spa",
         "web/ui/src/views/dashboard/DashboardView.test.tsx",
         "empty graph",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/dashboard/DashboardView.test.tsx",
+        "no rules contract",
         0,
         1,
         "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
@@ -760,16 +846,24 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "web/ui/src/views/health/HealthView.test.tsx",
         "indeterminate",
         0,
-        3,
-        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/health/HealthView.test.tsx",
+        "moved-past",
+        0,
+        2,
+        "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
         "web/ui/src/views/health/HealthView.test.tsx",
         "n/a",
         0,
-        5,
-        "NO PRODUCTION SITE — 5 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        7,
+        "NO PRODUCTION SITE — 7 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -781,59 +875,51 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
     ),
     (
         "spa",
+        "web/ui/src/views/health/HealthView.test.tsx",
+        "no-production-scope",
+        0,
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/health/HealthView.test.tsx",
+        "unindexed",
+        0,
+        3,
+        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/health/HealthView.test.tsx",
+        "unscanned",
+        0,
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "spa",
         "web/ui/src/views/health/HealthView.tsx",
         "indeterminate",
-        2,
+        1,
         0,
-        "CONFORMANT — S-436's third arm rendered: neither `current` nor a date, and `detail` names the fact that is missing (R1, R4)",
+        "CONFORMANT — the stale-tone switch only (S-615 moved the sentence and the action to `health.copy.ts`): `indeterminate` renders muted, because nothing is established. R1, R4",
     ),
     (
         "spa",
         "web/ui/src/views/health/HealthView.tsx",
         "moved-past",
-        2,
+        1,
         0,
-        "CONFORMANT — the claim is that the graph moved past the snapshot, never that the figures are proven stale. R1: exactly what the timestamp pair establishes and no more",
+        "CONFORMANT — the stale-tone switch only (S-615 moved the sentence and the action to `health.copy.ts`): the same caution tone as `de-indexed`, never a staleness proof. R1",
     ),
     (
         "spa",
         "web/ui/src/views/health/HealthView.tsx",
         "n/a",
-        9,
+        3,
         0,
-        "CONFORMANT — the three `signalAbsence` sentences and the ADR-21 metric drop-outs. R4: a muted `n/a`, never a fabricated zero",
-    ),
-    (
-        "spa",
-        "web/ui/src/views/health/HealthView.tsx",
-        "no baseline",
-        1,
-        0,
-        "CONFORMANT — the gate band's absent baseline. R4",
-    ),
-    (
-        "spa",
-        "web/ui/src/views/health/HealthView.tsx",
-        "no-production-scope",
-        2,
-        0,
-        "CONFORMANT — R3: this arm names no command, because no command changes the state — the conclusion `SignalAbsence::NoProductionScope` follows",
-    ),
-    (
-        "spa",
-        "web/ui/src/views/health/HealthView.tsx",
-        "unindexed",
-        2,
-        0,
-        "CONFORMANT — R3: names `logos index`, and may, because this condition is exactly \"nothing is indexed\"",
-    ),
-    (
-        "spa",
-        "web/ui/src/views/health/HealthView.tsx",
-        "unscanned",
-        2,
-        0,
-        "CONFORMANT — R3: names `logos scan`, and may, for the same reason",
+        "CONFORMANT — the dimension table's three muted `n/a` badges for an ADR-21 drop-out (score, normalized, raw). R4: a muted `n/a`, never a fabricated zero",
     ),
     (
         "spa",
@@ -872,8 +958,16 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "web/ui/src/views/health/healthModel.test.ts",
         "n/a",
         0,
-        5,
-        "NO PRODUCTION SITE — 5 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        6,
+        "NO PRODUCTION SITE — 6 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/health/healthModel.test.ts",
+        "no baseline",
+        0,
+        2,
+        "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -929,7 +1023,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "none recorded",
         0,
         3,
-        "NO PRODUCTION SITE — 3 test occurrence(s): fixture data for the tool × origin cross-tab's `outcome_absence` cell, plus the assertion that the Attribution card renders the read-model's own named absence verbatim rather than a rate. Added by S-306 (FR-OB-14 SPA rendering)",
+        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -937,7 +1031,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "none recorded",
         0,
         1,
-        "NO PRODUCTION SITE — 1 test occurrence(s): the words fall inside a Vitest title, `awaits data when every member IS read but none recorded anything`, describing the fixture the case builds rather than a string the view renders. The view's own awaiting-data wording is `No member recorded any telemetry in this window`, which is not a sentinel. Added by S-429 T2 (CR-137); enumerated, never truncated away",
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -945,7 +1039,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "none recorded",
         0,
         4,
-        "NO PRODUCTION SITE — 4 test occurrence(s): `answeredLabel`'s and `attributionByClass`'s unit tests pin the read-model's `outcome_absence` string verbatim, both as the function's input fixture and its returned label — never a re-derived word. Added by S-306 (FR-OB-14 SPA rendering)",
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -2240,6 +2334,16 @@ const S502_ADDITION: (usize, usize, usize) = (0, 0, 1);
 /// [S-499]: ../../docs/planning/journal.md#s-499-health-drill-downs-render-the-persisted-offenders-in-three-honest-states
 const S499_ADDITION: (usize, usize, usize) = (0, 0, 5);
 
+/// What Sprint 93 ([CR-203]) changed in the census on 2026-10-08, as a NET
+/// `(production rows, production occurrences, test occurrences)`: the Health
+/// sites moved from `HealthView.tsx` to `copy/health.copy.ts` (−4 rows, +6
+/// rows; −15, +16 occurrences), one new `CoverageView.tsx` `n/a`, and 24 new
+/// test-scope assertions. Net, because a move is not an addition: it is the
+/// figure that keeps every earlier reading checkable.
+///
+/// [CR-203]: ../../docs/requests/CR-203-every-web-widget-explains-itself.md
+const SPRINT93_DELTA: (usize, usize, usize) = (2, 2, 24);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -2247,9 +2351,9 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (87, 42, 121),
-        "the census as it stands after S-499's addendum, 2026-10-03: 87 production \
-         occurrences over 42 production rows, beside 121 test-scope occurrences"
+        (89, 44, 145),
+        "the census as it stands after Sprint 93's addendum, 2026-10-08: 89 production \
+         occurrences over 44 production rows, beside 145 test-scope occurrences"
     );
     // The 2026-09-20 reading the header and the tuple below state.
     let production_rows = production_rows_now
@@ -2258,20 +2362,23 @@ fn the_audit_reports_its_count_with_its_denominator() {
         - S442_ADDITION.0
         - S306_ADDITION.0
         - S502_ADDITION.0
-        - S499_ADDITION.0;
+        - S499_ADDITION.0
+        - SPRINT93_DELTA.0;
     let production_occurrences = production_occurrences_now
         - S445_ADDITION.1
         - S444_ADDITION.1
         - S442_ADDITION.1
         - S306_ADDITION.1
         - S502_ADDITION.1
-        - S499_ADDITION.1;
+        - S499_ADDITION.1
+        - SPRINT93_DELTA.1;
     let test_occurrences = test_occurrences
         - S445_ADDITION.2
         - S444_ADDITION.2
         - S306_ADDITION.2
         - S502_ADDITION.2
-        - S499_ADDITION.2;
+        - S499_ADDITION.2
+        - SPRINT93_DELTA.2;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 
