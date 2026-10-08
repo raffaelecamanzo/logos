@@ -1112,6 +1112,22 @@ describe("groupEvidence (S-614, FR-UI-42, NFR-CC-04)", () => {
   });
 
   it("keeps the first occurrence's order, and groups nothing out of nothing", () => {
+    const row = (key: string): EvidenceRow => ({
+      end: "consumer",
+      member: "api",
+      key,
+      value: "v",
+      profiles: [],
+      unprofiled: true,
+      sources: ["a.yml"],
+      refusal: null,
+    });
+    // The group seen first has FEWER calls than the one after it, so neither a
+    // sort by count nor one by key can pass for first-occurrence order.
+    expect(groupEvidence([row("z.first"), row("a.second"), row("a.second")]).map((g) => [g.key, g.calls])).toEqual([
+      ["z.first", 1],
+      ["a.second", 2],
+    ]);
     expect(groupEvidence([])).toEqual([]);
   });
 });
