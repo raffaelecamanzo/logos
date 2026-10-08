@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.15.2] — 2026-10-09
+
 ### Changed
 
 - **The Architecture view and Declared contracts are hidden; review polish
