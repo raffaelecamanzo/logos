@@ -48,6 +48,14 @@ describe("the check itself (falsifiable)", () => {
     expect(check("Run logos workspace frobnicate.")).toEqual([false]);
   });
 
+  it("reads a template literal's text around its substitutions (review fix)", () => {
+    // health.copy.ts names `logos gate --save` inside a template literal.
+    const src = "export const x = (n: number) => `Start at ${n}, then run logos frobnicate; later ${n} logos gate --save.`;\n";
+    const found = commandsIn("/src/copy/x.copy.ts", src);
+    expect(found.map((c) => c.words.join(" "))).toEqual(["frobnicate", "gate"]);
+    expect(found.map((c) => isDocumented(c, documented))).toEqual([false, true]);
+  });
+
   it("passes documented commands, with their arguments", () => {
     expect(check("Run logos index in that member.")).toEqual([true]);
     expect(check("Then logos gate --save, and logos node <symbol>.")).toEqual([true, true]);
