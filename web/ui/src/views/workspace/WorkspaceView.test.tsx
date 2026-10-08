@@ -1929,6 +1929,10 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     const card = screen.getByRole("heading", { name: "Declared contracts" }).closest("section")!;
     expect(within(card).queryByRole("table", { name: /accessible twin of the declared layer/i })).toBeNull();
     expect(card).toHaveTextContent("No member on this map declares a contract.");
+    // No document to check, so nothing to do (S-614): the widget's `none`
+    // state, held to the message standard like its `act` one.
+    expect(actionKind(card)).toBe("none");
+    expectWidgetCopy(card, declaredContracts, { documents: 0 });
     const registry = within(card).getByRole("table", { name: /Named externals/ });
     expect(within(registry).getAllByRole("cell").map((c) => c.textContent)).toEqual([
       "PSS pss-mock:source.yaml",
