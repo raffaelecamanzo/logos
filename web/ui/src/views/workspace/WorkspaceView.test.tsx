@@ -2108,10 +2108,9 @@ function mapPanel(): HTMLElement {
   return screen.getByRole("tabpanel");
 }
 
+/** The map tab's one widget titled `title` (S-613's `tabWidget`, on the map). */
 function mapWidget(title: string): HTMLElement {
-  const found = expectOneWidgetStack(mapPanel()).filter((w) => widgetTitle(w) === title);
-  expect(found, title).toHaveLength(1);
-  return found[0];
+  return tabWidget(mapPanel(), title);
 }
 
 /** The bindings table's rows as `consumer->provider`. */
