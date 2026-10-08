@@ -31,10 +31,18 @@ export interface Column<Row> {
   /**
    * Gloss the header through `Term` (S-616, FR-UI-39): the term renders beside
    * the sort button, never inside it — a focusable `<dfn>` cannot nest in a
-   * `<button>` — and the button keeps the header as its name. The column is
-   * named by the header alone (a string header), not by the definition.
+   * `<button>`, and a click on the term would sort — and the button keeps the
+   * header as its name. The column is named by the header alone (a string
+   * header), not by the definition. A glossed header is a string: a `Term`
+   * written into `header` itself would land inside the button (CR-208).
    */
   gloss?: GlossaryTerm;
+  /**
+   * The words of a glossed header the term underlines, when the header is more
+   * than the term ("…of which used by another service"); the rest of the header
+   * renders plain beside it. Absent, the whole header is the term.
+   */
+  glossText?: string;
   /** Cell renderer. */
   cell: (row: Row) => ReactNode;
   /** Right-align the header + cells (numeric columns). */
@@ -43,6 +51,24 @@ export interface Column<Row> {
   mono?: boolean;
   /** When set, the column is sortable; returns the comparable value for `row`. */
   sortValue?: (row: Row) => string | number;
+}
+
+/** A glossed header as it reads: the term (`glossText`, or the whole header)
+ *  through `Term`, any other words of the header plain around it. */
+function GlossedHeader({ header, gloss, glossText }: { header: ReactNode; gloss: GlossaryTerm; glossText?: string }) {
+  if (glossText === undefined) return <Term term={gloss}>{header}</Term>;
+  const text = typeof header === "string" ? header : "";
+  const at = text.indexOf(glossText);
+  if (at < 0) {
+    throw new Error(`DataTable: the glossed words "${glossText}" are not in the header "${text}"`);
+  }
+  return (
+    <>
+      {text.slice(0, at)}
+      <Term term={gloss}>{glossText}</Term>
+      {text.slice(at + glossText.length)}
+    </>
+  );
 }
 
 export interface DataTableProps<Row> {
@@ -158,7 +184,7 @@ export function DataTable<Row>({
                 >
                   {col.gloss && (
                     <>
-                      <Term term={col.gloss}>{col.header}</Term>{" "}
+                      <GlossedHeader header={col.header} gloss={col.gloss} glossText={col.glossText} />{" "}
                     </>
                   )}
                   {col.sortValue ? (

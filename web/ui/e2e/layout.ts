@@ -20,9 +20,10 @@ export interface StackMeasure {
   leftOffsets: { part: string; offset: number }[];
   /**
    * Per widget: the computed font size of the explanation's what and why. A
-   * tool panel (S-617, `data-widget-panel`) has a what and no why.
+   * tool panel (S-617, `data-widget-panel`) has a what and no why; the one
+   * no-explanation widget (CR-208, `data-widget-no-explanation`) has neither.
    */
-  bodySizes: { panel: boolean; what: string; why: string }[];
+  bodySizes: { panel: boolean; noExplanation: boolean; what: string; why: string }[];
   /** Elements of the action line CR-206 removed (its part, copy or where chip)
    *  rendered anywhere in the stack. */
   actionParts: number;
@@ -81,6 +82,7 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
     const size = (node: Element | null | undefined) => (node ? getComputedStyle(node).fontSize : "missing");
     const bodySizes = frames.map((frame) => ({
       panel: frame.hasAttribute("data-widget-panel"),
+      noExplanation: frame.hasAttribute("data-widget-no-explanation"),
       what: size(frame.querySelector('[data-widget-copy="what"]')),
       why: size(frame.querySelector('[data-widget-copy="why"]')),
     }));
@@ -111,7 +113,8 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
 export interface StackLayoutOptions {
   /**
    * The view legitimately stacks ONE child (S-617: Architecture, whose cycle list
-   * is hidden), so there is no gap to measure. Off by default: a stack that
+   * is hidden), so there is no gap to measure. No case sets it while the register
+   * hides the Architecture view too (CR-208); it stays for that view's return. Off by default: a stack that
    * unexpectedly lost its siblings must still fail. With it on, the stack must
    * still hold a widget, so the check never passes over nothing.
    */
@@ -127,7 +130,7 @@ export interface StackLayoutOptions {
  *    empty-row sentence renders anywhere on the page (CR-207);
  *  - in every widget, what and why share one font size, and every widget's
  *    explanation — a tool panel's one line included — is set at the page's body
- *    text size;
+ *    text size; the one widget declared to have none (CR-208) renders neither;
  *  - every figure-row qualifier (`FigureNote`) is set at the body size and
  *    weight, whatever its figure's size, so one role reads the same on every view.
  */
@@ -155,6 +158,14 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
     expect(offset, `the ${part} block starts at its widget's left edge`).toBeCloseTo(0, 0);
   }
   for (const [i, s] of m.bodySizes.entries()) {
+    if (s.noExplanation) {
+      // Project Overview (CR-208): declared on its frame, and it renders neither.
+      expect([s.what, s.why], `widget ${i + 1}: the no-explanation widget renders no what or why`).toEqual([
+        "missing",
+        "missing",
+      ]);
+      continue;
+    }
     expect(s.what, `widget ${i + 1}: its what renders`).not.toBe("missing");
     if (s.panel) {
       // A tool panel has a what only; its size is held to the others' below.
@@ -166,7 +177,8 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
   // One body size across the view (S-617): every widget's explanation, a tool
   // panel's line included, is set at the page's body text size — so a view of
   // panels alone is held to it too, not only compared among themselves.
-  expect([...new Set(m.bodySizes.map((s) => s.what))], "one body size across the stack's widgets").toEqual([
+  const explained = m.bodySizes.filter((s) => !s.noExplanation);
+  expect([...new Set(explained.map((s) => s.what))], "one body size across the stack's widgets").toEqual([
     m.bodyText,
   ]);
   for (const note of m.figureNotes) {

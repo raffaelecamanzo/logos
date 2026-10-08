@@ -9,6 +9,7 @@
  */
 
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { CrossServiceCoverage } from "../../api/types.ts";
@@ -568,6 +569,36 @@ describe("every widget explains itself, in one stack (S-613)", () => {
       "usedByAnotherService",
       "unusedAcrossWorkspace",
     ]);
+  });
+
+  it("Members keeps each gloss outside its sort button: one control, and the term never sorts (CR-208 AC-4)", async () => {
+    const user = userEvent.setup();
+    const { container } = await mount();
+    const w = widget(container, "Members");
+    const glossedHeaders = within(w)
+      .getAllByRole("columnheader")
+      .filter((th) => th.querySelector("dfn[data-term]") !== null);
+    expect(glossedHeaders.map((th) => th.getAttribute("aria-label"))).toEqual([
+      "Reference resolution (its own)",
+      "Entry points added by other services",
+      "Unused in its own graph",
+      "…of which used by another service",
+      "Unused across the workspace",
+    ]);
+    const rowOrder = () => within(w).getAllByRole("row").slice(1).map((r) => r.querySelector("td")?.textContent);
+    for (const th of glossedHeaders) {
+      const term = th.querySelector("dfn[data-term]") as HTMLElement;
+      const buttons = within(th).getAllByRole("button");
+      expect(buttons).toHaveLength(1);
+      expect(buttons[0].contains(term)).toBe(false);
+      const before = rowOrder();
+      await user.click(term);
+      expect(th).toHaveAttribute("aria-sort", "none");
+      expect(rowOrder()).toEqual(before);
+    }
+    // The prose around a partial term stays plain, beside it.
+    const promoted = glossedHeaders[3].querySelector("dfn")!;
+    expect(promoted.firstChild?.textContent).toBe("used by another service");
   });
 
   it("Members has no per-row action column; a degraded member still shows its red State badge and reason (CR-207 AC-1)", async () => {

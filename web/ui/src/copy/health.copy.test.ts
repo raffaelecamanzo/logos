@@ -2,7 +2,7 @@
 // does not reach.
 import { describe, expect, it } from "vitest";
 
-import { percent } from "./health.copy.ts";
+import { DIMENSION_COPY, percent } from "./health.copy.ts";
 
 describe("percent", () => {
   it.each([
@@ -17,5 +17,16 @@ describe("percent", () => {
     [1, "100.0%"],
   ])("states %f as %s", (ratio, text) => {
     expect(percent(ratio)).toBe(text);
+  });
+});
+
+// CR-208 (NFR-CC-04): the Architecture view is hidden, so no dimension's pointer
+// may name it or link to it — the rendered view is checked in HealthView.test.tsx;
+// this holds every dimension, rendered state or not.
+describe("the unlisted pointers name no hidden view (CR-208)", () => {
+  it.each(Object.entries(DIMENSION_COPY))("%s points at no Architecture view or matrix", (_key, entry) => {
+    const pointer = entry.unlisted;
+    expect(pointer?.view?.href ?? "").not.toMatch(/^\/(architecture|dsm)\b/);
+    expect(`${pointer?.statement ?? ""} ${pointer?.view?.label ?? ""}`).not.toMatch(/architecture|matrix/i);
   });
 });

@@ -5,7 +5,7 @@
 // `.tsx` under src/views/), so a view added later is scanned the day it exists.
 import { describe, expect, it } from "vitest";
 
-import { isCopyEntry } from "../copy/text.ts";
+import { isCopyEntry, isNoExplanationEntry } from "../copy/text.ts";
 import { TOOL_PANELS } from "../copy/toolPanels.ts";
 import { REMOVED_ACTION_TEXT } from "../test/removedActionText.ts";
 import { scanViewSources, textSites, type CatalogueExport, type CatalogueIndex } from "../test/widgetScan.ts";
@@ -30,7 +30,12 @@ const catalogues: CatalogueIndex = new Map(
     path,
     new Map(
       Object.entries(mod).flatMap(([name, value]): [string, CatalogueExport][] =>
-        isCopyEntry(value) ? [[name, "entry"]] : isEntryRecord(value) ? [[name, "record"]] : [],
+        // The one no-explanation entry (CR-208) is an entry a Widget names too.
+        isCopyEntry(value) || isNoExplanationEntry(value)
+          ? [[name, "entry"]]
+          : isEntryRecord(value)
+            ? [[name, "record"]]
+            : [],
       ),
     ),
   ]),

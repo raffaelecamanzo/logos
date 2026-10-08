@@ -13,6 +13,11 @@
  *
  * Tables carry no per-row action either: CR-207 removed the Members and Binding
  * evidence "What you can do" columns, so the web UI has no action text at all.
+ *
+ * ONE entry renders no explanation part (CR-208): Project Overview, whose wiki
+ * snippet already says what it is. It is typed apart, as a `NoExplanationEntry`
+ * keyed to that one widget, so the exception is a type every other entry cannot
+ * borrow — they stay `CopyEntry`s and still fail `tsc -b` without `what`/`why`.
  */
 
 import type { GlossaryTerm } from "./glossary.ts";
@@ -41,6 +46,19 @@ export interface CopyEntry {
   /** One sentence: the decision the figure supports or the failure it guards. */
   readonly why: CopyText;
   /** Removed by CR-206: an entry carrying an action line is a type error. */
+  readonly action?: never;
+}
+
+/**
+ * The one catalogue entry with no explanation part (CR-208, FR-UI-39): the
+ * `Widget` frame renders its title and its figure or absence, and no what/why.
+ * Keyed to the one widget it is for, so a second exception is a deliberate edit
+ * here rather than a borrowed marker; it carries neither part, nor an action.
+ */
+export interface NoExplanationEntry {
+  readonly noExplanation: "project-overview";
+  readonly what?: never;
+  readonly why?: never;
   readonly action?: never;
 }
 

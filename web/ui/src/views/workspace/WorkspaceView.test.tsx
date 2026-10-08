@@ -395,7 +395,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       "Consumer",
       "Provider",
       "Binding",
-      "Bindings",
+      "Calls",
     ]);
     expect(screen.queryByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance })).toBeNull();
     expect(expectOneWidgetStack(screen.getByRole("tabpanel")).map(widgetTitle)).toEqual(["Cross-service bindings"]);
@@ -1817,6 +1817,8 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
   });
 
   it("the edge detail names each document with its identity score or external, and each bound call's operation and base-path source", async () => {
+    // The widget is hidden through the register (CR-208); this case reads it shown.
+    onTestFinished(removeHiddenWidgetEntry("declared-contracts"));
     stubApi({ providers: [BINDING], coverage: DECLARING });
     mount();
     const card = (await screen.findByRole("heading", { name: "Declared contracts" })).closest("section")!;
@@ -1947,6 +1949,8 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
   });
 
   it("over a relation a mock only stands in for, draws the external with no edge, no edge legend row and no empty twin table", async () => {
+    // The widget is hidden through the register (CR-208); this case reads it shown.
+    onTestFinished(removeHiddenWidgetEntry("declared-contracts"));
     stubApi({
       providers: [BINDING],
       coverage: {
@@ -1978,6 +1982,19 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       "pss-mock",
       "0",
     ]);
+  });
+
+  it("hides the Declared contracts widget through the register on a workspace that vendors a spec; the declared layer and its legend stay (CR-208)", async () => {
+    stubApi({ providers: [BINDING], coverage: DECLARING });
+    mount();
+    const legend = (await screen.findByText("Declared contracts", { selector: "span" })).closest("details")!;
+    expect(within(legend).getByText("Declares a contract (a vendored spec)")).toBeInTheDocument();
+    expect(declaredEdges().length).toBeGreaterThan(0);
+    expect(screen.queryByRole("heading", { name: "Declared contracts" })).toBeNull();
+    expect(screen.queryByRole("table", { name: /accessible twin of the declared layer/i })).toBeNull();
+    // The coverage tab's own declared widget is not the hidden one: it stays.
+    await userEvent.click(screen.getByRole("tab", { name: "Cross-service coverage" }));
+    expect(screen.getByRole("heading", { name: "Declared contracts and named externals" })).toBeInTheDocument();
   });
 
   it("renders no declared class, legend section, node or widget over a workspace that declares nothing", async () => {
@@ -2324,24 +2341,45 @@ describe("WorkspaceView — the service map's widgets explain themselves, in one
     mount();
     await screen.findByText(/^1 member depends on the model libraries/);
     const widgets = expectOneWidgetStack(mapPanel());
+    // Declared contracts is hidden through the register (CR-208), though a member
+    // vendors a spec here; the case below brings it back.
     expect(widgets.map(widgetTitle)).toEqual([
+      "Cross-service bindings",
+      "Binding evidence",
+      "Cross-context model hint",
+    ]);
+    expectWidgetCopy(mapWidget("Cross-service bindings"), crossServiceBindings);
+    expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence);
+    expectWidgetCopy(mapWidget("Cross-context model hint"), crossContextHint);
+  });
+
+  it("brings Declared contracts back into the stack, after Binding evidence, once its register entry is removed (CR-208)", async () => {
+    onTestFinished(removeHiddenWidgetEntry("declared-contracts"));
+    stubApi({
+      providers: [BINDING, ADMITTED_BINDING],
+      coverage: DECLARING,
+      buildDependency: BUILD_HEADLINE,
+      buildDeps: BUILD_DEPS,
+    });
+    mount();
+    await screen.findByText(/^1 member depends on the model libraries/);
+    expect(expectOneWidgetStack(mapPanel()).map(widgetTitle)).toEqual([
       "Cross-service bindings",
       "Binding evidence",
       "Declared contracts",
       "Cross-context model hint",
     ]);
-    expectWidgetCopy(mapWidget("Cross-service bindings"), crossServiceBindings);
-    expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence);
     expectWidgetCopy(mapWidget("Declared contracts"), declaredContracts);
     // The figure counts the widget's own tables, written out: 4 drawn links,
     // 4 documents, 2 bound calls.
     expect(figureOf(mapWidget("Declared contracts"))).toBe(
       "4 declared contracts, from 4 documents · 2 calls matched to a named external",
     );
-    expectWidgetCopy(mapWidget("Cross-context model hint"), crossContextHint);
   });
 
   it("states no count of matched calls when no drawn link names an external — no question was asked", async () => {
+    // The widget is hidden through the register (CR-208); this case reads it shown.
+    onTestFinished(removeHiddenWidgetEntry("declared-contracts"));
     const memberOnly = {
       ...DECLARED_CONTRACTS,
       contracts: DECLARED_CONTRACTS.contracts.filter((c) => c.target.kind === "member"),

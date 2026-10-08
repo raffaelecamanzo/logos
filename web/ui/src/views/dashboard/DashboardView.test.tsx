@@ -13,7 +13,7 @@ import {
 } from "../../copy/dashboard.copy.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import { ruleFindings } from "../../copy/ruleFindings.copy.ts";
-import type { CopyEntry } from "../../copy/types.ts";
+import type { CopyEntry, NoExplanationEntry } from "../../copy/types.ts";
 import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
 import { DashboardView } from "./DashboardView.tsx";
 
@@ -311,8 +311,9 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
 
 // ── S-617 (CR-203, FR-UI-39/40): every widget explains itself, in one stack ──
 
-/** Each widget's catalogue entry, by title. */
-const ENTRIES: Record<string, CopyEntry> = {
+/** Each widget's catalogue entry, by title. Project Overview's is the one entry
+ *  with no explanation (CR-208): `expectWidgetCopy` asserts it renders none. */
+const ENTRIES: Record<string, CopyEntry | NoExplanationEntry> = {
   "Project Overview": projectOverview,
   "Quality index": qualityIndex,
   Languages: languages,
@@ -427,6 +428,17 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     const widgets = expectOneWidgetStack(container);
     expect(widgets.map(widgetTitle)).toEqual(expected);
     for (const widget of widgets) expectWidgetCopy(widget, ENTRIES[widgetTitle(widget)]);
+  });
+
+  it.each(STATES)("$name: Project Overview renders no explanation part, and every other widget does (CR-208)", async ({ model }) => {
+    stub(model());
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Code coverage" });
+    const explained = widgetsIn(container).map((w) => [
+      widgetTitle(w),
+      w.querySelector('[data-widget-part="explanation"]') !== null,
+    ]);
+    expect(explained).toEqual(STATES[0].expected.map((title) => [title, title !== "Project Overview"]));
   });
 
   it("states each absence in its widget's figure row, never as a centred empty state", async () => {

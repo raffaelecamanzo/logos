@@ -14,7 +14,8 @@
  *     is outside a `Term` gloss.
  * Given the catalogue entry, it also asserts the rendered parts ARE that
  * entry's parts — a test names the catalogue key, never the prose, so a wording
- * change edits the catalogue alone.
+ * change edits the catalogue alone. Given the one no-explanation entry (CR-208,
+ * Project Overview), it asserts the opposite: no explanation part renders.
  *
  * Test-only: it imports vitest's `expect`, and nothing under src/ outside a test
  * imports it, so it never reaches the bundle.
@@ -27,7 +28,7 @@ import { REMOVED_ACTION_TEXT } from "../test/removedActionText.ts";
 import type { GlossaryTerm } from "./glossary.ts";
 import { copyTextString, findUnglossedUses, type PlainPart } from "./text.ts";
 import { isToolPanelKey, TOOL_PANELS, type ToolPanelKey } from "./toolPanels.ts";
-import type { CopyEntry } from "./types.ts";
+import type { CopyEntry, NoExplanationEntry } from "./types.ts";
 
 /** Whitespace as a browser renders it: runs collapsed, ends trimmed. */
 function collapse(text: string): string {
@@ -100,9 +101,15 @@ function expectNoActionLine(frame: Element, label: string): void {
   }
 }
 
-export function expectWidgetCopy(widget: Element, entry?: CopyEntry): void {
+export function expectWidgetCopy(widget: Element, entry?: CopyEntry | NoExplanationEntry): void {
   const frame = frameOf(widget);
   const label = readerText(frame.querySelector('[data-widget-part="title"]') ?? frame) || "widget";
+
+  if (entry !== undefined && "noExplanation" in entry) {
+    expectNoExplanation(frame, label);
+    return;
+  }
+  expect(frame.hasAttribute("data-widget-no-explanation"), `${label}: only the no-explanation entry's frame is marked as one`).toBe(false);
 
   for (const name of ["what", "why"] as const) {
     const el = part(frame, name);
@@ -128,6 +135,21 @@ export function expectWidgetCopy(widget: Element, entry?: CopyEntry): void {
   if (entry === undefined) return;
   expect(readerText(part(frame, "what")!), `${label}: what`).toBe(collapse(copyTextString(entry.what)));
   expect(readerText(part(frame, "why")!), `${label}: why`).toBe(collapse(copyTextString(entry.why)));
+}
+
+/** The one no-explanation entry's frame (CR-208): no explanation part and no
+ *  what or why, while the vocabulary rule and the no-action rule still hold over
+ *  what it does render — its title and its figure row. */
+function expectNoExplanation(frame: Element, label: string): void {
+  expect(frame.hasAttribute("data-widget-no-explanation"), `${label}: its frame declares the exception`).toBe(true);
+  expect(frame.querySelector('[data-widget-part="explanation"]'), `${label}: renders no explanation part (CR-208)`).toBeNull();
+  for (const name of ["what", "why"] as const) {
+    expect(part(frame, name), `${label}: renders no ${name} (CR-208)`).toBeNull();
+  }
+  const parts = (["title", "figure"] as const).map((name) => renderedPart(frame.querySelector(`[data-widget-part="${name}"]`)));
+  const unglossed = findUnglossedUses(parts).map((u) => u.term);
+  expect(unglossed, `${label}: internal vocabulary used outside a Term gloss`).toEqual([]);
+  expectNoActionLine(frame, label);
 }
 
 /**

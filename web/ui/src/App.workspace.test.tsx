@@ -263,10 +263,13 @@ function openAt(url: string) {
 
 // `/dsm` → `/architecture` (S-612) shares the `/overview` migration's code path;
 // each retired route is driven separately so a target that stops carrying the
-// query fails here rather than relying on the other route's test.
+// query fails here rather than relying on the other route's test. While the
+// register hides the Architecture view (CR-208), `/dsm` and `/architecture` land
+// on Health by that same path, so they must carry the member across too.
 const RETIRED = [
   { from: "/overview", to: "/" },
-  { from: "/dsm", to: "/architecture" },
+  { from: "/dsm", to: "/health" },
+  { from: "/architecture", to: "/health" },
 ] as const;
 
 describe("the retired-route migrations keep the member (S-426, S-194, S-612)", () => {

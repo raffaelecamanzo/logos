@@ -59,13 +59,29 @@
   gap: var(--space-1);
 }
 
-/* A row of form fields side by side, wrapping on a narrow column, their inputs
-   aligned on one baseline: the bindings filter (S-614) and the impact form —
-   one rule, so the two rows on this tab cannot drift apart. */
-.filters,
+/* The impact form: its field and its button side by side, wrapping on a narrow
+   column, aligned on the field's bottom edge. */
 .impactForm {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
   flex-wrap: wrap;
+}
+
+/* The bindings filter (S-614): its fields side by side, wrapping on a narrow
+   column. Only the first field has a hint, so aligning the fields' bottom edges
+   left its input a hint-line above the other two (CR-208 item 6). Every field
+   instead reserves the same three rows — label, control, hint — on one subgrid,
+   so the controls share a row: one top edge and, stretched to that row, one
+   height, whether or not a field has a hint. */
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  column-gap: var(--space-3);
+}
+
+.filters > * {
+  grid-row: span 3;
+  display: grid;
+  grid-template-rows: subgrid;
 }

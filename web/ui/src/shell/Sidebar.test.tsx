@@ -1,8 +1,9 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
 import { NAV_GROUPS, NAV_ITEMS, navItemsFor, WORKSPACE_NAV_ITEMS } from "../nav.ts";
+import { removeHiddenWidgetEntry } from "../test/hiddenWidgets.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import styles from "./Sidebar.module.css";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
@@ -199,9 +200,10 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     // …and every member-scoped tab below it. Same order as the single-root
     // sidebar: the CR-042 A/B/C groups survive INSIDE the section rather than
     // being re-ordered by it — less the member Chat, which a workspace replaces
-    // with the Workspace Chat (S-485).
+    // with the Workspace Chat (S-485), and the Architecture view, which the
+    // hidden-widget register hides (CR-208).
     expect(names("Service")).toEqual(
-      NAV_ITEMS.filter((i) => i.id !== "chat").map((i) => i.label),
+      NAV_ITEMS.filter((i) => i.id !== "chat" && i.id !== "architecture").map((i) => i.label),
     );
   });
 
@@ -334,14 +336,41 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect([...nav.children].map((c) => c.tagName)).toEqual(NAV_GROUPS.map(() => "UL"));
     // Derived from the registry, not pinned as 6/3/2: a count written out here goes
     // stale the first time a view is added and then asserts the wrong thing quietly.
+    // The registry as offered: a view the hidden-widget register hides (CR-208) is
+    // not in the sidebar, and the case below proves removing its entry restores it.
+    const offered = navItemsFor(false);
     expect([...nav.children].map((c) => c.children.length)).toEqual(
-      NAV_GROUPS.map((g) => NAV_ITEMS.filter((i) => i.group === g).length),
+      NAV_GROUPS.map((g) => offered.filter((i) => i.group === g).length),
     );
     expect(
       [...nav.querySelectorAll("a")].map((a) => [a.getAttribute("href"), a.textContent]),
-    ).toEqual(NAV_ITEMS.map((i) => [i.path, i.label]));
+    ).toEqual(offered.map((i) => [i.path, i.label]));
     // Every item still carries its inline-SVG icon (CR-042).
-    expect(nav.querySelectorAll("li > a > span:first-child > svg")).toHaveLength(NAV_ITEMS.length);
+    expect(nav.querySelectorAll("li > a > span:first-child > svg")).toHaveLength(offered.length);
+  });
+});
+
+// ── CR-208 / FR-UI-41: the Architecture view is hidden through the register ───
+describe("the Architecture view is hidden from the sidebar (CR-208, FR-UI-41)", () => {
+  it.each([
+    ["a single-root serve", 404],
+    ["a workspace", 200],
+  ] as const)("lists no Architecture entry in %s", async (_name, probe) => {
+    mountWithMode(probe);
+    await screen.findAllByRole("link", { name: /Dashboard/ });
+    // Settled on the mode under test: a workspace adds its own section.
+    if (probe === 200) await screen.findByRole("link", { name: /Workspace/ });
+    expect(screen.queryByRole("link", { name: /Architecture/ })).toBeNull();
+    expect(document.querySelector('a[href="/architecture"]')).toBeNull();
+  });
+
+  it("lists it again, after Wiki, once its register entry is removed", async () => {
+    onTestFinished(removeHiddenWidgetEntry("architecture-view"));
+    mountWithMode(404);
+    const link = await screen.findByRole("link", { name: /Architecture/ });
+    expect(link).toHaveAttribute("href", "/architecture");
+    const labels = [...document.querySelectorAll("nav a")].map((a) => a.textContent);
+    expect(labels.indexOf("Architecture")).toBe(labels.indexOf("Wiki") + 1);
   });
 });
 

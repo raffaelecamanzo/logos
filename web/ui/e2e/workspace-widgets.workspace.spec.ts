@@ -6,7 +6,8 @@
 // `WidgetStack`: consecutive widgets sit one equal gap apart (the coverage tab's
 // last three included, the gap CR-203 §3.1 item 10 found missing), every widget
 // part is left-aligned, the explanation is set at the body size, and no widget
-// renders an action line (CR-206).
+// renders an action line (CR-206). The bindings filter's inputs share one row
+// (CR-208).
 import { expect, test, type Locator } from "@playwright/test";
 
 import { expectWidgetStackLayout } from "./layout.ts";
@@ -93,3 +94,59 @@ test("the Service map stacks the map and its widgets at one gap, left-aligned, i
   expect(m.bodySizes).toHaveLength(1);
 });
 
+
+// CR-208 item 6 (FR-UI-42): the bindings filter's three inputs sit on one row —
+// one top edge and one height — though only the first field has a hint under it.
+// The fixture resolves no binding, so the filter is not rendered over it; the
+// route-providers answer is served with two bindings instead, one admitted from
+// committed configuration so the provenance filter (the third input) exists.
+test("the bindings filter's three inputs share one top edge and one height", async ({ page }) => {
+  await page.route("**/api/v1/workspace/route-providers*", (route) =>
+    route.fulfill({
+      json: {
+        providers: [
+          {
+            relation: "route",
+            from: { member: "api", symbol: "op" },
+            to: { member: "web", symbol: "route" },
+            from_value: { provenance: "literal" },
+            to_value: { provenance: "literal" },
+          },
+          {
+            relation: "route",
+            from: { member: "api", symbol: "op2" },
+            to: { member: "web", symbol: "route2" },
+            from_value: { provenance: "literal" },
+            to_value: {
+              provenance: "config-bound",
+              bound: [
+                {
+                  key: "billing.base-url",
+                  source: "properties",
+                  values: [{ value: "http://web:8080", profiles: [], unprofiled: true, sources: ["application.yml"] }],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto("/workspace");
+  const filter = page.getByRole("search", { name: "Filter the cross-service bindings" });
+  const inputs = filter.locator("input, select");
+  await expect(inputs).toHaveCount(3);
+  // The first field carries the hint the other two do not: the case that drifted.
+  await expect(filter.locator("p")).toHaveCount(1);
+  const boxes = await inputs.evaluateAll((els) =>
+    els.map((el) => {
+      const r = el.getBoundingClientRect();
+      return { top: r.top, height: r.height };
+    }),
+  );
+  const [first, ...rest] = boxes;
+  for (const box of rest) {
+    expect(box.top, "every input's top edge is the first's").toBeCloseTo(first.top, 0);
+    expect(box.height, "every input's height is the first's").toBeCloseTo(first.height, 0);
+  }
+});

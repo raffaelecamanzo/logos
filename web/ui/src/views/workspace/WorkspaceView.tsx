@@ -42,9 +42,11 @@
  *
  * The service map tab (S-614, CR-203 §3.2 D items 6–9, FR-UI-42): the map with
  * its legend and notes, then its widgets — Cross-service bindings (filtered by
- * text, binding kind and provenance), Binding evidence (identical rows merged
- * with a Calls count), Declared contracts (one Documents and one Bound calls
- * table), the build twin and the Cross-context model hint — all in one
+ * text, binding kind and provenance; its count column reads "Calls", CR-208),
+ * Binding evidence (identical rows merged with a Calls count), Declared contracts
+ * (one Documents and one Bound calls table — hidden through the hidden-widget
+ * register since CR-208, its legend and edges kept), the build twin and the
+ * Cross-context model hint — all in one
  * `WidgetStack`, with their words in `copy/serviceMap.copy.ts`. The filter
  * narrows the bindings table and the evidence, never the canvas.
  *
@@ -814,8 +816,10 @@ const LINK_COLUMNS: Column<ServiceLink>[] = [
     sortValue: (l) => l.relation,
   },
   {
+    // The column counts calls (CR-208 item 5); the figure's "n of m bindings
+    // shown" counts rows, so it keeps its word.
     key: "count",
-    header: "Bindings",
+    header: "Calls",
     numeric: true,
     cell: (l) => l.count,
     sortValue: (l) => l.count,
@@ -1297,7 +1301,11 @@ function ServiceMap({
 
       <BindingEvidence links={map.links} shown={shown} />
 
-      {declared && <DeclaredContractsCard layer={declared} join={coverage.bound_external} />}
+      {/* Hidden through the register (CR-208); its data stays on workspace/status,
+          and the map's declared layer and legend above are unaffected. */}
+      {declared && !isWidgetHidden("declared-contracts") && (
+        <DeclaredContractsCard layer={declared} join={coverage.bound_external} />
+      )}
 
       {layer && layer.links.length > 0 && (
         <Widget panel="buildLayerTable" title="Build dependencies">

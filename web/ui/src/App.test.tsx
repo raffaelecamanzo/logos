@@ -1,5 +1,5 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Stub every module that would fetch the network or need a real DOM environment
 // beyond jsdom. The test focuses solely on the /overview redirect and the
@@ -30,14 +30,17 @@ vi.mock("./views/index.ts", async (importOriginal) => {
   const real = await importOriginal<typeof import("./views/index.ts")>();
   return {
     ...real,
-    // Override viewForPath to return a lightweight stub component for / and
-    // /architecture (the `/dsm` redirect's destination).
+    // Override viewForPath to return a lightweight stub component for /,
+    // /architecture (the `/dsm` redirect's destination) and /health (where both
+    // land while the register hides the Architecture view, CR-208).
     viewForPath: (path: string) =>
       path === "/"
         ? () => <div data-testid="dashboard-view" />
         : path === "/architecture"
           ? () => <div data-testid="architecture-view" />
-          : real.viewForPath(path),
+          : path === "/health"
+            ? () => <div data-testid="health-view" />
+            : real.viewForPath(path),
   };
 });
 
@@ -57,6 +60,7 @@ vi.mock("./components/index.ts", () => ({
 }));
 
 import { App } from "./App.tsx";
+import { removeHiddenWidgetEntry } from "./test/hiddenWidgets.ts";
 
 afterEach(() => {
   cleanup();
@@ -86,26 +90,44 @@ describe("App /overview redirect (S-194)", () => {
   });
 });
 
-// The retired `/dsm` bookmark lands on Architecture (CR-038, frontend-design
-// §Navigation). S-612 relabels the sidebar entry "Architecture"; the route and
-// this redirect are unchanged by it (FR-UI-41).
-describe("App /dsm redirect", () => {
-  it("renders the Architecture view on the first settled frame", async () => {
-    mockPathname = "/dsm";
+// The Architecture view is hidden through the hidden-widget register (CR-208,
+// FR-UI-41): `/architecture`, and the retired `/dsm` bookmark that migrated to it
+// (CR-038), land on Health in one redirect. Removing the register entry brings the
+// route back, `/dsm` migrating to it as before.
+describe("App /architecture and /dsm while the Architecture view is hidden (CR-208)", () => {
+  it.each(["/architecture", "/dsm"])("renders Health on the first settled frame from %s", async (path) => {
+    mockPathname = path;
     render(<App />);
-    expect(await screen.findByTestId("architecture-view")).toBeInTheDocument();
+    expect(await screen.findByTestId("health-view")).toBeInTheDocument();
+    expect(screen.queryByTestId("architecture-view")).toBeNull();
   });
 
-  it("calls redirect('/architecture') when rawPathname is /dsm", async () => {
-    mockPathname = "/dsm";
+  it.each(["/architecture", "/dsm"])("calls redirect('/health') once from %s, never via /architecture", async (path) => {
+    mockPathname = path;
     render(<App />);
-    await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith("/architecture"));
+    await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith("/health"));
+    expect(mockRedirect).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT call redirect when pathname is already /architecture", async () => {
-    mockPathname = "/architecture";
-    render(<App />);
-    await screen.findByTestId("architecture-view");
-    expect(mockRedirect).not.toHaveBeenCalled();
+  describe("with the register entry removed", () => {
+    let restore: () => void = () => {};
+    beforeEach(() => {
+      restore = removeHiddenWidgetEntry("architecture-view");
+    });
+    afterEach(() => restore());
+
+    it("renders the Architecture view again at /dsm, redirecting to /architecture", async () => {
+      mockPathname = "/dsm";
+      render(<App />);
+      expect(await screen.findByTestId("architecture-view")).toBeInTheDocument();
+      await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith("/architecture"));
+    });
+
+    it("does NOT call redirect when pathname is already /architecture", async () => {
+      mockPathname = "/architecture";
+      render(<App />);
+      await screen.findByTestId("architecture-view");
+      expect(mockRedirect).not.toHaveBeenCalled();
+    });
   });
 });
