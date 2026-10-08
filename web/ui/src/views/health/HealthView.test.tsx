@@ -592,8 +592,11 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     expect(within(figure).getByText("not applicable")).toBeInTheDocument();
     expect(within(figure).getByText("3 of 5 dependency edges — too few for community structure")).toBeInTheDocument();
     expect(within(figure).queryByRole("meter")).toBeNull();
-    // The computed raw value is still stated.
-    expect(seen(figure)).toContain("Q -0.50");
+    // The reason stands in place of a score — no normalized figure beside it — and
+    // the computed raw value is still stated.
+    expect(seen(figure)).toBe(
+      "not applicable 3 of 5 dependency edges — too few for community structure Q -0.50 (Newman's modularity, from −0.5 to 1)",
+    );
     expectWidgetCopy(w, DIMENSION_COPY.modularity, { kind: "not-applicable" });
   });
 });
