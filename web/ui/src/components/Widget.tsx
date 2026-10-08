@@ -1,23 +1,25 @@
 /*
- * Widget (S-611, CR-203, FR-UI-39, FR-UI-40). The one frame every widget renders
- * through. It composes `Card` — the brand grammar (3px red top rule, radius,
- * padding; ADR-44) is unchanged — and lays out five parts, top to bottom, each
- * marked `data-widget-part`:
+ * Widget (S-611, CR-203, CR-206, FR-UI-39, FR-UI-40). The one frame every widget
+ * renders through. It composes `Card` — the brand grammar (3px red top rule,
+ * radius, padding; ADR-44) is unchanged — and lays out four parts, top to
+ * bottom, each marked `data-widget-part`:
  *
  *   1. title       — the title left, at most one status badge right, one line;
- *   2. figure      — the key figure(s), or the statement of an absence;
+ *   2. figure      — the key figure(s), or the statement of an absence (which
+ *                    names the command that fixes it, when one does);
  *   3. explanation — what the widget shows, and why it matters (then any
  *                    `note`: payload text the catalogue cannot hold);
- *   4. action      — "What you can do", the action text, and the where chip;
- *   5. evidence    — the table, chart or list (the children).
+ *   4. evidence    — the table, chart or list (the children).
  *
- * The words come from a catalogue entry (`copy`) evaluated at the widget's
- * `state`, so a view never writes copy inline and a wording change edits one
- * catalogue. An absence renders as a left-aligned statement in the figure row;
- * the centred `EmptyState` is for a view with no widget at all, never here.
+ * There is no action line: CR-206 removed "What you can do" and its where chip.
+ *
+ * The words come from a catalogue entry (`copy`), so a view never writes copy
+ * inline and a wording change edits one catalogue. An absence renders as a
+ * left-aligned statement in the figure row; the centred `EmptyState` is for a
+ * view with no widget at all, never here.
  *
  * PANEL MODE (S-617): a tool panel — a query form, an editor, the chat, a wiki
- * page — presents no figure, so it is exempt from why, action and where. It is
+ * page — presents no figure, so it is exempt from why. It is
  * rendered as `<Widget panel="key" title=…>`: the title row, the panel's one
  * line from the `TOOL_PANELS` register as its explanation (`what`), then the
  * tool itself in the evidence part. The frame is marked `data-widget-panel`.
@@ -26,7 +28,7 @@
 import type { ReactNode } from "react";
 
 import { TOOL_PANELS, type ToolPanelKey } from "../copy/toolPanels.ts";
-import { NOTHING_TO_DO, type CopyEntry, type CopyText, type WidgetAction } from "../copy/types.ts";
+import { NOTHING_TO_DO, type CopyEntry, type CopyText, type RowAction } from "../copy/types.ts";
 
 import { Card } from "./Card.tsx";
 import { Term } from "./Term.tsx";
@@ -41,13 +43,10 @@ type FigureRow =
       absence: ReactNode;
     };
 
-/** `state` may be omitted only when the entry's action takes none. */
-type StateProp<S> = undefined extends S ? { state?: S } : { state: S };
-
-/** A figure widget: its words from a catalogue entry at its state. */
-type CopyMode<S> = {
+/** A figure widget: its words from a catalogue entry. */
+type CopyMode = {
   /** The widget's catalogue entry. */
-  copy: CopyEntry<S>;
+  copy: CopyEntry;
   panel?: undefined;
   /**
    * Secondary detail for the explanation, after why: text the read-model
@@ -55,22 +54,20 @@ type CopyMode<S> = {
    * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
    */
   note?: ReactNode;
-} & FigureRow &
-  StateProp<S>;
+} & FigureRow;
 
-/** A tool panel: its one line from the `TOOL_PANELS` register, and no figure,
- *  why, action or where. */
+/** A tool panel: its one line from the `TOOL_PANELS` register, and no figure
+ *  or why. */
 type PanelMode = {
   /** The panel's key in `TOOL_PANELS`. */
   panel: ToolPanelKey;
   copy?: undefined;
-  state?: undefined;
   note?: undefined;
   figure?: undefined;
   absence?: undefined;
 };
 
-export type WidgetProps<S> = {
+export type WidgetProps = {
   /** The title (≤8 words), left on the title row. */
   title: ReactNode;
   /** At most one status badge, right on the title row. */
@@ -78,7 +75,11 @@ export type WidgetProps<S> = {
   /** The evidence: a table, chart or list — or, for a panel, the tool itself. */
   children?: ReactNode;
   className?: string;
-} & (CopyMode<S> | PanelMode);
+  /** Removed by CR-206 with the action line it drove. Typed `never` so a stale
+   *  state is a type error even inside a spread (`{...common}`), which JSX does
+   *  not check for excess properties. */
+  state?: never;
+} & (CopyMode | PanelMode);
 
 /** Renders catalogue text, glossing each `Gloss` segment through `Term`. */
 export function CopyTextView({ text }: { text: CopyText }) {
@@ -122,7 +123,7 @@ export function FigureNote({ children, block = false }: { children: ReactNode; b
  * line. A `none` action reads `none` — by default the one "Nothing to do"
  * sentence; a catalogue whose `none` says something more specific passes it.
  */
-export function ActionCell({ action, none = NOTHING_TO_DO }: { action: WidgetAction; none?: CopyText }) {
+export function ActionCell({ action, none = NOTHING_TO_DO }: { action: RowAction; none?: CopyText }) {
   if (action.kind === "none") {
     return (
       <span className="muted">
@@ -175,7 +176,7 @@ function Evidence({ children }: { children?: ReactNode }) {
   );
 }
 
-export function Widget<S>(props: WidgetProps<S>) {
+export function Widget(props: WidgetProps) {
   const { title, badge, children, className } = props;
   const cardClass = [styles.widget, className].filter(Boolean).join(" ");
 
@@ -196,7 +197,6 @@ export function Widget<S>(props: WidgetProps<S>) {
   }
 
   const { copy, note, figure, absence } = props;
-  const action = copy.action((props as { state: S }).state);
   const hasAbsence = isRendered(absence);
 
   return (
@@ -227,26 +227,6 @@ export function Widget<S>(props: WidgetProps<S>) {
             <div className={styles.note} data-widget-note="">
               {note}
             </div>
-          )}
-        </div>
-
-        <div className={styles.action} data-widget-part="action" data-action-kind={action.kind}>
-          <p className={styles.body}>
-            <span className={styles.actionLabel}>What you can do:</span>{" "}
-            <span data-widget-copy="action">
-              {action.kind === "act" ? <CopyTextView text={action.text} /> : NOTHING_TO_DO}
-            </span>
-          </p>
-          {action.kind === "act" && (
-            <p className={styles.where} data-widget-copy="where">
-              <span className={styles.whereKind}>{action.where}</span>
-              {action.target !== undefined && (
-                <>
-                  {" "}
-                  <code className={styles.target}>{action.target}</code>
-                </>
-              )}
-            </p>
           )}
         </div>
 

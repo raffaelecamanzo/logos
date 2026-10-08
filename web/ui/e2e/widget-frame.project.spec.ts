@@ -1,6 +1,7 @@
-// The widget frame in a real browser (S-611, FR-UI-40): equal gaps between
-// consecutive widgets, left-aligned widget text, one body size for explanation
-// and action — read as COMPUTED style from the real components and stylesheets.
+// The widget frame in a real browser (S-611, CR-206, FR-UI-40): equal gaps
+// between consecutive widgets, left-aligned widget text, the explanation at the
+// body size and no action line — read as COMPUTED style from the real
+// components and stylesheets.
 //
 // The page is the harness build (global-setup.ts) — a fixed page of every frame
 // state, written before any view rendered a Widget — served at the logos origin
@@ -54,7 +55,7 @@ async function openHarness(page: import("@playwright/test").Page) {
   return { stack, violations };
 }
 
-test("consecutive widgets share one gap, widget text is left-aligned, explanation and action share one size", async ({
+test("consecutive widgets share one gap, widget text is left-aligned, the explanation is at the body size", async ({
   page,
 }) => {
   const { stack, violations } = await openHarness(page);

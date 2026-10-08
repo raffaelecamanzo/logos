@@ -63,9 +63,9 @@ import {
   OFFENDER_STATEMENT,
   READING_ABSENCE,
   THRESHOLDS_DISCLOSURE,
-  type DimensionState,
   gate as gateCopy,
   gateFigureText,
+  gateLowest,
   GATE_NOT_COMPARED,
   offenderBadge,
   qualitySignal as qualitySignalCopy,
@@ -122,13 +122,12 @@ function Health({ data }: { data: HealthModel }) {
   // shape `DashboardView` uses for `freshnessStatement`, so the model stays a
   // projection of its arguments.
   const currency = snapshotStaleness(data.status, data.evolution, Math.floor(Date.now() / 1000));
-  // The dimension to start with — one answer for the Gate's FAIL action and the
-  // Quality signal's action, so the two cannot name different dimensions.
+  // The lowest-scoring dimension, which a current FAIL names as a fact (CR-206).
   const lowest = data.scan.metrics.empty ? null : lowestDimension(metricRows(data.scan.metrics));
   return (
     <WidgetStack>
       <GateWidget gate={data.gate} absence={absence} currency={currency} lowest={lowest} />
-      <QualitySignalWidget scan={data.scan} absence={absence} currency={currency} lowest={lowest} />
+      <QualitySignalWidget scan={data.scan} absence={absence} currency={currency} />
       {!data.scan.metrics.empty &&
         dimensionDetails(data.scan).map((dim) => (
           <DimensionWidget key={dim.key} dim={dim} currency={currency} />
@@ -151,17 +150,21 @@ function ReadingFigure({
   figure,
   currency,
   note,
+  fact,
 }: {
   figure: ReactNode;
   currency: SnapshotCurrency | null;
   /** A further qualifying line under the figure (the Gate's not-compared line,
    *  the Quality signal's scope line). */
   note?: string;
+  /** A fact about the reading (a current FAIL's lowest-scoring dimension). */
+  fact?: string;
 }) {
   return (
     <div className={styles.figureLines}>
       <span>{figure}</span>
       {note !== undefined && <FigureNote block>{note}</FigureNote>}
+      {fact !== undefined && <FigureNote block>{fact}</FigureNote>}
       {currency !== null && <FigureNote block>{staleNote(currency)}</FigureNote>}
     </div>
   );
@@ -194,7 +197,7 @@ function GateWidget({
 }) {
   if (gate.signal === null) {
     return (
-      <Widget title="Gate" copy={gateCopy} state={{ kind: "absent", absence }} absence={READING_ABSENCE[absence]} />
+      <Widget title="Gate" copy={gateCopy} absence={READING_ABSENCE[absence]} />
     );
   }
   const verdict = gate.passed ? "PASS" : "FAIL";
@@ -233,16 +236,12 @@ function GateWidget({
       title="Gate"
       badge={badge}
       copy={gateCopy}
-      state={
-        currency !== null
-          ? { kind: "stale", currency }
-          : { kind: "verdict", passed: gate.passed, lowest: lowest?.name ?? null }
-      }
       figure={
         <ReadingFigure
           figure={figure}
           currency={currency}
           note={informational && gate.baseline_signal !== null ? GATE_NOT_COMPARED : undefined}
+          fact={!gate.passed && currency === null && lowest !== null ? gateLowest(lowest.name) : undefined}
         />
       }
     />
@@ -281,12 +280,10 @@ function QualitySignalWidget({
   scan,
   absence,
   currency,
-  lowest,
 }: {
   scan: ScanResult;
   absence: SignalAbsence;
   currency: SnapshotCurrency | null;
-  lowest: MetricRow | null;
 }) {
   const aggregate = scan.metrics.empty ? null : aggregateSignal(scan);
   if (aggregate === null) {
@@ -294,7 +291,6 @@ function QualitySignalWidget({
       <Widget
         title="Quality signal"
         copy={qualitySignalCopy}
-        state={{ kind: "absent", absence }}
         absence={READING_ABSENCE[absence]}
       />
     );
@@ -305,7 +301,6 @@ function QualitySignalWidget({
     <Widget
       title="Quality signal"
       copy={qualitySignalCopy}
-      state={currency !== null ? { kind: "stale", currency } : { kind: "scored", lowest: lowest?.name ?? null }}
       figure={
         <ReadingFigure
           figure={
@@ -371,26 +366,10 @@ function MetricsTable({ rows }: { rows: MetricRow[] }) {
   return <DataTable columns={columns} rows={rows} rowKey={(r) => r.name} caption="Quality metrics" />;
 }
 
-/** The state a dimension's catalogue entry is evaluated at. A figure from a
- *  snapshot the graph has moved on from is the Gate's stale state, never a reading
- *  to act on (CR-135: one classification for the whole page). */
-function dimensionState(dim: DimensionDetail, currency: SnapshotCurrency | null): DimensionState {
-  if (dim.value === null || dim.notApplicable !== null || dim.offenderState === "not-applicable") {
-    return { kind: "not-applicable" };
-  }
-  if (currency !== null) return { kind: "stale", currency };
-  return {
-    kind: "scored",
-    normalized: dim.value.normalized,
-    offenders: dim.offenderState,
-    listed: dim.offenders.length,
-  };
-}
-
 /**
  * One dimension's widget (FR-UI-43, CR-203 items 14–19): its plain question, its
  * score with the normalized and raw values, the not-applicable reason when it drops
- * out, and an action with where. The five offender-backed dimensions keep S-499's
+ * out. The five offender-backed dimensions keep S-499's
  * three honest states, decided by `dim.offenderState` (never by list length) —
  * "not recorded" (never shown as clean, CR-162), a recorded-empty "none flagged",
  * or the worst-offender table in persisted order. The other five carry no list in
@@ -404,7 +383,6 @@ function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: Sn
     title: dim.name,
     badge: badge === null ? undefined : <span className="muted">{badge}</span>,
     copy,
-    state: dimensionState(dim, currency),
   };
   const evidence = <DimensionEvidence dim={dim} />;
   if (dim.value === null) {
@@ -512,10 +490,10 @@ function OffendersTable({ offenders }: { offenders: Offender[] }) {
 
 /** The Signal trend widget: the signal-evolution series as its accessible
  *  data-table twin, one row per snapshot oldest-first with signed movement. No
- *  snapshots → the named absence and the command that records one. */
+ *  snapshots → the named absence, which names the command that records one. */
 function SignalTrendWidget({ snapshots }: { snapshots: EvolutionPoint[] }) {
   if (snapshots.length === 0) {
-    return <Widget title="Signal trend" copy={signalTrendCopy} state={{ snapshots: 0 }} absence={NO_SNAPSHOTS} />;
+    return <Widget title="Signal trend" copy={signalTrendCopy} absence={NO_SNAPSHOTS} />;
   }
   const columns: Column<EvolutionPoint>[] = [
     { key: "snapshot", header: "Snapshot", numeric: true, mono: true, cell: (p) => p.snapshot_id, sortValue: (p) => p.snapshot_id },
@@ -524,7 +502,7 @@ function SignalTrendWidget({ snapshots }: { snapshots: EvolutionPoint[] }) {
     { key: "delta", header: "Δ vs prev", numeric: true, mono: true, cell: (p) => optDelta(p.signal_delta), sortValue: (p) => p.signal_delta ?? 0 },
   ];
   return (
-    <Widget title="Signal trend" copy={signalTrendCopy} state={{ snapshots: snapshots.length }}>
+    <Widget title="Signal trend" copy={signalTrendCopy}>
       <DataTable
         columns={columns}
         rows={snapshots}

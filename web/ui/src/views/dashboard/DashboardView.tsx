@@ -15,7 +15,8 @@
  * `copy/ruleFindings.copy.ts` with the Rule findings view), stacked in ONE
  * `WidgetStack`. The former equal-width pairs are one column: a stack's widgets
  * are its direct children, one gap apart. An absence inside a widget is a
- * left-aligned statement in its figure row with the command in its action. CR-079 retired the
+ * left-aligned statement in its figure row that names the command that fills it
+ * (CR-206). CR-079 retired the
  * Coverage-trust card and the reachability roll-up, promoting the architecture
  * Rule findings into that former slot. Every read is GET-only — loading the view
  * mutates no store (ADR-28).
@@ -124,7 +125,6 @@ function QualityCard({ gate }: { gate: GateResult }) {
       <Widget
         title="Quality index"
         copy={qualityIndex}
-        state={{ recorded: false, passed: false }}
         absence={DASHBOARD_ABSENCE.noSignal}
       >
         {link}
@@ -137,7 +137,6 @@ function QualityCard({ gate }: { gate: GateResult }) {
       title="Quality index"
       badge={<Badge tone={gate.passed ? "green" : "red"}>{gate.passed ? "PASS" : "FAIL"}</Badge>}
       copy={qualityIndex}
-      state={{ recorded: true, passed: gate.passed }}
       figure={
         <>
           <span>{band.label}</span>
@@ -159,7 +158,7 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
   const link = <DetailLink href="/coverage" label="Coverage" />;
   if (bp === null) {
     return (
-      <Widget title="Code coverage" copy={codeCoverage} state={{ ingested: false }} absence={DASHBOARD_ABSENCE.noCoverage}>
+      <Widget title="Code coverage" copy={codeCoverage} absence={DASHBOARD_ABSENCE.noCoverage}>
         {link}
       </Widget>
     );
@@ -168,7 +167,6 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
     <Widget
       title="Code coverage"
       copy={codeCoverage}
-      state={{ ingested: true }}
       figure={
         <span>
           <span className="num">{pctBp(bp)}</span> <FigureNote>of lines covered</FigureNote>
@@ -182,8 +180,8 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
 }
 
 /** *Rule findings* — the architecture-rules verdict projected from `overview.rules`
- *  (CR-079). Three honest states (NFR-CC-04): an absence and a configuration
- *  action when no `.logos/rules.toml` is authored yet, or when one is authored
+ *  (CR-079). Three honest states (NFR-CC-04): an absence naming the file and the
+ *  evaluating command when no `.logos/rules.toml` is authored yet, or when one is authored
  *  but declares zero rules (`!rules_present || checked_rules === 0`) — the
  *  `logos init` default is not a clean check, it is nothing evaluated (CR-141,
  *  S-438); a red FAIL naming the finding count when there are findings; a green
@@ -201,7 +199,7 @@ function RuleFindingsCard({ rules }: { rules: RulesReport }) {
   const link = <DetailLink href="/gaps" label="Rule findings" />;
   if (findings === 0 && checked === 0) {
     return (
-      <Widget title="Rule findings" copy={ruleFindings} state={state} absence={RULE_FINDINGS_TEXT.noRules}>
+      <Widget title="Rule findings" copy={ruleFindings} absence={RULE_FINDINGS_TEXT.noRules}>
         {link}
       </Widget>
     );
@@ -211,7 +209,6 @@ function RuleFindingsCard({ rules }: { rules: RulesReport }) {
       title="Rule findings"
       badge={findings > 0 ? <Badge tone="red">FAIL</Badge> : <Badge tone="green">PASS</Badge>}
       copy={ruleFindings}
-      state={state}
       figure={
         <span>{findings > 0 ? RULE_FINDINGS_TEXT.findings(findings, rules.checked_rules) : RULE_FINDINGS_TEXT.clean(checked)}</span>
       }
@@ -231,7 +228,7 @@ function LanguagesCard({
 }) {
   if (composition.languages.length === 0) {
     return (
-      <Widget title="Languages" copy={languagesCopy} state={{ indexed: false }} absence={DASHBOARD_ABSENCE.noLanguages} />
+      <Widget title="Languages" copy={languagesCopy} absence={DASHBOARD_ABSENCE.noLanguages} />
     );
   }
   const n = composition.languages.length;
@@ -241,7 +238,6 @@ function LanguagesCard({
     <Widget
       title="Languages"
       copy={languagesCopy}
-      state={{ indexed: true }}
       figure={
         <span>
           {n} <FigureNote>{plural(n, "language", "languages")} indexed</FigureNote>
@@ -268,7 +264,7 @@ function LanguagesCard({
  *  total/source/test physical-LOC roll-up, with the reference resolution as the
  *  figure. The roll-up is computed only at full-index time ([FR-IX-12]); on a
  *  graph where it is not yet computed, all three figures are `null` in lock-step,
- *  so the rows are left out and the action names the full index rather than a
+ *  so the rows are left out and the evidence names the full index rather than a
  *  fabricated `0` ([NFR-CC-04]). */
 function GraphCard({ status }: { status: StatusInfo }) {
   const resolution = resolutionStatement(status);
@@ -289,7 +285,6 @@ function GraphCard({ status }: { status: StatusInfo }) {
     <Widget
       title="Graph"
       copy={graphCopy}
-      state={{ linesCounted: loc !== null }}
       figure={
         <span>
           <span className="mono">{resolution}</span> <FigureNote>of references resolved</FigureNote>
@@ -331,13 +326,12 @@ function GraphCard({ status }: { status: StatusInfo }) {
 /** *Activity (compact)* — usage telemetry from `stats`; no telemetry → an honest absence. */
 function ActivityCard({ stats }: { stats: StatsInfo }) {
   if (stats.calls_total === 0) {
-    return <Widget title="Activity" copy={activityCopy} state={{ recorded: false }} absence={DASHBOARD_ABSENCE.noTelemetry} />;
+    return <Widget title="Activity" copy={activityCopy} absence={DASHBOARD_ABSENCE.noTelemetry} />;
   }
   return (
     <Widget
       title="Activity"
       copy={activityCopy}
-      state={{ recorded: true }}
       figure={
         <span>
           <span className="num">{fmtInt(stats.calls_total)}</span>{" "}
@@ -366,22 +360,21 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
  *
  *  The page is agent-authored prose the binary never writes itself (ADR-57), and
  *  `wiki status` is a pure read that only *lists* the work — running it leaves the
- *  page just as absent. So the action names the write that ends it (FR-EH-04,
- *  CR-130), which is also the command `wiki status` hands out for this slug. */
+ *  page just as absent. So the absence names the write that ends it (FR-EH-04,
+ *  CR-130, CR-206), which is also the command `wiki status` hands out for this slug. */
 function ProjectOverviewCard({ page }: { page: WikiPage | null }) {
   if (page === null) {
     return (
       <Widget
         title="Project Overview"
         copy={projectOverview}
-        state={{ written: false }}
         absence={DASHBOARD_ABSENCE.noOverview}
       />
     );
   }
   const snippet = snippetOf(page.body);
   return (
-    <Widget title="Project Overview" copy={projectOverview} state={{ written: true }}>
+    <Widget title="Project Overview" copy={projectOverview}>
       {snippet === "" ? (
         <p className="muted">A project overview is available in the wiki.</p>
       ) : (

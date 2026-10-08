@@ -34,11 +34,6 @@ export function expectOneWidgetStack(root: Element): HTMLElement[] {
   return widgets;
 }
 
-/** A widget's action kind (`act` or `none`), as the frame marks it. */
-export function actionKind(widget: Element): string | null {
-  return widget.querySelector('[data-widget-part="action"]')?.getAttribute("data-action-kind") ?? null;
-}
-
 /** A widget's title as a reader sees it (a gloss's tooltip left out). */
 export function widgetTitle(widget: Element): string {
   const title = widget.querySelector('[data-widget-part="title"] h3');

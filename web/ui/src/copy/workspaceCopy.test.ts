@@ -1,10 +1,10 @@
 // The workspace catalogues' sentences (S-613, FR-UI-39). The catalogue test holds
 // every `CopyEntry` to the vocabulary rule; this holds the figure-row and absence
-// sentences and the remedy table beside them, which render in the parts
+// sentences and the row-action remedies beside them, which render in the parts
 // `expectWidgetCopy` reads but are not entries themselves.
 import { describe, expect, it } from "vitest";
 
-import { COVERAGE_TEXT, NOT_RESOLVED_REMEDY, remedyFor, UNLISTED_REMEDY } from "./coverage.copy.ts";
+import { COVERAGE_TEXT, NOT_RESOLVED_REMEDY } from "./coverage.copy.ts";
 import { findUnglossedUses, plainPart } from "./text.ts";
 import type { CopyText } from "./types.ts";
 import { DASHBOARD_TEXT, memberRowAction } from "./workspaceDashboard.copy.ts";
@@ -34,6 +34,7 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     capturedResolves: [[0, 3], [1, 1], [2, 3]],
     declaredPairs: [[0, 0], [1, 1], [3, 2]],
     externalsMatched: [[1, 1], [2, 5]],
+    notResolvedCaption: [[1], [7]],
   },
   DASHBOARD_TEXT: {
     keepThem: [[0, false], [0, true], [1, false], [1, true], [7, false], [7, true]],
@@ -82,7 +83,6 @@ describe("workspace catalogue sentences", () => {
     ...sentences("SERVICE_MAP_TEXT"),
     ...Object.entries(BINDING_KIND_LABEL).map(([k, label]) => [`kind ${k}`, label] as [string, CopyText]),
     ...Object.entries(NOT_RESOLVED_REMEDY).map(([k, r]) => [`remedy ${k}`, r.remedy] as [string, CopyText]),
-    ["remedy (unlisted)", UNLISTED_REMEDY.remedy] as [string, CopyText],
   ];
 
   it("samples every sentence function, so none goes unchecked", () => {
@@ -101,21 +101,6 @@ describe("workspace catalogue sentences", () => {
 
   it.each(all)("%s uses no internal term outside a gloss", (_key, text) => {
     expect(findUnglossedUses([plainPart(text)])).toEqual([]);
-  });
-
-  it("gives every reason the server sends a remedy, and an unknown one the listing command", () => {
-    expect(Object.keys(NOT_RESOLVED_REMEDY).sort()).toEqual([
-      "ambiguous",
-      "base-url-runtime",
-      "config-key-missing",
-      "config-placeholder-value",
-      "no-provider-in-workspace",
-      "path-not-composed",
-      "topic-not-literal",
-    ]);
-    expect(remedyFor("a-reason-from-a-later-arm")).toBe(UNLISTED_REMEDY);
-    // Own keys only: an inherited name is not a reason.
-    expect(remedyFor("constructor")).toBe(UNLISTED_REMEDY);
   });
 
   it("states the service map's shares as n of m, numerator first (S-614)", () => {
@@ -142,6 +127,8 @@ describe("workspace catalogue sentences", () => {
     expect(COVERAGE_TEXT.capturedUnresolved(1)).toContain("the 1 captured call that could match");
     expect(HEALTH_TEXT.unknownMembers(2)).toContain("so those rules were silently narrowed");
     expect(HEALTH_TEXT.unknownMembers(1)).toContain("so that rule was silently narrowed");
+    expect(COVERAGE_TEXT.notResolvedCaption(1)).toBe("Why 1 outbound call site did not resolve, largest reason first");
+    expect(COVERAGE_TEXT.notResolvedCaption(7)).toBe("Why 7 outbound call sites did not resolve, largest reason first");
   });
 
   it("per-row member actions: re-index a degraded member, review deletions, else nothing", () => {

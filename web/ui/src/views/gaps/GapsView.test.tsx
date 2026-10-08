@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GapsModel, RulesReport } from "../../api/types.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import { ruleFindings } from "../../copy/ruleFindings.copy.ts";
-import { actionKind, expectOneWidgetStack } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack } from "../../test/widgetStack.ts";
 import { GapsView } from "./GapsView.tsx";
 
 afterEach(() => {
@@ -128,12 +128,10 @@ describe("GapsView → Rule findings over mocked /api/v1 (S-189, FR-UI-06; CR-07
 
 // ── S-617 (CR-203, FR-UI-39/40): the widget explains itself in each state ────
 
-const RULES: { name: string; rules: RulesReport; state: { findings: number; checked: number }; kind: "act" | "none" }[] = [
+const RULES: { name: string; rules: RulesReport }[] = [
   {
     name: "clean over three rules",
     rules: { passed: true, checked_rules: 3, rules_present: true, violations: [], freshness: "fresh", warnings: [] },
-    state: { findings: 0, checked: 3 },
-    kind: "none",
   },
   {
     name: "findings",
@@ -145,40 +143,35 @@ const RULES: { name: string; rules: RulesReport; state: { findings: number; chec
       freshness: "fresh",
       warnings: [],
     },
-    state: { findings: 1, checked: 2 },
-    kind: "act",
   },
   {
     name: "no rules.toml",
     rules: { passed: null, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] },
-    state: { findings: 0, checked: 0 },
-    kind: "act",
   },
   {
     // `logos init`'s default contract declares nothing: not a pass (CR-141).
     name: "a contract declaring no rule",
     rules: { passed: true, checked_rules: 0, rules_present: true, violations: [], freshness: "fresh", warnings: [] },
-    state: { findings: 0, checked: 0 },
-    kind: "act",
   },
 ];
 
 describe("the Rule findings widget explains itself (S-617, FR-UI-39/40)", () => {
-  it.each(RULES)("$name: one stack, the shared catalogue entry at its state", async ({ rules, state, kind }) => {
+  it.each(RULES)("$name: one stack, the shared catalogue entry", async ({ rules }) => {
     stub(model({ rules }));
     const { container } = render(<GapsView />);
     await screen.findByRole("heading", { name: "Rule findings" });
     const [widget] = expectOneWidgetStack(container);
-    expect(actionKind(widget)).toBe(kind);
-    expectWidgetCopy(widget, ruleFindings, state);
+    expectWidgetCopy(widget, ruleFindings);
   });
 
   it("a contract declaring no rule renders the onboarding, never a PASS", async () => {
     stub(model({ rules: RULES[3].rules }));
     render(<GapsView />);
-    expect(await screen.findByText(/No architecture rules yet/i)).toBeInTheDocument();
+    const absence = await screen.findByText(/No architecture rules yet/i);
+    expect(absence).toHaveAttribute("data-widget-absence");
     expect(screen.queryByText("PASS")).not.toBeInTheDocument();
-    expect(screen.getByText(".logos/rules.toml").closest('[data-widget-copy="where"]')).not.toBeNull();
+    // The absence names where rules are declared and the command that evaluates them (CR-206).
+    expect(absence.textContent).toMatch(/; declare rules in \.logos\/rules\.toml, then run logos check\.$/);
   });
 });
 

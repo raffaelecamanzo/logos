@@ -279,12 +279,12 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     render(<StatisticsView />);
 
     const absence = await screen.findByText(statisticsAbsence.awaiting);
-    // The absence is stated in the value widget's figure row, and its action is
-    // the command — the one Statistics state with something to do.
+    // The absence is stated in the value widget's figure row, and names the
+    // command that shows what is recorded (CR-206).
     expect(absence).toHaveAttribute("data-widget-absence");
+    expect(absence.textContent).toMatch(/; logos stats shows what has been recorded so far\.$/);
     const w = widget("Estimated value");
-    expectWidgetCopy(w, estimatedValue, { recorded: false });
-    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos stats");
+    expectWidgetCopy(w, estimatedValue);
     // No charts, no other widget, and no fabricated value figure.
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     expect(document.querySelectorAll("[data-widget]")).toHaveLength(1);
@@ -392,18 +392,15 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     expect(screen.queryByText(attributionNotesLead)).toBeNull();
   });
 
-  it("every widget explains itself, informational on a populated store (FR-UI-39)", async () => {
+  it("every widget explains itself on a populated store (FR-UI-39)", async () => {
     stubFetch(populated);
     render(<StatisticsView />);
     await screen.findByRole("heading", { name: "Tool attribution by class" });
-    expectWidgetCopy(widget("Estimated value"), estimatedValue, { recorded: true });
+    expectWidgetCopy(widget("Estimated value"), estimatedValue);
     expectWidgetCopy(widget("Usage over time"), usageOverTime);
     expectWidgetCopy(widget("Top tools & surfaces"), topToolsAndSurfaces);
     expectWidgetCopy(widget("Dev vs main"), devVsMain);
     expectWidgetCopy(widget("Tool attribution by class"), toolAttribution);
-    for (const frame of document.querySelectorAll("[data-widget]")) {
-      expect(frame.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "none");
-    }
     // One stack, five widgets, in reading order.
     const stacks = document.querySelectorAll("[data-widget-stack]");
     expect(stacks).toHaveLength(1);

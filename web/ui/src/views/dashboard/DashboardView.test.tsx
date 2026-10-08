@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OverviewModel } from "../../api/types.ts";
 import {
+  DASHBOARD_ABSENCE,
   activity,
   codeCoverage,
   graph,
@@ -10,10 +11,10 @@ import {
   projectOverview,
   qualityIndex,
 } from "../../copy/dashboard.copy.ts";
-import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import { ruleFindings } from "../../copy/ruleFindings.copy.ts";
 import type { CopyEntry } from "../../copy/types.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
 import { DashboardView } from "./DashboardView.tsx";
 
 // ── A fully-populated, indexed overview read-model ────────────────────────────
@@ -140,9 +141,11 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     m.gate.signal = null;
     stub(m);
     render(<DashboardView />);
-    expect(await screen.findByText(/No quality signal recorded yet/i)).toBeInTheDocument();
-    expect(screen.getByText("logos scan")).toBeInTheDocument();
-    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    const absence = await screen.findByText(/No quality signal recorded yet/i);
+    // The absence names the command in its sentence (CR-206), and only that one.
+    expect(absence.textContent).toBe(DASHBOARD_ABSENCE.noSignal);
+    expect(absence.textContent).toMatch(/; run logos scan to record one\.$/);
+    expect(readerText(absence.closest("[data-widget]")!)).not.toMatch(/logos index/);
     // Neither of the two causes is asserted, and the graph is never blamed.
     expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
@@ -153,9 +156,9 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     m.overview_page = null;
     stub(m);
     render(<DashboardView />);
-    expect(await screen.findByText(/No project overview generated yet/i)).toBeInTheDocument();
-    expect(screen.getByText("logos wiki write overview/project-overview")).toBeInTheDocument();
-    expect(screen.queryByText("logos wiki status")).not.toBeInTheDocument();
+    const absence = await screen.findByText(/No project overview generated yet/i);
+    expect(absence.textContent).toMatch(/logos wiki write overview\/project-overview\.$/);
+    expect(readerText(absence.closest("[data-widget]")!)).not.toMatch(/logos wiki status/);
   });
 
   it("renders honest per-widget empty states, never fabricated figures", async () => {
@@ -231,10 +234,10 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     stub(m);
     render(<DashboardView />);
     expect(await screen.findByText(/No architecture rules yet/i)).toBeInTheDocument();
-    // The action names the file to author (configuration) and the evaluating command.
-    const card = screen.getByText(/No architecture rules yet/i).closest("section") as HTMLElement;
-    expect(within(card).getByText(".logos/rules.toml")).toBeInTheDocument();
-    expect(card.querySelector('[data-widget-copy="action"]')).toHaveTextContent(/run logos check/);
+    // The absence names the file to author and the evaluating command (CR-206).
+    expect(screen.getByText(/No architecture rules yet/i).textContent).toMatch(
+      /; declare rules in \.logos\/rules\.toml, then run logos check\.$/,
+    );
     // Never a fabricated PASS/FAIL verdict when no rules exist yet.
     expect(screen.queryByText("FAIL")).not.toBeInTheDocument();
   });
@@ -274,8 +277,7 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     const heading = await screen.findByText("Rule findings");
     const card = heading.closest("section") as HTMLElement;
     // Reuses the one onboarding absence — no fourth state.
-    expect(within(card).getByText(/No architecture rules yet/i)).toBeInTheDocument();
-    expect(card.querySelector('[data-widget-copy="action"]')).toHaveTextContent(/run logos check/);
+    expect(within(card).getByText(/No architecture rules yet/i).textContent).toMatch(/then run logos check\.$/);
     expect(within(card).queryByText("PASS")).not.toBeInTheDocument();
     expect(within(card).queryByText(/No findings/i)).not.toBeInTheDocument();
   });
@@ -310,34 +312,34 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
 // ── S-617 (CR-203, FR-UI-39/40): every widget explains itself, in one stack ──
 
 /** Each widget's catalogue entry, by title. */
-const ENTRIES: Record<string, CopyEntry<never>> = {
-  "Project Overview": projectOverview as CopyEntry<never>,
-  "Quality index": qualityIndex as CopyEntry<never>,
-  Languages: languages as CopyEntry<never>,
-  Graph: graph as CopyEntry<never>,
-  Activity: activity as CopyEntry<never>,
-  "Rule findings": ruleFindings as CopyEntry<never>,
-  "Code coverage": codeCoverage as CopyEntry<never>,
+const ENTRIES: Record<string, CopyEntry> = {
+  "Project Overview": projectOverview,
+  "Quality index": qualityIndex,
+  Languages: languages,
+  Graph: graph,
+  Activity: activity,
+  "Rule findings": ruleFindings,
+  "Code coverage": codeCoverage,
 };
 
-/** Every state the tests below cover, with each widget's state and action kind. */
+/** Every state the tests below cover, with the widgets each renders, in order. */
 const STATES: {
   name: string;
   model: () => OverviewModel;
-  expected: Record<string, [state: unknown, kind: "act" | "none"]>;
+  expected: string[];
 }[] = [
   {
     name: "healthy (everything recorded, rules pass)",
     model: clone,
-    expected: {
-      "Project Overview": [{ written: true }, "none"],
-      "Quality index": [{ recorded: true, passed: true }, "none"],
-      Languages: [{ indexed: true }, "none"],
-      Graph: [{ linesCounted: true }, "none"],
-      Activity: [{ recorded: true }, "none"],
-      "Rule findings": [{ findings: 0, checked: 3 }, "none"],
-      "Code coverage": [{ ingested: true }, "none"],
-    },
+    expected: [
+      "Project Overview",
+      "Quality index",
+      "Languages",
+      "Graph",
+      "Activity",
+      "Rule findings",
+      "Code coverage",
+    ],
   },
   {
     name: "problems (gate FAIL, rule findings)",
@@ -354,19 +356,19 @@ const STATES: {
       };
       return m;
     },
-    expected: {
-      "Project Overview": [{ written: true }, "none"],
-      "Quality index": [{ recorded: true, passed: false }, "act"],
-      Languages: [{ indexed: true }, "none"],
-      Graph: [{ linesCounted: true }, "none"],
-      Activity: [{ recorded: true }, "none"],
-      "Rule findings": [{ findings: 1, checked: 4 }, "act"],
-      "Code coverage": [{ ingested: true }, "none"],
-    },
+    expected: [
+      "Project Overview",
+      "Quality index",
+      "Languages",
+      "Graph",
+      "Activity",
+      "Rule findings",
+      "Code coverage",
+    ],
   },
   {
     // The always-on structural fold-ins fire with no contract (S-354): a finding
-    // over zero checked rules acts on the finding, never on the onboarding.
+    // over zero checked rules shows the finding, never the onboarding.
     name: "a fold-in finding with no rules contract",
     model: () => {
       const m = clone();
@@ -380,15 +382,15 @@ const STATES: {
       };
       return m;
     },
-    expected: {
-      "Project Overview": [{ written: true }, "none"],
-      "Quality index": [{ recorded: true, passed: true }, "none"],
-      Languages: [{ indexed: true }, "none"],
-      Graph: [{ linesCounted: true }, "none"],
-      Activity: [{ recorded: true }, "none"],
-      "Rule findings": [{ findings: 1, checked: 0 }, "act"],
-      "Code coverage": [{ ingested: true }, "none"],
-    },
+    expected: [
+      "Project Overview",
+      "Quality index",
+      "Languages",
+      "Graph",
+      "Activity",
+      "Rule findings",
+      "Code coverage",
+    ],
   },
   {
     name: "nothing recorded yet (indexed, but no scan, coverage, telemetry, overview or rules)",
@@ -405,31 +407,26 @@ const STATES: {
       m.rules = { passed: null, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] };
       return m;
     },
-    expected: {
-      "Project Overview": [{ written: false }, "act"],
-      "Quality index": [{ recorded: false, passed: false }, "act"],
-      Languages: [{ indexed: false }, "act"],
-      Graph: [{ linesCounted: false }, "act"],
-      Activity: [{ recorded: false }, "act"],
-      "Rule findings": [{ findings: 0, checked: 0 }, "act"],
-      "Code coverage": [{ ingested: false }, "act"],
-    },
+    expected: [
+      "Project Overview",
+      "Quality index",
+      "Languages",
+      "Graph",
+      "Activity",
+      "Rule findings",
+      "Code coverage",
+    ],
   },
 ];
 
 describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
-  it.each(STATES)("$name: one stack, each widget its catalogue entry at its state", async ({ model, expected }) => {
+  it.each(STATES)("$name: one stack, each widget its catalogue entry", async ({ model, expected }) => {
     stub(model());
     const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
     const widgets = expectOneWidgetStack(container);
-    expect(widgets.map(widgetTitle)).toEqual(Object.keys(expected));
-    for (const widget of widgets) {
-      const title = widgetTitle(widget);
-      const [state, kind] = expected[title];
-      expect(actionKind(widget), `${title}: action kind`).toBe(kind);
-      expectWidgetCopy(widget, ENTRIES[title], state as never);
-    }
+    expect(widgets.map(widgetTitle)).toEqual(expected);
+    for (const widget of widgets) expectWidgetCopy(widget, ENTRIES[widgetTitle(widget)]);
   });
 
   it("states each absence in its widget's figure row, never as a centred empty state", async () => {
@@ -441,20 +438,24 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     expect(container.querySelector('[class*="empty"]')).toBeNull();
   });
 
-  it("names the command that ends each absence in the where chip", async () => {
+  it("names the command that ends each absence in the absence sentence itself (CR-206)", async () => {
     stub(STATES[3].model());
-    render(<DashboardView />);
+    const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
-    for (const cmd of [
-      "logos scan",
-      "logos coverage ingest <report>",
-      "logos stats",
-      "logos wiki write overview/project-overview",
-      ".logos/rules.toml",
-    ]) {
-      expect(screen.getByText(cmd).closest('[data-widget-copy="where"]'), cmd).not.toBeNull();
+    const absenceOf = (title: string) =>
+      readerText(widgetsIn(container).find((w) => widgetTitle(w) === title)!.querySelector('[data-widget-part="figure"], [data-widget-part="evidence"]')!);
+    for (const [title, cmd] of [
+      ["Project Overview", "logos wiki write overview/project-overview"],
+      ["Quality index", "logos scan"],
+      ["Languages", "logos index"],
+      ["Activity", "logos stats"],
+      ["Rule findings", ".logos/rules.toml, then run logos check"],
+      ["Code coverage", "logos coverage ingest <report>"],
+    ] as const) {
+      expect(absenceOf(title), title).toContain(cmd);
     }
-    // Languages and Graph both name the index.
-    expect(screen.getAllByText("logos index")).toHaveLength(2);
+    // Graph's not-yet-counted lines name the full index, in its evidence.
+    expect(screen.getByText(DASHBOARD_ABSENCE.noLines)).toBeInTheDocument();
+    expect(DASHBOARD_ABSENCE.noLines).toContain("a full logos index counts them");
   });
 });

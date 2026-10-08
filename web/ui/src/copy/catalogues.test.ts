@@ -1,11 +1,12 @@
 // Every copy catalogue glosses each internal term at its first use (S-611,
-// FR-UI-39) — in what, why, and the text its action can return. Catalogues are DISCOVERED (every `*.copy.ts` under src/), so a view's
-// catalogue is held to the rule the moment it exists — no hand-kept list to forget.
+// FR-UI-39) — in what, then why. Catalogues are DISCOVERED (every `*.copy.ts`
+// under src/), so a view's catalogue is held to the rule the moment it exists —
+// no hand-kept list to forget.
 // The walk below also reaches every OTHER text a catalogue exports (its tables,
 // records and sentence functions), so a later story's table is held too.
 import { describe, expect, it } from "vitest";
 
-import { actionLiterals, findUnglossedUses, isCopyEntry, plainPart, type PlainPart } from "./text.ts";
+import { findUnglossedUses, isCopyEntry, plainPart, sentenceLiterals, type PlainPart } from "./text.ts";
 import type { CopyEntry, CopyText } from "./types.ts";
 
 const modules = import.meta.glob<Record<string, unknown>>("/src/**/*.copy.ts", { eager: true });
@@ -23,11 +24,11 @@ function isCopyText(value: unknown): value is CopyText {
  * Health's `DIMENSION_COPY` included), and sorts what it finds into the entries
  * and every OTHER piece of reader text: the `*_TEXT` and `*_ABSENCE` tables, a
  * disclosure, an entry's extra fields (a dimension's `raw`), a per-row action. A
- * function is read by its string literals, as an entry's action is — so a new
+ * function is read by its string literals — so a new
  * sentence is held to the rule the moment it is exported, with no list to extend.
  */
 function walk(mod: Record<string, unknown>, path: string) {
-  const found: { entries: [string, CopyEntry<never>][]; texts: [string, PlainPart][] } = { entries: [], texts: [] };
+  const found: { entries: [string, CopyEntry][]; texts: [string, PlainPart][] } = { entries: [], texts: [] };
   const seen = new Set<unknown>();
   const visit = (key: string, value: unknown) => {
     if (typeof value === "object" && value !== null) {
@@ -37,11 +38,11 @@ function walk(mod: Record<string, unknown>, path: string) {
     if (isCopyText(value)) {
       found.texts.push([key, plainPart(value)]);
     } else if (typeof value === "function") {
-      found.texts.push([`${key}()`, actionLiterals(value as (...args: never[]) => unknown)]);
+      found.texts.push([`${key}()`, sentenceLiterals(value as (...args: never[]) => unknown)]);
     } else if (isCopyEntry(value)) {
       found.entries.push([key, value]);
       for (const [field, inner] of Object.entries(value)) {
-        if (field !== "what" && field !== "why" && field !== "action") visit(`${key}.${field}`, inner);
+        if (field !== "what" && field !== "why") visit(`${key}.${field}`, inner);
       }
     } else if (typeof value === "object" && value !== null) {
       for (const [field, inner] of Object.entries(value)) visit(`${key}.${field}`, inner);
@@ -52,7 +53,7 @@ function walk(mod: Record<string, unknown>, path: string) {
 }
 
 const walked = Object.entries(modules).map(([path, mod]) => walk(mod, path));
-const entries: [string, CopyEntry<never>][] = walked.flatMap((w) => w.entries);
+const entries: [string, CopyEntry][] = walked.flatMap((w) => w.entries);
 const texts: [string, PlainPart][] = walked.flatMap((w) => w.texts);
 
 describe("copy catalogues", () => {
@@ -68,9 +69,8 @@ describe("copy catalogues", () => {
   });
 
   it.each(entries)("%s glosses every internal term at its first use", (_key, entry) => {
-    // what, then why, then every word the action can say (its string literals).
-    const parts = [plainPart(entry.what), plainPart(entry.why), actionLiterals(entry.action)];
-    const names = ["what", "why", "action"];
+    const parts = [plainPart(entry.what), plainPart(entry.why)];
+    const names = ["what", "why"];
     expect(findUnglossedUses(parts).map((u) => `${u.term} (in the ${names[u.part]})`)).toEqual([]);
   });
 });
@@ -91,7 +91,7 @@ describe("every other sentence a catalogue exports (sprint review)", () => {
 
   it("walks records and sentence functions, not only top-level entries", () => {
     const probe = walk(
-      { RECORD: { one: { what: "W.", why: "Y.", action: () => ({ kind: "none" }) } }, TEXT: { line: (n: number) => `${n} arms` } },
+      { RECORD: { one: { what: "W.", why: "Y." } }, TEXT: { line: (n: number) => `${n} arms` } },
       "probe",
     );
     expect(probe.entries.map(([key]) => key)).toEqual(["probe#RECORD.one"]);

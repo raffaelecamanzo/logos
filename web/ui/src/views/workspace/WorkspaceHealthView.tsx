@@ -160,7 +160,6 @@ function AnsweringCard({ status }: { status: WorkspaceStatus }) {
         </Badge>
       }
       copy={membersAnswering}
-      state={{ failed: failed.length }}
       figure={
         <div className={styles.figure}>
           <p>{HEALTH_TEXT.answered(rollup.opened, rollup.members)}</p>
@@ -287,7 +286,6 @@ function MemberTable({ status }: { status: WorkspaceStatus }) {
     <Widget
       title="Members"
       copy={memberFreshness}
-      state={{ degraded }}
       figure={<span className={styles.statement}>{HEALTH_TEXT.degraded(degraded, rows.length)}</span>}
     >
       <DataTable
@@ -319,7 +317,6 @@ function WarmCard({ status }: { status: WorkspaceStatus }) {
     <Widget
       title="Warm state across the workspace"
       copy={warmState}
-      state={{ degraded: warm.degraded }}
       figure={
         <div className={styles.figure}>
           <p>{HEALTH_TEXT.warm(warm.warm, warm.members)}</p>
@@ -374,7 +371,7 @@ const VIOLATION_COLUMNS: Column<WorkspaceViolation>[] = [
  *  verdict a reader takes for advice.
  *
  *  A workspace declaring no rules gets NO report — `governance` is `null` — and
- *  renders a left-aligned absence plus the configuration action, never a passing
+ *  renders a left-aligned absence naming the configuration to declare, never a passing
  *  check: a green verdict over an unchecked workspace is the defect S-437 and
  *  S-438 removed from the two surfaces that had it (ADR-56, NFR-CC-04). */
 function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
@@ -390,11 +387,6 @@ function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
     title: "Workspace rules",
     badge: <Badge tone="muted">Advisory</Badge>,
     copy: workspaceRules,
-    state: {
-      declared: report !== null,
-      findings: report?.violations.length ?? 0,
-      unknownMembers: unknown.length,
-    },
   } as const;
   if (report === null) {
     return (

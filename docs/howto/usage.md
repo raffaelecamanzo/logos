@@ -718,32 +718,29 @@ honest empty state naming the producing command:
 ### Reading a widget
 
 Every figure on every view sits in a **widget**, and every widget reads in the
-same four parts, top to bottom (CR-203, since S-617 on every view):
+same three parts, top to bottom (CR-203 and CR-206, since S-617 on every view):
 
 1. **Title and figure.** The title names the widget, with at most one status
    badge beside it (`PASS`, `FAIL`, `Advisory`, …). Below it, the figure: the key
    number — and a share always with what it is out of (*2 of 3 members
-   answered*, never *2* alone). When there is nothing to show yet, this line says so in words, in
-   place of the figure (*No coverage ingested yet.*).
+   answered*, never *2* alone). When there is nothing to show yet, this line says
+   so in words, in place of the figure, and names the command that fills it when
+   one does (*No coverage ingested yet; run `logos coverage ingest <report>` on
+   the LCOV or Cobertura report your test run writes.*).
 2. **Explanation.** What the widget shows, then why it matters — which decision
    it supports or what it protects you from. A term of the project's own
    vocabulary is underlined where it is first used; hover over it or focus it
    with the keyboard for its meaning in plain words.
-3. **What you can do.** The action for the state the widget is in: what to change
-   and where — **source code**, **documentation**, **configuration** or
-   **command**, naming the file, setting or command when it is known (*Command
-   `logos scan`*). When nothing needs doing it reads *Nothing to do —
-   informational.*
-4. **Evidence.** The table, chart or list the figure comes from.
+3. **Evidence.** The table, chart or list the figure comes from.
 
 The widgets on a view are stacked in one column, an equal gap apart, every part
-left-aligned and the explanation and action in one text size.
+left-aligned and the explanation set in the body text size.
 
 **Tool panels** — the graph query form, the Graph view's accessible tables and
 Decisions & docs, the wiki's pages and search, the Config editors, the chat API
 key and the chat itself — present no figure. They keep the same frame and say in
-one line what they are for, and have no explanation of why, no action and no
-evidence of their own.
+one line what they are for, and have no explanation of why and no evidence of
+their own.
 
 **Workspace mode.** When `logos serve --ui` starts at a workspace parent (a
 `logos.workspace.toml` is discovered up-tree), the app shell renders a **member
@@ -780,13 +777,14 @@ inventory (the **Broker topics** widget, formerly *Promoted broker topics*),
 drawing every unopenable member as degraded and naming it; and
 **Workspace Statistics** sums telemetry over members. On the Workspace Dashboard,
 the Workspace tab's **Cross-service coverage** tab and Workspace Health, each
-widget states what it shows, why it matters and what you can do, with where to do
-it (since S-613; Workspace Health's other four widgets since S-617). **Resolved cross-service edges**
-lists why the unresolved outbound calls did not resolve, largest reason first, each
-with its remedy; **Cross-service reachability** leads with the callables to keep
-because another service calls them; **Members** gives each row its own action; and
-**Workspace rules** with no rules declared names `[[governance.boundaries]]` in
-`logos.workspace.toml`. Every ratio on these views
+widget states what it shows and why it matters (since S-613; Workspace Health's
+other four widgets since S-617). **Resolved cross-service edges** shows why the
+unresolved outbound calls did not resolve as a table of reason and count, largest
+reason first, whose counts sum to the unresolved figure; **Cross-service
+reachability** leads with the callables to keep because another service calls
+them; **Members** gives each row its own action; and **Workspace rules** with no
+rules declared says so and names `[[governance.boundaries]]` in
+`logos.workspace.toml` in that sentence. Every ratio on these views
 carries its denominator and its exclusion — a zero denominator renders the ratio
 **absent** ("not measured", no bar) with the excluded count still shown, rather than
 a `0%` that reads like a measurement. Workspace Statistics states its **member
@@ -857,7 +855,7 @@ the map filters its table by text (a consumer or provider name, case-insensitive
 binding kind (HTTP, gRPC, broker) and, when the Provenance column exists, by provenance
 kind; its figure reads *n of m bindings shown*. The filter narrows that table and
 **Binding evidence** together and never the map, which always draws every binding. Each
-service-map widget states what it shows, why it matters and what you can do.
+service-map widget states what it shows and why it matters.
 
 **The build layer (since S-464).** When any member holds a Maven or Gradle manifest, the
 service map's legend gains a **Build dependencies** checkbox — *off* by default, so the
@@ -927,10 +925,9 @@ segment, an ellipsis and its last two segments (`logos-core/…/resolve/binder.r
 in both the risk table and **Ownership dispersion**; hover it for the full path,
 or focus it with the keyboard to see it as a tip. Two rows that would abbreviate
 the same keep more segments until they differ, and the File column sorts by the
-full path. Each of the two widgets says what it ranks, why it matters and what
-to do: add tests to or split the top files, `logos coverage ingest` when Coverage
-reads n/a, `logos hotspots` when nothing is ranked yet, and an owner in
-`CODEOWNERS` for dispersed files; a single-author history needs nothing. The
+full path. Each of the two widgets says what it ranks and why it matters; when
+nothing is ranked yet the board says so and names `logos hotspots`, and a
+single-author history is stated as such. The
 **Co-change** and **Defect** headers explain themselves on hover and focus
 (CR-203). On **Health** (`/health`) the Quality-signal table carries a
 **Score** column rendering each metric's normalized value as a CSP-safe `<meter>`
@@ -981,22 +978,25 @@ and never infers the state from an empty list:
 |---|---|
 | Offenders recorded | The offender table, in persisted order |
 | Recorded, none flagged | *No offenders flagged within thresholds.* — the only state that means a clean result |
-| Not recorded | *Offenders were not recorded for this snapshot.*, with `logos scan` as what to do — a snapshot written before 1.9.0, or a store never scanned |
+| Not recorded | *Offenders were not recorded for this snapshot; run `logos scan` to record them.* — a snapshot written before 1.9.0, or a store never scanned |
 
 A not-applicable dimension (Cohesion or Focus with no classes) keeps its `n/a`
 rendering in every state. After upgrading, the existing snapshot reads "not
 recorded" until the next `logos scan`.
 
-**Every dimension has a widget, and every widget says what to do (unreleased,
-CR-203).** Health renders the Gate, the Quality signal, one widget per quality
-dimension — all ten, in the Quality signal table's order — and the Signal trend,
-each stating what it shows, why it matters, and what you can do and where (source
-code, configuration or a command), or "Nothing to do". The Gate states its pass
+**Every dimension has a widget, and every widget explains itself (unreleased,
+CR-203, CR-206).** Health renders the Gate, the Quality signal, one widget per
+quality dimension — all ten, in the Quality signal table's order — and the Signal
+trend, each stating what it shows and why it matters. The Gate states its pass
 condition, *passes at ≥ baseline − ε*, with ε read from the gate result; a pass
 the gate reached without comparing (no baseline, or one recorded under other
-thresholds or metric semantics) is stated as an informational pass instead. When
-the snapshot is not current, every dimension widget says so and names the Gate's
-command rather than a code change. The Quality signal folds in what the Aggregate scope card used to show: the functions
+thresholds or metric semantics) is stated as an informational pass instead; a
+FAIL names the lowest-scoring dimension under the figure. An absent reading names
+the command that fills it in its own sentence — `logos index` when nothing is
+indexed, `logos scan` when no scan has run — and so does a reading that is not
+current (`logos index` after a de-index, `logos scan` once the graph has moved
+past the snapshot); every dimension widget then says it is not current and points
+to the Gate. The Quality signal folds in what the Aggregate scope card used to show: the functions
 scored and excluded, and the thresholds fingerprint with what a change to
 `[metric_thresholds]` does to the gate. Modularity, Acyclicity, Depth, Equality
 and Redundancy carry no offender list in the payload; their widgets say so and
@@ -1758,7 +1758,7 @@ the same local telemetry the `logos stats` CLI reports, now visualized
 [FR-UI-27](../specs/requirements/FR-UI-27.md)). It reads the enriched read-model
 over `GET /api/v1/statistics[?window=<days>]` — a thin, read-only pass-through of
 `Engine::stats(window)` — and renders five widgets, each stating what it shows
-and why, and that there is nothing to do — it is informational (CR-203):
+and why it matters (CR-203):
 
 1. An **Estimated value** widget leading with the reads/tokens-saved figures (the
    dogfood metric), clearly labeled as *estimates*, not measured truth.

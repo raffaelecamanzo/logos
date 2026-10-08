@@ -14,9 +14,9 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { CrossServiceCoverage } from "../../api/types.ts";
 import statesStyles from "../../components/States.module.css";
 import { COVERAGE_TEXT, resolvedEdges } from "../../copy/coverage.copy.ts";
-import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import { DASHBOARD_TEXT, members, reachability } from "../../copy/workspaceDashboard.copy.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -34,7 +34,6 @@ import {
   WIDGET_STATES,
   type AppStubOptions,
 } from "./appViewFixtures.ts";
-import { buildCoverageDashboard, resolvedEdgesState } from "./coverageModel.ts";
 import { WorkspaceDashboardView } from "./WorkspaceDashboardView.tsx";
 
 /** The two reads this view issues, each with the card that read alone supplies.
@@ -469,107 +468,72 @@ function figureText(w: HTMLElement): string {
   return (w.querySelector('[data-widget-part="figure"]')?.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-function actionText(w: HTMLElement): string {
-  return w.querySelector('[data-widget-copy="action"]')?.textContent ?? "";
-}
-
 describe("every widget explains itself, in one stack (S-613)", () => {
   it("has a state to check for each of the four the story names", () => {
     // The floor: `it.each` over an empty table registers nothing, silently.
     expect(Object.keys(WIDGET_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
   });
 
-  /** Each widget's action kind in each state, written out rather than read back
-   *  from the catalogue: `expectWidgetCopy` derives the expected kind from the
-   *  same catalogue the view renders, so only a table stated here can catch a
-   *  wrong branch in the catalogue or a wrong state in the view. Order follows
-   *  `DASHBOARD_WIDGETS`. */
-  const EXPECTED_ACTIONS: Record<keyof typeof WIDGET_STATES, string[]> = {
-    // Every call resolves, every endpoint matches, nothing to keep or delete.
-    healthy: ["none", "none", "none", "none", "none"],
-    // 7 calls unresolved, 7 references unmatched, captured calls do resolve
-    // (2), 1 callable to keep, members with callables unused everywhere.
-    "partial coverage": ["act", "act", "none", "act", "act"],
-    // Nothing captured, nothing declared, nothing promoted, no tallies.
-    "nothing measured": ["none", "none", "none", "none", "none"],
-    // As partial, and the Members action is the degraded member's re-index.
-    "degraded member": ["act", "act", "none", "act", "act"],
-  };
-
   it.each(Object.entries(WIDGET_STATES))(
     "%s: every widget is a Widget under the view's one WidgetStack and carries the message standard",
-    async (state, { status, reachability: reach }) => {
+    async (_state, { status, reachability: reach }) => {
       const { container } = await mount({ status, reachability: reach });
       const widgets = expectOneWidgetStack(container);
       expect(widgets.map(widgetTitle)).toEqual(DASHBOARD_WIDGETS);
       for (const w of widgets) expectWidgetCopy(w);
-      expect(widgets.map(actionKind)).toEqual(EXPECTED_ACTIONS[state as keyof typeof WIDGET_STATES]);
     },
   );
 
-  it("Members asks for deletion review when no member is degraded and some have callables unused everywhere", async () => {
-    // The default roster: no degraded member; unused-everywhere tallies 7, 5, 2.
-    const { container } = await mount();
-    const w = widget(container, "Members");
-    expectWidgetCopy(w, members, { degraded: 0, withUnused: 3 });
-    // The phrase is glossed, so the tooltip follows it in the raw text.
-    expect(actionText(w)).toMatch(/^Review the callables unused across the workspace/);
-    expect(w.querySelector('[data-widget-copy="action"] dfn')?.getAttribute("data-term")).toBe("unusedAcrossWorkspace");
-    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("source code");
-  });
-
-  it("Members asks for a re-index first when a member is degraded", async () => {
+  it("Members carries its entry and no widget action line; a degraded member's re-index stays in its row (CR-206)", async () => {
     const { container } = await mount(WIDGET_STATES["degraded member"]);
     const w = widget(container, "Members");
-    expect(actionText(w)).toMatch(/^Run logos index in each member marked degraded/);
-    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos index");
+    expectWidgetCopy(w, members);
   });
 
-  it("Resolved cross-service edges: r of s resolved, and below 100% the reasons largest first, summing to the unresolved count", async () => {
+  it("Resolved cross-service edges: r of s resolved, and below 100% an evidence table of reasons, largest first, summing to the unresolved count", async () => {
     const { container } = await mount({ status: workspaceStatus({ coverage: MULTI_REASON_COVERAGE }) });
     const w = widget(container, "Resolved cross-service edges");
-    const state = resolvedEdgesState(buildCoverageDashboard(MULTI_REASON_COVERAGE));
-    expectWidgetCopy(w, resolvedEdges, state);
+    expectWidgetCopy(w, resolvedEdges);
 
     expect(figureText(w)).toContain("2 of 9 outbound call sites resolved");
     // The edge count rides beside it in the server's composed line (CR-203 D4,
     // BR-51), in the figure row and verbatim.
     expect(figureText(w)).toContain(MULTI_REASON_COVERAGE.resolved_edges_summary);
     const [, resolved, measured] = figureText(w).match(/(\d+) of (\d+) outbound call sites resolved/)!.map(Number);
-    const listed = [...actionText(w).matchAll(/(\d+) × ([^:]+): [^;(]+\(([^)]+)\)/g)].map((m) => ({
-      count: Number(m[1]),
-      label: m[2],
-      where: m[3],
-    }));
+    // The reasons are evidence (CR-206): a table of reason and count, in the
+    // evidence part, captioned with the figure they explain.
+    const table = within(w).getByRole("table", { name: `Why ${measured - resolved} outbound call sites did not resolve, largest reason first` });
+    expect(table.closest("[data-widget-part]")).toHaveAttribute("data-widget-part", "evidence");
+    const header = within(table).getAllByRole("columnheader").map((h) => h.textContent?.trim());
+    expect(header.map((h) => h?.replace(/[▲▼↕].*$/, "").trim())).toEqual(["Reason", "Call sites"]);
+    const listed = within(table)
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
     // Largest first, across three arms; the 1–1 tie broken by reason name.
-    expect(listed.map((l) => [l.count, l.label])).toEqual([
-      [3, "Base URL resolved at runtime"],
-      [2, "Broker topic is not a static literal"],
-      [1, "Two or more providers (ambiguous)"],
-      [1, "Path could not be composed"],
-    ]);
-    expect(listed.map((l) => l.where)).toEqual([
-      "configuration",
-      "source code or configuration",
-      "source code",
-      "source code",
+    expect(listed).toEqual([
+      ["Base URL resolved at runtime", "3"],
+      ["Broker topic is not a static literal", "2"],
+      ["Two or more providers (ambiguous)", "1"],
+      ["Path could not be composed", "1"],
     ]);
     // The listed counts sum to the unresolved count the figure shows.
-    expect(listed.reduce((n, l) => n + l.count, 0)).toBe(measured - resolved);
-    // The call to a service outside the workspace is named apart, never in the sum.
-    expect(actionText(w)).toMatch(/A further 1 call site calls a service outside this workspace and is not counted above/);
+    expect(listed.reduce((n, [, count]) => n + Number(count), 0)).toBe(measured - resolved);
+    // A count, not advice: no remedy text anywhere in the widget.
+    expect(readerText(w)).not.toMatch(/commit the base URL|build the path|name the topic|make one path or method distinct/);
   });
 
-  it("Resolved cross-service edges: nothing to do when every captured call resolves", async () => {
+  it("Resolved cross-service edges: no reasons table when every captured call resolves", async () => {
     const { container } = await mount({ status: WIDGET_STATES.healthy.status });
     const w = widget(container, "Resolved cross-service edges");
-    expect(w.querySelector('[data-widget-part="action"]')?.getAttribute("data-action-kind")).toBe("none");
+    expect(w.querySelector('[data-widget-part="evidence"]')).toBeNull();
+    expect(within(w).queryByRole("table")).toBeNull();
   });
 
   it("Cross-service reachability leads with the keep-them count, with no EmptyState", async () => {
     const { container } = await mount();
     const w = widget(container, "Cross-service reachability");
-    expectWidgetCopy(w, reachability, { keep: 1 });
+    expectWidgetCopy(w, reachability);
     expect(w.querySelector('[data-widget-part="figure"] p')?.textContent).toBe(DASHBOARD_TEXT.keepThem(1, false));
     expect(w.querySelector('[data-widget-part="figure"] p')?.textContent).toMatch(
       /^1 callable unused in its own service but called from another — keep it\.$/,
@@ -585,7 +549,7 @@ describe("every widget explains itself, in one stack (S-613)", () => {
   it("Cross-service reachability states an empty answer in its figure row, never as an EmptyState", async () => {
     const { container } = await mount(WIDGET_STATES["nothing measured"]);
     const w = widget(container, "Cross-service reachability");
-    expectWidgetCopy(w, reachability, { keep: 0 });
+    expectWidgetCopy(w, reachability);
     expect(figureText(w)).toContain(DASHBOARD_TEXT.keepThem(0, false));
     expect(figureText(w)).toContain(DASHBOARD_TEXT.keepThemNone);
     expect(w.querySelector(`.${statesStyles.empty}`)).toBeNull();
@@ -617,7 +581,7 @@ describe("every widget explains itself, in one stack (S-613)", () => {
       }),
     });
     const w = widget(container, "Members");
-    expectWidgetCopy(w, members, { degraded: 1, withUnused: 1 });
+    expectWidgetCopy(w, members);
     const actionCell = (member: string) => {
       const row = within(w).getByRole("row", { name: new RegExp(`^${member}\\b`) });
       return [...row.querySelectorAll("td")].at(-1)?.textContent ?? "";

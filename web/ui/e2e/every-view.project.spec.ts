@@ -1,8 +1,8 @@
 // The widget layout standard on EVERY project view (S-617, CR-203 §6, FR-UI-40):
 // the S-613 computed-style check — one equal gap between consecutive widgets,
-// every part left-aligned, explanation and action in one body size — over each
-// view the single-repository sidebar offers, read in a real browser from the
-// served bundle.
+// every part left-aligned, the explanation at the body size, no action line
+// (CR-206) — over each view the single-repository sidebar offers, read in a real
+// browser from the served bundle.
 //
 // "Every" is the sidebar's own list (`NAV_ITEMS` in src/nav.ts), not a hand-kept
 // one: the first test fails until a new view has a case here.

@@ -298,7 +298,6 @@ function ValueWidget({ agg }: { agg: WorkspaceStatistics }) {
     <Widget
       title="Estimated value"
       copy={workspaceEstimatedValue}
-      state={{ recorded: true, failed: splitUnread(agg).failed.length }}
       figure={
         <p className={styles.valueLead}>
           <strong className={styles.valueBig}>{fmtInt(agg.tokens_saved_estimate)}</strong> tokens and{" "}
@@ -536,7 +535,6 @@ function UnreadCard({ agg }: { agg: WorkspaceStatistics }) {
         </Badge>
       }
       copy={membersNotSummed}
-      state={{ failed: splitUnread(agg).failed.length }}
     >
       <DataTable
         // Not "could not be read": an absent store WAS read, successfully, and found
@@ -582,7 +580,7 @@ function Surfaces({ agg }: { agg: WorkspaceStatistics }) {
  * the members it could READ, so with a locked or unreadable member in the roster a
  * zero is not evidence that nothing was recorded anywhere — and `logos stats` is
  * then the wrong remedy, because the blocker is the store rather than a shortage of
- * usage. The catalogue's action follows the same split.
+ * usage: that branch names the store instead (CR-206).
  */
 function AwaitingData({ agg }: { agg: WorkspaceStatistics }) {
   const { failed } = splitUnread(agg);
@@ -590,21 +588,21 @@ function AwaitingData({ agg }: { agg: WorkspaceStatistics }) {
     failed.length === 0 ? (
       // Every member either has a store that recorded nothing, or has no store at
       // all. Both mean nothing was recorded, so the universal claim is earned.
-      "No member recorded any telemetry in this window — use Logos in any service and this view will fill in."
+      WORKSPACE_STATISTICS_ABSENCE.nothingRecorded
     ) : (
       <>
         {agg.members_read > 0 &&
           `None of the ${agg.members_read} member${s(agg.members_read)} whose telemetry could be read recorded anything in this window. `}
         {failed.length} member{s(failed.length)} could not be read at all, so this view knows
         nothing about {failed.length === 1 ? "its" : "their"} usage —{" "}
-        {failed.length === 1 ? "it is" : "they are"} named below, with the reason.
+        {failed.length === 1 ? "it is" : "they are"} named below, with the reason.{" "}
+        {WORKSPACE_STATISTICS_ABSENCE.storeRepair}
       </>
     );
   return (
     <Widget
       title="Estimated value"
       copy={workspaceEstimatedValue}
-      state={{ recorded: false, failed: failed.length }}
       absence={absence}
     />
   );

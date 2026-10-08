@@ -1,7 +1,8 @@
 /*
  * The catalogue-command check (S-617, CR-203 §8 risk "an action names a command
  * that does not exist", FR-UI-39). Every `logos …` command a catalogue names to
- * the reader is looked up in the command reference, `docs/howto/commands.md`.
+ * the reader — since CR-206, in an absence or not-current sentence — is looked
+ * up in the command reference, `docs/howto/commands.md`.
  * `docs/howto/` is tracked in the public repository, so the check runs in public
  * CI too; it reads nothing under `docs/specs` or `docs/planning`, which public CI
  * does not have.

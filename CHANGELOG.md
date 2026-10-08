@@ -13,6 +13,26 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **Widgets drop the "What you can do" line; an absent figure names the command
+  that fills it (CR-206, S-629).** Every web widget now reads in three parts —
+  title and figure, explanation (what it shows, why it matters), evidence — with
+  no action line and no where chip; the catalogue entry is `{ what, why }`, and
+  an entry that carries an action is a type error. Where a widget has no figure
+  yet, its absence sentence names the command that fills it: `logos index` and
+  `logos scan` on Health (and in its not-current notes), `logos scan` for
+  offenders not recorded and for an empty Signal trend, `logos stats` when no
+  telemetry is recorded, `logos coverage ingest <report>` when no coverage is
+  ingested, `logos hotspots` when nothing is ranked, `.logos/rules.toml` and
+  `logos check` when no architecture rules exist, and `[[governance.boundaries]]`
+  in `logos.workspace.toml` when no workspace rules are declared. A failing Gate
+  names its lowest-scoring dimension under the figure. **Resolved cross-service
+  edges** below 100% shows its not-resolved reasons as an evidence table of
+  reason and count, largest first, summing to the unresolved figure, without
+  remedies. The per-row action columns of **Members** and **Binding evidence**
+  are unchanged.
+
 ## [1.15.0] — 2026-10-08
 
 ### Added

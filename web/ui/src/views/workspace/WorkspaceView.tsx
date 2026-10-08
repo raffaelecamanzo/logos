@@ -382,8 +382,7 @@ const HINT_COLUMNS: Column<CrossContextHint>[] = [
 
 /** The cross-context model hint (S-464, CR-148 §3.2 D; CR-203 §3.2 D item 9) —
  *  a REPORT, never an edge: nothing here reaches the canvas, whatever the build
- *  toggle says. A review hint, never a failure: its badge says so, and its
- *  action points at the member's build manifest. */
+ *  toggle says. A review hint, never a failure: its badge says so. */
 function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
   if (hints.length === 0) return null;
   return (
@@ -418,7 +417,7 @@ function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
 function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline }) {
   if (!headline) {
     return (
-      <Widget title="Build dependencies" copy={buildDependencies} state={{ unread: 0 }} absence={COVERAGE_TEXT.buildAbsent} />
+      <Widget title="Build dependencies" copy={buildDependencies} absence={COVERAGE_TEXT.buildAbsent} />
     );
   }
   const unread = headline.members.unread ?? [];
@@ -436,7 +435,6 @@ function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline 
     <Widget
       title="Build dependencies"
       copy={buildDependencies}
-      state={{ unread: unread.length }}
       figure={
         <div className={styles.figure}>
           <p className={styles.statement}>{headline.summary}</p>
@@ -712,7 +710,6 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
     <Widget
       title="Declared contracts"
       copy={declaredContracts}
-      state={{ documents: documents.length }}
       figure={
         <div className={styles.figure}>
           <p className={styles.statement}>
@@ -938,16 +935,10 @@ function BindingEvidence({ links, shown }: { links: ServiceLink[]; shown: Servic
   const admitted = links.filter(hasNonLiteralBinding);
   if (admitted.length === 0) return null;
   const visible = shown.filter(hasNonLiteralBinding).map((l) => ({ link: l, rows: groupEvidence(linkEvidence(l)) }));
-  const shownRows = visible.flatMap((v) => v.rows);
-  const state = {
-    define: shownRows.filter((r) => r.refusal === "missing-key").length,
-    replace: shownRows.filter((r) => r.refusal === "placeholder-value").length,
-  };
   return (
     <Widget
       title="Binding evidence"
       copy={bindingEvidence}
-      state={state}
       figure={
         <div className={styles.figure}>
           <p className={styles.statement}>{SERVICE_MAP_TEXT.evidenceShown(visible.length, admitted.length)}</p>

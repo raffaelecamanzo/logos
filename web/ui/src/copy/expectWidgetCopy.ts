@@ -1,18 +1,18 @@
 /*
- * expectWidgetCopy (S-611, CR-203, FR-UI-39) — the ONE shared test helper that
- * asserts a rendered widget carries the message standard. View tests call it for
- * each state they render (healthy, problem, absent, partial); no view test keeps
- * a hand-rolled copy of these checks.
+ * expectWidgetCopy (S-611, CR-203, CR-206, FR-UI-39) — the ONE shared test
+ * helper that asserts a rendered widget carries the message standard. View tests
+ * call it for each state they render (healthy, problem, absent, partial); no view
+ * test keeps a hand-rolled copy of these checks.
  *
  * It asserts, over the rendered DOM:
- *   - what, why and action render non-empty;
- *   - where renders if and only if the action is `act`, and a `none` action
- *     reads the one fixed "Nothing to do" sentence;
+ *   - what and why render non-empty;
+ *   - no action line renders: no action part, no action or where copy, and no
+ *     "What you can do" label (CR-206 removed it end to end);
  *   - no glossary term's first use in the widget — title, figure row or copy —
  *     is outside a `Term` gloss.
- * Given the catalogue entry and the state, it also asserts the rendered parts
- * ARE that entry's parts — a test names the catalogue key, never the prose, so a
- * wording change edits the catalogue alone.
+ * Given the catalogue entry, it also asserts the rendered parts ARE that
+ * entry's parts — a test names the catalogue key, never the prose, so a wording
+ * change edits the catalogue alone.
  *
  * Test-only: it imports vitest's `expect`, and nothing under src/ outside a test
  * imports it, so it never reaches the bundle.
@@ -23,7 +23,7 @@ import { expect } from "vitest";
 import type { GlossaryTerm } from "./glossary.ts";
 import { copyTextString, findUnglossedUses, type PlainPart } from "./text.ts";
 import { isToolPanelKey, TOOL_PANELS, type ToolPanelKey } from "./toolPanels.ts";
-import { NOTHING_TO_DO, type CopyEntry } from "./types.ts";
+import type { CopyEntry } from "./types.ts";
 
 /** Whitespace as a browser renders it: runs collapsed, ends trimmed. */
 function collapse(text: string): string {
@@ -82,11 +82,29 @@ function frameOf(widget: Element): Element {
   return frame;
 }
 
-export function expectWidgetCopy<S>(widget: Element, entry?: CopyEntry<S>, state?: S): void {
+/** The label the removed action line opened with. */
+const ACTION_LABEL = "What you can do";
+
+/** Asserts the frame renders no part of the action line CR-206 removed: the
+ *  part, its copy, its where chip, or its label. The frame's own text is read,
+ *  so a row's own action column inside a table (row content, kept) is not it:
+ *  only the frame outside the evidence part is searched for the label. */
+function expectNoActionLine(frame: Element, label: string): void {
+  for (const selector of ['[data-widget-part="action"]', '[data-widget-copy="action"]', '[data-widget-copy="where"]']) {
+    expect(frame.querySelector(selector), `${label}: the action line was removed (CR-206), yet ${selector} renders`).toBeNull();
+  }
+  const outsideEvidence = frame.cloneNode(true) as Element;
+  outsideEvidence.querySelectorAll('[data-widget-part="evidence"]').forEach((ev) => ev.remove());
+  expect(readerText(outsideEvidence), `${label}: the action line was removed (CR-206), yet "${ACTION_LABEL}" renders`).not.toContain(
+    ACTION_LABEL,
+  );
+}
+
+export function expectWidgetCopy(widget: Element, entry?: CopyEntry): void {
   const frame = frameOf(widget);
   const label = readerText(frame.querySelector('[data-widget-part="title"]') ?? frame) || "widget";
 
-  for (const name of ["what", "why", "action"] as const) {
+  for (const name of ["what", "why"] as const) {
     const el = part(frame, name);
     expect(el, `${label}: the ${name} part is missing`).not.toBeNull();
     expect(readerText(el!), `${label}: the ${name} part is empty`).not.toBe("");
@@ -94,7 +112,7 @@ export function expectWidgetCopy<S>(widget: Element, entry?: CopyEntry<S>, state
 
   // The vocabulary rule over the whole widget, in reading order: an internal
   // term's first use — in the title, the figure row or the copy — is glossed.
-  const order = ["title", "figure", "what", "why", "action"] as const;
+  const order = ["title", "figure", "what", "why"] as const;
   const parts = order.map((name) =>
     renderedPart(
       name === "title" || name === "figure"
@@ -105,36 +123,20 @@ export function expectWidgetCopy<S>(widget: Element, entry?: CopyEntry<S>, state
   const unglossed = findUnglossedUses(parts).map((u) => `${u.term} (in the ${order[u.part]})`);
   expect(unglossed, `${label}: internal vocabulary used outside a Term gloss`).toEqual([]);
 
-  const actionLine = frame.querySelector('[data-widget-part="action"]');
-  const kind = actionLine?.getAttribute("data-action-kind");
-  expect(["act", "none"], `${label}: unknown action kind ${String(kind)}`).toContain(kind);
-  const where = part(frame, "where");
-  if (kind === "act") {
-    expect(where, `${label}: an "act" action must say where`).not.toBeNull();
-    expect(readerText(where!), `${label}: the where chip is empty`).not.toBe("");
-  } else {
-    expect(where, `${label}: a "none" action must not name a where`).toBeNull();
-    expect(readerText(part(frame, "action")!)).toBe(NOTHING_TO_DO);
-  }
+  expectNoActionLine(frame, label);
 
   if (entry === undefined) return;
-  const action = entry.action(state as S);
   expect(readerText(part(frame, "what")!), `${label}: what`).toBe(collapse(copyTextString(entry.what)));
   expect(readerText(part(frame, "why")!), `${label}: why`).toBe(collapse(copyTextString(entry.why)));
-  expect(kind, `${label}: action kind for this state`).toBe(action.kind);
-  if (action.kind === "act") {
-    expect(readerText(part(frame, "action")!), `${label}: action`).toBe(collapse(copyTextString(action.text)));
-    const expectedWhere = collapse([action.where, action.target].filter(Boolean).join(" "));
-    expect(readerText(where!), `${label}: where`).toBe(expectedWhere);
-  }
 }
 
 /**
  * expectToolPanel (S-617) — the panel-mode twin of `expectWidgetCopy`. Asserts a
  * rendered widget is the tool panel `key`: it is registered in `TOOL_PANELS`, its
  * frame names that key, its one line IS the register's `what`, and it carries no
- * figure, why, action or where (FR-UI-39: tool panels are exempt from them). The
- * vocabulary rule still holds over its title and its line.
+ * figure or why (FR-UI-39: tool panels are exempt from them) and, like every
+ * widget, no action line. The vocabulary rule still holds over its title and its
+ * line.
  */
 export function expectToolPanel(widget: Element, key: ToolPanelKey): void {
   const frame = frameOf(widget);
@@ -142,9 +144,8 @@ export function expectToolPanel(widget: Element, key: ToolPanelKey): void {
   expect(isToolPanelKey(key), `${label}: ${key} is registered in TOOL_PANELS`).toBe(true);
   expect(frame.getAttribute("data-widget-panel"), `${label}: the panel it renders`).toBe(key);
   expect(readerText(part(frame, "what")!), `${label}: what`).toBe(collapse(copyTextString(TOOL_PANELS[key].what)));
-  for (const name of ["why", "action", "where"] as const) {
-    expect(part(frame, name), `${label}: a tool panel has no ${name}`).toBeNull();
-  }
+  expect(part(frame, "why"), `${label}: a tool panel has no why`).toBeNull();
+  expectNoActionLine(frame, label);
   expect(frame.querySelector('[data-widget-part="figure"]'), `${label}: a tool panel has no figure`).toBeNull();
   const parts = [frame.querySelector('[data-widget-part="title"]'), part(frame, "what")].map(renderedPart);
   const unglossed = findUnglossedUses(parts).map((u) => u.term);

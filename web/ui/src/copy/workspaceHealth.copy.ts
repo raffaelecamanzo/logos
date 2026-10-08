@@ -4,114 +4,38 @@
  * Members answering, Members, Warm state and Broker topics.
  *
  * Every figure the sentences carry is the server's (NFR-MA-02); `HEALTH_TEXT`
- * formats the numbers it is handed and computes none.
+ * formats the numbers it is handed and computes none. The no-rules absence names
+ * where rules are declared (CR-206).
  */
 
-import { noAction, plural, type CopyEntry } from "./types.ts";
+import { plural, type CopyEntry } from "./types.ts";
 
 // ── Workspace rules (item 5) ─────────────────────────────────────────────────
 
-export interface WorkspaceRulesState {
-  /** Whether the manifest declares any workspace rule at all. */
-  readonly declared: boolean;
-  /** Rule findings. */
-  readonly findings: number;
-  /** Rule references naming a member this workspace does not have. */
-  readonly unknownMembers: number;
-}
-
-export const workspaceRules: CopyEntry<WorkspaceRulesState> = {
+export const workspaceRules: CopyEntry = {
   what: "The workspace rules declared in logos.workspace.toml, checked against every cross-service binding this workspace resolved, with each finding listed.",
   why: "A finding is a call your declared architecture forbids; the check is advisory, so it moves no exit code and no member's quality signal.",
-  action: ({ declared, findings, unknownMembers }) => {
-    if (!declared) {
-      return {
-        kind: "act",
-        where: "configuration",
-        target: "logos.workspace.toml [[governance.boundaries]]",
-        text: "Declare [[governance.boundaries]] in logos.workspace.toml to have cross-service calls checked.",
-      };
-    }
-    if (unknownMembers > 0) {
-      return {
-        kind: "act",
-        where: "configuration",
-        target: "logos.workspace.toml",
-        text: "Correct each rule that names a member this workspace does not have; until then it can never match.",
-      };
-    }
-    if (findings > 0) {
-      return {
-        kind: "act",
-        where: "source code",
-        text: "Remove each listed call that breaks a rule, or change the rule in logos.workspace.toml if the call is intended.",
-      };
-    }
-    return noAction;
-  },
 };
 
 // ── Members answering (S-617) ────────────────────────────────────────────────
 
-export interface AnsweringState {
-  /** Members that could not be opened. */
-  readonly failed: number;
-}
-
-export const membersAnswering: CopyEntry<AnsweringState> = {
+export const membersAnswering: CopyEntry = {
   what: "How many of the workspace's members answered this read, and which could not be opened.",
   why: "A member that does not answer is missing from every other figure on this page, so each of them counts less than the whole workspace.",
-  action: ({ failed }) =>
-    failed > 0
-      ? {
-          kind: "act",
-          where: "command",
-          target: "logos workspace status",
-          text: "See why each named member could not be opened with the command, then repair it — usually by running logos index in that member.",
-        }
-      : noAction,
 };
 
 // ── Members (S-617) ──────────────────────────────────────────────────────────
 
-export interface MemberTableState {
-  /** Members whose store could not be opened or whose indexing failed. */
-  readonly degraded: number;
-}
-
-export const memberFreshness: CopyEntry<MemberTableState> = {
+export const memberFreshness: CopyEntry = {
   what: "Each member's index age, whether it is indexed, whether its store opened, and its own share of resolved references.",
   why: "A member with an old index answers from an old picture of its code, and one that did not open answers nothing.",
-  action: ({ degraded }) =>
-    degraded > 0
-      ? {
-          kind: "act",
-          where: "command",
-          target: "logos index",
-          text: "Run the command in each member marked degraded; its reason is beside it.",
-        }
-      : noAction,
 };
 
 // ── Warm state (S-617) ───────────────────────────────────────────────────────
 
-export interface WarmState {
-  /** Members whose indexing failed. */
-  readonly degraded: number;
-}
-
-export const warmState: CopyEntry<WarmState> = {
+export const warmState: CopyEntry = {
   what: "How many members are indexed (warm), will index when first asked (deferred), or failed to index (degraded).",
   why: "A deferred member answers its first question slowly, while it indexes; a degraded one answers nothing.",
-  action: ({ degraded }) =>
-    degraded > 0
-      ? {
-          kind: "act",
-          where: "command",
-          target: "logos index",
-          text: "Run the command in each member that failed to index; the Members table names them.",
-        }
-      : noAction,
 };
 
 // ── Broker topics (S-617) ────────────────────────────────────────────────────
@@ -119,7 +43,6 @@ export const warmState: CopyEntry<WarmState> = {
 export const brokerTopics: CopyEntry = {
   what: "The message-broker topics each member publishes or subscribes to, with how many places in its code do each.",
   why: "A topic couples the services that use it even before any other service subscribes, so it is part of how the workspace fits together.",
-  action: () => noAction,
 };
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
@@ -129,7 +52,8 @@ export const HEALTH_TEXT = {
   rulesChecked: (rules: number, bindings: number, findings: number) =>
     `${rules} ${plural(rules, "rule", "rules")} checked over ${bindings} ${plural(bindings, "binding", "bindings")} · ${findings} ${plural(findings, "finding", "findings")}`,
   /** No rules declared: nothing was checked, which is not a pass (ADR-56). */
-  noRules: "No workspace rules are declared, so nothing was checked — this is not a pass.",
+  noRules:
+    "No workspace rules are declared, so nothing was checked — this is not a pass; declare [[governance.boundaries]] in logos.workspace.toml to have cross-service calls checked.",
   /** A clean report over zero bindings says nothing. */
   nothingToCheck: "Nothing was bound to check, so a clean result here says nothing about this workspace.",
   /** Rule references naming a member the workspace does not have. */

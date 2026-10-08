@@ -1,4 +1,4 @@
-// Computed-style layout assertions for the widget standard (S-611, FR-UI-40).
+// Computed-style layout assertions for the widget standard (S-611, CR-206, FR-UI-40).
 // Every later story's layout criterion calls `expectWidgetStackLayout` on a real
 // view's stack; nothing here knows about any one view.
 import { expect, type Locator } from "@playwright/test";
@@ -17,10 +17,13 @@ export interface StackMeasure {
    */
   leftOffsets: { part: string; offset: number }[];
   /**
-   * Per widget: the computed font size of the explanation and of the action. A
-   * tool panel (S-617, `data-widget-panel`) has a what and no why or action.
+   * Per widget: the computed font size of the explanation's what and why. A
+   * tool panel (S-617, `data-widget-panel`) has a what and no why.
    */
-  bodySizes: { panel: boolean; what: string; why: string; action: string; actionLine: string }[];
+  bodySizes: { panel: boolean; what: string; why: string }[];
+  /** Elements of the action line CR-206 removed (its part, copy or where chip)
+   *  rendered anywhere in the stack. */
+  actionParts: number;
   /** The page's body text size (`body`, set at `--text-base`). */
   bodyText: string;
   /**
@@ -31,15 +34,13 @@ export interface StackMeasure {
 }
 
 // The blocks that must start at the frame's left edge: every part, the copy
-// paragraphs, the where chip, an absence statement, the title and the first
-// figure. (The action TEXT is inline after its label, so it is not one of them.)
+// paragraphs, an absence statement, the title and the first figure.
 const LEFT_EDGE_BLOCKS = [
   "[data-widget-part]",
   '[data-widget-part="title"] > h3',
   '[data-widget-part="figure"] > :first-child',
   '[data-widget-copy="what"]',
   '[data-widget-copy="why"]',
-  '[data-widget-copy="where"]',
   "[data-widget-absence]",
 ].join(", ");
 
@@ -70,17 +71,14 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
       }));
     });
     const size = (node: Element | null | undefined) => (node ? getComputedStyle(node).fontSize : "missing");
-    const bodySizes = frames.map((frame) => {
-      const action = frame.querySelector('[data-widget-copy="action"]');
-      return {
-        panel: frame.hasAttribute("data-widget-panel"),
-        what: size(frame.querySelector('[data-widget-copy="what"]')),
-        why: size(frame.querySelector('[data-widget-copy="why"]')),
-        // The action text itself, and the line that carries it with its label.
-        action: size(action),
-        actionLine: size(action?.closest("p")),
-      };
-    });
+    const bodySizes = frames.map((frame) => ({
+      panel: frame.hasAttribute("data-widget-panel"),
+      what: size(frame.querySelector('[data-widget-copy="what"]')),
+      why: size(frame.querySelector('[data-widget-copy="why"]')),
+    }));
+    const actionParts = el.querySelectorAll(
+      '[data-widget-part="action"], [data-widget-copy="action"], [data-widget-copy="where"]',
+    ).length;
     const figureNotes = [...el.querySelectorAll<HTMLElement>("[data-figure-note]")].map((node) => ({
       text: (node.textContent ?? "").trim().slice(0, 40),
       fontSize: getComputedStyle(node).fontSize,
@@ -92,6 +90,7 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
       textAligns,
       leftOffsets,
       bodySizes,
+      actionParts,
       bodyText: getComputedStyle(document.body).fontSize,
       figureNotes,
     };
@@ -113,9 +112,10 @@ export interface StackLayoutOptions {
  *  - consecutive widgets are separated by ONE gap, and it is the stack's token;
  *  - every widget part computes `text-align: start` or `left`, and every block
  *    of a widget starts at its frame's left edge;
- *  - in every widget, explanation and action share one font size, and every
- *    widget's explanation — a tool panel's one line included — is set at the
- *    page's body text size;
+ *  - no widget renders an action line (CR-206);
+ *  - in every widget, what and why share one font size, and every widget's
+ *    explanation — a tool panel's one line included — is set at the page's body
+ *    text size;
  *  - every figure-row qualifier (`FigureNote`) is set at the body size and
  *    weight, whatever its figure's size, so one role reads the same on every view.
  */
@@ -128,6 +128,7 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
     expect(m.gaps.length, "a stack of fewer than two widgets has no gap to check").toBeGreaterThan(0);
   }
   expect(m.rowGap, "the stack declares a gap").toBeGreaterThan(0);
+  expect(m.actionParts, "no widget renders an action line (CR-206)").toBe(0);
   for (const [i, gap] of m.gaps.entries()) {
     expect(gap, `gap ${i + 1} of ${m.gaps.length} between consecutive widgets (stack gap ${m.rowGap}px)`).toBeCloseTo(
       m.rowGap,
@@ -148,8 +149,6 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
       continue;
     }
     expect(s.why, `widget ${i + 1}: why and what share one size`).toBe(s.what);
-    expect(s.action, `widget ${i + 1}: the action text and the explanation share one size`).toBe(s.what);
-    expect(s.actionLine, `widget ${i + 1}: the action line and the explanation share one size`).toBe(s.what);
   }
   // One body size across the view (S-617): every widget's explanation, a tool
   // panel's line included, is set at the page's body text size — so a view of

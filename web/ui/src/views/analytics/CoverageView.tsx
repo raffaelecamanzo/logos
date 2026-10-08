@@ -35,6 +35,7 @@ import {
   type Column,
 } from "../../components/index.ts";
 import { COVERAGE_VIEW_ABSENCE, perFileCoverage, untestedHotspots } from "../../copy/coverageView.copy.ts";
+import { withRankCommand } from "../../copy/files.copy.ts";
 import { plural } from "../../copy/types.ts";
 import { pctBp } from "./analyticsModel.ts";
 import { CoverageCellView, Na } from "./cells.tsx";
@@ -109,13 +110,11 @@ function CoverageContent({ model }: { model: CoverageModel }) {
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: false, ranked: false, files: 0 }}
           absence={COVERAGE_VIEW_ABSENCE.notIngested}
         />
         <Widget
           title="Per-file coverage"
           copy={perFileCoverage}
-          state={{ ingested: false, stale: 0 }}
           absence={COVERAGE_VIEW_ABSENCE.notIngested}
         />
       </WidgetStack>
@@ -142,21 +141,18 @@ function CoverageContent({ model }: { model: CoverageModel }) {
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: true, ranked: false, files: 0 }}
-          absence={untested.notice ?? COVERAGE_VIEW_ABSENCE.notRanked}
+          absence={withRankCommand(untested.notice ?? COVERAGE_VIEW_ABSENCE.notRanked)}
         />
       ) : untestedCount === 0 ? (
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: true, ranked: true, files: 0 }}
           absence={COVERAGE_VIEW_ABSENCE.noUntested}
         />
       ) : (
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: true, ranked: true, files: untestedCount }}
           figure={
             <span>
               {untestedCount}{" "}
@@ -185,14 +181,12 @@ function CoverageContent({ model }: { model: CoverageModel }) {
         <Widget
           title="Per-file coverage"
           copy={perFileCoverage}
-          state={{ ingested: true, stale: coverage.stale_files }}
           absence={COVERAGE_VIEW_ABSENCE.noFiles}
         />
       ) : (
         <Widget
           title="Per-file coverage"
           copy={perFileCoverage}
-          state={{ ingested: true, stale: coverage.stale_files }}
           figure={
             <span>
               {coverage.overall_coverage_bp != null ? pctBp(coverage.overall_coverage_bp) : "n/a"}{" "}

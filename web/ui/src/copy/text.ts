@@ -69,15 +69,16 @@ export function findUnglossedTerms(...texts: CopyText[]): GlossaryTerm[] {
 }
 
 /**
- * The text an action can return, read from its source: every string literal in
- * `action`, with `gloss(…)` calls removed first, joined into one plain part.
- * `action(state)` cannot be enumerated over its states, but the words it can
- * say are all literals in its body — so the catalogue test holds action text to
- * the vocabulary rule without each catalogue declaring sample states.
+ * The text a sentence function can return — a figure or absence sentence, a
+ * table row's own action — read from its source: every string literal in `fn`,
+ * with `gloss(…)` calls removed first, joined into one plain part. `fn` cannot be
+ * enumerated over its arguments, but the words it can say are all literals in
+ * its body — so the catalogue test holds them to the vocabulary rule without
+ * each catalogue declaring sample arguments.
  */
-export function actionLiterals(action: (...args: never[]) => unknown): PlainPart {
+export function sentenceLiterals(fn: (...args: never[]) => unknown): PlainPart {
   // `gloss)(` too: a test transform may call it as `(0, module.gloss)("arm")`.
-  const source = action.toString().replace(/\bgloss\)?\(\s*(["'`])[^"'`]*\1(?:\s*,\s*(["'`])[^"'`]*\2)?\s*\)/g, "");
+  const source = fn.toString().replace(/\bgloss\)?\(\s*(["'`])[^"'`]*\1(?:\s*,\s*(["'`])[^"'`]*\2)?\s*\)/g, "");
   const literals = [...source.matchAll(/(["'`])((?:\\.|(?!\1)[^\\])*)\1/g)].map((m) => m[2]);
   // A template's `${…}` is code, not words: keep only the string literals inside
   // it, so `${f.baseline}` never reads as the term "baseline".
@@ -91,12 +92,12 @@ export function actionLiterals(action: (...args: never[]) => unknown): PlainPart
 
 /**
  * Narrows an unknown module export to a catalogue entry: an object carrying
- * `what`, `why` and an `action` function. Lets the catalogue test discover every
- * entry in every `*.copy.ts` module without a hand-kept list.
+ * `what` and `why` text. Lets the catalogue test discover every entry in every
+ * `*.copy.ts` module without a hand-kept list.
  */
-export function isCopyEntry(value: unknown): value is CopyEntry<never> {
+export function isCopyEntry(value: unknown): value is CopyEntry {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   const isText = (t: unknown) => typeof t === "string" || Array.isArray(t);
-  return isText(v.what) && isText(v.why) && typeof v.action === "function";
+  return isText(v.what) && isText(v.why);
 }

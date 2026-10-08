@@ -127,7 +127,6 @@ function ValueWidget({ stats }: { stats: StatsInfo }) {
     <Widget
       title="Estimated value"
       copy={estimatedValue}
-      state={{ recorded: true }}
       figure={
         <>
           <span>
@@ -401,7 +400,6 @@ function AwaitingData() {
       <Widget
         title="Estimated value"
         copy={estimatedValue}
-        state={{ recorded: false }}
         absence={statisticsAbsence.awaiting}
       />
     </WidgetStack>
