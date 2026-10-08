@@ -1971,9 +1971,13 @@ describe("WorkspaceView — the coverage tab explains itself, in one stack (S-61
 
   it("each widget renders its own catalogue entry for its state", async () => {
     const panel = await openCoverageTab(COVERAGE_TAB_STATES["partial coverage"]);
-    expectWidgetCopy(tabWidget(panel, "Spec conformance (declared endpoints vs controllers)"), specConformance, {
-      notMatched: 7,
-    });
+    const spec = tabWidget(panel, "Spec conformance (declared endpoints vs controllers)");
+    expectWidgetCopy(spec, specConformance, { notMatched: 7 });
+    // The ratio is over the contract-surface walk the shortfall describes, so
+    // the rider sits beside it, not only on the headline.
+    expect(spec.querySelector('[data-widget-part="figure"]')?.textContent).toContain(
+      COVERAGE_TEXT.shortfall(PARTIAL_COVERAGE.members_read, PARTIAL_COVERAGE.members_total),
+    );
     expectWidgetCopy(tabWidget(panel, "Coverage by intake"), coverageByIntake, { finding: "captured-resolves" });
     expectWidgetCopy(tabWidget(panel, "Declared contracts and named externals"), declaredRelations);
     expectWidgetCopy(tabWidget(panel, "Build dependencies"), buildDependencies, { unread: 1 });

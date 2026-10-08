@@ -379,17 +379,12 @@ function EdgeLine({ line }: { line: string }) {
  *  The figure is two server fields (the rate's own numerator and denominator),
  *  never recomputed, and beside it the edge count in the server's composed
  *  `resolvedEdgesSummary` line, so BR-51's pairing — the count never without
- *  the rate — is the server's, not a fourth place that could forget it. Below 100% the action lists the not-resolved reasons across every
- *  relation arm, largest first, with their remedies. */
-function ResolvedEdgesWidget({
-  dashboard,
-  degraded,
-}: {
-  dashboard: CoverageDashboard;
-  degraded: DegradedRollup;
-}) {
+ *  the rate — is the server's, not a fourth place that could forget it. Below
+ *  100% the action lists the not-resolved reasons across every relation arm,
+ *  largest first, with their remedies. The coverage shortfall is stated once,
+ *  on Spec conformance, the board computed over the walk it describes. */
+function ResolvedEdgesWidget({ dashboard }: { dashboard: CoverageDashboard }) {
   const state = resolvedEdgesState(dashboard);
-  const shortfall = <CoverageShortfall dashboard={dashboard} degraded={degraded} />;
   const common = {
     title: "Resolved cross-service edges",
     badge: <Badge tone="muted">Advisory</Badge>,
@@ -401,12 +396,9 @@ function ResolvedEdgesWidget({
       <Widget
         {...common}
         absence={
-          <>
-            {dashboard.isEmpty
-              ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
-              : COVERAGE_TEXT.outboundNotMeasured}{" "}
-            {shortfall}
-          </>
+          dashboard.isEmpty
+            ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
+            : COVERAGE_TEXT.outboundNotMeasured
         }
       >
         <EdgeLine line={dashboard.resolvedEdgesSummary} />
@@ -423,9 +415,6 @@ function ResolvedEdgesWidget({
             <span>{COVERAGE_TEXT.outboundResolved(state.resolved, state.measured)}</span>
           </div>
           <EdgeLine line={dashboard.resolvedEdgesSummary} />
-          {!dashboard.coversAllMembers || degraded.degraded_members.length > 0 ? (
-            <p className={styles.note}>{shortfall}</p>
-          ) : null}
         </div>
       }
     />
@@ -446,8 +435,19 @@ function ResolvedEdgesWidget({
  *
  *  CR-111: the ratio is never presented without its denominator and excluded
  *  count — the figure row states both from the server's fields, and the
- *  server's own composed line rides beside it in the evidence. */
-function SpecConformanceWidget({ dashboard }: { dashboard: CoverageDashboard }) {
+ *  server's own composed line rides beside it in the evidence. The coverage
+ *  shortfall rides in the figure row too, its one place among the boards:
+ *  `covers_all_members` is about the contract-surface walk, the very
+ *  population this ratio is computed over. */
+function SpecConformanceWidget({
+  dashboard,
+  degraded,
+}: {
+  dashboard: CoverageDashboard;
+  degraded: DegradedRollup;
+}) {
+  const partial = !dashboard.coversAllMembers || degraded.degraded_members.length > 0;
+  const shortfall = <CoverageShortfall dashboard={dashboard} degraded={degraded} />;
   const common = {
     title: "Spec conformance (declared endpoints vs controllers)",
     badge: <Badge tone="muted">Advisory</Badge>,
@@ -460,9 +460,12 @@ function SpecConformanceWidget({ dashboard }: { dashboard: CoverageDashboard }) 
       <Widget
         {...common}
         absence={
-          dashboard.isEmpty
-            ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
-            : COVERAGE_TEXT.specNotMeasured(dashboard.noProviderInWorkspace)
+          <>
+            {dashboard.isEmpty
+              ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
+              : COVERAGE_TEXT.specNotMeasured(dashboard.noProviderInWorkspace)}{" "}
+            {shortfall}
+          </>
         }
       >
         {evidence}
@@ -494,6 +497,7 @@ function SpecConformanceWidget({ dashboard }: { dashboard: CoverageDashboard }) 
               dashboard.noProviderInWorkspace,
             )}
           </p>
+          {partial && <p className={styles.note}>{shortfall}</p>}
         </div>
       }
     >
@@ -516,8 +520,8 @@ export function CoveragePanel({
 }) {
   return (
     <>
-      <ResolvedEdgesWidget dashboard={dashboard} degraded={degraded} />
-      <SpecConformanceWidget dashboard={dashboard} />
+      <ResolvedEdgesWidget dashboard={dashboard} />
+      <SpecConformanceWidget dashboard={dashboard} degraded={degraded} />
 
       {/* S-377/CR-120: the headline counts TWO populations as one. A declared
           endpoint matched to a controller and a resolved outbound call site are
