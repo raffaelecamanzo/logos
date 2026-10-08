@@ -13,6 +13,27 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **Health names the worst items of Acyclicity, Depth, Equality and Redundancy
+  (CR-209, S-632).** `logos scan` records a top-10 list for four more dimensions,
+  beside the five it already kept:
+  - Acyclicity: each cross-directory cycle, largest first;
+  - Depth: the longest directory chain, then the other chain heads;
+  - Equality: the functions above the mean cyclomatic complexity, highest first;
+  - Redundancy: dead or duplicate production functions, longest first.
+
+  Each list has a fixed tie-break, so a re-scan of an unchanged tree records the
+  same rows. A function is listed as dead only where its language's reachability
+  analysis gives a verdict. The lists ride the existing `worst_offenders` payload
+  of `logos scan --json`, MCP `scan` and `GET /api/v1/health`, with the same row
+  shape and no schema migration. Health renders them with the same badge and
+  table as the other five, so nine of the ten dimensions now say which code drove
+  their score. Modularity alone stays unlisted. No dimension's score changes, and
+  the five existing lists are byte-identical. A snapshot recorded before this
+  release names the four lists it lacks in `worst_offenders.unrecorded`, and
+  Health shows them as "not recorded" until the next `logos scan`.
+
 ## [1.15.2] — 2026-10-09
 
 ### Changed

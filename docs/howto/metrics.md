@@ -416,10 +416,37 @@ its file, its line, and a short detail (the offending measurement). Uniqueness
 lists near-clone groups by their duplicated mass — members × mean line count,
 largest first, then group id, then member id — so a pair of 30-line copies
 (`clone group #12 · 2 members × 30 lines`) outranks six 4-line look-alikes, and
-a group's members stay adjacent. The list is
-report-only — it never gates — and is emitted in the `worst_offenders` field of
-`logos scan --json`. It is the "which code do I fix first?" surface that turns a
-dropped dimension into an actionable to-do list.
+a group's members stay adjacent.
+
+Nine of the ten dimensions carry a list. Beside Nesting, Conciseness, Cohesion,
+Focus and Uniqueness, four more name what drives their score
+([CR-209](../requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md)):
+
+| Dimension | What is listed (worst first) | Tie-break | Row detail |
+|---|---|---|---|
+| Acyclicity | Each cross-directory cycle the dimension counts, most members first. The row names the cycle's lowest-id member, with its file and line | Lowest member id | `N symbols across D directories: dir1, dir2, …` |
+| Depth | The longest directory chain, then each other chain head (a directory nothing depends on) by its longest chain. Chains of one directory are not listed | Head name | `dir1 → dir2 → … (L directories)` |
+| Equality | Functions above the mean cyclomatic complexity, the ones that raise the Gini, highest first | Node id | `complexity C` |
+| Redundancy | Dead or duplicate production functions, most lines first | Node id | `dead`, `duplicate` or `dead, duplicate` |
+
+A few specifics:
+- Each list is empty exactly when its dimension scores clean: no cycle, depth 1, an even complexity spread, or no dead or duplicate function.
+- A Depth row is a chain of directories, so it has no file or line. The project root reads `.`. A directory cycle is one layer, spelled `{a, b}`, and the count then names layers.
+- A row names at most three directories. A larger directory cycle reads `{a, b, c +4 more}`, and an Acyclicity row spanning more than three directories ends in `…` after its stated count.
+- At a fork, a Depth chain follows the longer continuation, then the lower name.
+- Redundancy lists a function as dead only where its language's reachability analysis gives a verdict. Where it does not (`is_dead` is NULL), the function is never listed as dead.
+
+Modularity has no list: it scores the directory layout as a whole, so no single
+unit is responsible for it.
+
+The lists are report-only: they never gate, and they never change a dimension's
+score. They are emitted in the `worst_offenders` field of `logos scan --json`,
+persisted with the snapshot, and shown under each Health dimension widget. A
+snapshot recorded before CR-209 has no rows for the four newer lists. The read
+names each of them whose score says it is not empty in `worst_offenders.unrecorded`,
+and Health shows it as "not recorded", never as "none flagged". Run `logos scan`
+to record them. Together the lists are the "which code do I fix first?" surface
+that turns a dropped dimension into an actionable to-do list.
 
 ## The non-gated evidence tiers
 

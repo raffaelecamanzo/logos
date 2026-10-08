@@ -30,3 +30,22 @@ describe("the unlisted pointers name no hidden view (CR-208)", () => {
     expect(`${pointer?.statement ?? ""} ${pointer?.view?.label ?? ""}`).not.toMatch(/architecture|matrix/i);
   });
 });
+
+// CR-209 AC-4: nine dimensions carry a list, so only Modularity — which scores the
+// directory layout as a whole — keeps a named absence; no copy for the four
+// CR-209 dimensions says their units are not listed.
+describe("only Modularity is unlisted (CR-209)", () => {
+  it("Modularity alone carries the unlisted copy", () => {
+    const unlisted = Object.entries(DIMENSION_COPY)
+      .filter(([, entry]) => entry.unlisted !== undefined)
+      .map(([key]) => key);
+    expect(unlisted).toEqual(["modularity"]);
+  });
+
+  it.each(["acyclicity", "depth", "equality", "redundancy"] as const)(
+    "%s's copy never calls its units unlisted",
+    (key) => {
+      expect(JSON.stringify(DIMENSION_COPY[key])).not.toMatch(/unlisted|No list of|not recorded with this snapshot/i);
+    },
+  );
+});

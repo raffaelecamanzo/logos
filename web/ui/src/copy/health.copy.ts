@@ -143,11 +143,12 @@ export interface UnitPointer {
 }
 
 /** A dimension's catalogue entry: the message standard, plus its figure text and,
- *  for a dimension with no offender list, the pointer to its units. */
+ *  for the dimension with no offender list (Modularity), the named absence. */
 export interface DimensionCopy extends CopyEntry {
   /** The raw value with its unit, as the figure row states it. */
   readonly raw: (raw: number) => CopyText;
-  /** Present exactly for the five dimensions whose units the payload does not list. */
+  /** Present exactly for the dimension whose units the payload does not list:
+   *  Modularity, which scores the directory layout as a whole (CR-209). */
   readonly unlisted?: UnitPointer;
 }
 
@@ -159,13 +160,6 @@ export function percent(ratio: number): string {
   if (ratio < 1 && ratio >= 0.9995) return ">99.9%";
   return `${(ratio * 100).toFixed(1)}%`;
 }
-
-/** Acyclicity and Depth point at the command line's module dependencies (CR-208):
- *  the Architecture view is hidden, and no text may point at a hidden widget
- *  (NFR-CC-04). `logos dsm` prints the module-to-module dependencies, not a list
- *  of cycles or chains, so the sentence claims no more than that; their own lists
- *  are CR-209's. */
-const MODULE_DEPENDENCIES = "The module-to-module dependencies are printed by";
 
 export const modularity: DimensionCopy = {
   what: "Do directories form real modules? This scores how many dependencies stay inside the directory they start in.",
@@ -181,42 +175,24 @@ export const acyclicity: DimensionCopy = {
   what: "Are there dependency cycles? This counts the groups of units that depend on each other in a loop.",
   why: "A unit in a cycle cannot be changed, tested or released without the others in it.",
   raw: (raw) => `${raw} dependency ${raw === 1 ? "cycle" : "cycles"}`,
-  unlisted: {
-    statement: `No list of the cycles is recorded with this snapshot. ${MODULE_DEPENDENCIES}`,
-    command: "logos dsm",
-  },
 };
 
 export const depth: DimensionCopy = {
   what: "How long are dependency chains? This measures the longest chain of units that depend on one another, counting each cycle as one unit.",
   why: "In a long chain, a change at the bottom can ripple through every layer above it.",
   raw: (raw) => `longest chain of ${raw} ${raw === 1 ? "unit" : "units"}, each cycle counted as one`,
-  unlisted: {
-    statement: `No list of the longest chains is recorded with this snapshot. ${MODULE_DEPENDENCIES}`,
-    command: "logos dsm",
-  },
 };
 
 export const equality: DimensionCopy = {
   what: "Is complexity evenly spread? This measures how unevenly branching logic is spread across functions.",
   why: "Complexity piled into a few functions makes those functions the riskiest to change.",
   raw: (raw) => [gloss("gini"), ` ${raw.toFixed(2)} of function complexity (0 is even)`],
-  unlisted: {
-    statement:
-      "No list of the most complex functions is recorded with this snapshot. The files that hold the most complexity are ranked in the Complexity column of",
-    view: { label: "Files & Risk", href: "/files" },
-    command: "logos hotspots",
-  },
 };
 
 export const redundancy: DimensionCopy = {
   what: "How much code is dead or duplicated? This is the share of production functions that nothing reaches, or that repeat another function exactly.",
   why: "Dead and duplicated code is read, maintained and tested for nothing.",
   raw: (raw) => `${percent(raw)} of production functions are dead or duplicated`,
-  unlisted: {
-    statement: "No list of the dead or duplicated functions is recorded with this snapshot. Each symbol's dead and duplicate flags are shown by",
-    command: "logos node <symbol>",
-  },
 };
 
 export const nesting: DimensionCopy = {

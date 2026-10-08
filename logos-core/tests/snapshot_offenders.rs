@@ -249,6 +249,8 @@ fn a_repeated_scan_of_an_unchanged_tree_writes_byte_identical_offender_rows() {
     assert_eq!(
         first,
         [
+            // CR-209: beta (CC 7) is the one function above the mean of 6.
+            "equality|1|beta_depth_six|'src/lib.rs'|14|complexity 7",
             "nesting|1|beta_depth_six|'src/lib.rs'|14|nesting depth 6",
             "nesting|2|gamma_depth_five|'src/lib.rs'|31|nesting depth 5",
             "nesting|3|alpha_depth_four|'src/lib.rs'|1|nesting depth 4",
@@ -326,8 +328,12 @@ fn a_pre_migration_snapshot_reads_not_recorded_and_never_as_recorded_empty() {
                 "cohesion": empty,
                 "focus": empty,
                 "uniqueness": empty,
+                "acyclicity": empty,
+                "depth": empty,
+                "equality": empty,
+                "redundancy": empty,
             }),
-            "the payload carries the recorded flag beside the five lists"
+            "the payload carries the recorded flag beside the nine lists"
         );
     }
 }
@@ -361,7 +367,10 @@ fn the_health_read_and_the_quality_readout_write_no_offender_rows() {
     engine.scan(true).expect("scan runs");
     let snapshots = metric_snapshot_count(tmp.path());
     let rows = offender_row_count(tmp.path());
-    assert_eq!(rows, 3, "the scan persisted the fixture's three offenders");
+    assert_eq!(
+        rows, 4,
+        "the scan persisted the fixture's three Nesting and one Equality offenders"
+    );
 
     for _ in 0..3 {
         engine.latest_health().expect("read-only health");
@@ -423,8 +432,8 @@ fn the_dimension_vocabulary_is_the_serialized_field_set() {
         );
     }
     assert!(
-        w.list_mut("redundancy").is_none(),
-        "a name outside the five has no list"
+        w.list_mut("modularity").is_none(),
+        "Modularity — the one dimension outside the nine — has no list"
     );
 }
 
@@ -528,4 +537,65 @@ fn persisted_lists_follow_the_effective_rules_toml_thresholds() {
             "`{name}` persisted the lists under nesting_depth = 5, not the default 4"
         );
     }
+}
+
+/// CR-209 end to end: a real two-directory cycle is recorded under Acyclicity,
+/// read back by the Health bundle exactly as scanned, and — once its rows are
+/// removed, as on a snapshot written before CR-209 — read back as unrecorded
+/// rather than as an empty, clean list ([NFR-CC-04]).
+///
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn a_two_directory_cycle_is_recorded_and_a_pre_cr209_snapshot_reads_unrecorded() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", "pub mod alpha;\npub mod beta;\n");
+    write(
+        tmp.path(),
+        "src/alpha/mod.rs",
+        "pub fn ping(n: u32) -> u32 {\n    if n == 0 { 0 } else { crate::beta::pong(n - 1) }\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/beta/mod.rs",
+        "pub fn pong(n: u32) -> u32 {\n    if n == 0 { 1 } else { crate::alpha::ping(n - 1) }\n}\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+    let scanned = engine.scan(true).expect("scan runs");
+    assert_eq!(scanned.metrics.acyclicity.raw, 1.0, "one cross-directory cycle");
+    let cycle: Vec<(&str, &str)> = scanned
+        .worst_offenders
+        .acyclicity
+        .iter()
+        .map(|o| (o.file.as_str(), o.detail.as_str()))
+        .collect();
+    assert_eq!(cycle.len(), 1, "{cycle:?}");
+    assert_eq!(cycle[0].1, "2 symbols across 2 directories: src/alpha, src/beta");
+
+    let read = engine.latest_health().expect("read-only health").scan.worst_offenders;
+    assert_eq!(read, scanned.worst_offenders, "Health reads back what scan recorded");
+    assert!(read.unrecorded.is_empty());
+
+    // A snapshot written before CR-209 holds rows for the five lists only.
+    Connection::open(tmp.path().join(".logos/logos.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM metric_snapshot_offenders \
+             WHERE dimension IN ('acyclicity', 'depth', 'equality', 'redundancy')",
+            [],
+        )
+        .unwrap();
+    let old = engine.latest_health().expect("read-only health").scan.worst_offenders;
+    assert!(old.recorded && old.acyclicity.is_empty());
+    assert!(
+        old.unrecorded.contains(&"acyclicity"),
+        "a cycle the score counts but no row names reads unrecorded: {:?}",
+        old.unrecorded
+    );
+    let json = serde_json::to_value(&old).unwrap();
+    assert!(json["unrecorded"].as_array().is_some_and(|a| a.contains(&"acyclicity".into())));
+    assert!(
+        serde_json::to_value(&read).unwrap().get("unrecorded").is_none(),
+        "elided on a snapshot this version wrote"
+    );
 }

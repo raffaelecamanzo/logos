@@ -821,9 +821,10 @@ pub struct ScanResult {
     /// `rules.toml` violations found by this run (FR-GV-02).
     pub violations: Vec<Violation>,
     pub metrics: MetricSnapshot,
-    /// Per-dimension worst-offender detail for the five CR-005 structural
-    /// dimensions (FR-QM-09..13, CR-005): the top-N offending functions/containers
-    /// per dimension, deterministically ordered and capped. Empty lists when a
+    /// Per-dimension worst-offender detail for nine dimensions — the five CR-005
+    /// structural dimensions (FR-QM-09..13) and Acyclicity, Depth, Equality and
+    /// Redundancy (CR-209): the top-N offending units per dimension,
+    /// deterministically ordered and capped. Empty lists when a
     /// dimension has no offenders (or dropped out); the review-phase visibility
     /// the `scan` surface gains. Persisted with the snapshot ([FR-QM-15]), so the
     /// read-only twin carries the same lists — or
@@ -895,11 +896,13 @@ pub struct TemporalTier {
     pub files: Vec<FileTemporal>,
 }
 
-/// Per-dimension worst-offender lists for the five CR-005 structural dimensions
-/// (CR-005 §3.2 review-phase visibility): the top-N offenders per dimension,
-/// each list deterministically ordered (by offending severity, then node id) and
-/// capped ([NFR-RA-06]). A dimension with no offenders — or one that dropped out
-/// of the aggregate (Cohesion/Focus with no construct) — carries an empty list.
+/// Per-dimension worst-offender lists for nine of the ten quality dimensions:
+/// the five CR-005 structural dimensions (CR-005 §3.2 review-phase visibility)
+/// and Acyclicity, Depth, Equality and Redundancy ([CR-209]). Each holds the
+/// top-N offenders, deterministically ordered (by offending severity, then a
+/// stable tie-break) and capped ([NFR-RA-06]). A dimension with no offenders —
+/// or one that dropped out of the aggregate (Cohesion/Focus with no construct) —
+/// carries an empty list. Modularity has none: no unit is responsible for it.
 ///
 /// The lists explain *which* code drives a low dimension score, so a reviewer can
 /// act on the signal; they never enter the aggregate or the gate (report detail
@@ -912,9 +915,12 @@ pub struct TemporalTier {
 /// threshold, and a list that is empty because the snapshot was written before
 /// offenders were persisted ([NFR-CC-04]). The serialized shape is
 /// `{"recorded": bool, "nesting": [..], "conciseness": [..], "cohesion": [..],
-/// "focus": [..], "uniqueness": [..]}`; with `recorded: false` every list is
-/// `[]` and means nothing.
+/// "focus": [..], "uniqueness": [..], "acyclicity": [..], "depth": [..],
+/// "equality": [..], "redundancy": [..]}`, plus `"unrecorded": [..]` only on a
+/// snapshot written before [CR-209]; with `recorded: false` every list is `[]`
+/// and means nothing.
 ///
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
 /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
@@ -944,25 +950,70 @@ pub struct WorstOffenders {
     /// grouped by clone group, largest duplicated mass (members × mean line
     /// count) first, then group id, then member id (FR-QM-13, CR-163).
     pub uniqueness: Vec<Offender>,
+    /// Each cross-directory cycle Acyclicity counts, one row per cycle named by
+    /// its lowest-id member: most members first, then that member's id (FR-QM-02,
+    /// [CR-209]).
+    ///
+    /// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+    pub acyclicity: Vec<Offender>,
+    /// The directory chains of two or more layers Depth measures, one row per
+    /// chain head: the longest chain first, then the head's name (FR-QM-03,
+    /// CR-209).
+    pub depth: Vec<Offender>,
+    /// Production functions above the mean cyclomatic complexity — the ones
+    /// that pull Equality's Gini up — highest first, then node id (FR-QM-04,
+    /// CR-209).
+    pub equality: Vec<Offender>,
+    /// Dead or duplicate production functions, most lines first, then node id
+    /// (FR-QM-05, CR-209). Dead only where the language's reachability
+    /// capability yields a verdict: `is_dead = NULL` is never listed as dead.
+    pub redundancy: Vec<Offender>,
+    /// The dimensions of a [`recorded`](Self::recorded) snapshot whose list it
+    /// did **not** record: the snapshot was written before CR-209 added the
+    /// list, and its own score says the list would not be empty. A reader shows
+    /// these as "not recorded", never as "none flagged" ([NFR-CC-04]). Empty —
+    /// and elided from the payload — on every snapshot this version writes.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<&'static str>,
 }
 
 impl WorstOffenders {
-    /// The five dimension names, in canonical order — the persisted
+    /// The nine dimension names — the persisted
     /// `metric_snapshot_offenders.dimension` values and the serialized field
-    /// names, spelled once.
-    pub const DIMENSIONS: [&'static str; 5] =
-        ["nesting", "conciseness", "cohesion", "focus", "uniqueness"];
+    /// names, spelled once. The five CR-005 lists come first, in their original
+    /// order, so they persist exactly as before; the four [CR-209] lists follow.
+    /// Modularity has no list: it scores the directory layout as a whole.
+    ///
+    /// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+    pub const DIMENSIONS: [&'static str; 9] = [
+        "nesting",
+        "conciseness",
+        "cohesion",
+        "focus",
+        "uniqueness",
+        "acyclicity",
+        "depth",
+        "equality",
+        "redundancy",
+    ];
 
     /// Each list paired with its [`DIMENSIONS`](Self::DIMENSIONS) name, in
-    /// canonical order.
-    pub fn lists(&self) -> [(&'static str, &[Offender]); 5] {
-        let [nesting, conciseness, cohesion, focus, uniqueness] = Self::DIMENSIONS;
+    /// that order.
+    pub fn lists(&self) -> [(&'static str, &[Offender]); 9] {
+        let [nesting, conciseness, cohesion, focus, uniqueness, acyclicity, depth, equality, redundancy] =
+            Self::DIMENSIONS;
         [
             (nesting, &self.nesting),
             (conciseness, &self.conciseness),
             (cohesion, &self.cohesion),
             (focus, &self.focus),
             (uniqueness, &self.uniqueness),
+            (acyclicity, &self.acyclicity),
+            (depth, &self.depth),
+            (equality, &self.equality),
+            (redundancy, &self.redundancy),
         ]
     }
 
@@ -975,6 +1026,10 @@ impl WorstOffenders {
             "cohesion" => Some(&mut self.cohesion),
             "focus" => Some(&mut self.focus),
             "uniqueness" => Some(&mut self.uniqueness),
+            "acyclicity" => Some(&mut self.acyclicity),
+            "depth" => Some(&mut self.depth),
+            "equality" => Some(&mut self.equality),
+            "redundancy" => Some(&mut self.redundancy),
             _ => None,
         }
     }

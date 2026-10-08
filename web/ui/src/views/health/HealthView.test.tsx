@@ -61,6 +61,10 @@ const HEALTH: HealthModel = {
       cohesion: [],
       focus: [],
       uniqueness: [],
+      acyclicity: [],
+      depth: [],
+      equality: [],
+      redundancy: [],
     },
     warnings: [],
   },
@@ -101,8 +105,12 @@ const DIMENSION_TITLES = [
   "Modularity", "Acyclicity", "Depth", "Equality", "Redundancy",
   "Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness",
 ];
-const OFFENDER_BACKED = ["Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness"];
-const UNLISTED = ["Modularity", "Acyclicity", "Depth", "Equality", "Redundancy"];
+const OFFENDER_BACKED = [
+  "Acyclicity", "Depth", "Equality", "Redundancy",
+  "Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness",
+];
+/** The four CR-209 added — rendered exactly like the five CR-005 lists. */
+const CR209 = ["Acyclicity", "Depth", "Equality", "Redundancy"];
 
 /** Every rendered widget, in document order. */
 const frames = () => widgetsIn(document.body);
@@ -426,7 +434,7 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     expect(seen(part(widget("Redundancy"), "figure"))).toContain("0.0% of production functions are dead or duplicated");
   });
 
-  it("the five unlisted dimensions state the absence and their pointer, never an empty table", async () => {
+  it("Modularity alone states that it has no list, never an empty table", async () => {
     for (const recorded of [true, false]) {
       cleanup();
       const m = clone();
@@ -434,40 +442,80 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
       stub(m);
       render(<HealthView />);
       await screen.findByText("Signal evolution");
-      for (const name of UNLISTED) {
-        // No list, so no offender badge: the title never claims a clean result
-        // ("none flagged") or a recording state (CR-162, NFR-CC-04).
-        expect(seen(part(widget(name), "title")), name).toBe(name);
-        const evidence = part(widget(name), "evidence")!;
-        expect(within(evidence).queryByRole("table"), name).toBeNull();
-        expect(evidence.querySelector('[data-offender-state="unlisted"]'), name).not.toBeNull();
-        expect(seen(evidence), name).toMatch(/^No list of /);
+      // No list, so no offender badge: the title never claims a clean result
+      // ("none flagged") or a recording state (CR-162, NFR-CC-04).
+      expect(seen(part(widget("Modularity"), "title"))).toBe("Modularity");
+      const evidence = part(widget("Modularity"), "evidence")!;
+      expect(within(evidence).queryByRole("table")).toBeNull();
+      expect(evidence.querySelector('[data-offender-state="unlisted"]')).not.toBeNull();
+      expect(seen(evidence)).toMatch(/^No list of units/);
+      // Modularity has no per-unit attribution: it says so and points nowhere.
+      expect(within(evidence).queryByRole("link")).toBeNull();
+      expect(evidence.querySelector("code")).toBeNull();
+      expect(seen(evidence)).toMatch(/as a whole/);
+      // CR-209 AC-4: the four it added are lists now, never "unlisted".
+      expect(document.querySelectorAll('[data-offender-state="unlisted"]')).toHaveLength(1);
+      for (const name of CR209) {
+        expect(seen(widget(name)), name).not.toMatch(/No list of|unlisted/i);
       }
     }
-    const link = (name: string) => within(part(widget(name), "evidence")!).queryByRole("link");
-    const command = (name: string) => part(widget(name), "evidence")!.querySelector("code")?.textContent ?? null;
-    // The Architecture view is hidden (CR-208): Acyclicity and Depth point at the
-    // command line alone, and no Health text names the view or its matrix.
-    expect(link("Acyclicity")).toBeNull();
-    expect(command("Acyclicity")).toBe("logos dsm");
-    expect(seen(part(widget("Acyclicity"), "evidence"))).toBe(
-      "No list of the cycles is recorded with this snapshot. The module-to-module dependencies are printed by logos dsm.",
-    );
-    expect(link("Depth")).toBeNull();
-    expect(command("Depth")).toBe("logos dsm");
-    expect(seen(part(widget("Depth"), "evidence"))).toBe(
-      "No list of the longest chains is recorded with this snapshot. The module-to-module dependencies are printed by logos dsm.",
-    );
+    // The Architecture view is hidden (CR-208): no Health text names it or its matrix.
     expect(document.querySelector('a[href^="/architecture"]')).toBeNull();
     expect(seen(document.body)).not.toMatch(/Architecture|dependency matrix/i);
-    expect(link("Equality")).toHaveAttribute("href", "/files");
-    expect(command("Equality")).toBe("logos hotspots");
-    expect(link("Redundancy")).toBeNull();
-    expect(command("Redundancy")).toBe("logos node <symbol>");
-    // Modularity has no per-unit attribution: it says so and points nowhere.
-    expect(link("Modularity")).toBeNull();
-    expect(command("Modularity")).toBeNull();
-    expect(seen(part(widget("Modularity"), "evidence"))).toMatch(/as a whole/);
+  });
+
+  it("renders the four CR-209 lists with the same badge and table as the five (CR-209 AC-4)", async () => {
+    const m = clone();
+    m.scan.worst_offenders = {
+      ...realOffenders.recordedEmpty,
+      acyclicity: [
+        { name: "ping", file: "src/alpha/mod.rs", line: 1, detail: "2 symbols across 2 directories: src/alpha, src/beta" },
+      ],
+      depth: [
+        { name: "api", file: "", line: null, detail: "api → core → util (3 directories)" },
+        { name: "cli", file: "", line: null, detail: "cli → util (2 directories)" },
+      ],
+      equality: [{ name: "parse", file: "src/p.rs", line: 9, detail: "complexity 31" }],
+      redundancy: [{ name: "gone", file: "src/g.rs", line: 4, detail: "dead, duplicate" }],
+    };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const expected: Record<string, string[][]> = {
+      Acyclicity: [["ping", "src/alpha/mod.rs", "1", "2 symbols across 2 directories: src/alpha, src/beta"]],
+      Depth: [
+        ["api", "", "", "api → core → util (3 directories)"],
+        ["cli", "", "", "cli → util (2 directories)"],
+      ],
+      Equality: [["parse", "src/p.rs", "9", "complexity 31"]],
+      Redundancy: [["gone", "src/g.rs", "4", "dead, duplicate"]],
+    };
+    for (const [name, rows] of Object.entries(expected)) {
+      const w = widget(name);
+      expect(within(part(w, "title")!).getByText(`${rows.length} flagged`), name).toBeInTheDocument();
+      const table = within(w).getByRole("table", { name: "Worst offenders" });
+      const cells = within(table)
+        .getAllByRole("row")
+        .slice(1)
+        .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+      expect(cells, name).toEqual(rows);
+    }
+  });
+
+  it("renders a list its snapshot predates (`unrecorded`) as not recorded, never as none flagged", async () => {
+    const m = clone();
+    m.scan.worst_offenders = { ...realOffenders.recordedEmpty, unrecorded: ["acyclicity", "redundancy"] };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    for (const name of ["Acyclicity", "Redundancy"]) {
+      const w = widget(name);
+      expect(within(part(w, "title")!).getByText("not recorded"), name).toBeInTheDocument();
+      expect(seen(w), name).not.toMatch(/none flagged/i);
+    }
+    for (const name of ["Depth", "Equality", "Nesting"]) {
+      expect(within(part(widget(name), "title")!).getByText("none flagged"), name).toBeInTheDocument();
+    }
   });
 
   it("no dimension widget carries an action line, at any score, listed or not (CR-206)", async () => {
@@ -482,8 +530,8 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
       expectWidgetCopy(w, DIMENSION_COPY[row.key]);
       expect(seen(w), row.name).not.toMatch(/\[metric_thresholds\] in \.logos\/rules\.toml|What you can do/);
     }
-    // The pointer to an unlisted dimension's units is evidence, not an action.
-    expect(seen(part(widget("Equality"), "evidence"))).toContain("The files that hold the most complexity are ranked in");
+    // Modularity's named absence is evidence, not an action.
+    expect(seen(part(widget("Modularity"), "evidence"))).toMatch(/^No list of units/);
   });
 
   it("renders an ADR-21 drop-out as a stated n/a, never a fabricated zero", async () => {
@@ -626,9 +674,13 @@ describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
     expect(within(rows[0]).getByText("src/lib.rs")).toBeInTheDocument();
     expect(within(rows[0]).getByText("nesting depth 6")).toBeInTheDocument();
     expect(within(part(nesting, "title")!).getByText("3 flagged")).toBeInTheDocument();
-    // The other four recorded dimensions flagged nothing.
-    for (const name of OFFENDER_BACKED.slice(1)) {
-      expect(seen(part(widget(name), "evidence"))).toMatch(NONE_FLAGGED);
+    // CR-209: Equality lists the one function above the mean complexity.
+    const equality = widget("Equality");
+    expect(within(part(equality, "title")!).getByText("1 flagged")).toBeInTheDocument();
+    expect(within(equality).getByText("complexity 7")).toBeInTheDocument();
+    // The other seven recorded dimensions flagged nothing.
+    for (const name of OFFENDER_BACKED.filter((n) => n !== "Nesting" && n !== "Equality")) {
+      expect(seen(part(widget(name), "evidence")), name).toMatch(NONE_FLAGGED);
     }
   });
 });
@@ -669,9 +721,8 @@ describe("Non-gated tier (S-612, FR-UI-41)", () => {
     render(<HealthView />);
     await screen.findByText("Signal evolution");
     expect(screen.queryByText("Non-gated tier")).toBeNull();
-    // Equality's widget points to Files & Risk for its own units; no other link does.
-    const links = screen.queryAllByRole("link", { name: /Files & Risk/i });
-    expect(links.map((l) => widgetTitle(l.closest("[data-widget]")!))).toEqual(["Equality"]);
+    // No widget links to Files & Risk: Equality lists its own functions (CR-209).
+    expect(screen.queryAllByRole("link", { name: /Files & Risk/i })).toEqual([]);
   });
 
   it("renders the Non-gated tier callout again when its register entry is removed", async () => {

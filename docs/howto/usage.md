@@ -972,7 +972,8 @@ what the comparison establishes. Where the ordering cannot be established at all
 takes precedence, and no fourth state was added.
 
 **Worst offenders are the ones the snapshot computed (since logos 1.9.0).** The
-Nesting, Conciseness, Cohesion, Focus and Uniqueness widgets on Health list the
+Nesting, Conciseness, Cohesion, Focus and Uniqueness widgets on Health — and,
+since CR-209, Acyclicity, Depth, Equality and Redundancy — list the
 offenders the last `scan`, `gate` or session snapshot persisted, in the order it
 computed them, read in the same single snapshot read as the signal and the gate.
 The page never recomputes them. Each of these widgets renders one of three states
@@ -986,7 +987,10 @@ and never infers the state from an empty list:
 
 A not-applicable dimension (Cohesion or Focus with no classes) keeps its `n/a`
 rendering in every state. After upgrading, the existing snapshot reads "not
-recorded" until the next `logos scan`.
+recorded" until the next `logos scan`. The same holds for the four CR-209 lists
+on a snapshot recorded before them: each one whose score says it is not empty
+reads "not recorded". One whose score is clean (no cycle, depth 1, an even
+spread, nothing dead or duplicated) reads "none flagged", which is then true.
 
 **Every dimension has a widget, and every widget explains itself (unreleased,
 CR-203, CR-206).** Health renders the Gate, the Quality signal, one widget per
@@ -1002,11 +1006,10 @@ current (`logos index` after a de-index, `logos scan` once the graph has moved
 past the snapshot); every dimension widget then says it is not current and points
 to the Gate. The Quality signal folds in what the Aggregate scope card used to show: the functions
 scored and excluded, and the thresholds fingerprint with what a change to
-`[metric_thresholds]` does to the gate. Modularity, Acyclicity, Depth, Equality
-and Redundancy carry no offender list in the payload; their widgets say so and
-point to where their units are found — `logos dsm` for the module-to-module
-dependencies, Files & Risk and `logos hotspots`, or `logos node` for one symbol's
-dead and duplicate flags — never an empty table.
+`[metric_thresholds]` does to the gate. Modularity carries no offender list in
+the payload: it scores the directory layout as a whole, and its widget says so,
+never an empty table. The other nine list their worst offenders (CR-209 added
+Acyclicity, Depth, Equality and Redundancy).
 
 **The same release stops the dashboard inventing an age it cannot establish.**
 Every relative age the SPA renders (`just now`, `5m ago`, `6d ago`) is derived

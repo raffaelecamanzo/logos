@@ -24,7 +24,18 @@
     "conciseness": [],
     "cohesion": [],
     "focus": [],
-    "uniqueness": []
+    "uniqueness": [],
+    "acyclicity": [],
+    "depth": [],
+    "equality": [
+      {
+        "name": "beta_depth_six",
+        "file": "src/lib.rs",
+        "line": 6,
+        "detail": "complexity 7"
+      }
+    ],
+    "redundancy": []
   },
   "recordedEmpty": {
     "recorded": true,
@@ -32,7 +43,11 @@
     "conciseness": [],
     "cohesion": [],
     "focus": [],
-    "uniqueness": []
+    "uniqueness": [],
+    "acyclicity": [],
+    "depth": [],
+    "equality": [],
+    "redundancy": []
   },
   "notRecorded": {
     "recorded": false,
@@ -40,6 +55,10 @@
     "conciseness": [],
     "cohesion": [],
     "focus": [],
-    "uniqueness": []
+    "uniqueness": [],
+    "acyclicity": [],
+    "depth": [],
+    "equality": [],
+    "redundancy": []
   }
 }

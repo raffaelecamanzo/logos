@@ -2164,7 +2164,10 @@ carries a `recorded` boolean, always present:
 "worst_offenders": {
   "recorded": true,
   "nesting": [{"name": "beta_depth_six", "file": "src/lib.rs", "line": 14, "detail": "nesting depth 6"}],
-  "conciseness": [], "cohesion": [], "focus": [], "uniqueness": []
+  "conciseness": [], "cohesion": [], "focus": [], "uniqueness": [],
+  "acyclicity": [], "depth": [],
+  "equality": [{"name": "beta_depth_six", "file": "src/lib.rs", "line": 14, "detail": "complexity 7"}],
+  "redundancy": []
 }
 ```
 
@@ -2172,6 +2175,13 @@ carries a `recorded` boolean, always present:
 `recorded: false` means the snapshot predates 1.9.0 or the store was never
 scanned: its empty lists carry no meaning. A Uniqueness entry's `detail` reads
 `clone group #G · N members × L lines`, heaviest group (members × mean lines) first.
+
+Since CR-209 nine dimensions carry a list: Acyclicity, Depth, Equality and
+Redundancy join the five above (what each lists, and its tie-break, is in
+[metrics.md](metrics.md#worst-offenders--naming-the-cause)). A snapshot recorded
+before CR-209 also carries `"unrecorded": [...]`, naming each of those four lists
+it holds no rows for although its score says the list is not empty. Treat each
+named list as not recorded. The key is absent on every snapshot written since.
 
 ### `check [--rules <FILE>] [--allow-no-rules]`
 
