@@ -8,6 +8,7 @@ import type {
   CrossServiceCoverage,
   XserviceBuildDeps,
 } from "../../api/types.ts";
+import statesStyles from "../../components/States.module.css";
 import {
   buildDependencies,
   COVERAGE_TEXT,
@@ -1017,6 +1018,24 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     mount();
     await traceSymbol();
     expect(await screen.findByText(/no cross-service impact/i)).toBeInTheDocument();
+  });
+
+  it("returns in the layout standard: one stack of tool panels, no centred empty state (sprint review)", async () => {
+    stubApi({ impact: IMPACT_DEGRADED });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service impact/i }));
+    // Before a trace: the query form is the tab's one panel.
+    const before = expectOneWidgetStack(screen.getByRole("tabpanel"));
+    expect(before.map(widgetTitle)).toEqual(["Trace a symbol"]);
+    expectToolPanel(before[0], "impactQuery");
+    await userEvent.type(screen.getByLabelText(/symbol/i), "get_user");
+    await userEvent.click(screen.getByRole("button", { name: /trace impact/i }));
+    await screen.findByText(/no cross-service impact/i);
+    // After: every part of the answer is a registered panel in the same stack.
+    const after = expectOneWidgetStack(screen.getByRole("tabpanel"));
+    expect(after.map(widgetTitle)).toEqual(["Trace a symbol", "api (seed)", "web (seed)", "Across services"]);
+    expectToolPanel(widgetTitled(screen.getByRole("tabpanel"), "Across services"), "impactAcross");
+    expect(screen.getByRole("tabpanel").querySelector(`.${statesStyles.empty}`)).toBeNull();
   });
 
   // ── CR-125 / BR-53: an unresolved egress must not read as an absence ────────

@@ -1381,29 +1381,33 @@ function ImpactPanel() {
     [query],
   );
 
+  // One stack, like every other tab (FR-UI-40), so the tab returns from the
+  // hidden register (S-612) already in the layout standard: the query form is a
+  // tool panel, and each part of the answer is a panel below it.
   return (
-    <div className={styles.panel}>
-      <form
-        className={styles.impactForm}
-        onSubmit={(e) => {
-          e.preventDefault();
-          setQuery(symbol.trim());
-        }}
-      >
-        <TextField
-          label="Symbol"
-          hint="A symbol name or canonical SCIP symbol; its impact is traced in every member and across every resolved binding."
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value)}
-        />
-        <Button type="submit" disabled={symbol.trim() === ""}>
-          Trace impact
-        </Button>
-      </form>
+    <WidgetStack>
+      <Widget panel="impactQuery" title="Trace a symbol">
+        <form
+          className={styles.impactForm}
+          onSubmit={(e) => {
+            e.preventDefault();
+            setQuery(symbol.trim());
+          }}
+        >
+          <TextField
+            label="Symbol"
+            hint="A symbol name or canonical SCIP symbol; its impact is traced in every member and across every resolved binding."
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+          />
+          <Button type="submit" disabled={symbol.trim() === ""}>
+            Trace impact
+          </Button>
+        </form>
+        {query === "" && <p className="muted">Name a symbol to trace its impact across services.</p>}
+      </Widget>
 
-      {query === "" ? (
-        <EmptyState message="Name a symbol to trace its impact across services." />
-      ) : (
+      {query !== "" && (
         <AsyncResource resource={impact} loadingLabel="Tracing the cross-service impact…">
           {(model) =>
             model === null ? null : (
@@ -1437,7 +1441,12 @@ function ImpactPanel() {
                 )}
                 {model.cross_service.length === 0 ? (
                   model.unresolved_egress ? null : (
-                    <EmptyState message="No cross-service impact — no resolved binding reaches this symbol from another service. (An unmaterialized binding is unknown, not absent — see Cross-service coverage.)" />
+                    <Widget panel="impactAcross" title="Across services">
+                      <p>
+                        No cross-service impact — no resolved binding reaches this symbol from another service. (An
+                        unmaterialized binding is unknown, not absent — see Cross-service coverage.)
+                      </p>
+                    </Widget>
                   )
                 ) : (
                   model.cross_service.map((far) => (
@@ -1449,6 +1458,6 @@ function ImpactPanel() {
           }
         </AsyncResource>
       )}
-    </div>
+    </WidgetStack>
   );
 }
