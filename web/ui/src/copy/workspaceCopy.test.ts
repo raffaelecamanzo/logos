@@ -115,6 +115,10 @@ describe("workspace catalogue sentences", () => {
   });
 
   it("states the service map's shares as n of m, numerator first (S-614)", () => {
+    // FR-UI-42's own words, written out: the view tests read this sentence
+    // back from the catalogue, so only a literal here pins it.
+    expect(SERVICE_MAP_TEXT.bindingsShown(3, 4)).toBe("3 of 4 bindings shown");
+    expect(SERVICE_MAP_TEXT.bindingsShown(0, 1)).toBe("0 of 1 binding shown");
     expect(SERVICE_MAP_TEXT.evidenceShown(0, 2)).toBe("Shown: 0 of 2 bindings not observed at a call site");
     expect(SERVICE_MAP_TEXT.evidenceShown(1, 1)).toBe("Shown: 1 of 1 binding not observed at a call site");
   });
