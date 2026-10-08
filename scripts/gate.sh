@@ -584,19 +584,21 @@ gate_ui() { # gate_name npm_script
 # FULL tier only — it builds the SPA and the binary, and needs a browser.
 #
 # Its denominator is Playwright's own JSON report, recorded as one unit: tests
-# listed (expected), run (started/finished), passed, failed. Each way it can read
-# green while testing nothing is a failure here:
-#   - no browser installed  -> every test errors; recorded as `missing_browser`
-#   - no report written      -> nothing ran;       recorded as `no_binaries`
-#   - zero tests listed      -> a vacuous pass;    recorded as `no_binaries`
-#   - the run hangs          -> a perl alarm kills it at UI_E2E_TIMEOUT seconds
-#                               (macOS has no `timeout`); recorded as `killed`
+# listed (expected), executed (started/finished), passed, failed, skipped. The
+# verdict comes from scripts/ui-e2e-classify.py, and each way it can read green
+# while testing nothing is a failure there:
+#   - no browser installed      -> `missing_browser`
+#   - no / unreadable report,
+#     or nothing executed       -> `no_binaries`
+#   - a test skipped            -> `skipped` (a layout check that did not run)
+#   - the run hangs             -> the watchdog kills it at UI_E2E_TIMEOUT
+#                                  seconds (macOS has no `timeout`): `killed`
 UI_E2E_TIMEOUT="${UI_E2E_TIMEOUT:-900}"
 
 gate_ui_e2e() {
     local gate=ui-e2e
     local log="$EVID/$gate.log" ui="$ROOT/web/ui" rc verdict trunc=none
-    local report="$ROOT/web/ui/e2e/.results/results.json" counts total passed failed skipped
+    local report="$ROOT/web/ui/e2e/.results/results.json" listed ran passed failed skipped
     if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
     reset_units
     for tool in npm perl; do
@@ -642,37 +644,20 @@ gate_ui_e2e() {
     # A killed run cannot stop its fixture servers; nothing else serves from .run/.
     pkill -f "$ROOT/web/ui/e2e/.run/" >/dev/null 2>&1
 
-    counts="$(python3 - "$report" <<'PY'
-import json, sys
-try:
-    stats = json.load(open(sys.argv[1])).get("stats", {})
-except (OSError, ValueError):
-    print("-1 0 0 0"); sys.exit(0)
-p, f, fl, s = (int(stats.get(k, 0)) for k in ("expected", "unexpected", "flaky", "skipped"))
-print("%d %d %d %d" % (p + f + fl + s, p, f + fl, s))
-PY
-)"
-    read -r total passed failed skipped <<EOF
-$counts
+    # The verdict is scripts/ui-e2e-classify.py's (tested by
+    # scripts/tests/test-ui-e2e-classify.sh): listed = every test reported,
+    # ran = those that executed, so a skipped test leaves finished < expected
+    # and verify-evidence.sh rejects the unit as well.
+    read -r verdict trunc listed ran passed failed skipped <<EOF
+$(python3 "$ROOT/scripts/ui-e2e-classify.py" "$report" "$rc" "$log")
 EOF
-    verdict=pass
-    if grep -q -E "Executable doesn't exist|npx playwright install" "$log"; then
-        trunc=missing_browser
-        verdict=fail
-    elif [ "$rc" -eq 142 ] || [ "$rc" -eq 14 ]; then
-        trunc=killed
-        verdict=fail
-    elif [ "$total" -le 0 ]; then
-        trunc=no_binaries
-        verdict=fail
-    elif [ "$failed" -gt 0 ] || [ "$rc" -ne 0 ]; then
-        verdict=fail
+    if [ -z "${skipped:-}" ]; then
+        verdict=fail trunc=classifier_error listed=0 ran=0 passed=0 failed=0 skipped=0
     fi
-    [ "$total" -ge 0 ] || total=0
-    add_unit playwright "$total" 1 "$total" "$total" "$passed" "$failed" "$skipped" \
+    add_unit playwright "$listed" 1 "$ran" "$ran" "$passed" "$failed" "$skipped" \
         "$rc" "$verdict" "$trunc"
     write_evidence "$gate" "npm run test:e2e" "$rc" "$verdict" "$trunc"
-    record "$gate" "$verdict" "($passed passed, $failed failed of $total$([ "$trunc" = none ] || echo "; $trunc"))"
+    record "$gate" "$verdict" "($passed passed, $failed failed, $skipped skipped of $listed$([ "$trunc" = none ] || echo "; $trunc"))"
 }
 
 # ------------------------------------------------- what this branch changed, and from where
