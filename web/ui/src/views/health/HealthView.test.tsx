@@ -335,8 +335,10 @@ describe("Quality signal widget (CR-203 items 13 and 20)", () => {
     const body = seen(disclosure.querySelector("p"));
     expect(body).toContain("[metric_thresholds]");
     expect(body).toContain(".logos/rules.toml");
-    expect(body).toContain("resets the gate's baseline");
-    expect(body).toContain("logos gate --save");
+    // FR-GV-10: the persisting gate re-baselines by itself — no manual save is asked for.
+    expect(body).toContain("re-baselines the gate");
+    expect(body).toContain("the next logos gate run saves the new score as the baseline by itself");
+    expect(body).not.toContain("--save");
     // The internal term is glossed in the disclosure too.
     expect(disclosure.querySelector('dfn[data-term="baseline"]')).not.toBeNull();
   });

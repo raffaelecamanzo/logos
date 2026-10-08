@@ -167,13 +167,14 @@ export function scopeLine(scored: number, excluded: number): string {
 }
 
 /** The thresholds disclosure (item 20): what the fingerprint is, and why a change
- *  to it is announced rather than silent (FR-GV-10). */
+ *  to it is announced rather than silent — the persisting `gate` re-baselines on
+ *  a thresholds-hash mismatch by itself (FR-GV-10, `governance::gate`). */
 export const THRESHOLDS_DISCLOSURE: { readonly summary: string; readonly body: CopyText } = {
   summary: "Thresholds fingerprint",
   body: [
-    "A fingerprint of the detection thresholds this snapshot was scored with: the defaults plus any [metric_thresholds] keys set in .logos/rules.toml. It changes when one of those keys changes, and that resets the gate's ",
+    "A fingerprint of the detection thresholds this snapshot was scored with: the defaults plus any [metric_thresholds] keys set in .logos/rules.toml. It changes when one of those keys changes, and a change re-baselines the gate: the next logos gate run saves the new score as the ",
     gloss("baseline"),
-    ": the next gate passes informationally until the new score is saved with logos gate --save. Nothing to do unless the change was unintended.",
+    " by itself and passes informationally, with a notice, and until then this page shows an informational pass. Nothing to do unless the change was unintended.",
   ],
 };
 
