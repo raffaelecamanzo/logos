@@ -254,6 +254,9 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     await screen.findByRole("table", { name: "Files ranked by risk" });
     const w = widget("Ownership dispersion");
     expectWidgetCopy(w, ownershipDispersion, { multiAuthor: false });
+    // Pinned apart from the catalogue: expectWidgetCopy compares against the
+    // catalogue's own action, so a wrong branch there would agree with itself.
+    expect(w.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "none");
     expect(within(w as HTMLElement).getByText(filesAbsence.singleAuthor)).toHaveAttribute("data-widget-absence");
     expect(screen.queryByRole("table", { name: "Ownership dispersion" })).toBeNull();
   });
