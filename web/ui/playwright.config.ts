@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig, devices } from "@playwright/test";
 
 // Browser tests for the web UI (S-611, CR-203 §11, FR-UI-40). Build-time-only,
@@ -18,8 +20,11 @@ import { defineConfig, devices } from "@playwright/test";
 const PROJECT_PORT = Number(process.env.LOGOS_E2E_PROJECT_PORT ?? 4991);
 const WORKSPACE_PORT = Number(process.env.LOGOS_E2E_WORKSPACE_PORT ?? 4992);
 
+// Absolute, so scripts/gate.sh can stop a stray fixture script of THIS tree by name.
+const SERVE_FIXTURE = fileURLToPath(new URL("./e2e/serve-fixture.sh", import.meta.url));
+
 const server = (kind: "single" | "workspace", port: number) => ({
-  command: `bash e2e/serve-fixture.sh ${kind} ${port}`,
+  command: `bash "${SERVE_FIXTURE}" ${kind} ${port}`,
   url: `http://127.0.0.1:${port}/`,
   // Never adopt a server already on the port: it may be another tree's binary.
   reuseExistingServer: false,

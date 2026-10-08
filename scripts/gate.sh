@@ -591,8 +591,9 @@ gate_ui() { # gate_name npm_script
 #   - no / unreadable report,
 #     or nothing executed       -> `no_binaries`
 #   - a test skipped            -> `skipped` (a layout check that did not run)
-#   - the run hangs             -> the watchdog kills it at UI_E2E_TIMEOUT
-#                                  seconds (macOS has no `timeout`): `killed`
+#   - the run hangs             -> scripts/run-bounded.pl kills its process
+#                                  tree at UI_E2E_TIMEOUT seconds (macOS has
+#                                  no `timeout`): `killed`
 UI_E2E_TIMEOUT="${UI_E2E_TIMEOUT:-900}"
 
 gate_ui_e2e() {
@@ -601,6 +602,7 @@ gate_ui_e2e() {
     local report="$ROOT/web/ui/e2e/.results/results.json" listed ran passed failed skipped
     if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
     reset_units
+    local tool
     for tool in npm perl; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "$tool is not installed" >"$log"
@@ -639,9 +641,13 @@ gate_ui_e2e() {
     rm -f "$report"
     echo "== npm run test:e2e (bounded at ${UI_E2E_TIMEOUT}s)" >>"$log"
     (cd "$ui" && LOGOS_E2E_BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/logos" \
-        perl -e 'alarm shift; exec @ARGV' "$UI_E2E_TIMEOUT" npm run test:e2e) >>"$log" 2>&1
+        perl "$ROOT/scripts/run-bounded.pl" "$UI_E2E_TIMEOUT" npm run test:e2e) >>"$log" 2>&1
     rc=$?
-    # A killed run cannot stop its fixture servers; nothing else serves from .run/.
+    # run-bounded.pl kills the run's whole process group on timeout, but
+    # Playwright starts each fixture server detached, in a group of its own. Both
+    # the fixture script and the server it execs name THIS tree's absolute paths,
+    # so these patterns reach only this tree's servers.
+    pkill -f "$ROOT/web/ui/e2e/serve-fixture.sh" >/dev/null 2>&1
     pkill -f "$ROOT/web/ui/e2e/.run/" >/dev/null 2>&1
 
     # The verdict is scripts/ui-e2e-classify.py's (tested by
