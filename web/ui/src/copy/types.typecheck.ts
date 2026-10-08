@@ -10,6 +10,8 @@
  * fails the build either way.
  */
 
+import type { WidgetProps } from "../components/Widget.tsx";
+
 import type { CopyEntry, NoExplanationEntry } from "./types.ts";
 
 // @ts-expect-error — `what` is missing.
@@ -43,3 +45,9 @@ export const entryClaimingException: CopyEntry = { noExplanation: "project-overv
 
 // @ts-expect-error — the exception is not a `CopyEntry`, so it cannot stand where one is required.
 export const exceptionAsEntry: CopyEntry = projectOverviewException;
+
+// @ts-expect-error — the exception renders no explanation part, so it takes no note to put in one.
+export const exceptionWithNote: WidgetProps = { title: "t", copy: projectOverviewException, note: "n" };
+
+/** An ordinary entry still takes its note. */
+export const entryWithNote: WidgetProps = { title: "t", copy: { what: "w", why: "w" }, note: "n" };

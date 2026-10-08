@@ -46,18 +46,22 @@ type FigureRow =
       absence: ReactNode;
     };
 
-/** A figure widget: its words from a catalogue entry. */
-type CopyMode = {
-  /** The widget's catalogue entry — or the one entry with no explanation. */
-  copy: CopyEntry | NoExplanationEntry;
-  panel?: undefined;
-  /**
-   * Secondary detail for the explanation, after why: text the read-model
-   * supplies (its own caveats, rendered verbatim), which a catalogue cannot
-   * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
-   */
-  note?: ReactNode;
-} & FigureRow;
+/** A figure widget: its words from a catalogue entry — or, for the one entry
+ *  with no explanation (CR-208), no words and no explanation part at all, so it
+ *  takes no `note` either. */
+type CopyMode = (
+  | {
+      /** The widget's catalogue entry. */
+      copy: CopyEntry;
+      /**
+       * Secondary detail for the explanation, after why: text the read-model
+       * supplies (its own caveats, rendered verbatim), which a catalogue cannot
+       * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
+       */
+      note?: ReactNode;
+    }
+  | { copy: NoExplanationEntry; note?: undefined }
+) & { panel?: undefined } & FigureRow;
 
 /** A tool panel: its one line from the `TOOL_PANELS` register, and no figure
  *  or why. */
@@ -193,15 +197,7 @@ export function Widget(props: WidgetProps) {
           </div>
         )}
 
-        {noExplanation ? (
-          isRendered(note) && (
-            <div className={styles.explanation} data-widget-part="explanation">
-              <div className={styles.note} data-widget-note="">
-                {note}
-              </div>
-            </div>
-          )
-        ) : (
+        {!noExplanation && (
           <div className={styles.explanation} data-widget-part="explanation">
             <p className={styles.body} data-widget-copy="what">
               <CopyTextView text={copy.what} />
