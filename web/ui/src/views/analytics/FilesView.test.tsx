@@ -105,9 +105,32 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     const absence = await screen.findByText(filesAbsence.unranked);
     expect(absence).toHaveAttribute("data-widget-absence");
     const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, coverageMissing: false });
+    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, filtered: false, coverageMissing: false });
     expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("logos hotspots");
     expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("an empty board under a filter keeps the filter switchable and does not ask to rank", async () => {
+    const user = userEvent.setup();
+    const urls: string[] = [];
+    stubFetch((url) => {
+      urls.push(url);
+      if (!url.includes("untested=true")) return model();
+      const m = EMPTY();
+      m.hotspots.untested = true;
+      return m;
+    });
+    render(<FilesView />);
+    await screen.findByRole("table", { name: "Files ranked by risk" });
+    await user.click(screen.getByRole("button", { name: "Untested only" }));
+    const absence = await screen.findByText(filesAbsence.filteredOut);
+    expect(absence).toHaveAttribute("data-widget-absence");
+    const w = widget("Files ranked by risk");
+    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, filtered: true, coverageMissing: false });
+    expect(w.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "none");
+    // The way back is on the page.
+    await user.click(within(w as HTMLElement).getByRole("button", { name: "Show all files" }));
+    expect(await screen.findByRole("table", { name: "Files ranked by risk" })).toBeInTheDocument();
   });
 
   it("states the read-model's own notice as the absence when it has one", async () => {
@@ -162,7 +185,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     render(<FilesView />);
     await screen.findByRole("table", { name: "Files ranked by risk" });
     // src/hot.rs is fresh: one ranked file has a coverage figure.
-    expectWidgetCopy(widget("Files ranked by risk"), filesRankedByRisk, { ranked: 2, coverageMissing: false });
+    expectWidgetCopy(widget("Files ranked by risk"), filesRankedByRisk, { ranked: 2, filtered: false, coverageMissing: false });
     cleanup();
 
     // No report ingested: the read-model falls back to static reachability.
@@ -174,7 +197,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     render(<FilesView />);
     await screen.findByRole("table", { name: "Files ranked by risk" });
     const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, coverageMissing: true });
+    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, filtered: false, coverageMissing: true });
     expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos coverage ingest");
   });
 
@@ -189,7 +212,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     render(<FilesView />);
     await screen.findByRole("table", { name: "Files ranked by risk" });
     const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, coverageMissing: false });
+    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, filtered: true, coverageMissing: false });
     expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent(/^source code$/);
   });
 

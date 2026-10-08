@@ -158,6 +158,44 @@ function FilesContent({
     [ownership],
   );
 
+  const toggles = (
+    <p className="muted">
+      {untested ? (
+        <>
+          <Button variant="ghost" size="sm" onClick={() => onToggle(false)}>
+            Show all files
+          </Button>{" "}
+          · <span className="muted">untested only</span>
+        </>
+      ) : (
+        <>
+          <span className="muted">all files</span> ·{" "}
+          <Button variant="ghost" size="sm" onClick={() => onToggle(true)}>
+            Untested only
+          </Button>
+        </>
+      )}
+      {" · "}
+      {productionScope ? (
+        <>
+          <span className="muted">production files only</span>{" "}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onToggleProductionScope(false)}
+          >
+            Show test files too
+          </Button>
+        </>
+      ) : (
+        <Button variant="ghost" size="sm" onClick={() => onToggleProductionScope(true)}>
+          Production files only
+        </Button>
+      )}
+    </p>
+  );
+  const filtered = hotspots.untested || hotspots.production_scope;
+
   const top = hotspots.files[0];
   if (!top) {
     return (
@@ -165,9 +203,12 @@ function FilesContent({
         <Widget
           title="Files ranked by risk"
           copy={filesRankedByRisk}
-          state={{ ranked: 0, coverageMissing: hotspots.coverage_basis !== "coverage" }}
-          absence={hotspots.notice ?? filesAbsence.unranked}
-        />
+          state={{ ranked: 0, filtered, coverageMissing: hotspots.coverage_basis !== "coverage" }}
+          absence={filtered ? filesAbsence.filteredOut : (hotspots.notice ?? filesAbsence.unranked)}
+        >
+          {/* The filters stay reachable, or a filter that empties the board is a dead end. */}
+          {filtered && toggles}
+        </Widget>
       </WidgetStack>
     );
   }
@@ -182,7 +223,7 @@ function FilesContent({
       <Widget
         title="Files ranked by risk"
         copy={filesRankedByRisk}
-        state={{ ranked: hotspots.ranked_files, coverageMissing }}
+        state={{ ranked: hotspots.ranked_files, filtered, coverageMissing }}
         figure={
           <>
             <span>
@@ -194,40 +235,7 @@ function FilesContent({
           </>
         }
       >
-        <p className="muted">
-          {untested ? (
-            <>
-              <Button variant="ghost" size="sm" onClick={() => onToggle(false)}>
-                Show all files
-              </Button>{" "}
-              · <span className="muted">untested only</span>
-            </>
-          ) : (
-            <>
-              <span className="muted">all files</span> ·{" "}
-              <Button variant="ghost" size="sm" onClick={() => onToggle(true)}>
-                Untested only
-              </Button>
-            </>
-          )}
-          {" · "}
-          {productionScope ? (
-            <>
-              <span className="muted">production files only</span>{" "}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onToggleProductionScope(false)}
-              >
-                Show test files too
-              </Button>
-            </>
-          ) : (
-            <Button variant="ghost" size="sm" onClick={() => onToggleProductionScope(true)}>
-              Production files only
-            </Button>
-          )}
-        </p>
+        {toggles}
         <DataTable
           caption="Files ranked by risk"
           columns={fileColumns}

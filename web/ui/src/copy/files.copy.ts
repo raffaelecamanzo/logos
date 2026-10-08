@@ -8,8 +8,10 @@ import { noAction, type CopyEntry } from "./types.ts";
 
 /** Files ranked by risk: what the board holds decides what to do about it. */
 export interface RiskState {
-  /** Files on the board; 0 when the history has not been ranked. */
+  /** Files on the board; 0 when the history has not been ranked, or a filter left none. */
   readonly ranked: number;
+  /** A filter (untested only, production files only) is narrowing the board. */
+  readonly filtered: boolean;
   /** No coverage report is ingested, so every Coverage cell reads n/a. */
   readonly coverageMissing: boolean;
 }
@@ -17,7 +19,9 @@ export interface RiskState {
 export const filesRankedByRisk: CopyEntry<RiskState> = {
   what: "Files ranked by how often they change multiplied by how complex they are, most at risk first.",
   why: "A file that changes often and is hard to follow is the likeliest place for a change to break something.",
-  action: ({ ranked, coverageMissing }) => {
+  action: ({ ranked, filtered, coverageMissing }) => {
+    // An empty board under a filter is the filter's answer, not a missing ranking.
+    if (ranked === 0 && filtered) return noAction;
     if (ranked === 0) {
       return {
         kind: "act",
@@ -66,5 +70,6 @@ export const ownershipDispersion: CopyEntry<OwnershipState> = {
 export const filesAbsence = {
   /** Shown when the read-model carries no notice of its own. */
   unranked: "No files ranked yet.",
+  filteredOut: "No ranked file matches the current filter.",
   singleAuthor: "Single-author history — every file has one author, so its ownership cannot be dispersed.",
 } as const;
