@@ -87,6 +87,20 @@ describe("widget source scan (S-617)", () => {
     ]);
   });
 
+  it("reads a Card or Widget imported without an extension, or through a namespace (review fix)", () => {
+    const src = `import { Widget } from "../../components/Widget";
+import * as C from "../../components/index.ts";
+export const A = () => <Widget title="A" />;
+export const B = () => <C.Widget title="B" panel="notAPanel" />;
+export const D = () => <C.Card title="D">x</C.Card>;
+`;
+    expect(scan({ "/src/views/x/X.tsx": src }).problems.map((p) => p.problem)).toEqual([
+      expect.stringMatching(/<Widget title="A"> names neither/),
+      expect.stringMatching(/panel "notAPanel" is not registered/),
+      expect.stringMatching(/renders a Card directly \(<C\.Card>\)/),
+    ]);
+  });
+
   describe("what a Widget names", () => {
     const head = `import { Widget } from "../../components/index.ts";\n`;
     const file = "/src/views/x/X.tsx";

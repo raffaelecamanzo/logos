@@ -77,12 +77,22 @@ function readImports(file: string, sf: ts.SourceFile) {
     if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
     const module = resolveImport(file, stmt.moduleSpecifier.text);
     const named = stmt.importClause?.namedBindings;
-    if (!named || !ts.isNamedImports(named)) continue;
+    if (!named) continue;
+    // `moduleResolution: "bundler"` also resolves an import with no extension.
+    const fromComponents = /\/components(?:\/(?:index|Card|Widget)(?:\.tsx?)?)?$/.test(module);
+    // `import * as C from "…/components"` renders `<C.Card>` / `<C.Widget>`.
+    if (ts.isNamespaceImport(named)) {
+      if (fromComponents) {
+        cards.add(`${named.name.text}.Card`);
+        widgets.add(`${named.name.text}.Widget`);
+      }
+      continue;
+    }
     for (const el of named.elements) {
       const exported = (el.propertyName ?? el.name).text;
       const local = el.name.text;
       if (module.endsWith(".copy.ts")) catalogue.set(local, { module, exported });
-      if (/\/components(\/index\.ts|\/Card\.tsx|\/Widget\.tsx)?$/.test(module)) {
+      if (fromComponents) {
         if (exported === "Card") cards.add(local);
         if (exported === "Widget") widgets.add(local);
       }
