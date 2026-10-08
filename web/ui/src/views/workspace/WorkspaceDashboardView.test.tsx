@@ -596,9 +596,17 @@ describe("every widget explains itself, in one stack (S-613)", () => {
       expect(th).toHaveAttribute("aria-sort", "none");
       expect(rowOrder()).toEqual(before);
     }
-    // The prose around a partial term stays plain, beside it.
-    const promoted = glossedHeaders[3].querySelector("dfn")!;
-    expect(promoted.firstChild?.textContent).toBe("used by another service");
+    // The prose around a partial term stays plain, beside it — before the term
+    // and after it — and reads as the header outside the sort button.
+    const visibleBeside = (th: HTMLElement) => {
+      const clone = th.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll('button, [role="tooltip"]').forEach((n) => n.remove());
+      return clone.textContent?.trim();
+    };
+    expect(glossedHeaders[0].querySelector("dfn")!.firstChild?.textContent).toBe("Reference resolution");
+    expect(visibleBeside(glossedHeaders[0])).toBe("Reference resolution (its own)");
+    expect(glossedHeaders[3].querySelector("dfn")!.firstChild?.textContent).toBe("used by another service");
+    expect(visibleBeside(glossedHeaders[3])).toBe("…of which used by another service");
   });
 
   it("Members has no per-row action column; a degraded member still shows its red State badge and reason (CR-207 AC-1)", async () => {

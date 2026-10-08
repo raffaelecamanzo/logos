@@ -153,6 +153,31 @@ describe("DataTable header gloss (S-616, FR-UI-39)", () => {
     expect(visible).toBe("…of which used by another service ");
   });
 
+  it("keeps the words after the term too, plain beside it (CR-208)", () => {
+    const cols: Column<Row>[] = [
+      {
+        key: "score",
+        header: "Reference resolution (its own)",
+        gloss: "referenceResolution",
+        glossText: "Reference resolution",
+        cell: (r) => r.score,
+        sortValue: (r) => r.score,
+      },
+    ];
+    render(<DataTable caption="t" columns={cols} rows={ROWS.slice(0, 1)} rowKey={(r) => r.name} />);
+    const header = screen.getByRole("columnheader", { name: "Reference resolution (its own)" });
+    const term = header.querySelector("dfn[data-term='referenceResolution']")!;
+    expect(term.firstChild?.textContent).toBe("Reference resolution");
+    const sort = within(header).getByRole("button");
+    const tip = term.querySelector('[role="tooltip"]')!.textContent!;
+    const visible = [...header.childNodes]
+      .filter((n) => n !== sort)
+      .map((n) => n.textContent)
+      .join("")
+      .replace(tip, "");
+    expect(visible).toBe("Reference resolution (its own) ");
+  });
+
   it("has one sort control per glossed header, and activating the term never sorts (CR-208 AC-4)", async () => {
     const user = userEvent.setup();
     render(<DataTable caption="t" columns={[...GLOSSED, ...PARTIAL]} rows={ROWS.slice(0, 3)} rowKey={(r) => r.name} />);
