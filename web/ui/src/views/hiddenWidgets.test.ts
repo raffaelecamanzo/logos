@@ -1,16 +1,44 @@
 import { describe, expect, it } from "vitest";
 
 import { removeHiddenWidgetEntry } from "../test/hiddenWidgets.ts";
-import { HIDDEN_WIDGETS, isWidgetHidden } from "./hiddenWidgets.ts";
+import { hiddenViewLanding, HIDDEN_WIDGETS, isViewHidden, isWidgetHidden } from "./hiddenWidgets.ts";
 
 describe("the hidden-widget register (S-612, FR-UI-41)", () => {
-  it("hides exactly the four CR-203 widgets", () => {
+  it("hides exactly the four CR-203 widgets and the two CR-208 ones", () => {
     expect(HIDDEN_WIDGETS.map((w) => w.id)).toEqual([
       "coverage-by-relation-arm",
       "cross-service-impact",
       "non-gated-tier",
       "architecture-cycles",
+      "architecture-view",
+      "declared-contracts",
     ]);
+  });
+
+  it("hides one whole view — the Architecture view, landing on Health (CR-208)", () => {
+    expect(HIDDEN_WIDGETS.filter((w) => w.view !== undefined).map((w) => [w.id, w.view])).toEqual([
+      ["architecture-view", { path: "/architecture", landsOn: "/health" }],
+    ]);
+    expect(isViewHidden("/architecture")).toBe(true);
+    expect(isViewHidden("/health")).toBe(false);
+    expect(hiddenViewLanding("/architecture")).toBe("/health");
+    expect(hiddenViewLanding("/architecture/x")).toBe("/health");
+    // A whole path segment, never a prefix of one.
+    expect(hiddenViewLanding("/architectures")).toBeNull();
+    expect(hiddenViewLanding("/health")).toBeNull();
+  });
+
+  it("answers the view lookups from the register, so removing the entry brings the view back", () => {
+    const restore = removeHiddenWidgetEntry("architecture-view");
+    try {
+      expect(isViewHidden("/architecture")).toBe(false);
+      expect(hiddenViewLanding("/architecture")).toBeNull();
+      // The Cycles band inside the view stays hidden on its own entry.
+      expect(isWidgetHidden("architecture-cycles")).toBe(true);
+    } finally {
+      restore();
+    }
+    expect(hiddenViewLanding("/architecture")).toBe("/health");
   });
 
   it("names, for every entry, the widget, where it was, why, and what still serves its data", () => {

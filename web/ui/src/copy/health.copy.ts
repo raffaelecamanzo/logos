@@ -160,7 +160,12 @@ export function percent(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
 }
 
-const ARCHITECTURE = { label: "the Architecture dependency matrix", href: "/architecture" } as const;
+/** Acyclicity and Depth point at the command line's module dependencies (CR-208):
+ *  the Architecture view is hidden, and no text may point at a hidden widget
+ *  (NFR-CC-04). `logos dsm` prints the module-to-module dependencies, not a list
+ *  of cycles or chains, so the sentence claims no more than that; their own lists
+ *  are CR-209's. */
+const MODULE_DEPENDENCIES = "The module-to-module dependencies are printed by";
 
 export const modularity: DimensionCopy = {
   what: "Do directories form real modules? This scores how many dependencies stay inside the directory they start in.",
@@ -177,8 +182,7 @@ export const acyclicity: DimensionCopy = {
   why: "A unit in a cycle cannot be changed, tested or released without the others in it.",
   raw: (raw) => `${raw} dependency ${raw === 1 ? "cycle" : "cycles"}`,
   unlisted: {
-    statement: "No list of the cycles is recorded with this snapshot. They are shown in",
-    view: ARCHITECTURE,
+    statement: `No list of the cycles is recorded with this snapshot. ${MODULE_DEPENDENCIES}`,
     command: "logos dsm",
   },
 };
@@ -188,8 +192,7 @@ export const depth: DimensionCopy = {
   why: "In a long chain, a change at the bottom can ripple through every layer above it.",
   raw: (raw) => `longest chain of ${raw} ${raw === 1 ? "unit" : "units"}, each cycle counted as one`,
   unlisted: {
-    statement: "No list of the longest chains is recorded with this snapshot. They are shown in",
-    view: ARCHITECTURE,
+    statement: `No list of the longest chains is recorded with this snapshot. ${MODULE_DEPENDENCIES}`,
     command: "logos dsm",
   },
 };

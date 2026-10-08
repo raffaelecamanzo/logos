@@ -7,6 +7,8 @@
  * S-192; migration completed in Sprint 33). The Dashboard lives at `/` (S-194).
  */
 
+import { isViewHidden } from "./views/hiddenWidgets.ts";
+
 /** The three sidebar groups (CR-042): primary read surfaces, risk & coverage,
  *  and the isolated policy editor. */
 export type NavGroup = "A" | "B" | "C";
@@ -76,6 +78,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // S-612 (FR-UI-41): "Architecture", not "Architecture / Cycles" — the Cycles
   // band and list are hidden through the hidden-widget register, and a label
   // naming them would point at nothing on the page. The route is unchanged.
+  // CR-208 hides the whole view through the same register (`architecture-view`):
+  // the entry stays registered here, and `navItemsFor` leaves it out while the
+  // register names its route, so removing that register entry brings it back.
   {
     id: "architecture",
     label: "Architecture",
@@ -196,14 +201,17 @@ export const NAV_SCOPE_LABELS: Readonly<Record<NavScope, string>> = {
 };
 
 /**
- * The navigable views for the current serve: the unchanged {@link NAV_ITEMS} in
- * single-root mode; in workspace mode, every one of them a workspace view does not
- * replace ({@link NavItem.replacedInWorkspaceBy}), plus {@link WORKSPACE_NAV_ITEMS}.
+ * The navigable views for the current serve: {@link NAV_ITEMS} in single-root
+ * mode; in workspace mode, every one of them a workspace view does not replace
+ * ({@link NavItem.replacedInWorkspaceBy}), plus {@link WORKSPACE_NAV_ITEMS}. In
+ * both, a view the hidden-widget register hides (CR-208, FR-UI-41) is left out —
+ * read off the register at call time, so removing its entry offers it again.
  */
 export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
-  return isWorkspace
+  const offered = isWorkspace
     ? [...NAV_ITEMS.filter((item) => item.replacedInWorkspaceBy === undefined), ...WORKSPACE_NAV_ITEMS]
     : NAV_ITEMS;
+  return offered.filter((item) => !isViewHidden(item.path));
 }
 
 /**

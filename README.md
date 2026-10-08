@@ -189,7 +189,6 @@ logos gate           # ...and fail CI when a change regresses it
 - **Dashboard** and **Health** — the quality signal, language mix, test coverage
   and rule findings at a glance.
 - **Graph** — an interactive, filterable view of symbols, docs and config.
-- **Architecture** — dependency cycles and layering violations.
 - **Files & Risk** — churn × complexity hotspots, joined with coverage.
 - **Chat** — ask compound questions about your codebase. A planner sends read-only
   sub-agents over the graph and the source, then writes back an answer with

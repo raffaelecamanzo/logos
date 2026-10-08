@@ -8,6 +8,7 @@ import { Widget } from "../components/Widget.tsx";
 
 import { expectWidgetCopy } from "./expectWidgetCopy.ts";
 import { coverage, observe, thresholds } from "./fixture.copy.ts";
+import type { NoExplanationEntry } from "./types.ts";
 
 function frame(html: string): Element {
   const host = document.createElement("div");
@@ -125,5 +126,34 @@ describe("expectWidgetCopy", () => {
   ])("fails when the rendered %s is not the named entry's", (_name, override, message) => {
     const { container } = render(<Widget title="Observe" copy={observe} />);
     expect(() => expectWidgetCopy(container.firstElementChild!, { ...observe, ...override })).toThrow(message);
+  });
+
+  // CR-208: the one no-explanation entry (Project Overview).
+  const NONE: NoExplanationEntry = { noExplanation: "project-overview" };
+
+  it("passes on the no-explanation entry, which renders no explanation part", () => {
+    const { container } = render(<Widget title="Project Overview" copy={NONE} absence="No overview yet; run logos scan." />);
+    expect(container.querySelector('[data-widget-part="explanation"]')).toBeNull();
+    expectWidgetCopy(container.firstElementChild!, NONE);
+  });
+
+  it("fails when a widget named by the no-explanation entry renders as an explained one", () => {
+    const { container } = render(<Widget title="Observe" copy={observe} />);
+    expect(() => expectWidgetCopy(container.firstElementChild!, NONE)).toThrow(/declares the exception/);
+  });
+
+  it("fails when a marked frame still renders an explanation part", () => {
+    const html = widgetHtml({}).replace('<div data-widget="">', '<div data-widget="" data-widget-no-explanation="">');
+    expect(() => expectWidgetCopy(frame(html), NONE)).toThrow(/no explanation part/);
+  });
+
+  it("fails when an explained entry's frame is marked as the exception", () => {
+    const html = widgetHtml({}).replace('<div data-widget="">', '<div data-widget="" data-widget-no-explanation="">');
+    expect(() => expectWidgetCopy(frame(html), observe)).toThrow(/only the no-explanation entry's frame/);
+  });
+
+  it("still holds the no-explanation widget to the vocabulary rule over its figure", () => {
+    const { container } = render(<Widget title="Project Overview" copy={NONE} figure="Coverage by arm." />);
+    expect(() => expectWidgetCopy(container.firstElementChild!, NONE)).toThrow(/outside a Term gloss/);
   });
 });

@@ -53,11 +53,11 @@ import {
   ErrorPanel,
   FigureNote,
   LoadingState,
-  Term,
   Widget,
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
+import { GLOSSARY } from "../../copy/glossary.ts";
 import {
   DASHBOARD_TEXT,
   members,
@@ -317,11 +317,9 @@ function tallyCell(row: RosterRow, pick: (t: MemberReachability) => number) {
 }
 
 /** The roster's columns. The figure headers are glossed (CR-203 §3.2 D item 3):
- *  plain words, each naming a precise figure the gloss defines.
- *
- *  Built on render, not at module load: the headers are elements, and an element
- *  created at import time would make every module importing this view (the app
- *  shell, its route table) need the gloss component just to load. */
+ *  plain words, each naming a precise figure the gloss defines. Each header is a
+ *  string glossed through the column's `gloss` slot, which renders the term beside
+ *  the sort button rather than inside it (CR-208). */
 const rosterColumns = (): Column<RosterRow>[] => [
   { key: "member", header: "Member", mono: true, cell: (r) => r.member, sortValue: (r) => r.member },
   {
@@ -344,42 +342,41 @@ const rosterColumns = (): Column<RosterRow>[] => [
     // This member's OWN signal, named with it. Never averaged across the roster
     // (BR-56): the figure is defined against one member's graph.
     key: "resolution",
-    header: (
-      <>
-        <Term term="referenceResolution" /> (its own)
-      </>
-    ),
+    header: `${GLOSSARY.referenceResolution.label} (its own)`,
+    gloss: "referenceResolution",
+    glossText: GLOSSARY.referenceResolution.label,
     cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
     sortValue: (r) => r.resolution ?? "",
   },
   {
     key: "extraRoots",
-    header: <Term term="entryPointsFromOtherServices" />,
+    header: GLOSSARY.entryPointsFromOtherServices.label,
+    gloss: "entryPointsFromOtherServices",
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.extra_roots),
     sortValue: (r) => r.tally?.extra_roots ?? -1,
   },
   {
     key: "deadPerRepo",
-    header: <Term term="unusedInOwnGraph" />,
+    header: GLOSSARY.unusedInOwnGraph.label,
+    gloss: "unusedInOwnGraph",
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.dead_per_repo),
     sortValue: (r) => r.tally?.dead_per_repo ?? -1,
   },
   {
     key: "promoted",
-    header: (
-      <>
-        …of which <Term term="usedByAnotherService" />
-      </>
-    ),
+    header: `…of which ${GLOSSARY.usedByAnotherService.label}`,
+    gloss: "usedByAnotherService",
+    glossText: GLOSSARY.usedByAnotherService.label,
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.live_via_cross_service),
     sortValue: (r) => r.tally?.live_via_cross_service ?? -1,
   },
   {
     key: "deadAppWide",
-    header: <Term term="unusedAcrossWorkspace" />,
+    header: GLOSSARY.unusedAcrossWorkspace.label,
+    gloss: "unusedAcrossWorkspace",
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.dead_app_wide),
     sortValue: (r) => r.tally?.dead_app_wide ?? -1,

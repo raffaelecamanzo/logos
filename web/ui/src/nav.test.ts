@@ -13,6 +13,7 @@ import {
   type NavItem,
   type NavScope,
 } from "./nav.ts";
+import { removeHiddenWidgetEntry } from "./test/hiddenWidgets.ts";
 
 /** Every registered entry, in both modes. */
 const ALL_ITEMS: readonly NavItem[] = [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS];
@@ -20,15 +21,17 @@ const ALL_ITEMS: readonly NavItem[] = [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS];
 describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
   it("leaves the single-root sidebar EXACTLY as it was — no workspace item leaks in", () => {
     // The AC is "in single-root mode the UI is byte-for-byte unchanged". The sidebar is
-    // the most visible half of that, so pin identity, not just absence.
-    expect(navItemsFor(false)).toEqual(NAV_ITEMS);
+    // the most visible half of that, so pin identity, not just absence — less the
+    // Architecture view, which the hidden-widget register hides (CR-208).
+    expect(navItemsFor(false)).toEqual(NAV_ITEMS.filter((i) => i.id !== "architecture"));
     expect(navItemsFor(false).some((i) => i.id === "workspace")).toBe(false);
   });
 
   it("appends the workspace-only tabs — and only those — in workspace mode", () => {
-    // Less the member Chat, which the Workspace Chat replaces there (S-485).
+    // Less the member Chat, which the Workspace Chat replaces there (S-485), and
+    // the Architecture view, which the register hides (CR-208).
     expect(navItemsFor(true)).toEqual([
-      ...NAV_ITEMS.filter((i) => i.id !== "chat"),
+      ...NAV_ITEMS.filter((i) => i.id !== "chat" && i.id !== "architecture"),
       ...WORKSPACE_NAV_ITEMS,
     ]);
     const added = navItemsFor(true).filter((i) => !NAV_ITEMS.includes(i));
@@ -46,10 +49,10 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
     ]);
   });
 
-  it("drops the member Chat — and only it — from a workspace's member section (S-485)", () => {
+  it("drops the member Chat — and, while the register hides it, Architecture — from a workspace's member section (S-485)", () => {
     // Pinned as the literal id list, for the merge reason the roster above gives.
     const dropped = NAV_ITEMS.filter((i) => !navItemsFor(true).includes(i));
-    expect(dropped.map((i) => i.id)).toEqual(["chat"]);
+    expect(dropped.map((i) => i.id)).toEqual(["chat", "architecture"]);
     // Single-root keeps it: the case above pins the whole list by identity.
     expect(navItemsFor(false).some((i) => i.id === "chat")).toBe(true);
     expect(navItemsFor(false).some((i) => i.id === "workspace-chat")).toBe(false);
@@ -64,6 +67,24 @@ describe("the Architecture tab (S-612, FR-UI-41)", () => {
     expect(item?.label).toBe("Architecture");
     expect(item?.path).toBe("/architecture");
     expect(ALL_ITEMS.some((i) => /cycles/i.test(i.label))).toBe(false);
+  });
+
+  it("is not offered in either mode while the register hides the view (CR-208)", () => {
+    for (const isWorkspace of [false, true]) {
+      expect(navItemsFor(isWorkspace).some((i) => i.path === "/architecture")).toBe(false);
+    }
+  });
+
+  it("is offered again, in its registered place, once the register entry is removed (CR-208)", () => {
+    const restore = removeHiddenWidgetEntry("architecture-view");
+    try {
+      expect(navItemsFor(false)).toEqual(NAV_ITEMS);
+      expect(navItemsFor(true).filter((i) => i.scope === "member")).toEqual(
+        NAV_ITEMS.filter((i) => i.id !== "chat"),
+      );
+    } finally {
+      restore();
+    }
   });
 });
 

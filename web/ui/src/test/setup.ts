@@ -2,6 +2,16 @@
 // Vitest's `expect`, and provide the jsdom shims the design-system components and
 // the router touch (matchMedia for the theme, which jsdom lacks).
 import "@testing-library/jest-dom/vitest";
+import { afterEach, expect } from "vitest";
+
+import { takeNestedSortControls, watchSortButtons } from "./nestedSortControls.ts";
+
+// CR-208 AC-4: no table header's sort button may hold a gloss or any other
+// focusable element, in ANY test that renders a table (see nestedSortControls.ts).
+watchSortButtons();
+afterEach(() => {
+  expect(takeNestedSortControls(), "a table header's sort button holds a focusable element (CR-208 AC-4)").toEqual([]);
+});
 
 // The served shell injects the per-session intent (CSRF) token as a
 // `<meta name="logos-intent">` tag, which `src/intent.ts` reads ONCE at module

@@ -446,10 +446,20 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     }
     const link = (name: string) => within(part(widget(name), "evidence")!).queryByRole("link");
     const command = (name: string) => part(widget(name), "evidence")!.querySelector("code")?.textContent ?? null;
-    expect(link("Acyclicity")).toHaveAttribute("href", "/architecture");
+    // The Architecture view is hidden (CR-208): Acyclicity and Depth point at the
+    // command line alone, and no Health text names the view or its matrix.
+    expect(link("Acyclicity")).toBeNull();
     expect(command("Acyclicity")).toBe("logos dsm");
-    expect(link("Depth")).toHaveAttribute("href", "/architecture");
+    expect(seen(part(widget("Acyclicity"), "evidence"))).toBe(
+      "No list of the cycles is recorded with this snapshot. The module-to-module dependencies are printed by logos dsm.",
+    );
+    expect(link("Depth")).toBeNull();
     expect(command("Depth")).toBe("logos dsm");
+    expect(seen(part(widget("Depth"), "evidence"))).toBe(
+      "No list of the longest chains is recorded with this snapshot. The module-to-module dependencies are printed by logos dsm.",
+    );
+    expect(document.querySelector('a[href^="/architecture"]')).toBeNull();
+    expect(seen(document.body)).not.toMatch(/Architecture|dependency matrix/i);
     expect(link("Equality")).toHaveAttribute("href", "/files");
     expect(command("Equality")).toBe("logos hotspots");
     expect(link("Redundancy")).toBeNull();

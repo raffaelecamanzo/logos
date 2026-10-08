@@ -15,7 +15,9 @@
  * and CR-207 removed the per-row action columns that still rendered it.
  *
  * The words come from a catalogue entry (`copy`), so a view never writes copy
- * inline and a wording change edits one catalogue. An absence renders as a
+ * inline and a wording change edits one catalogue. One entry is typed to have
+ * no explanation (`NoExplanationEntry`, CR-208 — Project Overview); its frame
+ * leaves the explanation part out and is marked `data-widget-no-explanation`. An absence renders as a
  * left-aligned statement in the figure row; the centred `EmptyState` is for a
  * view with no widget at all, never here.
  *
@@ -29,7 +31,7 @@
 import type { ReactNode } from "react";
 
 import { TOOL_PANELS, type ToolPanelKey } from "../copy/toolPanels.ts";
-import type { CopyEntry, CopyText } from "../copy/types.ts";
+import type { CopyEntry, CopyText, NoExplanationEntry } from "../copy/types.ts";
 
 import { Card } from "./Card.tsx";
 import { Term } from "./Term.tsx";
@@ -44,18 +46,22 @@ type FigureRow =
       absence: ReactNode;
     };
 
-/** A figure widget: its words from a catalogue entry. */
-type CopyMode = {
-  /** The widget's catalogue entry. */
-  copy: CopyEntry;
-  panel?: undefined;
-  /**
-   * Secondary detail for the explanation, after why: text the read-model
-   * supplies (its own caveats, rendered verbatim), which a catalogue cannot
-   * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
-   */
-  note?: ReactNode;
-} & FigureRow;
+/** A figure widget: its words from a catalogue entry — or, for the one entry
+ *  with no explanation (CR-208), no words and no explanation part at all, so it
+ *  takes no `note` either. */
+type CopyMode = (
+  | {
+      /** The widget's catalogue entry. */
+      copy: CopyEntry;
+      /**
+       * Secondary detail for the explanation, after why: text the read-model
+       * supplies (its own caveats, rendered verbatim), which a catalogue cannot
+       * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
+       */
+      note?: ReactNode;
+    }
+  | { copy: NoExplanationEntry; note?: undefined }
+) & { panel?: undefined } & FigureRow;
 
 /** A tool panel: its one line from the `TOOL_PANELS` register, and no figure
  *  or why. */
@@ -170,10 +176,13 @@ export function Widget(props: WidgetProps) {
 
   const { copy, note, figure, absence } = props;
   const hasAbsence = isRendered(absence);
+  const noExplanation = "noExplanation" in copy;
 
   return (
     <Card className={cardClass}>
-      <div className={styles.frame} data-widget="">
+      {/* The exception is marked on the frame, as a panel is, so a layout check
+          excuses this one frame by declaration rather than by a missing part. */}
+      <div className={styles.frame} data-widget="" data-widget-no-explanation={noExplanation ? "" : undefined}>
         <TitleRow title={title} badge={badge} />
 
         {(hasAbsence || isRendered(figure)) && (
@@ -188,19 +197,21 @@ export function Widget(props: WidgetProps) {
           </div>
         )}
 
-        <div className={styles.explanation} data-widget-part="explanation">
-          <p className={styles.body} data-widget-copy="what">
-            <CopyTextView text={copy.what} />
-          </p>
-          <p className={styles.body} data-widget-copy="why">
-            <CopyTextView text={copy.why} />
-          </p>
-          {isRendered(note) && (
-            <div className={styles.note} data-widget-note="">
-              {note}
-            </div>
-          )}
-        </div>
+        {!noExplanation && (
+          <div className={styles.explanation} data-widget-part="explanation">
+            <p className={styles.body} data-widget-copy="what">
+              <CopyTextView text={copy.what} />
+            </p>
+            <p className={styles.body} data-widget-copy="why">
+              <CopyTextView text={copy.why} />
+            </p>
+            {isRendered(note) && (
+              <div className={styles.note} data-widget-note="">
+                {note}
+              </div>
+            )}
+          </div>
+        )}
 
         <Evidence>{children}</Evidence>
       </div>

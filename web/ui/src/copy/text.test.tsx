@@ -6,7 +6,15 @@ import { describe, expect, it } from "vitest";
 import { Widget } from "../components/Widget.tsx";
 
 import { expectWidgetCopy } from "./expectWidgetCopy.ts";
-import { copyTextString, findUnglossedTerms, findUnglossedUses, isCopyEntry, plainPart, sentenceLiterals } from "./text.ts";
+import {
+  copyTextString,
+  findUnglossedTerms,
+  findUnglossedUses,
+  isCopyEntry,
+  isNoExplanationEntry,
+  plainPart,
+  sentenceLiterals,
+} from "./text.ts";
 import { gloss, type CopyEntry } from "./types.ts";
 
 describe("the first-use rule", () => {
@@ -115,5 +123,24 @@ describe("isCopyEntry", () => {
     ["a disclosure, whose text is not what and why", { summary: "a", body: "b" }],
   ])("rejects %s", (_name, value) => {
     expect(isCopyEntry(value)).toBe(false);
+  });
+});
+
+// CR-208: the one no-explanation entry is told apart by its marker AND by carrying
+// neither part — so an entry that claims the marker beside a what is not one.
+describe("isNoExplanationEntry", () => {
+  it("accepts the exception", () => {
+    expect(isNoExplanationEntry({ noExplanation: "project-overview" })).toBe(true);
+  });
+
+  it.each([
+    ["a marker beside a what", { noExplanation: "project-overview", what: "W." }],
+    ["a marker beside a why", { noExplanation: "project-overview", why: "Y." }],
+    ["a marker that is not a string", { noExplanation: true }],
+    ["an ordinary entry", { what: "W.", why: "Y." }],
+    ["null", null],
+    ["a string", "project-overview"],
+  ])("refuses %s", (_name, value) => {
+    expect(isNoExplanationEntry(value)).toBe(false);
   });
 });

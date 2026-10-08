@@ -704,7 +704,7 @@ shell chrome, so they never enter the tool-usage figures.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
-- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat` (single-root and `--standalone` only — see below), Wiki `/wiki`, Architecture `/architecture` (the retired `/dsm` bookmark redirects here).
+- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat` (single-root and `--standalone` only — see below), Wiki `/wiki`. The Architecture view is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
 - **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
@@ -732,6 +732,11 @@ same three parts, top to bottom (CR-203 and CR-206, since S-617 on every view):
    vocabulary is underlined where it is first used; hover over it or focus it
    with the keyboard for its meaning in plain words.
 3. **Evidence.** The table, chart or list the figure comes from.
+
+One widget has no explanation: the Dashboard's **Project Overview**, whose wiki
+snippet already says what it is, renders its title and the snippet — or, before
+the overview is written, the sentence naming the command that writes it — and
+nothing else (CR-208).
 
 The widgets on a view are stacked in one column, an equal gap apart, every part
 left-aligned and the explanation set in the body text size.
@@ -855,7 +860,9 @@ gains none of them (S-419, CR-132).
 **Filtering the bindings (since S-614).** The **Cross-service bindings** widget below
 the map filters its table by text (a consumer or provider name, case-insensitive), by
 binding kind (HTTP, gRPC, broker) and, when the Provenance column exists, by provenance
-kind; its figure reads *n of m bindings shown*. The filter narrows that table and
+kind; its figure reads *n of m bindings shown*, counting rows, while the table's
+**Calls** column counts the calls behind each row. The three filter inputs sit on one
+line whether or not a field has a hint under it. The filter narrows that table and
 **Binding evidence** together and never the map, which always draws every binding. Each
 service-map widget states what it shows and why it matters.
 
@@ -890,19 +897,14 @@ selects no member. Every registry external gets a node, including one only a
 toggle) and does not count toward node size, which reads as observed coupling.
 The legend gains a **Declared contracts** section: the edge row *Declares a
 contract (a vendored spec)* (only when an edge is drawn), the named-external row
-and the server's own headline line. Below the map, a **Declared contracts** widget
-holds the accessible twin table (member, *Declares a contract to*, documents,
-calls bound), then one **Documents** table and one **Bound calls** table (since
-S-614; each row names its member and counterparty, where a disclosure per link
-used to hold them): each document with its identity
-score — e.g. *Document identity: 31 of 31 operations match
-mailbox-aggregator-api's own src/main/resources/openapi/v1.yaml* — or the
-external it groups into, and each call bound to that external with its target,
-matched operation, base path (*none (host only)* for a base URL with no path) and
-base-path source (*Deploy overlay* or *Application configuration*, with every
-file and key). A refused call is never drawn; the server's summary counts it. A
-**Named externals** table lists each external's name and id, who declares it, who
-stands in for it and its copies. On the **Cross-service coverage** tab, a
+and the server's own headline line. The **Declared contracts** widget that used
+to sit below the map — its documents, each with its identity score or the external
+it groups into, the calls bound to each external with their matched operation and
+base-path source, and the named externals — is hidden from the web UI (CR-208; see
+[Hidden widgets](#hidden-widgets)). The same facts are in `logos workspace status`
+and `logos xservice route-providers` (`declared_contracts`, `bound_external`). A
+refused call is never drawn; the server's summary counts it. On the
+**Cross-service coverage** tab, a
 **Declared contracts and named externals** card follows the runtime boards (before
 the build card) with the two server lines — declared contract pairs over the spec
 documents read, and bound calls over the no-provider REST rows with their
@@ -1002,8 +1004,8 @@ to the Gate. The Quality signal folds in what the Aggregate scope card used to s
 scored and excluded, and the thresholds fingerprint with what a change to
 `[metric_thresholds]` does to the gate. Modularity, Acyclicity, Depth, Equality
 and Redundancy carry no offender list in the payload; their widgets say so and
-point to where their units are found — the Architecture dependency matrix and
-`logos dsm`, Files & Risk and `logos hotspots`, or `logos node` for one symbol's
+point to where their units are found — `logos dsm` for the module-to-module
+dependencies, Files & Risk and `logos hotspots`, or `logos node` for one symbol's
 dead and duplicate flags — never an empty table.
 
 **The same release stops the dashboard inventing an age it cannot establish.**
@@ -1022,11 +1024,10 @@ at an unknown age (the recorded time is implausibly old — check the store)
 
 Ordinary past ages render exactly as before. These are the same two strings the
 Health page's indeterminate branch above reuses — imported, not restated, so a
-future rewording changes both surfaces or neither. The **Architecture** view
-(`/architecture`) shows the module dependency matrix (DSM); a back-edge — a
-dependency against layer order, i.e. a cycle participant — is outlined with a `↺`.
-The cycle list that used to lead the page is hidden from the web UI (see
-[Hidden widgets](#hidden-widgets)).
+future rewording changes both surfaces or neither. The **Architecture** view — the
+module dependency matrix (DSM) — is hidden from the web UI (CR-208; see
+[Hidden widgets](#hidden-widgets)); `logos dsm`, MCP `dsm` and
+`GET /api/v1/architecture` serve the matrix unchanged.
 
 The root `/` view is the **Dashboard**: a roll-up that leads with the index's
 freshness, then one column of widgets (since S-617; the equal-size pairs of CR-037
@@ -1111,7 +1112,8 @@ with a guidance note — never a `4xx`/`5xx` and never a fabricated hit.
 
 ### Hidden widgets
 
-Four widgets are hidden from the web UI **only** (S-612). Their data is still
+Six widgets are hidden from the web UI **only** (S-612, CR-208); one of them is a
+whole view. Their data is still
 served, unchanged, by every other surface, so nothing is lost — each answer is one
 command or request away:
 
@@ -1120,12 +1122,14 @@ command or request away:
 | Coverage by relation arm | Workspace Dashboard; the Workspace tab's **Cross-service coverage** panel | `GET /api/v1/workspace/status` (`coverage`); `logos workspace status`; MCP `workspace_status` |
 | Cross-service impact | The **Workspace** tab, which now has two tabs: Service map and Cross-service coverage | `GET /api/v1/workspace/impact`; `logos xservice impact`; MCP `xservice_impact` |
 | Non-gated tier callout | Health | **Files & Risk** in the sidebar; `logos hotspots` |
-| Cycles band and cycle list | Architecture — the dependency matrix stays, back-edge cells still outlined `↺`; the sidebar entry reads **Architecture** | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
+| Cycles band and cycle list | Architecture (inside the view, which is itself hidden — see the next row) | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
+| Dependency matrix — the whole **Architecture** view | The sidebar; `/architecture` and the retired `/dsm` bookmark land on **Health** | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
+| Declared contracts | Workspace → **Service map** (the map's declared layer and its legend stay) | `GET /api/v1/workspace/status` (`coverage.declared_contracts`, `coverage.bound_external`); `logos workspace status`; `logos xservice route-providers` (`declared_contracts`, `bound_external`); MCP `workspace_status`; MCP `xservice_route_providers` |
 
-The routes are unchanged: `/architecture` resolves, and the retired `/dsm` bookmark
-still redirects to it. Each widget is hidden through one register in the SPA source
+Each widget is hidden through one register in the SPA source
 (`web/ui/src/views/hiddenWidgets.ts`), which records the same reason and surfaces;
-deleting a widget's entry there brings it back.
+deleting a widget's entry there brings it back — for the Architecture view, its
+sidebar entry and its route together.
 
 ### Interacting with the dashboard
 

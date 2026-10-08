@@ -7,7 +7,9 @@
  * client pathname (`usePathname` → `viewForPath`), registered in `views/index.ts`.
  * The Dashboard is at `/` (S-194). The retired `/overview` and `/dsm` routes are
  * silently redirected to `/` and `/architecture` (replaceState — no extra history
- * entry, bookmarks survive).
+ * entry, bookmarks survive). A view the hidden-widget register hides (CR-208 —
+ * the Architecture view) lands where its register entry says, `/dsm` included,
+ * by the same silent redirect.
  *
  * S-250 (CR-061, FR-UI-29) wraps the shell in the WorkspaceProvider and keys the
  * mounted view on the workspace cache key — the member. Switching members remounts
@@ -45,6 +47,7 @@ import { isAppLevelPath, workspaceReplacementPath } from "./nav.ts";
 import { usePathname, redirect } from "./router.tsx";
 import { Header } from "./shell/Header.tsx";
 import { Sidebar } from "./shell/Sidebar.tsx";
+import { hiddenViewLanding } from "./views/hiddenWidgets.ts";
 import { viewForPath } from "./views/index.ts";
 import { UnknownMember } from "./workspace/UnknownMember.tsx";
 import { useWorkspace, WorkspaceProvider } from "./workspace/WorkspaceContext.tsx";
@@ -72,7 +75,12 @@ function Shell() {
   // it a deep-linked `?repo=`, which then resolved to the manifest default and
   // painted ITS figures for a URL that named another member, or bypassed the
   // unknown-member refusal outright (NFR-RA-05).
-  const retiredTo = retiredRouteTarget(rawPathname);
+  //
+  // A retired route's target may itself be a view the hidden-widget register hides
+  // (`/dsm` → `/architecture`, CR-208), so the register is asked about the path the
+  // migration produced, and the one redirect goes straight to where it lands.
+  const migrated = retiredRouteTarget(rawPathname);
+  const retiredTo = hiddenViewLanding(migrated ?? rawPathname) ?? migrated;
   useEffect(() => {
     if (retiredTo !== null) {
       redirect(`${retiredTo}${window.location.search}${window.location.hash}`);

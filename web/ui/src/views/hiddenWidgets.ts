@@ -9,6 +9,11 @@
  * {@link isWidgetHidden} before rendering the widget, so removing an entry here
  * is the whole of bringing it back — no view edit, no rework.
  *
+ * A whole VIEW can be hidden the same way (CR-208): an entry that carries a
+ * `view` drops that view's sidebar entry (`navItemsFor`) and sends its route to
+ * the view's `landsOn` (`App.tsx`), so removing that one entry brings back both
+ * the route and the sidebar entry — again with no edit anywhere else.
+ *
  * `docs/howto/usage.md` lists the same entries for the reader, with the same
  * "still served by" surfaces.
  *
@@ -25,7 +30,18 @@ export type HideableWidget =
   | "coverage-by-relation-arm"
   | "cross-service-impact"
   | "non-gated-tier"
-  | "architecture-cycles";
+  | "architecture-cycles"
+  | "architecture-view"
+  | "declared-contracts";
+
+/** A whole view the register hides (CR-208): its route, and where that route
+ *  lands while the view is hidden. */
+export interface HiddenView {
+  /** The view's route, as `nav.ts` registers it. */
+  path: string;
+  /** Where a visit to `path` (or a sub-path of it) is redirected instead. */
+  landsOn: string;
+}
 
 export interface HiddenWidget {
   id: HideableWidget;
@@ -37,6 +53,8 @@ export interface HiddenWidget {
   reason: string;
   /** The surfaces that still serve its data, unchanged. */
   stillServedBy: readonly string[];
+  /** Set when the entry hides a whole view: its sidebar entry and its route. */
+  view?: HiddenView;
 }
 
 export const HIDDEN_WIDGETS: readonly HiddenWidget[] = [
@@ -73,14 +91,58 @@ export const HIDDEN_WIDGETS: readonly HiddenWidget[] = [
   {
     id: "architecture-cycles",
     widget: "Cycles band and cycle list",
-    hiddenFrom: "Architecture (the Dependency matrix stays, its cycle cells still outlined ↺)",
+    // The whole view is hidden too (`architecture-view`, CR-208); this entry
+    // stays so that bringing the view back does not bring the band back with it.
+    hiddenFrom: "Architecture (the Dependency matrix keeps its cycle cells outlined ↺)",
     reason:
       "No insight right now (owner, CR-203 item 22): the cycle links seed the Graph view generically, not at the cycle.",
     stillServedBy: ["GET /api/v1/architecture", "logos dsm", "MCP dsm"],
+  },
+  {
+    id: "architecture-view",
+    widget: "Dependency matrix (the Architecture view)",
+    hiddenFrom: "The sidebar; /architecture and the retired /dsm land on Health",
+    reason:
+      "Misleads more than it informs (owner, CR-208 item 1): with no layers declared its order is alphabetical, so its \"against order\" marks are arbitrary, and it is unreadable at a thousand rows.",
+    stillServedBy: ["GET /api/v1/architecture", "logos dsm", "MCP dsm"],
+    view: { path: "/architecture", landsOn: "/health" },
+  },
+  {
+    id: "declared-contracts",
+    widget: "Declared contracts",
+    hiddenFrom: "Workspace → Service map (the map's declared layer and its legend stay)",
+    reason:
+      "Unusable as built (owner, CR-208 item 2): up to four tables and a join line, with nothing to tell the tables apart.",
+    stillServedBy: [
+      "GET /api/v1/workspace/status (coverage.declared_contracts, coverage.bound_external)",
+      "logos workspace status",
+      "logos xservice route-providers (declared_contracts, bound_external)",
+      "MCP workspace_status",
+      "MCP xservice_route_providers",
+    ],
   },
 ];
 
 /** Whether the register hides `id` from the web UI. */
 export function isWidgetHidden(id: HideableWidget): boolean {
   return HIDDEN_WIDGETS.some((w) => w.id === id);
+}
+
+/** Does `pathname` resolve to the hidden view `view` — its route, or a sub-path
+ *  of it? The same whole-segment rule `navItemMatches` spells for the sidebar. */
+function inView(view: HiddenView, pathname: string): boolean {
+  return pathname === view.path || pathname.startsWith(`${view.path}/`);
+}
+
+/** Whether the register hides the view whose route is `path` (its sidebar entry
+ *  is then dropped). */
+export function isViewHidden(path: string): boolean {
+  return HIDDEN_WIDGETS.some((w) => w.view !== undefined && w.view.path === path);
+}
+
+/** Where a visit to `pathname` lands because the register hides the view it
+ *  resolves to, or `null` when that view is not hidden. */
+export function hiddenViewLanding(pathname: string): string | null {
+  const entry = HIDDEN_WIDGETS.find((w) => w.view !== undefined && inView(w.view, pathname));
+  return entry?.view?.landsOn ?? null;
 }

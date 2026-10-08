@@ -13,6 +13,29 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Architecture view and Declared contracts are hidden; review polish
+  (CR-208, S-631).** The sidebar no longer lists **Architecture**: `/architecture`
+  and the retired `/dsm` bookmark land on Health, and `logos dsm`, MCP `dsm` and
+  `GET /api/v1/architecture` answer unchanged. On Workspace → Service map the
+  **Declared contracts** widget is hidden too, while the map keeps its declared
+  layer and legend; its data stays on `GET /api/v1/workspace/status`,
+  `logos workspace status`, `logos xservice route-providers` and their MCP twins.
+  Both are entries in the hidden-widget register, so removing an entry brings the
+  widget back — for the view, its sidebar entry and route together. The
+  Dashboard's **Project Overview** shows its title and wiki snippet with no
+  explanation, the one widget typed to have none. A glossed table header keeps
+  its underlined term outside the sort button, so the header is one sort control
+  and clicking the term no longer sorts (Members, and every other table). The
+  service map's bindings table heads its count column **Calls**; *n of m bindings
+  shown* is unchanged. The bindings filter's three inputs sit on one line, with
+  one height, though only the first has a hint. Health's Acyclicity and Depth
+  point at `logos dsm` for the module-to-module dependencies instead of the
+  hidden matrix. The root `.gitignore` names the web UI's Playwright output
+  directories, so `logos serve` stops indexing the e2e harness build while a gate
+  runs (a stop-gap until the watcher reads nested `.gitignore` files, CR-210).
+
 ## [1.15.1] — 2026-10-08
 
 ### Changed

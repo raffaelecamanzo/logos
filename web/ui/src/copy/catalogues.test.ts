@@ -6,7 +6,14 @@
 // records and sentence functions), so a later story's table is held too.
 import { describe, expect, it } from "vitest";
 
-import { findUnglossedUses, isCopyEntry, plainPart, sentenceLiterals, type PlainPart } from "./text.ts";
+import {
+  findUnglossedUses,
+  isCopyEntry,
+  isNoExplanationEntry,
+  plainPart,
+  sentenceLiterals,
+  type PlainPart,
+} from "./text.ts";
 import type { CopyEntry, CopyText } from "./types.ts";
 
 const modules = import.meta.glob<Record<string, unknown>>("/src/**/*.copy.ts", { eager: true });
@@ -28,7 +35,11 @@ function isCopyText(value: unknown): value is CopyText {
  * sentence is held to the rule the moment it is exported, with no list to extend.
  */
 function walk(mod: Record<string, unknown>, path: string) {
-  const found: { entries: [string, CopyEntry][]; texts: [string, PlainPart][] } = { entries: [], texts: [] };
+  const found: { entries: [string, CopyEntry][]; texts: [string, PlainPart][]; noExplanation: string[] } = {
+    entries: [],
+    texts: [],
+    noExplanation: [],
+  };
   const seen = new Set<unknown>();
   const visit = (key: string, value: unknown) => {
     if (typeof value === "object" && value !== null) {
@@ -39,6 +50,9 @@ function walk(mod: Record<string, unknown>, path: string) {
       found.texts.push([key, plainPart(value)]);
     } else if (typeof value === "function") {
       found.texts.push([`${key}()`, sentenceLiterals(value as (...args: never[]) => unknown)]);
+    } else if (isNoExplanationEntry(value)) {
+      // Its key is a marker, not reader text (CR-208).
+      found.noExplanation.push(key);
     } else if (isCopyEntry(value)) {
       found.entries.push([key, value]);
       for (const [field, inner] of Object.entries(value)) {
@@ -55,6 +69,7 @@ function walk(mod: Record<string, unknown>, path: string) {
 const walked = Object.entries(modules).map(([path, mod]) => walk(mod, path));
 const entries: [string, CopyEntry][] = walked.flatMap((w) => w.entries);
 const texts: [string, PlainPart][] = walked.flatMap((w) => w.texts);
+const noExplanation: string[] = walked.flatMap((w) => w.noExplanation);
 
 describe("copy catalogues", () => {
   it("discovers the catalogues (a finding, not a floor)", () => {
@@ -66,6 +81,10 @@ describe("copy catalogues", () => {
       "/src/copy/fixture.copy.ts#coverage",
     ]);
     console.info(`copy catalogues: ${entries.length} entries in ${Object.keys(modules).length} modules`);
+  });
+
+  it("holds exactly one entry with no explanation: Project Overview (CR-208)", () => {
+    expect(noExplanation).toEqual(["/src/copy/dashboard.copy.ts#projectOverview"]);
   });
 
   it.each(entries)("%s glosses every internal term at its first use", (_key, entry) => {

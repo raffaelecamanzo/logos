@@ -5,7 +5,7 @@
  */
 
 import { GLOSSARY, VOCABULARY_TERMS, vocabularyPattern, type GlossaryTerm } from "./glossary.ts";
-import type { CopyEntry, CopyText } from "./types.ts";
+import type { CopyEntry, CopyText, NoExplanationEntry } from "./types.ts";
 
 /** The text as a reader sees it: plain segments and gloss words, joined. */
 export function copyTextString(text: CopyText): string {
@@ -100,4 +100,12 @@ export function isCopyEntry(value: unknown): value is CopyEntry {
   const v = value as Record<string, unknown>;
   const isText = (t: unknown) => typeof t === "string" || Array.isArray(t);
   return isText(v.what) && isText(v.why);
+}
+
+/** Narrows an unknown module export to the one no-explanation entry (CR-208):
+ *  an object carrying the `noExplanation` key and neither `what` nor `why`. */
+export function isNoExplanationEntry(value: unknown): value is NoExplanationEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.noExplanation === "string" && v.what === undefined && v.why === undefined;
 }
