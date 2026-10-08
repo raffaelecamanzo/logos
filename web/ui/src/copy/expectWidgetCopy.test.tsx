@@ -76,6 +76,19 @@ describe("expectWidgetCopy", () => {
     expect(() => expectWidgetCopy(frame(html))).toThrow(message);
   });
 
+  // S-613: a figure row of two blocks reads as two runs of text. Joined with no
+  // separator, "…matched" + "3 bound" read "matched3 bound", where the noun's
+  // `\b\d` cannot match — so a noun "bound" opening the second block went
+  // unflagged.
+  it("reads a block boundary as a word boundary, so a term opening a second block is caught", () => {
+    const html = widgetHtml({}).replace(
+      '<div data-widget-part="explanation">',
+      `<div data-widget-part="figure"><div><span>1 of 3 matched</span></div><p>3 bound · 1 ambiguous</p></div>
+    <div data-widget-part="explanation">`,
+    );
+    expect(() => expectWidgetCopy(frame(html))).toThrow(/bound \(in the figure\)/);
+  });
+
   it("accepts a term inside a gloss", () => {
     const html = widgetHtml({ what: 'Coverage by <dfn>arm<span role="tooltip">one way</span></dfn>.' });
     expect(() => expectWidgetCopy(frame(html))).not.toThrow();

@@ -2,11 +2,12 @@
 // each term's detector matches the term and rejects its one-character near misses.
 import { describe, expect, it } from "vitest";
 
-import { findTermsInPlainText, GLOSSARY, GLOSSARY_TERMS } from "./glossary.ts";
+import { findTermsInPlainText, FR_UI_39_TERMS, GLOSSARY, GLOSSARY_TERMS } from "./glossary.ts";
 
 describe("glossary", () => {
-  it("lists exactly the FR-UI-39 vocabulary, each with a plain-words definition", () => {
-    expect(GLOSSARY_TERMS.map((t) => GLOSSARY[t].label)).toEqual([
+  it("lists the FR-UI-39 vocabulary first, then the later stories' terms, each with a plain-words definition", () => {
+    expect(GLOSSARY_TERMS.slice(0, FR_UI_39_TERMS.length)).toEqual([...FR_UI_39_TERMS]);
+    expect(FR_UI_39_TERMS.map((t) => GLOSSARY[t].label)).toEqual([
       "arm",
       "intake",
       "egress",
@@ -21,6 +22,14 @@ describe("glossary", () => {
       "baseline",
       "epsilon",
       "bound",
+    ]);
+    // S-613: the Members table's glossed headers (CR-203 §3.2 D item 3).
+    expect(GLOSSARY_TERMS.slice(FR_UI_39_TERMS.length).map((t) => GLOSSARY[t].label)).toEqual([
+      "Reference resolution",
+      "Entry points added by other services",
+      "Unused in its own graph",
+      "used by another service",
+      "Unused across the workspace",
     ]);
     for (const term of GLOSSARY_TERMS) {
       expect(GLOSSARY[term].definition.length, term).toBeGreaterThan(20);
@@ -55,6 +64,12 @@ describe("glossary", () => {
     // Known limit, documented beside the pattern: a predicate adjective at a
     // sentence end is flagged too.
     ["the call is bound.", "bound"],
+    ["its own reference resolution", "referenceResolution"],
+    ["entry points added by other services", "entryPointsFromOtherServices"],
+    ["one entry point added by other services", "entryPointsFromOtherServices"],
+    ["unused in its own graph", "unusedInOwnGraph"],
+    ["…of which used by another service", "usedByAnotherService"],
+    ["callables unused across the workspace", "unusedAcrossWorkspace"],
   ])("detects %j as %s", (text, term) => {
     expect(findTermsInPlainText(text)).toContain(term);
   });
@@ -71,6 +86,11 @@ describe("glossary", () => {
     "a tiered list",
     "the scc of an ordinary word",
     "intaken",
+    "a reference that resolves",
+    "entry points added by this service",
+    "unused in its own service",
+    "unused by another service",
+    "unused across services",
   ])("does not flag the near miss %j", (text) => {
     expect(findTermsInPlainText(text)).toEqual([]);
   });

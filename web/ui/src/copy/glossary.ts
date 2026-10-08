@@ -112,7 +112,60 @@ export const GLOSSARY = {
     // bound.") is flagged too; write "linked" there.
     pattern: /\b\d[\d,]*\s+(?:un)?bound\b|\b(?:un)?bound\b(?=\s*(?:$|[.,;:!?)/]|(?:and|or|vs\.?|versus)\b))/i,
   },
+  // ── The Members table's column headers (S-613, CR-203 §3.2 D item 3) ──────
+  // Plain words already, glossed because each names a precise figure. Each
+  // pattern is the whole phrase, so the words used loosely elsewhere ("unused",
+  // "another service") are not the term.
+  referenceResolution: {
+    label: "Reference resolution",
+    definition:
+      "The share of this service's references — calls, imports, type uses — that link to the code they point at. The lower it is, the more links every other figure misses.",
+    pattern: /\breference resolution\b/i,
+  },
+  entryPointsFromOtherServices: {
+    label: "Entry points added by other services",
+    definition:
+      "Callables in this service that another workspace service calls, so they count as reachable even when nothing inside this service calls them.",
+    pattern: /\bentry points? added by other services\b/i,
+  },
+  unusedInOwnGraph: {
+    label: "Unused in its own graph",
+    definition:
+      "Callables that nothing in this repository reaches from one of its entry points, judged on this repository alone.",
+    pattern: /\bunused in its own graph\b/i,
+  },
+  usedByAnotherService: {
+    label: "used by another service",
+    definition:
+      "Of the callables this repository never reaches on its own, the ones another workspace service calls. Keep them.",
+    pattern: /\bused by another service\b/i,
+  },
+  unusedAcrossWorkspace: {
+    label: "Unused across the workspace",
+    definition:
+      "Callables that nothing reaches in any service of the workspace: the candidates for deletion.",
+    pattern: /\bunused across the workspace\b/i,
+  },
 } as const satisfies Record<string, GlossaryEntry>;
+
+/** The FR-UI-39 vocabulary, in the order the requirement lists it. Every other
+ *  glossary entry is a later story's addition (S-613: the Members headers). */
+export const FR_UI_39_TERMS = [
+  "arm",
+  "intake",
+  "egress",
+  "residue",
+  "tier",
+  "unionView",
+  "promoted",
+  "fanOut",
+  "scc",
+  "lcom4",
+  "gini",
+  "baseline",
+  "epsilon",
+  "bound",
+] as const satisfies readonly (keyof typeof GLOSSARY)[];
 
 export type GlossaryTerm = keyof typeof GLOSSARY;
 

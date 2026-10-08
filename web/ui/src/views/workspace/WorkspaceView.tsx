@@ -21,8 +21,9 @@
  * platform members collapsed; a cross-context model hint lists members depending
  * on two or more contexts' model libraries, never as an edge; and the coverage
  * tab states the build headline apart from every runtime figure. A build
- * dependency is never a runtime coupling (BR-58), and a workspace with no build
- * manifest renders every panel exactly as before.
+ * dependency is never a runtime coupling (BR-58). A workspace with no build
+ * manifest draws no build layer on the map; since S-613 its coverage tab's Build
+ * dependencies widget states that absence rather than being left out.
  *
  * The declared layer (S-461, CR-147, FR-WS-31): when a member holds a vendored
  * spec, the map draws each declared contract in its own `declares-contract` edge
@@ -30,9 +31,13 @@
  * drawn as its own node — with a legend section; the evidence names each
  * document, its identity score or external, and every call bound to the
  * external with its matched operation and base-path source. The coverage tab
- * renders both server headlines in their own card. A declared contract is never
- * an observed call (BR-57), and a workspace with no vendored spec renders every
- * panel exactly as before.
+ * renders both server headlines in their own widget. A declared contract is never
+ * an observed call (BR-57). A workspace with no vendored spec draws no declared
+ * layer on the map; since S-613 the coverage tab's widget states that absence.
+ *
+ * The coverage tab (S-613, CR-203 §3.2 D items 4 and 10): its five widgets —
+ * the three coverage boards, Declared contracts and Build dependencies — sit in
+ * one `WidgetStack`, with their words in `copy/coverage.copy.ts`.
  *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
@@ -84,8 +89,15 @@ import {
   LoadingState,
   Tabs,
   TextField,
+  Widget,
+  WidgetStack,
   type Column,
 } from "../../components/index.ts";
+import {
+  buildDependencies,
+  COVERAGE_TEXT,
+  declaredRelations,
+} from "../../copy/coverage.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { GraphCanvas } from "../graph/GraphCanvas.tsx";
 import { ADMITTED_DASH } from "../graph/graphModel.ts";
@@ -219,12 +231,15 @@ function WorkspaceContent({
           {
             id: "coverage",
             label: "Cross-service coverage",
+            // One stack for every widget on the tab (S-613, FR-UI-40): the
+            // coverage boards are a fragment, so they and the two relation
+            // widgets are siblings at one gap — the tab panel itself has none.
             panel: (
-              <>
+              <WidgetStack>
                 <CoveragePanel dashboard={coverage} degraded={status.degraded_rollup} />
                 <DeclaredRelationsCard dashboard={coverage} />
                 <BuildDependencyCard headline={status.build_dependency} />
-              </>
+              </WidgetStack>
             ),
           },
           ...(isWidgetHidden("cross-service-impact")
@@ -363,64 +378,86 @@ function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
   );
 }
 
-/** The build headline on the coverage tab (S-464, frontend-design §4.17) — its
- *  own card, after every runtime board, rendering the server's composed lines
- *  (BR-51) and never a figure of its own. Absent headline, no card. */
+/** The build headline on the coverage tab (S-464, frontend-design §4.17;
+ *  CR-203 §3.2 D item 10) — its own widget, after every runtime board,
+ *  rendering the server's composed lines (BR-51) and never a figure of its own.
+ *  An absent headline is stated as an absence (no member holds a build
+ *  manifest), never left as a missing widget the reader cannot tell apart from
+ *  a failed read. */
 function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline }) {
-  if (!headline) return null;
+  if (!headline) {
+    return (
+      <Widget title="Build dependencies" copy={buildDependencies} state={{ unread: 0 }} absence={COVERAGE_TEXT.buildAbsent} />
+    );
+  }
   const unread = headline.members.unread ?? [];
   const reasons = headline.members.unread_reasons ?? {};
   // Own keys only: a member named `constructor` must never read an inherited value.
   const reasonOf = (member: string) => (Object.hasOwn(reasons, member) ? reasons[member] : undefined);
+  // One node or none: a list of `false`s would still render an empty evidence
+  // part, which takes a gap in the frame.
+  const hasEvidence =
+    headline.platform_apart !== undefined ||
+    headline.platform_candidates.length > 0 ||
+    headline.collisions.length > 0 ||
+    unread.length > 0;
   return (
-    <Card title="Build dependencies">
-      <p className="muted">
-        What members build against, joined from their Maven/Gradle manifests. A build dependency,
-        never a runtime coupling: no figure above counts it.
-      </p>
-      <p>{headline.summary}</p>
-      {headline.platform_apart && (
-        <p className="muted">
-          Declared platform <span className="mono">{headline.platform_apart.members.join(", ")}</span>{" "}
-          — counted apart: {headline.platform_apart.summary}
-        </p>
+    <Widget
+      title="Build dependencies"
+      copy={buildDependencies}
+      state={{ unread: unread.length }}
+      figure={
+        <div className={styles.figure}>
+          <p className={styles.statement}>{headline.summary}</p>
+        </div>
+      }
+    >
+      {hasEvidence && (
+        <>
+          {headline.platform_apart && (
+            <p className="muted">
+              Declared platform <span className="mono">{headline.platform_apart.members.join(", ")}</span>{" "}
+              — counted apart: {headline.platform_apart.summary}
+            </p>
+          )}
+          {headline.platform_candidates.length > 0 && (
+            <p className="muted">
+              Platform candidates (a hint; nothing is classified until declared):{" "}
+              {headline.platform_candidates.map((c, i) => (
+                <span key={c.member}>
+                  {i > 0 && ", "}
+                  <span className="mono">{c.member}</span> ({c.in_degree} of {c.of})
+                </span>
+              ))}
+            </p>
+          )}
+          {headline.collisions.length > 0 && (
+            <p className="muted">
+              Produced by more than one member, so resolved to neither:{" "}
+              {headline.collisions.map((c, i) => (
+                <span key={c.artifact}>
+                  {i > 0 && ", "}
+                  <span className="mono">{c.artifact}</span> ({c.producers.join(", ")})
+                </span>
+              ))}
+            </p>
+          )}
+          {unread.length > 0 && (
+            <p className="muted">
+              Build facts could not be read for{" "}
+              {unread.map((member, i) => (
+                <span key={member}>
+                  {i > 0 && ", "}
+                  <span className="mono">{member}</span>
+                  {reasonOf(member) && ` (${reasonOf(member)})`}
+                </span>
+              ))}{" "}
+              — their build dependencies are unknown, not absent.
+            </p>
+          )}
+        </>
       )}
-      {headline.platform_candidates.length > 0 && (
-        <p className="muted">
-          Platform candidates (a hint; nothing is classified until declared):{" "}
-          {headline.platform_candidates.map((c, i) => (
-            <span key={c.member}>
-              {i > 0 && ", "}
-              <span className="mono">{c.member}</span> ({c.in_degree} of {c.of})
-            </span>
-          ))}
-        </p>
-      )}
-      {headline.collisions.length > 0 && (
-        <p className="muted">
-          Produced by more than one member, so resolved to neither:{" "}
-          {headline.collisions.map((c, i) => (
-            <span key={c.artifact}>
-              {i > 0 && ", "}
-              <span className="mono">{c.artifact}</span> ({c.producers.join(", ")})
-            </span>
-          ))}
-        </p>
-      )}
-      {unread.length > 0 && (
-        <p className="muted">
-          Build facts could not be read for{" "}
-          {unread.map((member, i) => (
-            <span key={member}>
-              {i > 0 && ", "}
-              <span className="mono">{member}</span>
-              {reasonOf(member) && ` (${reasonOf(member)})`}
-            </span>
-          ))}{" "}
-          — their build dependencies are unknown, not absent.
-        </p>
-      )}
-    </Card>
+    </Widget>
   );
 }
 
@@ -646,29 +683,34 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
   );
 }
 
-/** The declared relations on the coverage tab (S-461, frontend-design §4.17) —
- *  their own card after every runtime board, rendering the server's composed
- *  lines (BR-51) and never a figure of its own. Absent both, no card. */
+/** The declared relations on the coverage tab (S-461, frontend-design §4.17;
+ *  CR-203 §3.2 D item 10) — their own widget after every runtime board,
+ *  rendering the server's composed lines (BR-51) and never a figure of its own.
+ *  Absent both, the widget states the absence. */
 function DeclaredRelationsCard({ dashboard }: { dashboard: CoverageDashboard }) {
   const { declaredContracts, boundExternal } = dashboard;
-  if (!declaredContracts && !boundExternal) return null;
+  if (!declaredContracts && !boundExternal) {
+    return (
+      <Widget
+        title="Declared contracts and named externals"
+        copy={declaredRelations}
+        absence={COVERAGE_TEXT.declaredAbsent}
+      />
+    );
+  }
   return (
-    <Card title="Declared contracts and named externals">
-      <p className="muted">
-        Declared by the spec documents members vendor, never observed calls: no figure above counts
-        them.
-      </p>
-      {declaredContracts && <p>{declaredContracts.summary}</p>}
-      {boundExternal && (
-        <>
-          <p>{boundExternal.summary}</p>
-          <p className="muted">
-            A bound call stays under <span className="mono">No provider here</span> above: the binding
-            is reported beside its row, not moved into <span className="mono">bound</span>.
-          </p>
-        </>
-      )}
-    </Card>
+    <Widget
+      title="Declared contracts and named externals"
+      copy={declaredRelations}
+      figure={
+        <div className={styles.figure}>
+          {declaredContracts && <p className={styles.statement}>{declaredContracts.summary}</p>}
+          {boundExternal && <p className={styles.statement}>{boundExternal.summary}</p>}
+        </div>
+      }
+    >
+      {boundExternal && <p className="muted">{COVERAGE_TEXT.externalStaysApart}</p>}
+    </Widget>
   );
 }
 

@@ -8,6 +8,21 @@ import type {
   CrossServiceCoverage,
   XserviceBuildDeps,
 } from "../../api/types.ts";
+import {
+  buildDependencies,
+  COVERAGE_TEXT,
+  coverageByIntake,
+  declaredRelations,
+  specConformance,
+} from "../../copy/coverage.copy.ts";
+import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import {
+  HEALTHY_COVERAGE,
+  MULTI_REASON_COVERAGE,
+  oneDegraded,
+  PARTIAL_COVERAGE,
+} from "./appViewFixtures.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { scopedMember, setScopedMember } from "../../workspace/scope.ts";
@@ -667,7 +682,8 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
-    expect(screen.getByRole("heading", { name: "Coverage by intake" })).toBeInTheDocument();
+    // The title glosses "intake", so its accessible name carries the gloss after it.
+    expect(screen.getByRole("heading", { name: /^Coverage by intake/ })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Coverage by relation arm" })).toBeNull();
     expect(screen.queryByRole("table", { name: /by relation arm/i })).toBeNull();
     expect(screen.queryByText("Target read from")).toBeNull();
@@ -684,7 +700,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     // The ratio is the server's (33.3%), not bound/total (1/5 = 20%): the two
     // no-provider references are outside the denominator (ADR-53).
     expect(screen.getAllByText("33.3%").length).toBeGreaterThan(0);
-    expect(screen.getByText(/2 with no provider in this workspace/)).toBeInTheDocument();
+    expect(screen.getByText(/2 call a service outside this workspace/)).toBeInTheDocument();
 
     // The `route` row: 1 bound, 0 ambiguous, 1 unbound, 2 no-provider. The wire `bucket`
     // says "unbound" for the no-provider pair, but the summary's `unbound` counter
@@ -693,7 +709,8 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     const routeRow = screen.getByRole("cell", { name: /HTTP \(OpenAPI ↔ route\)/ }).closest("tr")!;
     const cells = [...routeRow.querySelectorAll("td")].map((c) => c.textContent);
     expect(cells.slice(1, 5)).toEqual(["1", "0", "1", "2"]);
-    expect(screen.getByText(/Path could not be composed/)).toBeInTheDocument();
+    // In the arm row; the headline's action names the same reason across arms.
+    expect(within(routeRow).getByText(/Path could not be composed/)).toBeInTheDocument();
   });
 
   // S-377/CR-120: the headline counts two populations as one, and the arm board
@@ -762,7 +779,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       "2",
     ]);
     expect(screen.queryByText(/No captured call site in this workspace resolves/)).toBeNull();
-    expect(screen.queryByText(/points\s+at a service outside it/)).toBeNull();
+    expect(screen.queryByText(/calls a service outside it/)).toBeNull();
     expect(screen.queryByText(/honest absence, not a resolution failure/)).toBeNull();
   });
 
@@ -797,7 +814,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
 
-    expect(screen.getByText(/points\s+at a service outside it/)).toBeInTheDocument();
+    expect(screen.getByText(COVERAGE_TEXT.capturedOutside(2))).toBeInTheDocument();
     expect(screen.queryByText(/No captured call site in this workspace resolves/)).toBeNull();
     expect(screen.queryByText(/honest absence, not a resolution failure/)).toBeNull();
   });
@@ -827,7 +844,12 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     stubApi();
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
-    expect(screen.getByText(/no cross-boundary references found/i)).toBeInTheDocument();
+    // Each coverage widget states the absence in its figure row (FR-UI-40), and
+    // none draws a bar over nothing.
+    const panel = screen.getByRole("tabpanel");
+    const absences = [...panel.querySelectorAll("[data-widget-absence]")].map((a) => a.textContent ?? "");
+    expect(absences.filter((a) => /no cross-boundary references found/i.test(a))).toHaveLength(3);
+    expect(panel.querySelectorAll("meter")).toHaveLength(0);
   });
 
   // CR-118 §4.5: the provider-identity fields are OPTIONAL, and the view must
@@ -1102,9 +1124,9 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     });
     mount();
 
-    expect(await screen.findByText(/spec conformance not measured/i)).toBeInTheDocument();
-    expect(screen.queryByText(/0\.0% bound/)).toBeNull();
-    expect(screen.queryByText(/100\.0% bound/)).toBeNull();
+    expect(await screen.findByText(COVERAGE_TEXT.specNotMeasured(2))).toBeInTheDocument();
+    expect(screen.queryByText(/0\.0% ·/)).toBeNull();
+    expect(screen.queryByText(/100\.0% ·/)).toBeNull();
     // CR-111: the excluded count is STILL reported when the ratio itself is absent
     // (S-327) — the server's composed line renders regardless.
     expect(
@@ -1178,7 +1200,8 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     ).toBeInTheDocument();
     // …with its own bar, distinct from the spec-conformance one below it.
     expect(scoreBarClassIn(container, /^Resolved cross-service edges/)).toBeTruthy();
-    expect(screen.getByText(/0\.0% of egress sites resolve/)).toBeInTheDocument();
+    // The figure is the rate's own numerator and denominator, both the server's.
+    expect(screen.getByText(COVERAGE_TEXT.outboundResolved(0, 2))).toBeInTheDocument();
     // And the retired vocabulary is absent from the whole rendered surface.
     expect(container.textContent).not.toMatch(/bound[ -]ratio/i);
   });
@@ -1206,6 +1229,11 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     stubApi({
       coverage: {
         ...COVERAGE,
+        // The invocation half agrees with the rate: 15 resolved of 117 captured.
+        by_intake: {
+          ...COVERAGE.by_intake,
+          invocation: { bound: 15, ambiguous: 1, unbound: 101, no_provider_in_workspace: 0 },
+        },
         resolved_cross_service_edges: 15,
         egress_resolution: 15 / 117,
         egress_resolution_measured: 117,
@@ -1221,7 +1249,7 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
       ),
     ).toBeInTheDocument();
     expect(scoreBarClassIn(container, /^Resolved cross-service edges/)).toBeTruthy();
-    expect(screen.getByText(/12\.8% of egress sites resolve/)).toBeInTheDocument();
+    expect(screen.getByText(COVERAGE_TEXT.outboundResolved(15, 117))).toBeInTheDocument();
     // The count in the sentence is not contradicted anywhere on the surface: the
     // exact string "0 resolved cross-service edges" must be absent, which is the
     // shipped defect's own rendering (CR-127 §3.1).
@@ -1248,10 +1276,8 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
         "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/egress resolution not measured — no outbound call site was captured/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/of egress sites resolve/)).toBeNull();
+    expect(screen.getByText(COVERAGE_TEXT.outboundNotMeasured)).toBeInTheDocument();
+    expect(screen.queryByText(/outbound call sites? resolved$/)).toBeNull();
     expect(scoreBarClassIn(container, /^Resolved cross-service edges/)).toBeUndefined();
   });
 
@@ -1277,7 +1303,7 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
 
     // The ratio card renders, so the assertion below is about absence of the
     // banner rather than about the card not having loaded yet.
-    expect(await screen.findByText(/33\.3% bound/)).toBeInTheDocument();
+    expect(await screen.findByText(/33\.3% ·/)).toBeInTheDocument();
     expect(screen.queryByText(/workspace members/i)).toBeNull();
   });
 
@@ -1304,15 +1330,16 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     });
     mount();
 
+    // Every coverage widget states the qualified absence — never the whole-workspace claim.
     expect(
-      await screen.findByText(/among the 9 of 72 workspace members that could be read/i),
-    ).toBeInTheDocument();
+      await screen.findAllByText(/among the 9 of 72 workspace members that could be read/i),
+    ).toHaveLength(3);
     expect(
       screen.queryByText(/No cross-boundary references found in this workspace/i),
       "the unqualified whole-workspace claim must be gone",
     ).toBeNull();
     // And the shortfall rider renders in the empty branch too.
-    expect(screen.getByText(/every figure here is a lower bound/i)).toBeInTheDocument();
+    expect(screen.getByText(/every figure here is a minimum/i)).toBeInTheDocument();
   });
 
   it("states the shortfall without attributing a cause the marker cannot know", async () => {
@@ -1432,7 +1459,9 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
     expect(screen.queryByRole("checkbox", { name: /builds against/i })).toBeNull();
-    expect(screen.queryByText(/build dependenc/i)).toBeNull();
+    // The service map says nothing about a build layer. (The coverage tab's Build
+    // dependencies widget states the absence — asserted below.)
+    expect(within(screen.getByRole("tabpanel")).queryByText(/build dependenc/i)).toBeNull();
     expect(calls().some((u) => u.includes("workspace/build-deps"))).toBe(false);
     expect(buildEdges()).toEqual([]);
   });
@@ -1634,24 +1663,20 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     );
   });
 
-  /* A workspace with no build manifest renders the coverage tab byte-for-byte as
-     before the build layer existed. The recorded file was written from the tree
-     as it stood BEFORE S-464 (the view reverted to its merge-base version for the
-     recording run) and is never re-recorded with `-u`. The map tab's twin is the
-     S-419 `service-map.literal-only.html` recording above, which this story
-     leaves passing. */
-  it("renders a manifest-less workspace's coverage tab identically to the DOM recorded before the build layer", async () => {
-    // The recording also predates S-612 and holds the per-arm board, so the board
-    // is restored for this comparison: what it pins is the build layer's absence,
-    // not the hidden-widget register.
-  onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
-    stubApi({ coverage: COVERAGE, providers: [BINDING] });
+  /* A workspace with no build manifest states the absence on the coverage tab and
+     draws no build figure. Until S-613 this was a byte-for-byte recording of the
+     tab from before the build layer existed; CR-203 rewrote every widget on the
+     tab, and an absent relation is now a stated absence in its widget's figure
+     row (FR-UI-40) rather than a missing card, so the recording was retired and
+     its claim — no build layer is fabricated — is asserted directly. */
+  it("states a manifest-less workspace's build relation as absent, with no build figure", async () => {
+    const calls = stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
-    const panel = screen.getByRole("tabpanel");
-    await expect(panel.innerHTML).toMatchFileSnapshot(
-      "./__snapshots__/coverage.no-build-manifests.html",
-    );
+    const card = screen.getByRole("heading", { name: "Build dependencies" }).closest("section")!;
+    expect(card.querySelector("[data-widget-absence]")?.textContent).toBe(COVERAGE_TEXT.buildAbsent);
+    expect(card.querySelector('[data-widget-part="evidence"]')).toBeNull();
+    expect(calls().some((u) => u.includes("workspace/build-deps"))).toBe(false);
   });
 });
 
@@ -1813,7 +1838,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
     expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
     expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
-    expect(card).toHaveTextContent("A bound call stays under No provider here above");
+    expect(within(card).getByText(COVERAGE_TEXT.externalStaysApart)).toBeInTheDocument();
   });
 
   it("the coverage tab states the declared headline alone when no member declares a named external", async () => {
@@ -1823,7 +1848,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     await userEvent.click(await screen.findByRole("tab", { name: "Cross-service coverage" }));
     const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
     expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
-    expect(card).not.toHaveTextContent("A bound call stays under");
+    expect(within(card).queryByText(COVERAGE_TEXT.externalStaysApart)).toBeNull();
     expect(within(card).queryByText(BOUND_EXTERNAL.headline.summary)).toBeNull();
   });
 
@@ -1860,7 +1885,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     ]);
   });
 
-  it("renders no declared class, legend section, node or card over a workspace that declares nothing", async () => {
+  it("renders no declared class, legend section or node over a workspace that declares nothing, and states the absence on the coverage tab", async () => {
     stubApi({ providers: [BINDING] });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas-edges")).toHaveTextContent("1"));
@@ -1869,6 +1894,87 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     expect(screen.queryByText("Declared contracts", { selector: "span" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Declared contracts" })).toBeNull();
     await userEvent.click(screen.getByRole("tab", { name: "Cross-service coverage" }));
-    expect(screen.queryByRole("heading", { name: "Declared contracts and named externals" })).toBeNull();
+    // The coverage tab's widget states the absence rather than vanishing (FR-UI-40).
+    const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
+    expect(card.querySelector("[data-widget-absence]")?.textContent).toBe(COVERAGE_TEXT.declaredAbsent);
+    expect(card.querySelector('[data-widget-part="evidence"]')).toBeNull();
+  });
+});
+
+// ── S-613: the Cross-service coverage tab (CR-203 §3.2 D items 4 and 10) ───────
+
+/** The coverage tab's widgets, top to bottom. The per-arm board is hidden (S-612). */
+const COVERAGE_TAB_WIDGETS = [
+  "Resolved cross-service edges",
+  "Spec conformance (declared endpoints vs controllers)",
+  "Coverage by intake",
+  "Declared contracts and named externals",
+  "Build dependencies",
+];
+
+/** The four states (S-613 AC1), as what `stubApi` serves. The relation widgets
+ *  are present in the healthy and partial states and absent in the empty one. */
+const COVERAGE_TAB_STATES: Record<
+  "healthy" | "partial coverage" | "nothing measured" | "degraded member",
+  NonNullable<Parameters<typeof stubApi>[0]>
+> = {
+  healthy: { coverage: { ...HEALTHY_COVERAGE, declared_contracts: DECLARED_CONTRACTS }, buildDependency: BUILD_HEADLINE },
+  "partial coverage": {
+    coverage: { ...PARTIAL_COVERAGE, declared_contracts: DECLARED_CONTRACTS, bound_external: BOUND_EXTERNAL },
+    buildDependency: { ...BUILD_HEADLINE, members: { ...BUILD_HEADLINE.members, read: 1, unread: ["web"] } },
+  },
+  "nothing measured": { coverage: EMPTY_COVERAGE },
+  "degraded member": { coverage: PARTIAL_COVERAGE, degradedRollup: oneDegraded("web") },
+};
+
+async function openCoverageTab(opts: Parameters<typeof stubApi>[0]) {
+  stubApi({ providers: [BINDING], buildDeps: BUILD_DEPS, ...opts });
+  mount();
+  await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+  return screen.getByRole("tabpanel");
+}
+
+function tabWidget(panel: HTMLElement, title: string): HTMLElement {
+  const found = expectOneWidgetStack(panel).filter((w) => widgetTitle(w) === title);
+  expect(found, title).toHaveLength(1);
+  return found[0];
+}
+
+describe("WorkspaceView — the coverage tab explains itself, in one stack (S-613)", () => {
+  it("has a state to check for each of the four the story names", () => {
+    expect(Object.keys(COVERAGE_TAB_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
+  });
+
+  it.each(Object.entries(COVERAGE_TAB_STATES))(
+    "%s: every widget is a Widget under the tab's one WidgetStack and carries the message standard",
+    async (_state, opts) => {
+      const panel = await openCoverageTab(opts);
+      const widgets = expectOneWidgetStack(panel);
+      expect(widgets.map(widgetTitle)).toEqual(COVERAGE_TAB_WIDGETS);
+      for (const w of widgets) expectWidgetCopy(w);
+    },
+  );
+
+  it("each widget renders its own catalogue entry for its state", async () => {
+    const panel = await openCoverageTab(COVERAGE_TAB_STATES["partial coverage"]);
+    expectWidgetCopy(tabWidget(panel, "Spec conformance (declared endpoints vs controllers)"), specConformance, {
+      notMatched: 7,
+    });
+    expectWidgetCopy(tabWidget(panel, "Coverage by intake"), coverageByIntake, { finding: "captured-resolves" });
+    expectWidgetCopy(tabWidget(panel, "Declared contracts and named externals"), declaredRelations);
+    expectWidgetCopy(tabWidget(panel, "Build dependencies"), buildDependencies, { unread: 1 });
+  });
+
+  it("glosses 'intake' in the Coverage by intake title", async () => {
+    const panel = await openCoverageTab({ coverage: MULTI_REASON_COVERAGE });
+    const title = tabWidget(panel, "Coverage by intake").querySelector('[data-widget-part="title"]')!;
+    expect(title.querySelector("dfn")?.getAttribute("data-term")).toBe("intake");
+  });
+
+  it("the captured-call finding asks for action only when captured calls resolve nowhere", async () => {
+    const panel = await openCoverageTab({ coverage: COVERAGE });
+    const intake = tabWidget(panel, "Coverage by intake");
+    expectWidgetCopy(intake, coverageByIntake, { finding: "captured-unresolved" });
+    expect(intake.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos workspace status");
   });
 });

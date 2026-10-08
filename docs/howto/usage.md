@@ -747,7 +747,15 @@ edge-count/egress-rate line (never the count without the rate beside it) with
 coverage by intake (the per-arm board is hidden — see [Hidden widgets](#hidden-widgets)); **Workspace Health** renders the degraded roll-up in
 words with a per-member table, the advisory governance findings and the topic
 inventory, drawing every unopenable member as degraded and naming it; and
-**Workspace Statistics** sums telemetry over members. Every ratio on these views
+**Workspace Statistics** sums telemetry over members. On the Workspace Dashboard,
+the Workspace tab's **Cross-service coverage** tab and Workspace Health's
+**Workspace rules** card, each card states what it shows, why it matters and what
+you can do, with where to do it (since S-613). **Resolved cross-service edges**
+lists why the unresolved outbound calls did not resolve, largest reason first, each
+with its remedy; **Cross-service reachability** leads with the callables to keep
+because another service calls them; **Members** gives each row its own action; and
+**Workspace rules** with no rules declared names `[[governance.boundaries]]` in
+`logos.workspace.toml`. Every ratio on these views
 carries its denominator and its exclusion — a zero denominator renders the ratio
 **absent** ("not measured", no bar) with the excluded count still shown, rather than
 a `0%` that reads like a measurement. Workspace Statistics states its **member
@@ -821,8 +829,9 @@ depend on the model libraries (`<group>.<context>:kafka-models`, or
 tab gains a **Build dependencies** card after every runtime board, rendering the server's
 own headline line (pairs by kind beside their denominator), the declared platforms apart,
 the platform candidates and any colliding artifact. A build dependency is never a runtime
-coupling: no runtime figure counts it. A workspace with no build manifest shows no toggle,
-no card and makes no extra request — every panel is exactly as before.
+coupling: no runtime figure counts it. A workspace with no build manifest shows no toggle
+and makes no extra request; its **Build dependencies** card states that no member holds a
+Maven or Gradle manifest.
 
 **The declared layer (since S-461).** When a member holds a
 [vendored spec](configuration.md#vendored-specs--declared-contracts-and-named-externals),
@@ -852,7 +861,8 @@ the build card) with the two server lines — declared contract pairs over the s
 documents read, and bound calls over the no-provider REST rows with their
 refusals. A bound call **stays under *No provider here***: the binding is
 reported beside its row, and no runtime figure counts it. A workspace with no
-vendored spec and no `kind` shows no declared edge, legend section or card.
+vendored spec and no `kind` shows no declared edge or legend section, and its
+**Declared contracts and named externals** card states that nothing is declared.
 
 In a plain single repo
 (no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;

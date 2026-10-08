@@ -12,8 +12,13 @@
  * It computes nothing. Every figure is the server's, displayed (ADR-01,
  * NFR-MA-02): the coverage boards are the SAME components the Workspace tab's
  * coverage panel renders (`CoverageBoards.tsx`), not a restyled copy, and the
- * headline is the server's composed `resolved_edges_summary` line so the count
- * can never be shown without its rate (BR-51).
+ * headline's edge count rides in the server's composed `resolved_edges_summary`
+ * line, so the count can never be shown without its rate (BR-51).
+ *
+ * Every widget renders through the shared `Widget` frame, in one `WidgetStack`,
+ * with its words in a catalogue (S-613, CR-203): the coverage boards in
+ * `copy/coverage.copy.ts`, Reachability and Members in
+ * `copy/workspaceDashboard.copy.ts`.
  *
  * The one thing this view deliberately does NOT have is a headline number for the
  * workspace. The per-repo 0–10000 signal is defined against one repository's
@@ -42,14 +47,24 @@ import type {
 import {
   Badge,
   Callout,
-  Card,
+  CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
   ErrorPanel,
   LoadingState,
+  Term,
+  Widget,
+  WidgetStack,
   type Column,
 } from "../../components/index.ts";
+import { NOTHING_TO_DO } from "../../copy/types.ts";
+import {
+  DASHBOARD_TEXT,
+  memberRowAction,
+  members,
+  reachability,
+} from "../../copy/workspaceDashboard.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { resolutionStatement } from "../dashboard/dashboardModel.ts";
 import { buildCoverageDashboard } from "./coverageModel.ts";
@@ -98,8 +113,11 @@ export function WorkspaceDashboardView() {
     );
   }
 
+  // One stack for the whole view (S-613, FR-UI-40): the coverage boards are a
+  // fragment and `AsyncResource` renders its children unwrapped, so every
+  // widget below is a direct child of this stack, at its one gap.
   return (
-    <div className={styles.view}>
+    <WidgetStack>
       <Callout label="Workspace" tone="signal">
         <span>
           <span className="mono">{workspace}</span> · {members.length} service
@@ -115,7 +133,7 @@ export function WorkspaceDashboardView() {
           </AsyncResource>
         )}
       </AsyncResource>
-    </div>
+    </WidgetStack>
   );
 }
 
@@ -144,68 +162,73 @@ function DashboardContent({
 
 // ── App-wide reachability (FR-WS-12, served by S-427) ────────────────────────
 
-/** The promotions and the bounds the payload was projected under.
+/** The callables another service keeps alive, led by how many there are
+ *  (CR-203 §3.2 D item 2), and the bounds the payload was projected under.
  *
  *  Every claim on this view is rendered next to `reachability.coverage` — the
  *  rider the claim is only as good as — because a promotion read apart from the
- *  coverage it rests on is the misreading BR-53 exists to remove. */
+ *  coverage it rests on is the misreading BR-53 exists to remove. So the lead
+ *  reads "at least" when the rider is partial, and an empty answer is stated in
+ *  the figure row (never a centred `EmptyState`) with that same caveat. */
 function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
-  const { reachability } = answer;
-  const rider = reachability.coverage;
-  const promotions = reachability.live_via_cross_service;
+  const { reachability: model } = answer;
+  const rider = model.coverage;
+  const promotions = model.live_via_cross_service;
   // The shortfall predicate, derived from the two counts the rider carries.
   // This rider has NO `covers_all_members` flag (unlike the coverage summary and
   // the degraded roll-up), so reading one would be reading `undefined` — falsy —
   // and would stamp "lower bound" on a complete answer too (S-428 review).
   const partial = rider.members_read < rider.members_total;
   return (
-    <Card
+    <Widget
       title="Cross-service reachability"
-      aside={<Badge tone="muted">advisory — never a gate input</Badge>}
+      badge={<Badge tone="muted">Advisory</Badge>}
+      copy={reachability}
+      state={{ keep: promotions.length }}
+      figure={
+        <div className={styles.figure}>
+          <p>{DASHBOARD_TEXT.keepThem(promotions.length, partial)}</p>
+          <p className={styles.note}>
+            {DASHBOARD_TEXT.keepThemBasis(
+              rider.bridge_invocation_edges,
+              rider.members_read,
+              rider.members_total,
+              partial,
+            )}
+            {promotions.length === 0 && <> {DASHBOARD_TEXT.keepThemNone}</>}
+          </p>
+          {model.skipped_members.length > 0 && (
+            <p className={styles.note}>
+              {DASHBOARD_TEXT.skipped(model.skipped_members)}{" "}
+              <span className="mono">{model.skipped_members.join(", ")}</span>.
+            </p>
+          )}
+        </div>
+      }
     >
-      <p className="muted">
-        {promotions.length} callable{promotions.length === 1 ? "" : "s"} dead in its own member and
-        live across the workspace union. Seeded from {rider.bridge_invocation_edges} invocation
-        edge{rider.bridge_invocation_edges === 1 ? "" : "s"}; the coverage this rests on is{" "}
-        {rider.members_read} of {rider.members_total} members read
-        {partial ? " — every figure here is a lower bound" : ""}.
-      </p>
-      {/* The applied bounds, stated. `dead: null` is SUPPRESSED, deliberately
-          distinct from `[]` ("computed, and genuinely empty") — so it is rendered
-          as "not requested", never as "no dead code" (CR-084, NFR-CC-04). */}
-      <p className="muted">
-        {reachability.scope.repo ? (
-          <>
-            Scoped to <span className="mono">{reachability.scope.repo}</span>.{" "}
-          </>
-        ) : (
-          "Unscoped — every member is projected. "
-        )}
-        {reachability.dead === null
-          ? "The app-wide dead set was not requested, so it is absent from this answer rather than empty."
-          : `${reachability.dead.length} callables are dead app-wide.`}
-      </p>
-      {reachability.skipped_members.length > 0 && (
-        <p className="muted">
-          {reachability.skipped_members.length} member
-          {reachability.skipped_members.length === 1 ? "" : "s"} could not be read, so{" "}
-          {reachability.skipped_members.length === 1 ? "it contributes" : "they contribute"} no
-          roots and no claims:{" "}
-          <span className="mono">{reachability.skipped_members.join(", ")}</span>.
-        </p>
-      )}
-      {promotions.length === 0 ? (
-        <EmptyState message="No callable is promoted across the workspace union — either nothing is dead per repo, or no invocation edge reaches one. Read the coverage above before taking this as an all-clear." />
-      ) : (
+      {promotions.length > 0 && (
         <DataTable
-          caption="Callables promoted to live by a cross-service edge"
+          caption="Callables kept in use by a call from another service"
           columns={PROMOTION_COLUMNS}
           rows={promotions}
           rowKey={(c) => `${c.member}:${c.symbol}`}
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
       )}
-    </Card>
+      {/* The applied bounds, stated. `dead: null` is SUPPRESSED, deliberately
+          distinct from `[]` ("computed, and genuinely empty") — so it is rendered
+          as "not requested", never as "no dead code" (CR-084, NFR-CC-04). */}
+      <p className="muted">
+        {model.scope.repo ? (
+          <>
+            {DASHBOARD_TEXT.scopedTo} <span className="mono">{model.scope.repo}</span>.{" "}
+          </>
+        ) : (
+          `${DASHBOARD_TEXT.unscoped} `
+        )}
+        {model.dead === null ? DASHBOARD_TEXT.deadSuppressed : DASHBOARD_TEXT.deadCount(model.dead.length)}
+      </p>
+    </Widget>
   );
 }
 
@@ -296,7 +319,32 @@ function tallyCell(row: RosterRow, pick: (t: MemberReachability) => number) {
   return pick(row.tally);
 }
 
-const ROSTER_COLUMNS: Column<RosterRow>[] = [
+/** The per-row action cell: what this member's own row asks of the reader. */
+function RowAction({ row }: { row: RosterRow }) {
+  const action = memberRowAction({ degraded: row.degraded, unusedAcross: row.tally?.dead_app_wide ?? null });
+  if (action.kind === "none") return <span className="muted">{NOTHING_TO_DO}</span>;
+  return (
+    <>
+      <CopyTextView text={action.text} />
+      <br />
+      <span className="muted">{action.where}</span>
+      {action.target !== undefined && (
+        <>
+          {" "}
+          <code>{action.target}</code>
+        </>
+      )}
+    </>
+  );
+}
+
+/** The roster's columns. The figure headers are glossed (CR-203 §3.2 D item 3):
+ *  plain words, each naming a precise figure the gloss defines.
+ *
+ *  Built on render, not at module load: the headers are elements, and an element
+ *  created at import time would make every module importing this view (the app
+ *  shell, its route table) need the gloss component just to load. */
+const rosterColumns = (): Column<RosterRow>[] => [
   { key: "member", header: "Member", mono: true, cell: (r) => r.member, sortValue: (r) => r.member },
   {
     key: "state",
@@ -318,38 +366,47 @@ const ROSTER_COLUMNS: Column<RosterRow>[] = [
     // This member's OWN signal, named with it. Never averaged across the roster
     // (BR-56): the figure is defined against one member's graph.
     key: "resolution",
-    header: "Its reference resolution",
+    header: (
+      <>
+        <Term term="referenceResolution" /> (its own)
+      </>
+    ),
     cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
     sortValue: (r) => r.resolution ?? "",
   },
   {
     key: "extraRoots",
-    header: "Roots from bindings",
+    header: <Term term="entryPointsFromOtherServices" />,
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.extra_roots),
     sortValue: (r) => r.tally?.extra_roots ?? -1,
   },
   {
     key: "deadPerRepo",
-    header: "Dead per repo",
+    header: <Term term="unusedInOwnGraph" />,
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.dead_per_repo),
     sortValue: (r) => r.tally?.dead_per_repo ?? -1,
   },
   {
     key: "promoted",
-    header: "Live via cross-service",
+    header: (
+      <>
+        …of which <Term term="usedByAnotherService" />
+      </>
+    ),
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.live_via_cross_service),
     sortValue: (r) => r.tally?.live_via_cross_service ?? -1,
   },
   {
     key: "deadAppWide",
-    header: "Dead app-wide",
+    header: <Term term="unusedAcrossWorkspace" />,
     numeric: true,
     cell: (r) => tallyCell(r, (t) => t.dead_app_wide),
     sortValue: (r) => r.tally?.dead_app_wide ?? -1,
   },
+  { key: "action", header: "What you can do", cell: (r) => <RowAction row={r} /> },
 ];
 
 function MemberRoster({
@@ -360,20 +417,29 @@ function MemberRoster({
   answer: WorkspaceReachabilityAnswer;
 }) {
   const rows = rosterRows(status, answer);
+  const rollup = status.degraded_rollup;
   return (
-    <Card title="Members">
+    <Widget
+      title="Members"
+      copy={members}
+      state={{
+        degraded: rows.filter((r) => r.degraded).length,
+        withUnused: rows.filter((r) => (r.tally?.dead_app_wide ?? 0) > 0).length,
+      }}
+      figure={
+        <div className={styles.figure}>
+          <p>{DASHBOARD_TEXT.membersRead(rollup.opened, rollup.members)}</p>
+        </div>
+      }
+    >
       <DataTable
         caption="Each member's own coupling figures — never rolled up"
-        columns={ROSTER_COLUMNS}
+        columns={rosterColumns()}
         rows={rows}
         rowKey={(r) => r.member}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-      <p className="muted">
-        Each row is that member's own figure. There is deliberately no workspace-wide total or
-        average here: the per-repository quality signal is defined against one repository's
-        baseline, so a mean across members would be a number with no referent (BR-56).
-      </p>
-    </Card>
+      <p className="muted">{DASHBOARD_TEXT.notAveraged}</p>
+    </Widget>
   );
 }

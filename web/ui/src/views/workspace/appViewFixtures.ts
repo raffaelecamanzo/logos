@@ -23,7 +23,9 @@ import type {
   DegradedRollup,
   MemberStatus,
   MemberTopics,
+  ReferenceCoverage,
   StatusInfo,
+  UnboundReason,
   WarmRollup,
   WorkspaceGovernance,
   WorkspaceGovernanceAnswer,
@@ -356,3 +358,148 @@ export function stubAppApi(opts: AppStubOptions = {}): () => string[] {
   );
   return () => calls;
 }
+
+// ── S-613: the four widget states (healthy, partial, nothing measured, degraded)
+
+/** One coverage row. Every row literal: the provenance channel is not under test. */
+function ref(
+  relation: string,
+  symbol: string,
+  intake: "invocation" | "contract-surface",
+  outcome: "bound" | "ambiguous" | Exclude<UnboundReason, "ambiguous">,
+): ReferenceCoverage {
+  const base = { relation, from: { member: "orders", symbol }, intake, provenance: "literal" as const };
+  if (outcome === "bound") return { ...base, bucket: "bound", state: "bound" };
+  if (outcome === "ambiguous") return { ...base, bucket: "ambiguous", state: "unbound", reason: "ambiguous" };
+  return { ...base, bucket: "unbound", state: "unbound", reason: outcome };
+}
+
+/** A self-consistent coverage payload whose captured calls fail for four reasons
+ *  across three arms — so the Resolved cross-service edges action has a reason
+ *  list to order and sum (CR-203 §3.2 D item 4).
+ *
+ *  Captured (invocation): 2 resolved; 3 `base-url-runtime` (route), 2
+ *  `topic-not-literal` (broker), 1 `ambiguous` (gRPC), 1 `path-not-composed`
+ *  (route) — 7 unresolved of 9 measured; and 1 call to a service outside the
+ *  workspace, outside the rate. Declared (contract-surface): 1 matched. The
+ *  `ambiguous`/`path-not-composed` tie at 1 is deliberate: it pins the name
+ *  tie-break. */
+export const MULTI_REASON_COVERAGE: CrossServiceCoverage = {
+  references: [
+    ref("route", "a", "invocation", "bound"),
+    ref("route", "b", "invocation", "bound"),
+    ref("route", "c", "invocation", "base-url-runtime"),
+    ref("route", "d", "invocation", "base-url-runtime"),
+    ref("route", "e", "invocation", "base-url-runtime"),
+    ref("broker-topic", "f", "invocation", "topic-not-literal"),
+    ref("broker-topic", "g", "invocation", "topic-not-literal"),
+    ref("grpc-call", "h", "invocation", "ambiguous"),
+    ref("route", "i", "invocation", "path-not-composed"),
+    ref("route", "j", "invocation", "no-provider-in-workspace"),
+    ref("route", "k", "contract-surface", "bound"),
+  ],
+  bound: 3,
+  ambiguous: 1,
+  unbound: 6,
+  no_provider_in_workspace: 1,
+  by_intake: {
+    contract_surface: { bound: 1, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
+    invocation: { bound: 2, ambiguous: 1, unbound: 6, no_provider_in_workspace: 1 },
+  },
+  resolved_cross_service_edges: 2,
+  egress_resolution: 2 / 9,
+  egress_resolution_measured: 9,
+  resolved_edges_summary:
+    "2 resolved cross-service edges; egress resolution 0.222 (2 of 9 egress sites resolved)",
+  spec_conformance_ratio: 0.3,
+  spec_conformance_measured: 10,
+  spec_conformance_summary: "0.300 (3 of 10 measured; 1 excluded as no-provider-in-workspace)",
+  members_read: 3,
+  members_total: 3,
+  covers_all_members: true,
+};
+
+/** Every captured call resolves and every declared endpoint matches. */
+export const HEALTHY_COVERAGE: CrossServiceCoverage = {
+  references: [
+    ref("route", "a", "invocation", "bound"),
+    ref("route", "b", "invocation", "bound"),
+    ref("route", "k", "contract-surface", "bound"),
+  ],
+  bound: 3,
+  ambiguous: 0,
+  unbound: 0,
+  no_provider_in_workspace: 0,
+  by_intake: {
+    contract_surface: { bound: 1, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
+    invocation: { bound: 2, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
+  },
+  resolved_cross_service_edges: 2,
+  egress_resolution: 1,
+  egress_resolution_measured: 2,
+  resolved_edges_summary:
+    "2 resolved cross-service edges; egress resolution 1.000 (2 of 2 egress sites resolved)",
+  spec_conformance_ratio: 1,
+  spec_conformance_measured: 3,
+  spec_conformance_summary: "1.000 (3 of 3 measured; 0 excluded as no-provider-in-workspace)",
+  members_read: 3,
+  members_total: 3,
+  covers_all_members: true,
+};
+
+/** The coverage of a workspace two of whose three members were read. */
+export const PARTIAL_COVERAGE: CrossServiceCoverage = {
+  ...MULTI_REASON_COVERAGE,
+  members_read: 2,
+  members_total: 3,
+  covers_all_members: false,
+};
+
+/** The four states every converted widget is checked in (S-613 AC1), as the
+ *  three reads the workspace views issue. */
+export const WIDGET_STATES: Record<
+  "healthy" | "partial coverage" | "nothing measured" | "degraded member",
+  { status: WorkspaceStatus; reachability: WorkspaceReachabilityAnswer; governance: WorkspaceGovernanceAnswer }
+> = {
+  healthy: {
+    status: workspaceStatus({
+      coverage: HEALTHY_COVERAGE,
+      members: [memberStatus("api"), memberStatus("orders"), memberStatus("web")],
+    }),
+    reachability: reachabilityAnswer({
+      members: [
+        { member: "api", extra_roots: 1, unresolved_roots: 0, dead_per_repo: 1, live_via_cross_service: 1, dead_app_wide: 0 },
+        { member: "orders", extra_roots: 0, unresolved_roots: 0, dead_per_repo: 0, live_via_cross_service: 0, dead_app_wide: 0 },
+        { member: "web", extra_roots: 0, unresolved_roots: 0, dead_per_repo: 0, live_via_cross_service: 0, dead_app_wide: 0 },
+      ],
+      live_via_cross_service: [],
+    }),
+    governance: governanceAnswer(governanceReport({ violations: [] })),
+  },
+  "partial coverage": {
+    status: workspaceStatus({ coverage: PARTIAL_COVERAGE }),
+    reachability: reachabilityAnswer({ coverage: coverageRider({ members_read: 2, members_total: 3 }) }),
+    governance: governanceAnswer(governanceReport({ unknown_member_refs: ["billing"] })),
+  },
+  "nothing measured": {
+    status: workspaceStatus({ coverage: EMPTY_COVERAGE }),
+    reachability: reachabilityAnswer({
+      coverage: coverageRider({ bridge_invocation_edges: 0, resolved_cross_service_edges: 0 }),
+      members: [],
+      live_via_cross_service: [],
+    }),
+    governance: governanceAnswer(null),
+  },
+  "degraded member": {
+    status: workspaceStatus({
+      coverage: PARTIAL_COVERAGE,
+      members: [memberStatus("api"), memberStatus("orders"), degradedMember("web")],
+      degraded_rollup: oneDegraded("web"),
+    }),
+    reachability: reachabilityAnswer({
+      coverage: coverageRider({ members_read: 2, members_total: 3 }),
+      skipped_members: ["web"],
+    }),
+    governance: governanceAnswer(governanceReport(), { complete: false, degraded_rollup: oneDegraded("web") }),
+  },
+};

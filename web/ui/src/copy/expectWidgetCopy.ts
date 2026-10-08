@@ -36,9 +36,17 @@ function readerText(el: Element): string {
   return collapse(clone.textContent ?? "");
 }
 
+/** Elements a browser lays out as their own block (or line): their edges are
+ *  word boundaries to a reader even when no whitespace sits in the markup. */
+const BLOCK_TAGS = new Set(["P", "DIV", "LI", "UL", "OL", "TABLE", "TR", "TD", "TH", "BR", "H1", "H2", "H3", "H4", "H5", "H6", "SECTION"]);
+
 /**
  * A rendered part as the vocabulary rule reads it: the text outside every gloss,
  * and where each `<dfn>` stood — the same shape `plainPart` gives catalogue text.
+ *
+ * A block's edges are read as a space (S-613): two paragraphs in a figure row
+ * are two runs of text, and joining them bare ("…matched" + "3 bound" →
+ * "matched3 bound") would hide a term that opens the second from its pattern.
  */
 function renderedPart(el: Element | null): PlainPart {
   let text = "";
@@ -50,7 +58,10 @@ function renderedPart(el: Element | null): PlainPart {
       const term = node.getAttribute("data-term");
       if (term !== null) glosses.push({ term: term as GlossaryTerm, at: text.length });
     } else {
+      const block = node instanceof Element && BLOCK_TAGS.has(node.tagName);
+      if (block) text += " ";
       node.childNodes.forEach(walk);
+      if (block) text += " ";
     }
   };
   if (el) walk(el);

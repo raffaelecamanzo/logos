@@ -16,6 +16,37 @@
   gap: var(--space-4);
 }
 
+/* A widget's figure row content (S-613): the lead figure in the frame's figure
+   type style, then secondary lines at body size. A column, because the frame's
+   figure row is a wrapping row meant for side-by-side figures. */
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.figure > p {
+  margin: 0;
+}
+
+/* A sentence in the figure row (a finding or a server's composed line): body
+   size, full ink — it IS the figure, not secondary detail. */
+.statement {
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-base);
+}
+
+/* Secondary detail under the lead: body size, muted. */
+.note {
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-base);
+  color: var(--text-2);
+}
+
 /* A coverage verdict row: the score bar beside its verbatim figure. Shared by
    both verdict cards since S-376 — the resolved-edge headline and the
    spec-conformance ratio below it. */

@@ -56,6 +56,35 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   one register, `web/ui/src/views/hiddenWidgets.ts`, with its reason and the
   surfaces that still serve it; deleting an entry brings the widget back. The
   usage guide lists them under *Hidden widgets*.
+- **The Workspace Dashboard, the Cross-service coverage tab and Workspace rules
+  say what each widget shows, why it matters and what to do, in one layout
+  (CR-203, S-613).** Eight widgets now render through the shared widget frame
+  with their words in catalogues (`web/ui/src/copy/coverage.copy.ts`,
+  `workspaceDashboard.copy.ts`, `workspaceHealth.copy.ts`):
+  - **Resolved cross-service edges** leads with "r of s outbound call sites
+    resolved". Below 100% its action lists why the rest did not resolve, across
+    every binding kind and largest first, each reason with its remedy and where
+    to apply it. The counts add up to the unresolved figure.
+  - **Cross-service reachability** leads with how many callables are unused in
+    their own service but called from another, to keep. It reads "at least"
+    when coverage is partial, and states an empty answer in place of a centred
+    empty state.
+  - **Members** glosses its figure headers and gives each row an action: run
+    `logos index` in a degraded member, or review its callables unused across
+    the workspace for deletion.
+  - **Workspace rules** carries an *Advisory* badge and the figure "r rules
+    checked over b bindings · v findings". With no rules it says nothing was
+    checked and names `[[governance.boundaries]]` in `logos.workspace.toml`.
+  - **Spec conformance**, **Coverage by intake** (with *intake* glossed),
+    **Declared contracts and named externals** and **Build dependencies** take
+    the same four parts. A workspace with no vendored spec or no build manifest
+    now sees that absence stated in its widget, where the widget used to be
+    left out.
+
+  Each workspace view stacks its widgets at one spacing, so the coverage tab's
+  last three widgets no longer touch. A Playwright spec checks the equal gaps,
+  left alignment and single body size on the real views. No figure, endpoint,
+  CLI command or MCP tool changed.
 
 ### Fixed
 
