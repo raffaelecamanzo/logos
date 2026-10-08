@@ -88,13 +88,17 @@ export function PathCell({ path, label = abbreviatePaths([path]).get(path)! }: P
 /**
  * A "File" column over `rows`: each cell a `PathCell` labelled against every
  * row of the table, sorted by the full path. Build it where the rows are known
- * (a `useMemo` over the rows), not as a module constant.
+ * (a `useMemo` over the rows), not as a module constant. Pass `labels` when the
+ * same paths are also shown outside the table, so both read the same label.
  */
-export function pathColumn<R>(rows: readonly R[], getPath: (row: R) => string, header = "File"): Column<R> {
-  const labels = abbreviatePaths(rows.map(getPath));
+export function pathColumn<R>(
+  rows: readonly R[],
+  getPath: (row: R) => string,
+  labels: ReadonlyMap<string, string> = abbreviatePaths(rows.map(getPath)),
+): Column<R> {
   return {
     key: "path",
-    header,
+    header: "File",
     mono: true,
     cell: (r) => <PathCell path={getPath(r)} label={labels.get(getPath(r))} />,
     sortValue: getPath,

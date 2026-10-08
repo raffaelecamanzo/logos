@@ -82,6 +82,13 @@ describe("PathCell", () => {
     expect(el).toHaveAttribute("tabindex", "0");
   });
 
+  it("abbreviates a long path on its own when no table label is given", () => {
+    render(<PathCell path={LONGER} />);
+    expect(screen.getByTitle(LONGER).querySelector('[aria-hidden="true"]')?.textContent).toBe(
+      "logos-core/…/window/commits.rs",
+    );
+  });
+
   it("renders a short path as itself, unfocusable, with the same title", () => {
     render(
       <table>

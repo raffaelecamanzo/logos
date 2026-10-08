@@ -20,6 +20,7 @@ import { useMemo, useState } from "react";
 import { AsyncResource, fetchFiles, useApiResource } from "../../api/index.ts";
 import type { FileTemporal, FilesModel } from "../../api/types.ts";
 import {
+  abbreviatePaths,
   Button,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
@@ -152,7 +153,13 @@ function FilesContent({
   const { hotspots, temporal } = model;
   const rows = useMemo(() => fileRiskRows(hotspots, temporal), [hotspots, temporal]);
   const ownership = useMemo(() => ownershipRows(temporal), [temporal]);
-  const fileColumns = useMemo(() => [pathColumn(rows, (r) => r.path), ...FILE_COLUMNS], [rows]);
+  // One labelling for the risk table AND its figure row, so the top file reads
+  // the same in both and never takes a label another row shares.
+  const riskLabels = useMemo(() => abbreviatePaths(rows.map((r) => r.path)), [rows]);
+  const fileColumns = useMemo(
+    () => [pathColumn(rows, (r) => r.path, riskLabels), ...FILE_COLUMNS],
+    [rows, riskLabels],
+  );
   const ownershipColumns = useMemo(
     () => [pathColumn(ownership, (r) => r.path), ...OWNERSHIP_COLUMNS],
     [ownership],
@@ -230,7 +237,7 @@ function FilesContent({
               {hotspots.ranked_files} <span className={styles.unit}>files ranked</span>
             </span>
             <span className={styles.unit}>
-              top: <PathCell path={top.path} />, score {top.score}
+              top: <PathCell path={top.path} label={riskLabels.get(top.path)} />, score {top.score}
             </span>
           </>
         }

@@ -290,6 +290,25 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expect(within(owners).getByTitle(LONG_A)).toBeInTheDocument();
   });
 
+  it("labels the top file in the figure exactly as its table row, even where the short label collides", async () => {
+    stubFetch(() => {
+      const m = model();
+      m.hotspots.files[0].path = LONG_A;
+      m.hotspots.files[1].path = LONG_B;
+      return m;
+    });
+    render(<FilesView />);
+    const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+    const figure = widget("Files ranked by risk").querySelector('[data-widget-part="figure"]')!;
+    const inFigure = within(figure as HTMLElement).getByTitle(LONG_A);
+    expect(inFigure.querySelector('[aria-hidden="true"]')?.textContent).toBe(
+      "logos-core/…/temporal/mining/window/commits.rs",
+    );
+    expect(within(table).getByTitle(LONG_A).querySelector('[aria-hidden="true"]')?.textContent).toBe(
+      inFigure.querySelector('[aria-hidden="true"]')?.textContent,
+    );
+  });
+
   it("sorts the File column by the full path", async () => {
     const user = userEvent.setup();
     stubFetch(() => {
