@@ -41,6 +41,7 @@ import type {
   ReferenceCoverage,
   UnboundReason,
 } from "../../api/types.ts";
+import { COVERAGE_TEXT, type NotResolvedReason, type ResolvedEdgesState } from "../../copy/coverage.copy.ts";
 
 /** The human label for each unbound reason (the wire tokens are kebab-case). */
 export const REASON_LABEL: Record<UnboundReason, string> = {
@@ -313,9 +314,12 @@ export function measuredInPopulation(counts: ClassificationCounts): number {
  *  deterministic. One comparator for the per-arm reasons and the pooled egress
  *  reasons, so the two lists can never order the same counts differently. */
 function reasonCounts(tally: Map<UnboundReason, number>): ReasonCount[] {
-  return [...tally]
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
+  return [...tally].map(([reason, count]) => ({ reason, count })).sort(byCountThenReason);
+}
+
+/** Largest count first; ties by reason token, so the order is deterministic. */
+function byCountThenReason(a: { reason: string; count: number }, b: { reason: string; count: number }): number {
+  return b.count - a.count || a.reason.localeCompare(b.reason);
 }
 
 /** Group a coverage read-model into the per-arm, per-reason dashboard model. */
@@ -440,26 +444,26 @@ export const NOT_ITEMISED = "not-itemised";
  *
  *  `unresolved` is the SERVER's (`egress_resolution_measured` minus the
  *  invocation population's `bound`, the rate's own numerator), and the reasons
- *  are the rows grouped. Their counts sum to `unresolved` by construction: any
- *  shortfall is carried as {@link NOT_ITEMISED} rather than dropped. */
-export function resolvedEdgesState(dashboard: CoverageDashboard): {
-  measured: number;
-  resolved: number;
-  unresolved: number;
-  reasons: { reason: string; label: string; count: number }[];
-  outside: number;
-} {
+ *  are the rows grouped. The server files each row and counts it in one body
+ *  (`Tally::record`) and debug-asserts that the two agree (`Tally::finish` in
+ *  `logos-core/src/federation/coverage.rs`), so the rows do not itemise more
+ *  than `unresolved`; should they ever itemise less, the shortfall is carried
+ *  as {@link NOT_ITEMISED},
+ *  in its place in the largest-first order, so the list still sums to the
+ *  figure it explains. */
+export function resolvedEdgesState(dashboard: CoverageDashboard): ResolvedEdgesState & { readonly resolved: number } {
   const measured = dashboard.egressResolutionMeasured;
   const resolved = dashboard.byIntake.invocation.bound;
   const unresolved = Math.max(0, measured - resolved);
-  const reasons = dashboard.egressNotResolved.map((r) => ({
-    reason: r.reason as string,
+  const reasons: NotResolvedReason[] = dashboard.egressNotResolved.map((r) => ({
+    reason: r.reason,
     label: reasonLabel(r.reason),
     count: r.count,
   }));
   const itemised = reasons.reduce((n, r) => n + r.count, 0);
   if (itemised < unresolved) {
-    reasons.push({ reason: NOT_ITEMISED, label: "Not itemised in this answer", count: unresolved - itemised });
+    reasons.push({ reason: NOT_ITEMISED, label: COVERAGE_TEXT.notItemised, count: unresolved - itemised });
+    reasons.sort(byCountThenReason);
   }
   return {
     measured,

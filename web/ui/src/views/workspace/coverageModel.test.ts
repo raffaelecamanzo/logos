@@ -8,6 +8,7 @@ import type {
   UnboundReason,
 } from "../../api/types.ts";
 import { BOUND_EXTERNAL, DECLARED_CONTRACTS, EMPTY_COVERAGE } from "../../workspace/testFixtures.ts";
+import { COVERAGE_TEXT } from "../../copy/coverage.copy.ts";
 import { HEALTHY_COVERAGE, MULTI_REASON_COVERAGE } from "./appViewFixtures.ts";
 import {
   armLabel,
@@ -734,8 +735,26 @@ describe("egressNotResolved / resolvedEdgesState (S-613)", () => {
       buildCoverageDashboard({ ...MULTI_REASON_COVERAGE, egress_resolution_measured: 12 }),
     );
     expect(state.unresolved).toBe(10);
-    expect(state.reasons.at(-1)).toEqual({ reason: NOT_ITEMISED, label: "Not itemised in this answer", count: 3 });
+    expect(state.reasons.find((r) => r.reason === NOT_ITEMISED)).toEqual({
+      reason: NOT_ITEMISED,
+      label: COVERAGE_TEXT.notItemised,
+      count: 3,
+    });
     expect(state.reasons.reduce((n, r) => n + r.count, 0)).toBe(10);
+  });
+
+  it("places the not-itemised remainder in the largest-first order, not always last", () => {
+    // 7 itemised against a figure of 20: the remainder (13) is the largest.
+    const state = resolvedEdgesState(
+      buildCoverageDashboard({ ...MULTI_REASON_COVERAGE, egress_resolution_measured: 22 }),
+    );
+    expect(state.reasons.map((r) => [r.reason, r.count])).toEqual([
+      [NOT_ITEMISED, 13],
+      ["base-url-runtime", 3],
+      ["topic-not-literal", 2],
+      ["ambiguous", 1],
+      ["path-not-composed", 1],
+    ]);
   });
 
   it("has nothing unresolved when every captured call resolves, or none was captured", () => {

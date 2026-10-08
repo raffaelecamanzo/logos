@@ -247,6 +247,8 @@ export const COVERAGE_TEXT = {
   /** The external join's figure, likewise. */
   externalsMatched: (matched: number, rows: number) =>
     `${matched} of ${rows} outbound REST ${plural(rows, "call", "calls")} to a service outside this workspace matched a named external`,
+  /** The label of unresolved call sites the answer counts but does not itemise. */
+  notItemised: "Not itemised in this answer",
   /** The build relation is absent: no member holds a build manifest. */
   buildAbsent: "No member holds a Maven or Gradle build manifest, so no build dependency was read.",
   /** A bound external call stays in the outside-the-workspace count. */
