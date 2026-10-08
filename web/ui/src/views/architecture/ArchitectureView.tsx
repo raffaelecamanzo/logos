@@ -84,7 +84,8 @@ interface CycleRow {
   count: number;
 }
 
-/** The cycle list that LEADS the page (§4.5): each back-edge as a sortable
+/** The cycle list that LEADS the page (§4.5) when the hidden-widget register does
+ *  not hide it (S-612): each back-edge as a sortable
  *  `From → To` row with its dependency count. From/To are focus links into the
  *  Graph tab. An acyclic report says so honestly (NFR-CC-04). */
 function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] }) {
