@@ -919,8 +919,8 @@ surface and the self-only CSP are untouched.
 The **Files & Risk** view (`/files`) is the merge of the former Hotspots and
 Commits views into one risk-ranked per-file table — commits, churn (`+/−`), age,
 co-change, defect density, complexity, and a coverage cell — with `?untested`
-keeping only files lacking fresh positive coverage. The per-file table renders
-inside a white widget card on the muted `NON-GATED TIER` band, and its `n/a`
+keeping only files lacking fresh positive coverage. The per-file table is the
+evidence of the **Files ranked by risk** widget, and its `n/a`
 cells (e.g. churn/age for a file with no history) right-align to their numeric
 columns (CR-042). A path longer than 40 characters is abbreviated to its first
 segment, an ellipsis and its last two segments (`logos-core/…/resolve/binder.rs`),

@@ -12,7 +12,7 @@ import { NOTHING_TO_DO } from "../copy/types.ts";
 import { Badge } from "./Badge.tsx";
 import statesStyles from "./States.module.css";
 import { Term } from "./Term.tsx";
-import { ActionCell, Widget } from "./Widget.tsx";
+import { ActionCell, FigureNote, Widget } from "./Widget.tsx";
 import styles from "./Widget.module.css";
 import { WidgetStack } from "./WidgetStack.tsx";
 import stackStyles from "./WidgetStack.module.css";
@@ -181,6 +181,30 @@ describe("Widget in panel mode (S-617, a tool panel)", () => {
     expect(() => expectToolPanel(other.container.querySelector("section")!, "graphQuery")).toThrow(
       /the panel it renders/,
     );
+  });
+});
+
+describe("FigureNote (the one figure-row qualifier)", () => {
+  it("sits in the figure row, inline by default and as its own line with block", () => {
+    const { container } = render(
+      <Widget
+        title="T"
+        copy={observe}
+        figure={
+          <span>
+            12 <FigureNote>files ranked</FigureNote>
+            <FigureNote block>Measured before the last commit.</FigureNote>
+          </span>
+        }
+      />,
+    );
+    const figure = container.querySelector('[data-widget-part="figure"]')!;
+    const notes = [...figure.querySelectorAll("[data-figure-note]")];
+    expect(notes.map((n) => [n.tagName, n.textContent])).toEqual([
+      ["SPAN", "files ranked"],
+      ["P", "Measured before the last commit."],
+    ]);
+    for (const note of notes) expect(note).toHaveClass(styles.figureNote);
   });
 });
 

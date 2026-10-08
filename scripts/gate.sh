@@ -581,8 +581,8 @@ gate_ui() { # gate_name npm_script
 #
 # The browser layout specs (S-611, CR-203 §11): Playwright drives a TREE-BUILT
 # `logos serve --ui` over the checked-in fixtures and asserts computed style —
-# on the served views, and on a harness build of the widget frame until views
-# render through it (web/ui/playwright.config.ts says which spec loads which).
+# on every served view, and on a harness build of the widget frame that pins the
+# frame's own rules (web/ui/playwright.config.ts says which spec loads which).
 # FULL tier only — it builds the SPA and the binary, and needs a browser.
 #
 # Its denominator is Playwright's own JSON report, recorded as one unit: tests

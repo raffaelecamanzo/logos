@@ -1,4 +1,4 @@
-// Shared steps for the every-view layout specs (S-617): open a view, wait for
+// Shared steps for the layout specs (S-617; `widgetTitles` is every spec's one title reader): open a view, wait for
 // the widget that says it has rendered, and hand back its one visible stack.
 import { expect, type Locator, type Page } from "@playwright/test";
 

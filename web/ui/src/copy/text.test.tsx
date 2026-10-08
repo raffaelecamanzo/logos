@@ -57,6 +57,16 @@ describe("action text", () => {
     expect(findUnglossedUses([actionLiterals(action)]).map((u) => u.term)).toEqual(["arm", "scc"]);
   });
 
+  it("reads a template's literal text, never the code inside ${…} (sprint review)", () => {
+    const action = (f: { baseline: number; n: number }) => ({
+      kind: "act" as const,
+      where: "command" as const,
+      text: `Compare with ${f.baseline}, then split the ${f.n === 1 ? "arm" : "SCC"}.`,
+    });
+    // `f.baseline` is an expression; "arm" and "SCC" are words the action can say.
+    expect(findUnglossedUses([actionLiterals(action)]).map((u) => u.term)).toEqual(["arm", "scc"]);
+  });
+
   it("does not count a term inside a gloss call", () => {
     const action = () => ({ kind: "act" as const, where: "command" as const, text: ["Check each ", gloss("arm"), "."] });
     expect(findUnglossedUses([actionLiterals(action)])).toEqual([]);

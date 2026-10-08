@@ -29,6 +29,7 @@ import {
   Callout,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
+  FigureNote,
   Widget,
   WidgetStack,
   type Column,
@@ -159,9 +160,9 @@ function CoverageContent({ model }: { model: CoverageModel }) {
           figure={
             <span>
               {untestedCount}{" "}
-              <span className="muted">
+              <FigureNote>
                 untested {plural(untestedCount, "file", "files")} among the {untested.ranked_files} ranked
-              </span>
+              </FigureNote>
             </span>
           }
         >
@@ -195,10 +196,10 @@ function CoverageContent({ model }: { model: CoverageModel }) {
           figure={
             <span>
               {coverage.overall_coverage_bp != null ? pctBp(coverage.overall_coverage_bp) : "n/a"}{" "}
-              <span className="muted">
+              <FigureNote>
                 of lines covered · {coverage.stale_files} of {coverage.total_files} {plural(coverage.total_files, "file", "files")}{" "}
                 stale
-              </span>
+              </FigureNote>
             </span>
           }
         >

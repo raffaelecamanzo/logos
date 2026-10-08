@@ -33,7 +33,7 @@ import type {
   StatusInfo,
   WikiPage,
 } from "../../api/types.ts";
-import { Badge, Callout, EmptyState, ScoreBar, Widget, WidgetStack } from "../../components/index.ts";
+import { Badge, Callout, EmptyState, FigureNote, ScoreBar, Widget, WidgetStack } from "../../components/index.ts";
 import {
   activity as activityCopy,
   codeCoverage,
@@ -171,7 +171,7 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
       state={{ ingested: true }}
       figure={
         <span>
-          <span className="num">{pctBp(bp)}</span> <span className="muted">of lines covered</span>
+          <span className="num">{pctBp(bp)}</span> <FigureNote>of lines covered</FigureNote>
         </span>
       }
     >
@@ -244,7 +244,7 @@ function LanguagesCard({
       state={{ indexed: true }}
       figure={
         <span>
-          {n} <span className="muted">{plural(n, "language", "languages")} indexed</span>
+          {n} <FigureNote>{plural(n, "language", "languages")} indexed</FigureNote>
         </span>
       }
     >
@@ -292,7 +292,7 @@ function GraphCard({ status }: { status: StatusInfo }) {
       state={{ linesCounted: loc !== null }}
       figure={
         <span>
-          <span className="mono">{resolution}</span> <span className="muted">of references resolved</span>
+          <span className="mono">{resolution}</span> <FigureNote>of references resolved</FigureNote>
         </span>
       }
     >
@@ -341,9 +341,9 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
       figure={
         <span>
           <span className="num">{fmtInt(stats.calls_total)}</span>{" "}
-          <span className="muted">
+          <FigureNote>
             {plural(stats.calls_total, "call", "calls")} in the last {stats.window_days} days
-          </span>
+          </FigureNote>
         </span>
       }
     >

@@ -79,7 +79,14 @@ export function actionLiterals(action: (...args: never[]) => unknown): PlainPart
   // `gloss)(` too: a test transform may call it as `(0, module.gloss)("arm")`.
   const source = action.toString().replace(/\bgloss\)?\(\s*(["'`])[^"'`]*\1(?:\s*,\s*(["'`])[^"'`]*\2)?\s*\)/g, "");
   const literals = [...source.matchAll(/(["'`])((?:\\.|(?!\1)[^\\])*)\1/g)].map((m) => m[2]);
-  return { text: literals.join(" "), glosses: [] };
+  // A template's `${…}` is code, not words: keep only the string literals inside
+  // it, so `${f.baseline}` never reads as the term "baseline".
+  const words = literals.map((lit) =>
+    lit.replace(/\$\{([^}]*)\}/g, (_, expr: string) =>
+      [" ", ...[...expr.matchAll(/(["'])((?:\\.|(?!\1)[^\\])*)\1/g)].map((m) => m[2]), " "].join(" "),
+    ),
+  );
+  return { text: words.join(" "), glosses: [] };
 }
 
 /**

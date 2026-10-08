@@ -50,8 +50,8 @@
  *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
- * muted node, not a service with "no couplings"; a workspace with no bindings gets
- * the awaiting-data state, never a fabricated 100%.
+ * muted node, not a service with "no couplings"; a workspace with no bindings
+ * states that absence in the Cross-service bindings widget, never a fabricated 100%.
  *
  * Every read here is a GET (ADR-28). In single-root mode this view is unreachable —
  * no nav item is rendered — and it says so honestly if navigated to by hand.
@@ -91,6 +91,7 @@ import {
   Badge,
   Button,
   Callout,
+  CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
@@ -688,6 +689,17 @@ type DeclaredLayerExternal = DeclaredLayer["externals"][number];
  *  (each call matched to an external, with its operation and base-path
  *  source), every row naming its member and counterparty, then the named
  *  externals. No per-link disclosure: one table per kind of fact. */
+/** The server's composed named-external line, verbatim (BR-51), after a lead
+ *  that glosses the internal word it ends on (FR-UI-39) — the coverage tab's
+ *  Declared contracts and the map's Declared contracts state it alike. */
+function ExternalLine({ line }: { line: string }) {
+  return (
+    <p className="muted">
+      <CopyTextView text={COVERAGE_TEXT.externalLineLead} /> <span className="mono">{line}</span>
+    </p>
+  );
+}
+
 function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: BoundExternal }) {
   const documents: DeclaredDocumentRow[] = layer.links.flatMap((link) =>
     link.contracts.map((contract) => ({ link, contract })),
@@ -711,7 +723,7 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
     >
       {/* The server's composed join line carries wire tokens, so it is the
           evidence, verbatim (BR-51), never the figure. */}
-      {join && <p className="muted mono">{join.headline.summary}</p>}
+      {join && <ExternalLine line={join.headline.summary} />}
       {/* A relation can name externals and declare nothing: a declared `mock`
           stands in for an external no member vendors. Then there is no link to
           tabulate, and an empty twin table would read as a table that failed to
@@ -789,7 +801,7 @@ function DeclaredRelationsCard({ dashboard }: { dashboard: CoverageDashboard }) 
       {declaredContracts && <p className="muted mono">{declaredContracts.summary}</p>}
       {boundExternal && (
         <>
-          <p className="muted mono">{boundExternal.summary}</p>
+          <ExternalLine line={boundExternal.summary} />
           <p className="muted">{COVERAGE_TEXT.externalStaysApart}</p>
         </>
       )}
@@ -1381,29 +1393,33 @@ function ImpactPanel() {
     [query],
   );
 
+  // One stack, like every other tab (FR-UI-40), so the tab returns from the
+  // hidden register (S-612) already in the layout standard: the query form is a
+  // tool panel, and each part of the answer is a panel below it.
   return (
-    <div className={styles.panel}>
-      <form
-        className={styles.impactForm}
-        onSubmit={(e) => {
-          e.preventDefault();
-          setQuery(symbol.trim());
-        }}
-      >
-        <TextField
-          label="Symbol"
-          hint="A symbol name or canonical SCIP symbol; its impact is traced in every member and across every resolved binding."
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value)}
-        />
-        <Button type="submit" disabled={symbol.trim() === ""}>
-          Trace impact
-        </Button>
-      </form>
+    <WidgetStack>
+      <Widget panel="impactQuery" title="Trace a symbol">
+        <form
+          className={styles.impactForm}
+          onSubmit={(e) => {
+            e.preventDefault();
+            setQuery(symbol.trim());
+          }}
+        >
+          <TextField
+            label="Symbol"
+            hint="A symbol name or canonical SCIP symbol; its impact is traced in every member and across every resolved binding."
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+          />
+          <Button type="submit" disabled={symbol.trim() === ""}>
+            Trace impact
+          </Button>
+        </form>
+        {query === "" && <p className="muted">Name a symbol to trace its impact across services.</p>}
+      </Widget>
 
-      {query === "" ? (
-        <EmptyState message="Name a symbol to trace its impact across services." />
-      ) : (
+      {query !== "" && (
         <AsyncResource resource={impact} loadingLabel="Tracing the cross-service impact…">
           {(model) =>
             model === null ? null : (
@@ -1437,7 +1453,12 @@ function ImpactPanel() {
                 )}
                 {model.cross_service.length === 0 ? (
                   model.unresolved_egress ? null : (
-                    <EmptyState message="No cross-service impact — no resolved binding reaches this symbol from another service. (An unmaterialized binding is unknown, not absent — see Cross-service coverage.)" />
+                    <Widget panel="impactAcross" title="Across services">
+                      <p>
+                        No cross-service impact — no resolved binding reaches this symbol from another service. (An
+                        unmaterialized binding is unknown, not absent — see Cross-service coverage.)
+                      </p>
+                    </Widget>
                   )
                 ) : (
                   model.cross_service.map((far) => (
@@ -1449,6 +1470,6 @@ function ImpactPanel() {
           }
         </AsyncResource>
       )}
-    </div>
+    </WidgetStack>
   );
 }

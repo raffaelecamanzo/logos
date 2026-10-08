@@ -49,6 +49,7 @@ import {
   CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
+  FigureNote,
   ScoreBar,
   Widget,
   WidgetStack,
@@ -153,14 +154,15 @@ function ReadingFigure({
 }: {
   figure: ReactNode;
   currency: SnapshotCurrency | null;
-  /** A further qualifying line under the figure (the Gate's not-compared line). */
+  /** A further qualifying line under the figure (the Gate's not-compared line,
+   *  the Quality signal's scope line). */
   note?: string;
 }) {
   return (
     <div className={styles.figureLines}>
       <span>{figure}</span>
-      {note !== undefined && <p className={styles.note}>{note}</p>}
-      {currency !== null && <p className={styles.note}>{staleNote(currency)}</p>}
+      {note !== undefined && <FigureNote block>{note}</FigureNote>}
+      {currency !== null && <FigureNote block>{staleNote(currency)}</FigureNote>}
     </div>
   );
 }
@@ -307,11 +309,9 @@ function QualitySignalWidget({
       figure={
         <ReadingFigure
           figure={
-            <span className="num">
-              {signalFigure(aggregate, applicableCount(rows))}
-              <span className={styles.scope}>{scopeLine(m.function_count, m.test_function_count)}</span>
-            </span>
+            <span className="num">{signalFigure(aggregate, applicableCount(rows))}</span>
           }
+          note={scopeLine(m.function_count, m.test_function_count)}
           currency={currency}
         />
       }
@@ -420,7 +420,7 @@ function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: Sn
       {dim.notApplicable !== null ? (
         // CR-156: computed but out of the aggregate — the reason, never a score bar.
         <span className={styles.dimensionScore}>
-          <Badge tone="muted">not applicable</Badge> <span className={styles.note}>{dim.notApplicable}</span>
+          <Badge tone="muted">not applicable</Badge> <FigureNote>{dim.notApplicable}</FigureNote>
         </span>
       ) : (
         <span className={styles.dimensionBar}>
@@ -428,10 +428,10 @@ function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: Sn
           <span className="mono num">{value.normalized.toFixed(2)}</span>
         </span>
       )}
-      <span className={styles.note}>
+      <FigureNote>
         <CopyTextView text={copy.raw(value.raw)} />
-      </span>
-      {currency !== null && <p className={styles.note}>{DIMENSION_NOT_CURRENT}</p>}
+      </FigureNote>
+      {currency !== null && <FigureNote block>{DIMENSION_NOT_CURRENT}</FigureNote>}
     </div>
   );
   return (

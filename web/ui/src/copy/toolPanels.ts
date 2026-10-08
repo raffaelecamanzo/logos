@@ -103,6 +103,16 @@ export const TOOL_PANELS = {
     what: "The build dependencies the map draws, as a table you can read with a keyboard or a screen reader.",
     reason: "The accessible twin of the map's build layer; the Cross-service coverage tab holds the figure widget for it.",
   },
+  impactQuery: {
+    name: "Cross-service impact query",
+    what: "Traces the callers of a symbol in every member and across every resolved binding.",
+    reason: "A query form (the Cross-service impact tab, hidden from the web UI): it presents no figure until a symbol is traced.",
+  },
+  impactAcross: {
+    name: "Cross-service reach of an impact trace",
+    what: "Whether any other service reaches the symbol you traced, through a resolved binding.",
+    reason: "Part of the Cross-service impact answer (hidden from the web UI): it states the empty answer in place of a centred empty state.",
+  },
   impactResult: {
     name: "Cross-service impact result",
     what: "The callers that reach the symbol you traced, in one service.",

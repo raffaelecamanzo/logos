@@ -1,5 +1,5 @@
 /*
- * Architecture / Cycles (DSM) view layout (S-189, FR-UI-23, ADR-44). Zero-runtime
+ * Architecture (DSM) view layout (S-189, FR-UI-23, ADR-44). Zero-runtime
  * CSS Module compiled to an external <link> stylesheet — no inline <style>, no
  * CSS-in-JS — so the byte-identical self-only CSP is unaffected. Every value is a
  * design token; the heat buckets derive their fill from the signal-red accent so a

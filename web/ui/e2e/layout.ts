@@ -23,6 +23,11 @@ export interface StackMeasure {
   bodySizes: { panel: boolean; what: string; why: string; action: string; actionLine: string }[];
   /** The page's body text size (`body`, set at `--text-base`). */
   bodyText: string;
+  /**
+   * Every figure-row qualifier (`FigureNote`, `data-figure-note`): its computed
+   * size and weight. One class owns them on every view, at the body size.
+   */
+  figureNotes: { text: string; fontSize: string; fontWeight: string }[];
 }
 
 // The blocks that must start at the frame's left edge: every part, the copy
@@ -76,6 +81,11 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
         actionLine: size(action?.closest("p")),
       };
     });
+    const figureNotes = [...el.querySelectorAll<HTMLElement>("[data-figure-note]")].map((node) => ({
+      text: (node.textContent ?? "").trim().slice(0, 40),
+      fontSize: getComputedStyle(node).fontSize,
+      fontWeight: getComputedStyle(node).fontWeight,
+    }));
     return {
       rowGap: parseFloat(getComputedStyle(el).rowGap),
       gaps,
@@ -83,6 +93,7 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
       leftOffsets,
       bodySizes,
       bodyText: getComputedStyle(document.body).fontSize,
+      figureNotes,
     };
   }, LEFT_EDGE_BLOCKS);
 }
@@ -104,7 +115,9 @@ export interface StackLayoutOptions {
  *    of a widget starts at its frame's left edge;
  *  - in every widget, explanation and action share one font size, and every
  *    widget's explanation — a tool panel's one line included — is set at the
- *    page's body text size.
+ *    page's body text size;
+ *  - every figure-row qualifier (`FigureNote`) is set at the body size and
+ *    weight, whatever its figure's size, so one role reads the same on every view.
  */
 export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutOptions = {}): Promise<StackMeasure> {
   const m = await measureStack(stack);
@@ -144,5 +157,9 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
   expect([...new Set(m.bodySizes.map((s) => s.what))], "one body size across the stack's widgets").toEqual([
     m.bodyText,
   ]);
+  for (const note of m.figureNotes) {
+    expect(note.fontSize, `figure note "${note.text}": body size`).toBe(m.bodyText);
+    expect(note.fontWeight, `figure note "${note.text}": regular weight`).toBe("400");
+  }
   return m;
 }

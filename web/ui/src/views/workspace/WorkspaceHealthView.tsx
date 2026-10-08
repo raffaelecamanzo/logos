@@ -55,6 +55,7 @@ import {
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
   ErrorPanel,
+  FigureNote,
   LoadingState,
   Widget,
   WidgetStack,
@@ -164,10 +165,10 @@ function AnsweringCard({ status }: { status: WorkspaceStatus }) {
         <div className={styles.figure}>
           <p>{HEALTH_TEXT.answered(rollup.opened, rollup.members)}</p>
           {rollup.not_attempted > 0 && (
-            <p className={styles.note}>
+            <FigureNote block>
               {rollup.not_attempted} not attempted (nothing needed{" "}
               {rollup.not_attempted === 1 ? "it" : "them"} — outside this answer&apos;s scope, not a failure).
-            </p>
+            </FigureNote>
           )}
         </div>
       }
@@ -270,6 +271,9 @@ const MEMBER_COLUMNS: Column<MemberRow>[] = [
   {
     key: "resolution",
     header: "Its reference resolution",
+    // Glossed as on the Workspace Dashboard's Members table, beside the sort
+    // control (S-616's DataTable slot), never inside it.
+    gloss: "referenceResolution",
     cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
     sortValue: (r) => r.resolution ?? "",
   },
@@ -319,13 +323,13 @@ function WarmCard({ status }: { status: WorkspaceStatus }) {
       figure={
         <div className={styles.figure}>
           <p>{HEALTH_TEXT.warm(warm.warm, warm.members)}</p>
-          <p className={styles.note}>
+          <FigureNote block>
             {warm.deferred} deferred · {warm.degraded} degraded ·{" "}
             {warm.warming === undefined
               ? "members indexing right now: not knowable (no live signal source)"
               : `${warm.warming} indexing right now`}
             .
-          </p>
+          </FigureNote>
         </div>
       }
     >
@@ -405,11 +409,11 @@ function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
       figure={
         <div className={styles.figure}>
           <p>{HEALTH_TEXT.rulesChecked(report.rules_checked, report.bindings_checked, report.violations.length)}</p>
-          {report.bindings_checked === 0 && <p className={styles.note}>{HEALTH_TEXT.nothingToCheck}</p>}
+          {report.bindings_checked === 0 && <FigureNote block>{HEALTH_TEXT.nothingToCheck}</FigureNote>}
           {unknown.length > 0 && (
-            <p className={styles.note}>
+            <FigureNote block>
               {HEALTH_TEXT.unknownMembers(unknown.length)} <span className="mono">{unknown.join(", ")}</span>.
-            </p>
+            </FigureNote>
           )}
         </div>
       }

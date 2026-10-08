@@ -17,7 +17,8 @@
 }
 
 /* A widget's figure row content (S-613): the lead figure in the frame's figure
-   type style, then secondary lines at body size. A column, because the frame's
+   type style, then secondary lines (`FigureNote`, the frame's one figure-row
+   qualifier). A column, because the frame's
    figure row is a wrapping row meant for side-by-side figures. */
 .figure {
   display: flex;
@@ -37,14 +38,6 @@
   font-size: var(--text-base);
   font-weight: var(--weight-regular);
   line-height: var(--leading-base);
-}
-
-/* Secondary detail under the lead: body size, muted. */
-.note {
-  font-size: var(--text-base);
-  font-weight: var(--weight-regular);
-  line-height: var(--leading-base);
-  color: var(--text-2);
 }
 
 /* A coverage verdict row: the score bar beside its verbatim figure. Shared by

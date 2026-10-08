@@ -24,6 +24,7 @@ import {
   Button,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
+  FigureNote,
   PathCell,
   pathColumn,
   Widget,
@@ -33,7 +34,6 @@ import {
 import { filesAbsence, filesRankedByRisk, ownershipDispersion } from "../../copy/files.copy.ts";
 import { fileRiskRows, ownershipRows, pctBp, type FileRiskRow } from "./analyticsModel.ts";
 import { CoverageCellView, Na } from "./cells.tsx";
-import styles from "./AnalyticsView.module.css";
 
 /** The risk table's columns after File (which `pathColumn` builds over the rows). */
 const FILE_COLUMNS: Column<FileRiskRow>[] = [
@@ -234,11 +234,11 @@ function FilesContent({
         figure={
           <>
             <span>
-              {hotspots.ranked_files} <span className={styles.unit}>files ranked</span>
+              {hotspots.ranked_files} <FigureNote>files ranked</FigureNote>
             </span>
-            <span className={styles.unit}>
+            <FigureNote>
               top: <PathCell path={top.path} label={riskLabels.get(top.path)} />, score {top.score}
-            </span>
+            </FigureNote>
           </>
         }
       >
@@ -273,7 +273,7 @@ function FilesContent({
           state={{ multiAuthor: true }}
           figure={
             <span>
-              {ownership.length} <span className={styles.unit}>of {temporal.files.length} files have more than one author</span>
+              {ownership.length} <FigureNote>of {temporal.files.length} files have more than one author</FigureNote>
             </span>
           }
         >

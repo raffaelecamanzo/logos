@@ -61,14 +61,6 @@
   color: var(--text-2);
   font-size: var(--text-sm);
 }
-/* A figure's unit or qualifier in a Statistics widget's figure row (S-616):
-   body weight and size, beside the figure. */
-.unit {
-  font-size: var(--text-base);
-  font-weight: var(--weight-regular);
-  color: var(--text-2);
-}
-
 /* At-a-glance calls/latency strip under the estimate. */
 .glance {
   display: flex;

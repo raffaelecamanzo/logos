@@ -16,7 +16,7 @@ import statesStyles from "../../components/States.module.css";
 import { COVERAGE_TEXT, resolvedEdges } from "../../copy/coverage.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import { DASHBOARD_TEXT, members, reachability } from "../../copy/workspaceDashboard.copy.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -460,9 +460,8 @@ const DASHBOARD_WIDGETS = [
 
 /** The one widget titled `title`. */
 function widget(container: HTMLElement, title: string): HTMLElement {
-  const found = expectOneWidgetStack(container).filter((w) => widgetTitle(w) === title);
-  expect(found, title).toHaveLength(1);
-  return found[0];
+  expectOneWidgetStack(container);
+  return widgetTitled(container, title);
 }
 
 /** A widget's figure row, as a reader sees it. */

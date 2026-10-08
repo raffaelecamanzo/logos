@@ -8,6 +8,7 @@ import type {
   CrossServiceCoverage,
   XserviceBuildDeps,
 } from "../../api/types.ts";
+import statesStyles from "../../components/States.module.css";
 import {
   buildDependencies,
   COVERAGE_TEXT,
@@ -26,7 +27,7 @@ import {
   SERVICE_MAP_TEXT,
 } from "../../copy/serviceMap.copy.ts";
 import { copyTextString } from "../../copy/text.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import {
   HEALTHY_COVERAGE,
   MULTI_REASON_COVERAGE,
@@ -1019,6 +1020,24 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     expect(await screen.findByText(/no cross-service impact/i)).toBeInTheDocument();
   });
 
+  it("returns in the layout standard: one stack of tool panels, no centred empty state (sprint review)", async () => {
+    stubApi({ impact: IMPACT_DEGRADED });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service impact/i }));
+    // Before a trace: the query form is the tab's one panel.
+    const before = expectOneWidgetStack(screen.getByRole("tabpanel"));
+    expect(before.map(widgetTitle)).toEqual(["Trace a symbol"]);
+    expectToolPanel(before[0], "impactQuery");
+    await userEvent.type(screen.getByLabelText(/symbol/i), "get_user");
+    await userEvent.click(screen.getByRole("button", { name: /trace impact/i }));
+    await screen.findByText(/no cross-service impact/i);
+    // After: every part of the answer is a registered panel in the same stack.
+    const after = expectOneWidgetStack(screen.getByRole("tabpanel"));
+    expect(after.map(widgetTitle)).toEqual(["Trace a symbol", "api (seed)", "web (seed)", "Across services"]);
+    expectToolPanel(widgetTitled(screen.getByRole("tabpanel"), "Across services"), "impactAcross");
+    expect(screen.getByRole("tabpanel").querySelector(`.${statesStyles.empty}`)).toBeNull();
+  });
+
   // ── CR-125 / BR-53: an unresolved egress must not read as an absence ────────
 
   /** The residue exactly as the API composed it — the single-composed-field
@@ -1892,6 +1911,8 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       ["PSS web:legacy/pss.yaml", "web", "—", "1"],
     ]);
     expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
+    // The line ends "outside egress_resolution": its lead glosses egress first.
+    expect(within(card).getByText(BOUND_EXTERNAL.headline.summary).parentElement?.querySelector('dfn[data-term="egress"]')).not.toBeNull();
   });
 
   it("the coverage tab states both server headlines in their own card, the bound call still under no provider", async () => {
@@ -1901,6 +1922,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
     expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
     expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
+    expect(within(card).getByText(BOUND_EXTERNAL.headline.summary).parentElement?.querySelector('dfn[data-term="egress"]')).not.toBeNull();
     expect(within(card).getByText(COVERAGE_TEXT.externalStaysApart)).toBeInTheDocument();
     // The figure row is in plain words from the headlines' counts; the composed
     // lines, which carry wire tokens, are the evidence (FR-UI-39).
@@ -2014,9 +2036,8 @@ async function openCoverageTab(opts: Parameters<typeof stubApi>[0]) {
 }
 
 function tabWidget(panel: HTMLElement, title: string): HTMLElement {
-  const found = expectOneWidgetStack(panel).filter((w) => widgetTitle(w) === title);
-  expect(found, title).toHaveLength(1);
-  return found[0];
+  expectOneWidgetStack(panel);
+  return widgetTitled(panel, title);
 }
 
 describe("WorkspaceView — the coverage tab explains itself, in one stack (S-613)", () => {
