@@ -17,6 +17,7 @@ vi.mock("./echarts.ts", () => ({
 
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import {
+  attributionNotesLead,
   devVsMain,
   estimatedValue,
   statisticsAbsence,
@@ -375,7 +376,15 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     const explanation = widget("Tool attribution by class").querySelector('[data-widget-part="explanation"]')!;
     const notes = [...explanation.querySelectorAll("[data-widget-note] p")].map((p) => p.textContent);
     // Exactly the read-model's own notes, verbatim and in order, after the lead.
-    expect(notes.slice(1)).toEqual(coverage().notes);
+    expect(notes).toEqual([attributionNotesLead, ...coverage().notes]);
+  });
+
+  it("renders no note, and no lead, when the read-model states no attribution limits", async () => {
+    stubFetch((w) => ({ ...populated(w), attribution_coverage: { ...coverage(), notes: [] } }));
+    render(<StatisticsView />);
+    await screen.findByRole("heading", { name: "Tool attribution by class" });
+    expect(widget("Tool attribution by class").querySelector("[data-widget-note]")).toBeNull();
+    expect(screen.queryByText(attributionNotesLead)).toBeNull();
   });
 
   it("every widget explains itself, informational on a populated store (FR-UI-39)", async () => {
