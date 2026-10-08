@@ -75,12 +75,13 @@
   color: var(--text-1);
 }
 
-/* A note: secondary detail in the explanation, so muted and one step smaller. */
+/* A note: secondary detail in the explanation. Muted, but at the explanation's
+   one body size (FR-UI-40: muted tone, not a smaller size, marks the detail). */
 .note {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   line-height: var(--leading-base);
   color: var(--text-2);
 }
