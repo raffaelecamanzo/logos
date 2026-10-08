@@ -287,8 +287,10 @@ export function blankComments(file: string, text: string): string {
  * Where each source still writes one of `texts` outside a comment, as sorted,
  * distinct `file:line` (the line the text starts on). Whitespace inside a text
  * matches any run of whitespace, line breaks included, so JSX text a formatter
- * wrapped is still found. An HTML entity spelling (`&mdash;`) is not: the
- * rendered-DOM checks (`expectWidgetCopy`, the Playwright layout check) cover it.
+ * wrapped is still found. A spelling only the browser resolves — an entity
+ * (`&mdash;`), a concatenation — is not: the rendered-DOM checks cover it,
+ * `expectWidgetCopy` per widget and the Playwright layout check over each view's
+ * whole page.
  */
 export function textSites(files: Record<string, string>, texts: readonly string[]): string[] {
   const patterns = texts.map(

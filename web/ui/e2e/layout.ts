@@ -26,9 +26,11 @@ export interface StackMeasure {
   /** Elements of the action line CR-206 removed (its part, copy or where chip)
    *  rendered anywhere in the stack. */
   actionParts: number;
-  /** The removed action text (CR-206, CR-207) found anywhere in the stack's
-   *  rendered text — evidence tables included, since CR-207 removed the per-row
-   *  action columns too. */
+  /** The removed action text (CR-206, CR-207) found anywhere in the page's
+   *  rendered text — the whole document, not just the stack: evidence tables
+   *  included, since CR-207 removed the per-row action columns too, and the shell
+   *  around the view. Read from the DOM, so a spelling the source scan cannot see
+   *  (an entity, a concatenation) is caught here. */
   actionText: string[];
   /** The page's body text size (`body`, set at `--text-base`). */
   bodyText: string;
@@ -85,7 +87,7 @@ export async function measureStack(stack: Locator): Promise<StackMeasure> {
     const actionParts = el.querySelectorAll(
       '[data-widget-part="action"], [data-widget-copy="action"], [data-widget-copy="where"]',
     ).length;
-    const rendered = el.textContent ?? "";
+    const rendered = el.ownerDocument.body.textContent ?? "";
     const actionText = removedText.filter((t) => rendered.includes(t));
     const figureNotes = [...el.querySelectorAll<HTMLElement>("[data-figure-note]")].map((node) => ({
       text: (node.textContent ?? "").trim().slice(0, 40),
@@ -122,7 +124,7 @@ export interface StackLayoutOptions {
  *  - every widget part computes `text-align: start` or `left`, and every block
  *    of a widget starts at its frame's left edge;
  *  - no widget renders an action line (CR-206), and no "What you can do" or
- *    empty-row sentence renders anywhere in the stack (CR-207);
+ *    empty-row sentence renders anywhere on the page (CR-207);
  *  - in every widget, what and why share one font size, and every widget's
  *    explanation — a tool panel's one line included — is set at the page's body
  *    text size;
@@ -139,7 +141,7 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
   }
   expect(m.rowGap, "the stack declares a gap").toBeGreaterThan(0);
   expect(m.actionParts, "no widget renders an action line (CR-206)").toBe(0);
-  expect(m.actionText, "no action text renders anywhere, tables included (CR-206, CR-207)").toEqual([]);
+  expect(m.actionText, "no action text renders anywhere on the page, tables included (CR-206, CR-207)").toEqual([]);
   for (const [i, gap] of m.gaps.entries()) {
     expect(gap, `gap ${i + 1} of ${m.gaps.length} between consecutive widgets (stack gap ${m.rowGap}px)`).toBeCloseTo(
       m.rowGap,
