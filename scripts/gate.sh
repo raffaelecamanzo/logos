@@ -41,7 +41,8 @@
 #   bash scripts/gate.sh probe    # resolve paths + counts, run no gates
 #   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch
 #                                 (skips the two timing suites; `full` does not)
-#   bash scripts/gate.sh full     # pre-handoff: every package, deny, agents, ui
+#   bash scripts/gate.sh full     # pre-handoff: every package, deny, agents, ui,
+#                                 the ui-e2e browser leg (full only, never fast)
 #
 # `full` RESUMES: a gate that already passed for this exact tree is not re-run,
 # so a run killed by memory pressure continues where it stopped when invoked
@@ -73,7 +74,8 @@ usage: bash scripts/gate.sh {probe|fast|full}
   fast   clippy + the packages the working tree touches + the architecture
          gate. Emits tier "fast", which is never sufficient for handoff.
   full   all packages, cargo-deny, the agents feature legs, and the web/ui
-         gates. Emits tier "full", which is what verify-evidence.sh requires.
+         gates, including the ui-e2e browser leg (never run by fast). Emits
+         tier "full", which is what verify-evidence.sh requires.
 EOF
     exit 2
 }
@@ -575,6 +577,97 @@ gate_ui() { # gate_name npm_script
     record "$gate" "$verdict"
 }
 
+# ----------------------------------------------------------------- web/ui e2e
+#
+# The browser layout specs (S-611, CR-203 §11): Playwright drives a TREE-BUILT
+# `logos serve --ui` over the checked-in fixtures and asserts computed style —
+# on the served views, and on a harness build of the widget frame until views
+# render through it (web/ui/playwright.config.ts says which spec loads which).
+# FULL tier only — it builds the SPA and the binary, and needs a browser.
+#
+# Its denominator is Playwright's own JSON report, recorded as one unit: tests
+# listed (expected), executed (started/finished), passed, failed, skipped. The
+# verdict comes from scripts/ui-e2e-classify.py, and each way it can read green
+# while testing nothing is a failure there:
+#   - no browser installed      -> `missing_browser`
+#   - no / unreadable report,
+#     or nothing executed       -> `no_binaries`
+#   - a test skipped            -> `skipped` (a layout check that did not run)
+#   - the run hangs             -> scripts/run-bounded.pl kills its process
+#                                  tree at UI_E2E_TIMEOUT seconds (macOS has
+#                                  no `timeout`): `killed`
+UI_E2E_TIMEOUT="${UI_E2E_TIMEOUT:-900}"
+
+gate_ui_e2e() {
+    local gate=ui-e2e
+    local log="$EVID/$gate.log" ui="$ROOT/web/ui" rc verdict trunc=none
+    local report="$ROOT/web/ui/e2e/.results/results.json" listed ran passed failed skipped
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
+    reset_units
+    local tool
+    for tool in npm perl; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "$tool is not installed" >"$log"
+            write_evidence "$gate" "npm run test:e2e" 127 fail no_binaries
+            record "$gate" fail "($tool missing)"
+            return
+        fi
+    done
+    if ! ui_has_script test:e2e; then
+        echo "web/ui/package.json declares no \"test:e2e\" script" >"$log"
+        write_evidence "$gate" "npm run test:e2e" 127 fail no_binaries
+        record "$gate" fail
+        return
+    fi
+
+    # The binary must embed a real SPA build: build the bundle, then the binary,
+    # then restore the tracked dist placeholder (rust-embed's debug-embed has
+    # already copied the bundle into the binary, so the restore cannot undo it).
+    {
+        echo "== npm run build"
+        (cd "$ui" && npm run build)
+    } >"$log" 2>&1
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "== cargo build -p logos --bin logos" >>"$log"
+        CARGO_TERM_COLOR=never cargo build -p logos --bin logos --jobs 4 >>"$log" 2>&1
+        rc=$?
+    fi
+    git checkout -- web/ui/dist 2>/dev/null
+    if [ $rc -ne 0 ]; then
+        write_evidence "$gate" "npm run build && cargo build -p logos" "$rc" fail build_error
+        record "$gate" fail "(build failed)"
+        return
+    fi
+
+    rm -f "$report"
+    echo "== npm run test:e2e (bounded at ${UI_E2E_TIMEOUT}s)" >>"$log"
+    (cd "$ui" && LOGOS_E2E_BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/logos" \
+        perl "$ROOT/scripts/run-bounded.pl" "$UI_E2E_TIMEOUT" npm run test:e2e) >>"$log" 2>&1
+    rc=$?
+    # run-bounded.pl kills the run's whole process group on timeout, but
+    # Playwright starts each fixture server detached, in a group of its own. Both
+    # the fixture script and the server it execs name THIS tree's absolute paths,
+    # so these patterns reach only this tree's servers.
+    pkill -f "$ROOT/web/ui/e2e/serve-fixture.sh" >/dev/null 2>&1
+    pkill -f "$ROOT/web/ui/e2e/.run/" >/dev/null 2>&1
+
+    # The verdict is scripts/ui-e2e-classify.py's (tested by
+    # scripts/tests/test-ui-e2e-classify.sh): listed = every test reported,
+    # ran = those that executed, so a skipped test leaves finished < expected
+    # and verify-evidence.sh rejects the unit as well.
+    read -r verdict trunc listed ran passed failed skipped <<EOF
+$(python3 "$ROOT/scripts/ui-e2e-classify.py" "$report" "$rc" "$log")
+EOF
+    if [ -z "${skipped:-}" ]; then
+        verdict=fail trunc=classifier_error listed=0 ran=0 passed=0 failed=0 skipped=0
+    fi
+    add_unit playwright "$listed" 1 "$ran" "$ran" "$passed" "$failed" "$skipped" \
+        "$rc" "$verdict" "$trunc"
+    write_evidence "$gate" "npm run test:e2e" "$rc" "$verdict" "$trunc"
+    record "$gate" "$verdict" "($passed passed, $failed failed, $skipped skipped of $listed$([ "$trunc" = none ] || echo "; $trunc"))"
+}
+
 # ------------------------------------------------- what this branch changed, and from where
 #
 # The fast tier scopes its test and UI legs to the packages that changed. The
@@ -672,6 +765,8 @@ case "$TIER" in
         if ! git diff --quiet -- web/ui/dist 2>/dev/null; then
             git checkout -- web/ui/dist 2>/dev/null
         fi
+        # Browser layout specs: full tier only, never fast (S-611).
+        gate_ui_e2e
         AFTER="$(compute_tree_id)"
         if [ "$AFTER" != "$TREE_ID" ]; then
             echo

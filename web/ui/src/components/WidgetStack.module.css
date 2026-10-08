@@ -1,0 +1,9 @@
+/* One column, one gap token between consecutive widgets (FR-UI-40). The gap is
+   the stack's alone: no child carries a vertical margin, and the Playwright
+   layout spec fails if one does. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-5);
+}

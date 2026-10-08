@@ -30,7 +30,7 @@
 #     recomputed right now                            only fast, then commit)
 #
 # THE TWO TIERS IT WILL CERTIFY, and why `fast` is not a loophole
-#   `--tier full` (the default) is unchanged: all eight gates, each recorded by a
+#   `--tier full` (the default) is unchanged: all nine gates, each recorded by a
 #   full-tier run of gate.sh, all on one tree which is the tree that exists now.
 #
 #   `--tier fast` certifies what `gate.sh fast` actually runs — clippy, test, arch
@@ -148,7 +148,7 @@ evid, tree_now, mode, expect_tier = sys.argv[1], sys.argv[2], sys.argv[3], sys.a
 # The full tier's contract. A gate absent from disk is a gate that did not run.
 ALL_GATES = [
     "clippy", "test", "test-agents", "deny", "arch",
-    "ui-typecheck", "ui-test", "ui-build",
+    "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
 ]
 # What `gate.sh fast` actually runs. Its two UI legs are conditional on web/ui
 # having changed, so they are not required — but a gate this tier does not

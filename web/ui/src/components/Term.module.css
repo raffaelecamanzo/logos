@@ -1,0 +1,42 @@
+/* Term — a glossed word: dotted underline, tip on hover and focus. */
+.term {
+  position: relative;
+  font-style: normal;
+  text-decoration: underline dotted var(--text-2);
+  text-underline-offset: 0.2em;
+  cursor: help;
+}
+
+.term:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.tip {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 10;
+  margin-top: var(--space-1);
+  width: max-content;
+  max-width: 36ch;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-1);
+  box-shadow: var(--elevation-2);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-base);
+  text-align: left;
+  white-space: normal;
+}
+
+.term:hover .tip,
+.term:focus .tip,
+.term:focus-visible .tip {
+  display: block;
+}

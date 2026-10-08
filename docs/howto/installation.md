@@ -112,6 +112,26 @@ Released binaries (Homebrew, the installer, the archives) always embed the
 real SPA — CI runs the `npm run build` step once and embeds the bundle into
 every target, so an installed `logos` needs nothing from you.
 
+### Browser layout tests (contributors)
+
+The web UI's layout rules — equal gaps between stacked widgets, left-aligned
+widget text, one body font size — are checked in a real browser by Playwright
+specs under `web/ui/e2e/`. They need a Chromium build, installed **once** per
+machine:
+
+```bash
+cd web/ui
+npm ci
+npx playwright install chromium   # one-time download into Playwright's cache
+```
+
+`bash scripts/gate.sh full` runs them as its `ui-e2e` leg: it builds the SPA,
+builds `logos` from the tree, serves two checked-in fixtures (a single
+repository and a two-member workspace) and prints how many specs passed. The
+fast tier never runs them. Without the browser the leg fails and says so
+(`missing_browser`); it never passes by running nothing. To run the specs alone
+after building the SPA and the binary, use `npm run test:e2e` in `web/ui`.
+
 ### Slim builds (optional)
 
 Grammar support is feature-gated. For a smaller, faster-to-compile binary

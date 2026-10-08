@@ -21,3 +21,11 @@ vite.config.d.ts
 # Local env / editor noise.
 .vite/
 *.local
+
+# Playwright browser tests (S-611): fixture copies, the harness build, results.
+e2e/.run/
+e2e/.harness-dist/
+e2e/.results/
+test-results/
+playwright-report/
+blob-report/
