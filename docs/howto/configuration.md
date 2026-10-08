@@ -525,6 +525,35 @@ on a default working as intended. The reconcile-backed readouts — `scan`, `che
 - **Upgrading narrows admission**, so the next `index`/`reconcile` purges the
   minified files' nodes from an existing graph (see the next section).
 
+### Ignore files — `.gitignore` and `.ignore` at every depth
+
+Besides `exclude` and `ignored_dirs`, discovery honours your ignore files:
+
+- **Which files are read.** Every `.gitignore` and `.ignore` from the project
+  root down to a file's directory, plus `<root>/.git/info/exclude`. They apply
+  whether or not the project is a git repository. Logos never reads the global
+  gitignore (`core.excludesFile`) or any ignore file above the project root.
+- **Git's precedence.** A rule in a deeper file overrides a shallower one, and a
+  `!negation` re-includes what a shallower rule excluded. As in git, a negation
+  cannot re-include a file whose directory is excluded: `out/` in the root
+  `.gitignore` keeps out everything under `out/`, whatever `out/.gitignore` says.
+  An `.ignore` rule outranks a `.gitignore` rule at any depth.
+- **One answer everywhere.** `logos index`, `scan`, every `sync`, the git hooks
+  and the `serve` watcher admit the same files. Before 1.15.3 the watcher and
+  partial syncs read only the root's ignore files. A file ignored by a nested
+  `.gitignore` (a front-end subproject's `dist/`, a test harness's bundle) was
+  indexed when written while `serve` ran, and it counted in rule findings and
+  metrics until the next full reconcile.
+- **Edits apply live.** With `serve` running, a change to an ignore file at any
+  depth applies to the next watcher batch, with no restart. If the new rule
+  excludes files that are already indexed under that directory, they leave the
+  graph in that batch. Files written under an ignored directory are never
+  indexed.
+- **Removing a rule** re-admits the files it excluded when each is next written,
+  or at the next full reconcile (`logos scan` or `logos index`).
+- **`logos doctor`** reports an indexed file that an ignore file now excludes as
+  admission drift (`unadmitted_files`). `logos index` purges it.
+
 ### Narrowing admission self-corrects the graph
 
 Admission is the set of files any of the above tables let in. When you **narrow**

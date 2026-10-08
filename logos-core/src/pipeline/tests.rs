@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    admits_file, classify_index_persistence, counts_show_a_graph, hash_source, is_config_admitted,
-    is_doc_admitted, load_files, relativize, supported_extension, Candidate, IndexPersistence,
+    admits_file, classify_index_persistence, counts_show_a_graph, hash_source, is_beneath,
+    is_config_admitted, is_doc_admitted, load_files, relativize, supported_extension, Candidate, IndexPersistence,
     LoadedFile, ShadowStore,
 };
 use crate::config::Config;
@@ -353,6 +353,19 @@ fn relativize_rejects_paths_escaping_the_root() {
     assert_eq!(relativize(&root, &PathBuf::from("/etc/passwd")), None);
     // The root itself has no relative file key.
     assert_eq!(relativize(&root, Path::new("")), None);
+}
+
+#[test]
+fn is_beneath_matches_whole_directory_components_only() {
+    // CR-210: the ignore-file re-gate scopes to the changed file's directory.
+    assert!(is_beneath("src/util.rs", "src"));
+    assert!(is_beneath("src/a/b.rs", "src"));
+    assert!(is_beneath("any/where.rs", ""), "the root contains everything");
+    // Near misses: a sibling sharing the prefix, the directory itself, a parent.
+    assert!(!is_beneath("src-extra/util.rs", "src"));
+    assert!(!is_beneath("srcutil.rs", "src"));
+    assert!(!is_beneath("src", "src"));
+    assert!(!is_beneath("src/util.rs", "src/util.rs/x"));
 }
 
 // ── CR-057 / S-226: chunked Pass-1 persistence ──────────────────────────────

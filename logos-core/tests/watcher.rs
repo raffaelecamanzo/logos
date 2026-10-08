@@ -15,7 +15,11 @@
 //!   ([FR-SY-06](../../docs/specs/requirements/FR-SY-06.md),
 //!   [UAT-SY-03](../../docs/specs/requirements/UAT-SY-03.md));
 //! - a single-file sync stays within the ≤250 ms budget
-//!   ([NFR-PE-03](../../docs/specs/requirements/NFR-PE-03.md)).
+//!   ([NFR-PE-03](../../docs/specs/requirements/NFR-PE-03.md));
+//! - a file written under a directory ignored only by a nested `.gitignore` is
+//!   not indexed, and a nested rule added mid-session removes an indexed file
+//!   with no restart
+//!   ([CR-210](../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md)).
 //!
 //! Timing posture: OS event *delivery* latency is outside our contract, so
 //! tests poll with generous deadlines rather than sleeping fixed amounts;
@@ -201,6 +205,56 @@ fn watcher_syncs_a_deletion_as_removal() {
     wait_for("the watcher counters to record the removal sync", || {
         handle.stats().syncs_run >= 1
     });
+}
+
+/// CR-210 AC-2: with the watcher running, a file written under a directory
+/// ignored only by a nested `.gitignore` is never indexed. A control file
+/// written after it proves the batch was processed, so the absence is a verdict,
+/// not a race.
+#[test]
+fn watcher_never_indexes_a_file_a_nested_gitignore_excludes() {
+    let (_tmp, root, engine) = indexed_project();
+    write(&root, "web/.gitignore", "harness-dist/\n");
+    let handle = engine.watch().expect("watcher starts");
+
+    write(
+        &root,
+        "web/harness-dist/bundle.rs",
+        "pub fn bundled_by_the_e2e_harness() -> u32 { 19 }\n",
+    );
+    write(&root, "web/control.rs", "pub fn control_written_after_the_bundle() -> u32 { 1 }\n");
+
+    wait_for("the watcher to sync the control file", || {
+        searchable(&engine, "control_written_after_the_bundle")
+    });
+    // One more settle window, for an OS that delivers the two events apart.
+    std::thread::sleep(Duration::from_millis(4 * DEBOUNCE_MS));
+    assert!(
+        !searchable(&engine, "bundled_by_the_e2e_harness"),
+        "a nested-ignored write is not indexed (CR-210 AC-2): {:?}",
+        handle.stats()
+    );
+}
+
+/// CR-210 AC-3: a nested ignore rule added while the watcher runs removes an
+/// already-indexed file from the graph on the next batch — the one carrying the
+/// `.gitignore` edit — with no full reconcile and no restart.
+#[test]
+fn watcher_removes_an_indexed_file_a_new_nested_rule_excludes() {
+    let (_tmp, root, engine) = indexed_project();
+    write(&root, "src/gen/out.rs", "pub fn generated_then_ignored() -> u32 { 7 }\n");
+    let sync = engine.sync(&[root.join("src/gen/out.rs")]);
+    assert_eq!(sync.files_added, 1, "{sync:?}");
+    assert!(searchable(&engine, "generated_then_ignored"));
+
+    let handle = engine.watch().expect("watcher starts");
+    write(&root, "src/gen/.gitignore", "*\n");
+
+    wait_for("the watcher to remove the newly ignored file", || {
+        !searchable(&engine, "generated_then_ignored")
+    });
+    assert!(searchable(&engine, "seed_alpha"), "the rest of the graph is untouched");
+    wait_for("the watcher counters to record the sync", || handle.stats().syncs_run >= 1);
 }
 
 /// S-513 / FR-EH-05: the watcher's reconcile follows the per-file rule — a file

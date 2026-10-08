@@ -340,6 +340,30 @@ fn inject_unadmitted_file(root: &Path) -> &'static str {
     PATH
 }
 
+/// CR-210 AC-5: a stored file that only a nested `.gitignore` excludes is
+/// admission drift. Before CR-210 the tripwire's authority read the root ignore
+/// files only, so it could not see this drift at all.
+#[test]
+fn doctor_reports_a_stored_file_a_nested_gitignore_excludes_as_admission_drift() {
+    let tmp = clean_project();
+    write(tmp.path(), "src/gen/leaked.rs", "pub fn leaked() {}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("populate the graph");
+    assert!(engine.doctor().expect("doctor runs").ok, "no drift while the file is admitted");
+
+    // The rule arrives without any sync — the store still holds the file.
+    write(tmp.path(), "src/gen/.gitignore", "leaked.rs\n");
+
+    let drifted = engine.doctor().expect("doctor runs");
+    assert!(!drifted.ok, "doctor detects the nested-ignore drift");
+    assert_eq!(drifted.unadmitted_sample, vec!["src/gen/leaked.rs".to_string()]);
+    assert!(
+        drifted.faults.iter().any(|f| f.contains("src/gen/leaked.rs")),
+        "the fault names the offending file: {:?}",
+        drifted.faults
+    );
+}
+
 #[test]
 fn doctor_reports_ok_on_a_healthy_graph_and_admission_drift_on_an_injected_unadmitted_file() {
     let tmp = clean_project();

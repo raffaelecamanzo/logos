@@ -477,8 +477,13 @@ pub enum SyncScope {
     /// is neither in it nor on disk has been deleted and is reconciled out over
     /// the removal path a full [`index`] uses ([FR-RC-01]).
     FullWalk,
-    /// `paths` is a partial changed-file batch; only those paths are reconciled
-    /// and no stored file outside the set is ever purged.
+    /// `paths` is a partial changed-file batch; only those paths are reconciled.
+    /// The one reach outside the set: a `.gitignore`/`.ignore` in it re-gates the
+    /// stored files beneath its directory, removing those it now excludes
+    /// ([CR-210]). No stored file the current admission still accepts is ever
+    /// purged.
+    ///
+    /// [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
     Partial,
 }
 
@@ -496,7 +501,8 @@ pub enum SyncScope {
 /// that have disappeared from disk — routing each to the same removal path a full
 /// [`index`] uses, independent of the admission fingerprint — while a
 /// [`SyncScope::Partial`] caller (the watcher/hooks/CLI) reconciles only its own
-/// path-set and never purges a file outside it.
+/// path-set, plus — when that set names a `.gitignore`/`.ignore` — the stored
+/// files beneath its directory that the ignore files now exclude ([CR-210]).
 ///
 /// # Errors
 /// Returns an error if the stored file list cannot be read or a write batch
@@ -507,6 +513,7 @@ pub enum SyncScope {
 /// [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
 /// [FR-RC-01]: ../../../docs/specs/requirements/FR-RC-01.md
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
+/// [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
 pub fn sync(
     runtime: &Runtime,
     registry: &LanguageRegistry,
@@ -537,9 +544,10 @@ pub fn sync(
     let langs = config.language_allowlist();
 
     // CR-054 / FR-SY-11: the walk-level admission authority (nested-`.git`
-    // boundary + gitignore matcher + `ignored_dirs` + include/exclude globs +
-    // size), built ONCE per sync so an edit to `.gitignore` self-heals on the
-    // next sync (the matcher re-reads the root ignore sources here). This is the
+    // boundary + ignore files at every depth + `ignored_dirs` + include/exclude
+    // globs + size), built ONCE per sync so an edit to any `.gitignore`/`.ignore`
+    // self-heals on the next sync (each directory's ignore files are re-read on
+    // first use here, CR-210). This is the
     // load-bearing gate that finally aligns the incremental path with the full
     // walk ([FR-IX-02]): it covers the watcher, the git hook, an explicit CLI
     // `sync`, and the worktree seed-diff — every partial entry point flows
@@ -564,6 +572,10 @@ pub fn sync(
     let mut seen: HashSet<String> = HashSet::new();
     let mut files_failed: Vec<String> = Vec::new();
     let mut module_descriptors: Vec<String> = Vec::new();
+    // CR-210: the directories (root-relative, `""` for the root) whose
+    // `.gitignore`/`.ignore` this batch names — their stored files are re-gated
+    // after the loop.
+    let mut ignore_dirs: Vec<String> = Vec::new();
 
     for path in paths {
         let Some(rel) = relativize(&canon_root, path) else {
@@ -581,6 +593,12 @@ pub fn sync(
         // re-binds them. The admission gate below then skips it as usual.
         if rel == "go.mod" || rel.ends_with("/go.mod") {
             module_descriptors.push(rel.clone());
+        }
+        // An ignore file is never indexed either, but its change can exclude
+        // stored files beneath it (CR-210): record its directory for the re-gate
+        // below. Recorded before the admission gate, which skips it as usual.
+        if config::is_ignore_file(Path::new(&rel)) {
+            ignore_dirs.push(rel.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.to_string()));
         }
 
         let abs = canon_root.join(&rel);
@@ -615,8 +633,8 @@ pub fn sync(
             // index — is a narrowing removal, not a skip. Route it to the removal
             // path so its nodes are purged and inbound cross-file edges return to
             // `unresolved_refs` via this sync's resolve pass. This gate is
-            // self-limiting: admission is deterministic in the config + the root
-            // ignore sources, so a stored, on-disk, now-unadmitted file can only
+            // self-limiting: admission is deterministic in the config + the
+            // ignore files, so a stored, on-disk, now-unadmitted file can only
             // exist *after* one of those changed — no fingerprint check is needed
             // here, and a `.gitignore` edit (which does not move the config
             // fingerprint) is now caught too. A never-admitted file (not in
@@ -652,6 +670,30 @@ pub fn sync(
             }
         }
         loaded.push(LoadedFile { rel, source, hash });
+    }
+
+    // CR-210: a changed ignore file re-gates the stored files beneath its
+    // directory, so a file a new (nested) rule excludes leaves the graph on THIS
+    // batch — the watcher sees the `.gitignore` edit, not a write to every file
+    // it now ignores, and its pre-filter drops later writes to them. Admission
+    // only: a stored file still on disk that `admits_path` now rejects is a
+    // narrowing removal, exactly as in the per-path gate above; one still
+    // admitted is left alone (its content did not change, so no re-extract).
+    // This is evidence about files outside the batch, but only ever removes a
+    // file the current ignore files exclude, so it cannot purge a live one. A
+    // full walk needs none of it: its sweep below already converges the set.
+    if scope == SyncScope::Partial && !ignore_dirs.is_empty() {
+        let mut regated: Vec<&String> = stored
+            .keys()
+            .filter(|rel| !seen.contains(*rel))
+            .filter(|rel| ignore_dirs.iter().any(|dir| is_beneath(rel, dir)))
+            .filter(|rel| {
+                let abs = canon_root.join(rel.as_str());
+                abs.is_file() && !authority.admits_path(&abs)
+            })
+            .collect();
+        regated.sort(); // deterministic removal order (NFR-RA-06)
+        removals.extend(regated.into_iter().cloned());
     }
 
     // CR-052 / FR-SY-10 + CR-054 / FR-RC-06 (Channel B): on a FULL-WALK sync,
@@ -3228,6 +3270,12 @@ fn to_forward_slash(path: &Path) -> String {
 
 /// Resolve an input path (absolute or root-relative) to a project-relative key,
 /// rejecting anything that escapes the root ([NFR-SE-04]).
+/// Is the root-relative, forward-slashed `rel` inside directory `dir` (also
+/// root-relative; `""` is the root, which contains everything)?
+fn is_beneath(rel: &str, dir: &str) -> bool {
+    dir.is_empty() || rel.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn relativize(canon_root: &Path, path: &Path) -> Option<String> {
     let rel: &Path = if path.is_absolute() {
         path.strip_prefix(canon_root).ok()?

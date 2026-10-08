@@ -14,7 +14,11 @@
 //! - on a tree with a gitignored subdir and a nested worktree, an
 //!   index → incremental `sync`/`scan` loop converges byte-identically to a
 //!   fresh `index` and `verify` reports `ok`
-//!   ([NFR-RA-06](../../docs/specs/requirements/NFR-RA-06.md)).
+//!   ([NFR-RA-06](../../docs/specs/requirements/NFR-RA-06.md));
+//! - a nested `.gitignore` gates the partial path as it gates the walk, and a
+//!   partial sync naming a changed ignore file removes the stored files it now
+//!   excludes, with no full reconcile
+//!   ([CR-210](../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md)).
 //!
 //! Gated on `lang-rust`: integration tests share the crate's feature set and a
 //! `--no-default-features` build excludes the Rust grammar these fixtures need.
@@ -193,6 +197,77 @@ fn partial_sync_of_a_gitignored_or_boundary_path_creates_no_nodes() {
     assert!(
         !has_nodes_for_file(rt, "nested_repo/copy.rs"),
         "a partial sync of a nested-`.git`-boundary path creates no nodes (FR-SY-11)"
+    );
+}
+
+// ── CR-210: nested ignore files on the partial path ──────────────────────────
+
+#[test]
+fn partial_sync_of_a_nested_ignored_path_creates_no_nodes() {
+    // The CR-210 leak: `web/e2e/.harness-dist/` ignored only by `web/.gitignore`.
+    // The walk always excluded it; a partial sync (the watcher's spelling) used to
+    // index it. Now the per-path gate rejects it too.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/main.rs", "pub fn main_fn() {}\n");
+    write(root, "web/.gitignore", "e2e/.harness-dist/\n");
+    write(root, "web/e2e/.harness-dist/bundle.rs", "pub fn bundled() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    assert!(!has_nodes_for_file(rt, "web/e2e/.harness-dist/bundle.rs"), "index excludes it");
+
+    write(root, "web/e2e/.harness-dist/bundle.rs", "pub fn bundled_again() {}\n");
+    write(root, "web/app.rs", "pub fn app() {}\n");
+    engine.sync(&[abs(root, "web/e2e/.harness-dist/bundle.rs"), abs(root, "web/app.rs")]);
+
+    assert!(has_nodes_for_file(rt, "web/app.rs"), "the admitted sibling is indexed");
+    assert!(
+        !has_nodes_for_file(rt, "web/e2e/.harness-dist/bundle.rs"),
+        "a partial sync of a nested-ignored path creates no nodes (CR-210)"
+    );
+}
+
+#[test]
+fn partial_sync_of_a_new_nested_rule_removes_the_stored_file_it_excludes() {
+    // CR-210 AC-3: adding a nested rule for an indexed file removes it on the next
+    // incremental batch — the batch that carries the `.gitignore` edit, which is
+    // the only path the watcher sees change — with no reconcile and no restart.
+    // Its inbound edge returns to the ledger, as on every removal path.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write_cross_file_fixture(root);
+    write(root, "src/sibling.rs", "pub fn sibling() {}\n");
+    write(root, "other/util.rs", "pub fn other_util() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed before the rule");
+    assert!(!has_unresolved_target(rt, "run"), "the cross-file call is resolved first");
+
+    // The rule names `util.rs` — the near miss `other/util.rs` is outside `src/`.
+    write(root, "src/.gitignore", "util.rs\n");
+    let result = engine.sync(&[abs(root, "src/.gitignore")]);
+
+    assert!(
+        !has_nodes_for_file(rt, "src/util.rs"),
+        "the stored file a new nested rule excludes leaves the graph on this batch: {result:?}"
+    );
+    assert_eq!(result.files_removed, 1, "exactly the one excluded file is removed: {result:?}");
+    assert!(has_unresolved_target(rt, "run"), "its inbound edge returns to unresolved_refs");
+    assert!(has_nodes_for_file(rt, "src/lib.rs"), "the caller stays indexed");
+    assert!(has_nodes_for_file(rt, "src/sibling.rs"), "an unnamed sibling stays indexed");
+    assert!(has_nodes_for_file(rt, "other/util.rs"), "the rule does not reach outside src/");
+
+    // The re-gate is keyed on the batch naming an ignore file: a root rule that
+    // excludes `other/`, written but not in the batch, reaches nothing yet.
+    write(root, ".gitignore", "other/\n");
+    let unrelated = engine.sync(&[abs(root, "src/sibling.rs")]);
+    assert!(
+        has_nodes_for_file(rt, "other/util.rs"),
+        "a batch naming no ignore file re-gates nothing outside itself: {unrelated:?}"
     );
 }
 
