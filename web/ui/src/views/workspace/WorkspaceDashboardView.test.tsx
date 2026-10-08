@@ -163,6 +163,11 @@ describe("the headline is the server's composed line (BR-51, AC1)", () => {
     // sweep for this spec).
     expect(card(/^Resolved cross-service edges$/).querySelectorAll("meter")).toHaveLength(0);
     expect(card(/^Spec conformance/).querySelectorAll("meter")).toHaveLength(0);
+    // Outbound calls WERE captured — all 899 call outside the workspace — so the
+    // absence says that, never "no outbound call site was captured".
+    expect(card(/^Resolved cross-service edges$/).querySelector("[data-widget-absence]")?.textContent).toBe(
+      COVERAGE_TEXT.outboundAllOutside(899),
+    );
   });
 
   it("DOES draw the bar when the rate is present — so the absence above is a choice", async () => {

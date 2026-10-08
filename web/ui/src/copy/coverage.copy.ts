@@ -210,6 +210,10 @@ export const COVERAGE_TEXT = {
   /** No outbound call site was captured, so the rate has no denominator. */
   outboundNotMeasured:
     "Not measured: no outbound call site was captured in this workspace, so the rate has no denominator.",
+  /** Outbound calls WERE captured, and every one calls a service outside the
+   *  workspace — outside the rate (ADR-53), so it has no denominator either. */
+  outboundAllOutside: (outside: number) =>
+    `Not measured: every captured outbound call (${outside}) calls a service outside this workspace, so the rate has no denominator. Add those services as members in logos.workspace.toml, or vendor their specs, if they belong in this picture.`,
   /** No cross-boundary reference at all — qualified when members were not read. */
   nothingFound: (coversAllMembers: boolean, read: number, total: number) =>
     coversAllMembers

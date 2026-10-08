@@ -398,7 +398,9 @@ function ResolvedEdgesWidget({ dashboard }: { dashboard: CoverageDashboard }) {
         absence={
           dashboard.isEmpty
             ? COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)
-            : COVERAGE_TEXT.outboundNotMeasured
+            : state.outside > 0
+              ? COVERAGE_TEXT.outboundAllOutside(state.outside)
+              : COVERAGE_TEXT.outboundNotMeasured
         }
       >
         <EdgeLine line={dashboard.resolvedEdgesSummary} />
