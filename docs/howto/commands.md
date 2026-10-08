@@ -1912,7 +1912,7 @@ captured, and the number says nothing about your outbound calls either way. Sum
 an `invocation` row's four counts to tell which you are looking at.
 
 The same split rides the `workspace_status` MCP tool and the web coverage view,
-which shows it as its own board — the relation-arm board cannot separate the two,
+which shows it as its own board — a per-arm count cannot separate the two,
 because an OpenAPI operation and an HTTP client call are both the `route` arm.
 
 ##### Reading a large `ambiguous` count

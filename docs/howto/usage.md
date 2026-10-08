@@ -744,7 +744,7 @@ blank `?repo=` is unscoped. In a plain single repo the parameter is inert.
 The three workspace-scoped views answer questions the per-member views cannot:
 **Workspace Dashboard** renders the server's own composed cross-service
 edge-count/egress-rate line (never the count without the rate beside it) with
-coverage by arm and by intake; **Workspace Health** renders the degraded roll-up in
+coverage by intake (the per-arm board is hidden — see [Hidden widgets](#hidden-widgets)); **Workspace Health** renders the degraded roll-up in
 words with a per-member table, the advisory governance findings and the topic
 inventory, drawing every unopenable member as degraded and naming it; and
 **Workspace Statistics** sums telemetry over members. Every ratio on these views
@@ -795,7 +795,7 @@ exposes the cross-service surfaces: an **app-level service map** — the ECharts
 graph canvas drawing services as nodes and cross-service bindings as edges,
 including first-class **topic hops** (`A → topic → B`) once broker coupling is
 promoted — a **cross-service coverage dashboard** (bound / ambiguous /
-unbound-with-reasons), and a cross-service impact answer (served, but hidden from the
+unbound), and a cross-service impact answer (served, but hidden from the
 web UI — see [Hidden widgets](#hidden-widgets)). Since logos 1.4.13 every
 service-map link also carries its **provenance**, so an edge admitted from committed
 configuration is never drawn as though it had been observed at the call site: a link with
@@ -1129,8 +1129,7 @@ focusing, and filtering mutate no store and contact no external origin:
     hide); **depth** scopes the focused neighbourhood; and **Reset to whole graph**
     returns the canvas to the full unfiltered view at the home-zoom budget and
     clears any lock (and the intent overlay). Click-to-focus also arrives from the Decisions
-    panel and from `/architecture` cycle participants (which deep-link to
-    `/graph?seed=<module>`).
+    panel.
   - **Decisions panel.** Selecting a node populates the side panel — built
     client-side from `GET /api/v1/impact?seed=<symbol>` — led by a **node identity
     header** (the node's name, a kind badge, a layer badge, and its `file:line`)
