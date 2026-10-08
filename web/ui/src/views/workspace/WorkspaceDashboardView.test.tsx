@@ -16,7 +16,7 @@ import statesStyles from "../../components/States.module.css";
 import { COVERAGE_TEXT, resolvedEdges } from "../../copy/coverage.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import { DASHBOARD_TEXT, members, reachability } from "../../copy/workspaceDashboard.copy.ts";
-import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -479,15 +479,51 @@ describe("every widget explains itself, in one stack (S-613)", () => {
     expect(Object.keys(WIDGET_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
   });
 
+  /** Each widget's action kind in each state, written out rather than read back
+   *  from the catalogue: `expectWidgetCopy` derives the expected kind from the
+   *  same catalogue the view renders, so only a table stated here can catch a
+   *  wrong branch in the catalogue or a wrong state in the view. Order follows
+   *  `DASHBOARD_WIDGETS`. */
+  const EXPECTED_ACTIONS: Record<keyof typeof WIDGET_STATES, string[]> = {
+    // Every call resolves, every endpoint matches, nothing to keep or delete.
+    healthy: ["none", "none", "none", "none", "none"],
+    // 7 calls unresolved, 7 references unmatched, captured calls do resolve
+    // (2), 1 callable to keep, members with callables unused everywhere.
+    "partial coverage": ["act", "act", "none", "act", "act"],
+    // Nothing captured, nothing declared, nothing promoted, no tallies.
+    "nothing measured": ["none", "none", "none", "none", "none"],
+    // As partial, and the Members action is the degraded member's re-index.
+    "degraded member": ["act", "act", "none", "act", "act"],
+  };
+
   it.each(Object.entries(WIDGET_STATES))(
     "%s: every widget is a Widget under the view's one WidgetStack and carries the message standard",
-    async (_state, { status, reachability: reach }) => {
+    async (state, { status, reachability: reach }) => {
       const { container } = await mount({ status, reachability: reach });
       const widgets = expectOneWidgetStack(container);
       expect(widgets.map(widgetTitle)).toEqual(DASHBOARD_WIDGETS);
       for (const w of widgets) expectWidgetCopy(w);
+      expect(widgets.map(actionKind)).toEqual(EXPECTED_ACTIONS[state as keyof typeof WIDGET_STATES]);
     },
   );
+
+  it("Members asks for deletion review when no member is degraded and some have callables unused everywhere", async () => {
+    // The default roster: no degraded member; unused-everywhere tallies 7, 5, 2.
+    const { container } = await mount();
+    const w = widget(container, "Members");
+    expectWidgetCopy(w, members, { degraded: 0, withUnused: 3 });
+    // The phrase is glossed, so the tooltip follows it in the raw text.
+    expect(actionText(w)).toMatch(/^Review the callables unused across the workspace/);
+    expect(w.querySelector('[data-widget-copy="action"] dfn')?.getAttribute("data-term")).toBe("unusedAcrossWorkspace");
+    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("source code");
+  });
+
+  it("Members asks for a re-index first when a member is degraded", async () => {
+    const { container } = await mount(WIDGET_STATES["degraded member"]);
+    const w = widget(container, "Members");
+    expect(actionText(w)).toMatch(/^Run logos index in each member marked degraded/);
+    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos index");
+  });
 
   it("Resolved cross-service edges: r of s resolved, and below 100% the reasons largest first, summing to the unresolved count", async () => {
     const { container } = await mount({ status: workspaceStatus({ coverage: MULTI_REASON_COVERAGE }) });

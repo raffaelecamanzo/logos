@@ -16,7 +16,7 @@ import {
   specConformance,
 } from "../../copy/coverage.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
-import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import {
   HEALTHY_COVERAGE,
   MULTI_REASON_COVERAGE,
@@ -1957,15 +1957,31 @@ describe("WorkspaceView — the coverage tab explains itself, in one stack (S-61
     expect(Object.keys(COVERAGE_TAB_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
   });
 
+  /** Each widget's action kind in each state, written out rather than read back
+   *  from the catalogue (which `expectWidgetCopy` derives its expectation from),
+   *  so a wrong catalogue branch or a wrong view state fails here. */
+  const EXPECTED_ACTIONS: Record<keyof typeof COVERAGE_TAB_STATES, string[]> = {
+    // Resolved, Spec, Intake, Declared, Build — all clean, build facts all read.
+    healthy: ["none", "none", "none", "none", "none"],
+    // 7 calls unresolved, 7 references unmatched, captured calls resolve, a
+    // declared relation is informational, one member's build facts unread.
+    "partial coverage": ["act", "act", "none", "none", "act"],
+    // Resolved, Spec, Intake, Build (absent): nothing to act on.
+    "nothing measured": ["none", "none", "none", "none"],
+    // Resolved, Spec, Intake, Build (absent).
+    "degraded member": ["act", "act", "none", "none"],
+  };
+
   it.each(Object.entries(COVERAGE_TAB_STATES))(
     "%s: every widget is a Widget under the tab's one WidgetStack and carries the message standard",
-    async (_state, opts) => {
+    async (state, opts) => {
       const panel = await openCoverageTab(opts);
       const widgets = expectOneWidgetStack(panel);
       expect(widgets.map(widgetTitle)).toEqual(
         opts.coverage?.declared_contracts ? COVERAGE_TAB_WIDGETS : WITHOUT_DECLARED,
       );
       for (const w of widgets) expectWidgetCopy(w);
+      expect(widgets.map(actionKind)).toEqual(EXPECTED_ACTIONS[state as keyof typeof COVERAGE_TAB_STATES]);
     },
   );
 

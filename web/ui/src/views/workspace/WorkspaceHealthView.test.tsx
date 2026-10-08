@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import statesStyles from "../../components/States.module.css";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import { HEALTH_TEXT, workspaceRules } from "../../copy/workspaceHealth.copy.ts";
-import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import {
@@ -393,11 +393,26 @@ describe("Workspace rules explains itself, in the view's one stack (S-613)", () 
     expect(Object.keys(WIDGET_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
   });
 
+  /** The where each state calls for, written out rather than read back from the
+   *  catalogue, so a wrong branch or priority in it fails here. `null` is a
+   *  `none` action. */
+  const EXPECTED_WHERE: Record<keyof typeof WIDGET_STATES, string | null> = {
+    healthy: null,
+    // An unknown member outranks the finding beside it: fix the rule first.
+    "partial coverage": "configuration logos.workspace.toml",
+    "nothing measured": "configuration logos.workspace.toml [[governance.boundaries]]",
+    "degraded member": "source code",
+  };
+
   it.each(Object.entries(WIDGET_STATES))(
     "%s: Workspace rules is a Widget under the view's one WidgetStack and carries the message standard",
-    async (_state, { status, governance }) => {
+    async (state, { status, governance }) => {
       await mount({ status, governance });
-      expectWidgetCopy(await rulesWidget());
+      const w = await rulesWidget();
+      expectWidgetCopy(w);
+      const where = EXPECTED_WHERE[state as keyof typeof WIDGET_STATES];
+      expect(actionKind(w)).toBe(where === null ? "none" : "act");
+      expect(w.querySelector('[data-widget-copy="where"]')?.textContent ?? null).toBe(where);
     },
   );
 
@@ -434,5 +449,7 @@ describe("Workspace rules explains itself, in the view's one stack (S-613)", () 
     await mount({ governance: governanceAnswer(governanceReport({ unknown_member_refs: ["billing"] })) });
     const w = await rulesWidget();
     expectWidgetCopy(w, workspaceRules, { declared: true, findings: 1, unknownMembers: 1 });
+    expect(w.querySelector('[data-widget-copy="action"]')?.textContent).toMatch(/^Correct each rule/);
+    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration logos.workspace.toml");
   });
 });
