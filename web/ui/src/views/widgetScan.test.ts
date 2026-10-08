@@ -153,6 +153,18 @@ export const B = () => <Widget title="B" copy={HEALTH_TEXT} />;
       ]);
     });
 
+    it("fails a conditional copy when either arm names no catalogue entry (review fix)", () => {
+      const src = `import { gate } from "../../copy/health.copy.ts";
+const mine = { what: "w", why: "y", action: () => ({ kind: "none" }) };
+export const A = ({ c }: { c: boolean }) => <Widget title="A" copy={c ? { ...mine } : gate} />;
+export const B = ({ c }: { c: boolean }) => <Widget title="B" copy={c ? gate : { ...mine }} />;
+`;
+      expect(names(src).problems).toEqual([
+        expect.stringMatching(/<Widget title="A">: copy=\{\{ \.\.\.mine \}\} does not name a catalogue entry/),
+        expect.stringMatching(/<Widget title="B">: copy=\{\{ \.\.\.mine \}\} does not name a catalogue entry/),
+      ]);
+    });
+
     it("fails an indexed copy whose base is not imported, or not a record of entries (review fix)", () => {
       const src = `import { HEALTH_TEXT } from "../../copy/workspaceHealth.copy.ts";
 const LOCAL = { x: { what: "w", why: "y", action: () => ({ kind: "none" }) } };
