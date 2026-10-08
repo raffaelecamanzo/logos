@@ -13,6 +13,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { expectWidgetStackLayout } from "./layout.ts";
+import { widgetTitles } from "./views.ts";
 
 const DIMENSIONS = [
   "Modularity", "Acyclicity", "Depth", "Equality", "Redundancy",
@@ -76,12 +77,10 @@ async function openHealth(page: Page) {
   return { stack, violations };
 }
 
-const titles = (page: Page) => page.locator('[data-widget-part="title"] h3').allTextContents();
-
 test("the served Health view's absent state lays out as one widget stack", async ({ page }) => {
   const { stack, violations } = await openHealth(page);
   await expect(stack.locator("[data-widget]")).toHaveCount(3);
-  expect(await titles(page)).toEqual(["Gate", "Quality signal", "Signal trend"]);
+  expect(await widgetTitles(stack)).toEqual(["Gate", "Quality signal", "Signal trend"]);
   // The fixture is indexed and never scanned: each absence is a statement in its
   // widget's figure row, never a centred EmptyState.
   await expect(stack.locator('[data-widget-part="figure"] [data-widget-absence]')).toHaveCount(3);
@@ -98,7 +97,7 @@ for (const recorded of [true, false]) {
     );
     const { stack, violations } = await openHealth(page);
     await expect(stack.locator("[data-widget]")).toHaveCount(13);
-    expect(await titles(page)).toEqual(["Gate", "Quality signal", ...DIMENSIONS, "Signal trend"]);
+    expect(await widgetTitles(stack)).toEqual(["Gate", "Quality signal", ...DIMENSIONS, "Signal trend"]);
     if (recorded) {
       await expect(page.getByRole("table", { name: "Worst offenders" })).toHaveCount(1);
     } else {

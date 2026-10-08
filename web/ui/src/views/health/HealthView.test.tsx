@@ -17,6 +17,7 @@ import {
 import { NOTHING_TO_DO } from "../../copy/types.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { HealthView } from "./HealthView.tsx";
+import { widgetsIn, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import { metricRows, type DimensionKey } from "./healthModel.ts";
 import realOffenders from "./fixtures/worst-offenders.real.json";
 
@@ -105,22 +106,11 @@ const DIMENSION_TITLES = [
 const OFFENDER_BACKED = ["Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness"];
 const UNLISTED = ["Modularity", "Acyclicity", "Depth", "Equality", "Redundancy"];
 
-/** Every rendered widget frame, in document order. */
-function frames(): HTMLElement[] {
-  return [...document.querySelectorAll<HTMLElement>("[data-widget]")];
-}
-
-/** A widget's title as the reader sees it. */
-function titleOf(frame: Element): string {
-  return frame.querySelector('[data-widget-part="title"] h3')?.textContent?.trim() ?? "";
-}
+/** Every rendered widget, in document order. */
+const frames = () => widgetsIn(document.body);
 
 /** The one widget with this title. */
-function widget(title: string): HTMLElement {
-  const found = frames().filter((f) => titleOf(f) === title);
-  expect(found, `exactly one "${title}" widget`).toHaveLength(1);
-  return found[0];
-}
+const widget = (title: string) => widgetTitled(document.body, title);
 
 /** A part of a widget: the copy element of that name (what, why, action, where),
  *  else the frame part (title, figure, evidence). */
@@ -162,7 +152,7 @@ describe("HealthView on the widget frame (S-615, FR-UI-43)", () => {
     const children = [...stack.children];
     expect(children).toHaveLength(13);
     expect(children.map((c) => c.querySelectorAll("[data-widget]").length)).toEqual(Array(13).fill(1));
-    expect(frames().map(titleOf)).toEqual(["Gate", "Quality signal", ...DIMENSION_TITLES, "Signal trend"]);
+    expect(frames().map(widgetTitle)).toEqual(["Gate", "Quality signal", ...DIMENSION_TITLES, "Signal trend"]);
   });
 
   it("enumerates 10 of 10 dimension widgets from the Quality signal table's own list, in its order", async () => {
@@ -173,7 +163,7 @@ describe("HealthView on the widget frame (S-615, FR-UI-43)", () => {
       .getAllByRole("row")
       .slice(1)
       .map((r) => within(r).getAllByRole("cell")[0].textContent);
-    const widgetOrder = frames().map(titleOf).filter((t) => DIMENSION_TITLES.includes(t));
+    const widgetOrder = frames().map(widgetTitle).filter((t) => DIMENSION_TITLES.includes(t));
     expect(widgetOrder).toHaveLength(10);
     expect(widgetOrder).toEqual(tableOrder);
     expect(widgetOrder).toEqual(metricRows(HEALTH.scan.metrics).map((r) => r.name));
@@ -381,7 +371,7 @@ describe("Quality signal widget (CR-203 items 13 and 20)", () => {
     await screen.findByText("Signal evolution");
     expect(screen.queryByText(/Aggregate scope/i)).toBeNull();
     expect(screen.queryByText(/^Aggregate/)).toBeNull();
-    expect(frames().map(titleOf)).not.toContain("Aggregate scope");
+    expect(frames().map(widgetTitle)).not.toContain("Aggregate scope");
   });
 
   it("renders a CR-156 Modularity drop-out as not applicable with its reason and m-of-5 count", async () => {
@@ -747,7 +737,7 @@ describe("Non-gated tier (S-612, FR-UI-41)", () => {
     expect(screen.queryByText("Non-gated tier")).toBeNull();
     // Equality's widget points to Files & Risk for its own units; no other link does.
     const links = screen.queryAllByRole("link", { name: /Files & Risk/i });
-    expect(links.map((l) => titleOf(l.closest("[data-widget]")!))).toEqual(["Equality"]);
+    expect(links.map((l) => widgetTitle(l.closest("[data-widget]")!))).toEqual(["Equality"]);
   });
 
   it("renders the Non-gated tier callout again when its register entry is removed", async () => {
@@ -798,7 +788,7 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
     expect(screen.getAllByText("logos scan").length).toBe(3);
     // No dimension widget without a figure, no step that cannot change the readout,
     // no blame on the graph, and no centred EmptyState inside a widget.
-    expect(frames().map(titleOf)).toEqual(["Gate", "Quality signal", "Signal trend"]);
+    expect(frames().map(widgetTitle)).toEqual(["Gate", "Quality signal", "Signal trend"]);
     expect(screen.queryByText("logos index")).not.toBeInTheDocument();
     expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
     expect(document.querySelectorAll("[data-widget-absence]")).toHaveLength(3);

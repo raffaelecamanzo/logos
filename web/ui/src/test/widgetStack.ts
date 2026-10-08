@@ -47,3 +47,12 @@ export function widgetTitle(widget: Element): string {
   clone.querySelectorAll('[role="tooltip"]').forEach((tip) => tip.remove());
   return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
 }
+
+/** The one widget under `root` whose title, as a reader sees it, is `title`
+ *  (asserted unique). Every view test finds its widgets through this one lookup
+ *  rather than a copy of it. */
+export function widgetTitled(root: Element, title: string): HTMLElement {
+  const found = widgetsIn(root).filter((w) => widgetTitle(w) === title);
+  expect(found, `exactly one "${title}" widget`).toHaveLength(1);
+  return found[0];
+}

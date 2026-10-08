@@ -25,14 +25,11 @@ import {
   topToolsAndSurfaces,
   usageOverTime,
 } from "../../copy/statistics.copy.ts";
+import { widgetTitled } from "../../test/widgetStack.ts";
 import { StatisticsView } from "./StatisticsView.tsx";
 
-/** The widget frame titled `title`. */
-function widget(title: string): Element {
-  const frame = screen.getByRole("heading", { name: title }).closest("[data-widget]");
-  if (!frame) throw new Error(`no widget titled ${title}`);
-  return frame;
-}
+/** The widget titled `title`. */
+const widget = (title: string) => widgetTitled(document.body, title);
 
 /** The `attribution_coverage` rider (FR-OB-11): the raw-events-only limit, the
  *  legacy-`NULL`-origin caveat, and the pre-origin-stamp label, exactly as the

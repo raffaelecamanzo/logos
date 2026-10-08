@@ -26,7 +26,7 @@ import {
   SERVICE_MAP_TEXT,
 } from "../../copy/serviceMap.copy.ts";
 import { copyTextString } from "../../copy/text.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { actionKind, expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import {
   HEALTHY_COVERAGE,
   MULTI_REASON_COVERAGE,
@@ -2014,9 +2014,8 @@ async function openCoverageTab(opts: Parameters<typeof stubApi>[0]) {
 }
 
 function tabWidget(panel: HTMLElement, title: string): HTMLElement {
-  const found = expectOneWidgetStack(panel).filter((w) => widgetTitle(w) === title);
-  expect(found, title).toHaveLength(1);
-  return found[0];
+  expectOneWidgetStack(panel);
+  return widgetTitled(panel, title);
 }
 
 describe("WorkspaceView — the coverage tab explains itself, in one stack (S-613)", () => {
