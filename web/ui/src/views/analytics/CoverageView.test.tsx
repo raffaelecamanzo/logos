@@ -183,6 +183,19 @@ describe("Coverage widgets explain themselves (S-617, FR-UI-39/40)", () => {
   });
 });
 
+it("names the ranking command in its own nothing-ranked absence, when the read-model has no notice (HF-1 review)", async () => {
+  stubFetch(() => {
+    const m = notRanked();
+    m.untested = { ...m.untested, notice: null, degraded: null } as CoverageModel["untested"];
+    return m;
+  });
+  render(<CoverageView />);
+  const heading = await screen.findByRole("heading", { name: "Untested hotspots" });
+  expect(heading.closest("[data-widget]")!.querySelector("[data-widget-absence]")?.textContent).toBe(
+    "No files ranked yet, so no untested file can be named; run logos hotspots to rank the files from the git history.",
+  );
+});
+
 it("states the read-model's notice alone when nothing was ranked: a degraded history is not fixed by the ranking command (HF-1 review)", async () => {
   stubFetch(notRanked);
   render(<CoverageView />);
