@@ -85,3 +85,22 @@ test("the layout check catches one widget whose margin changed", async ({ page }
   expect(m.gaps[1]).toBeCloseTo(m.rowGap + 8, 1);
   await expect(expectWidgetStackLayout(stack)).rejects.toThrow(/gap 2 of 3/);
 });
+
+test("a glossed term shows its explanation on hover and on keyboard focus, and hides it at rest", async ({
+  page,
+}) => {
+  const { stack } = await openHarness(page);
+  const term = stack.locator('dfn[data-term="arm"]');
+  const tip = term.getByRole("tooltip");
+  await expect(tip).toBeHidden();
+
+  await term.hover();
+  await expect(tip).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(tip).toBeHidden();
+
+  // The keyboard path is why Term is not a plain `title` attribute.
+  await page.keyboard.press("Tab");
+  await expect(term).toBeFocused();
+  await expect(tip).toBeVisible();
+});
