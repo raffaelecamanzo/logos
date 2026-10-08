@@ -4,7 +4,8 @@
  *
  * A read failure is not a shortage of usage, so where a member could not be read
  * the awaiting-data absence names that member's store, never `logos stats`
- * (FR-UI-37, review finding A3-F1 of S-429); `STORE_REPAIR` is that sentence.
+ * (FR-UI-37, review finding A3-F1 of S-429); `WORKSPACE_STATISTICS_ABSENCE.storeRepair`
+ * is that sentence.
  */
 
 import type { CopyEntry } from "./types.ts";
