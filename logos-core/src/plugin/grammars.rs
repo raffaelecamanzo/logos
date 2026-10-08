@@ -712,9 +712,12 @@ mod tests {
         })
     }
 
-    /// Every grammar row in `compiled()` declaration order (the full
-    /// `lang-all` roster); rows whose feature is off are filtered out.
-    fn expected() -> Vec<Row> {
+    /// The first code grammars (query-carrying rows) of `compiled()`, in
+    /// declaration order, for the full `lang-all` roster; rows whose feature is
+    /// off are filtered out by the test. The table is split over this and the two
+    /// functions below only to keep each under the `max_fn_lines` architecture
+    /// rule.
+    fn expected_code_first() -> Vec<Row> {
         vec![
             Row {
                 feature: cfg!(feature = "lang-rust"),
@@ -920,6 +923,13 @@ mod tests {
                     ),
                 ],
             },
+        ]
+    }
+
+    /// The remaining code grammars (query-carrying rows), after
+    /// [`expected_code_first`].
+    fn expected_code_rest() -> Vec<Row> {
+        vec![
             Row {
                 feature: cfg!(feature = "lang-c"),
                 manifest: ("c/plugin.toml", 3486, 0xe08a7b0e8cf9b3ae),
@@ -1100,6 +1110,13 @@ mod tests {
                     ),
                 ],
             },
+        ]
+    }
+
+    /// The documentation, data-format, build-format, schema and infra grammars
+    /// (no queries) of `compiled()`, in declaration order, after the code rows.
+    fn expected_structural() -> Vec<Row> {
+        vec![
             Row {
                 feature: cfg!(feature = "lang-markdown"),
                 manifest: ("markdown/plugin.toml", 2636, 0x221a1f670cc6402d),
@@ -1156,6 +1173,14 @@ mod tests {
                 queries: &[],
             },
         ]
+    }
+
+    /// Every grammar row in `compiled()` declaration order.
+    fn expected() -> Vec<Row> {
+        let mut rows = expected_code_first();
+        rows.extend(expected_code_rest());
+        rows.extend(expected_structural());
+        rows
     }
 
     #[test]
