@@ -61,6 +61,8 @@ export const RULE_FINDINGS_TEXT = {
     `${findings} ${plural(findings, "finding", "findings")} across ${checked} checked ${plural(checked, "rule", "rules")}`,
   /** A clean check over at least one rule. */
   clean: (checked: number) => `No findings — ${checked} ${plural(checked, "rule", "rules")} checked`,
+  /** The view's verdict line over zero checked rules. */
+  noneChecked: "no rules checked",
   /** Nothing declared, or a contract that declares nothing: not a pass. */
   noRules: "No architecture rules yet, so nothing was checked — this is not a pass.",
 } as const;

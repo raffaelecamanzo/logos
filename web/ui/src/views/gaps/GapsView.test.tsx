@@ -181,3 +181,10 @@ describe("the Rule findings widget explains itself (S-617, FR-UI-39/40)", () => 
     expect(screen.getByText(".logos/rules.toml").closest('[data-widget-copy="where"]')).not.toBeNull();
   });
 });
+
+it("leads with 'no rules checked', never '0 rule findings', over a contract declaring no rule (review fix)", async () => {
+  stub(model({ rules: { passed: true, checked_rules: 0, rules_present: true, violations: [], freshness: "fresh", warnings: [] } }));
+  render(<GapsView />);
+  expect(await screen.findByText("no rules checked")).toBeInTheDocument();
+  expect(screen.queryByText("0 rule findings")).toBeNull();
+});

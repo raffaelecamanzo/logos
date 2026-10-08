@@ -47,13 +47,15 @@ export function GapsView() {
 }
 
 function RuleFindings({ model }: { model: GapsModel }) {
-  const findings = model.rules.violations.length;
-  const clean = findings === 0;
+  const { findings, checked } = ruleFindingsState(model.rules);
+  // Over zero checked rules "0 rule findings" would read as a clean check; the
+  // verdict says that nothing was checked instead (CR-141).
+  const unchecked = findings === 0 && checked === 0;
   return (
     <WidgetStack>
-      <Callout label="RULE FINDINGS" tone={clean ? "muted" : "signal"}>
+      <Callout label="RULE FINDINGS" tone={findings === 0 ? "muted" : "signal"}>
         <span>
-          {findings} rule {plural(findings, "finding", "findings")}
+          {unchecked ? RULE_FINDINGS_TEXT.noneChecked : `${findings} rule ${plural(findings, "finding", "findings")}`}
         </span>
       </Callout>
       <RulesCard report={model.rules} />
