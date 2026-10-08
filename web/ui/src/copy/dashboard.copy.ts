@@ -8,6 +8,7 @@
  * (CR-206).
  */
 
+import { COVERAGE_VIEW_ABSENCE } from "./coverageView.copy.ts";
 import { gloss, type CopyEntry } from "./types.ts";
 
 export const qualityIndex: CopyEntry = {
@@ -43,8 +44,8 @@ export const projectOverview: CopyEntry = {
 /** The named absences each widget states in its figure row. */
 export const DASHBOARD_ABSENCE = {
   noSignal: "No quality signal recorded yet; run logos scan to record one.",
-  noCoverage:
-    "No coverage ingested yet; run logos coverage ingest <report> on the LCOV or Cobertura report your test run writes.",
+  /** The Coverage view's own sentence, so the ingest command is worded once. */
+  noCoverage: COVERAGE_VIEW_ABSENCE.notIngested,
   noLanguages: "No languages indexed yet; run logos index.",
   noLines: "Lines of code not yet counted; a full logos index counts them.",
   noTelemetry:
