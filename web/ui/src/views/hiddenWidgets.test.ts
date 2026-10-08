@@ -46,4 +46,19 @@ describe("the hidden-widget register (S-612, FR-UI-41)", () => {
     restoreArms();
     expect(HIDDEN_WIDGETS.map((w) => w.id)).toEqual(declared);
   });
+
+  it("refuses to remove an entry that is not in the register, rather than another one", () => {
+    // Without the guard `findIndex` gives -1 and `splice(-1, 1)` would silently
+    // drop the LAST entry — a return test would then run against a register
+    // missing a widget it never named.
+    const restore = removeHiddenWidgetEntry("non-gated-tier");
+    try {
+      expect(() => removeHiddenWidgetEntry("non-gated-tier")).toThrow(
+        /not in the hidden-widget register/,
+      );
+      expect(isWidgetHidden("architecture-cycles")).toBe(true);
+    } finally {
+      restore();
+    }
+  });
 });
