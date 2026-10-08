@@ -10,7 +10,7 @@ import { noAction, type CopyEntry } from "./types.ts";
 export interface RiskState {
   /** Files on the board; 0 when the history has not been ranked. */
   readonly ranked: number;
-  /** No ranked file carries a coverage figure: every Coverage cell reads n/a. */
+  /** No coverage report is ingested, so every Coverage cell reads n/a. */
   readonly coverageMissing: boolean;
 }
 

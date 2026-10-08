@@ -165,15 +165,17 @@ function FilesContent({
         <Widget
           title="Files ranked by risk"
           copy={filesRankedByRisk}
-          state={{ ranked: 0, coverageMissing: true }}
+          state={{ ranked: 0, coverageMissing: hotspots.coverage_basis !== "coverage" }}
           absence={hotspots.notice ?? filesAbsence.unranked}
         />
       </WidgetStack>
     );
   }
 
-  // "Coverage reads n/a": no ranked file carries a coverage figure.
-  const coverageMissing = hotspots.files.every((f) => f.coverage.state === "n/a");
+  // "Coverage reads n/a" because no report is ingested: the read-model then ranks
+  // on its static-reachability fallback. Not "every listed cell is n/a" — the
+  // untested filter over an ingested report leaves exactly such a list.
+  const coverageMissing = hotspots.coverage_basis !== "coverage";
 
   return (
     <WidgetStack>

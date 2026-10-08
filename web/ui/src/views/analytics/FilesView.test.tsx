@@ -105,7 +105,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     const absence = await screen.findByText(filesAbsence.unranked);
     expect(absence).toHaveAttribute("data-widget-absence");
     const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, coverageMissing: true });
+    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, coverageMissing: false });
     expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("logos hotspots");
     expect(screen.queryByRole("table")).toBeNull();
   });
@@ -165,8 +165,9 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expectWidgetCopy(widget("Files ranked by risk"), filesRankedByRisk, { ranked: 2, coverageMissing: false });
     cleanup();
 
+    // No report ingested: the read-model falls back to static reachability.
     stubFetch(() => {
-      const m = model();
+      const m = model({ coverage_basis: "static-reachability", coverage_label: "static reachability, not execution coverage" });
       for (const f of m.hotspots.files) f.coverage = { state: "n/a", coverage_bp: null };
       return m;
     });
@@ -175,6 +176,21 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     const w = widget("Files ranked by risk");
     expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, coverageMissing: true });
     expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos coverage ingest");
+  });
+
+  it("never asks to ingest coverage that is ingested, even when every listed file reads n/a", async () => {
+    // "Untested only" over an ingested report keeps exactly the files with no
+    // fresh coverage, so every remaining cell can read n/a — the report exists.
+    stubFetch(() => {
+      const m = model({ untested: true, coverage_basis: "coverage" });
+      for (const f of m.hotspots.files) f.coverage = { state: "n/a", coverage_bp: null };
+      return m;
+    });
+    render(<FilesView />);
+    await screen.findByRole("table", { name: "Files ranked by risk" });
+    const w = widget("Files ranked by risk");
+    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, coverageMissing: false });
+    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent(/^source code$/);
   });
 
   it("with coverage, the action is to test or split the top files, in source code", async () => {
