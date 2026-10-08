@@ -5,14 +5,16 @@
 import { describe, expect, it } from "vitest";
 
 import { COVERAGE_TEXT, NOT_RESOLVED_REMEDY, remedyFor, UNLISTED_REMEDY } from "./coverage.copy.ts";
-import { findTermsInPlainText } from "./glossary.ts";
+import { findUnglossedUses, plainPart } from "./text.ts";
+import type { CopyText } from "./types.ts";
 import { DASHBOARD_TEXT, memberRowAction } from "./workspaceDashboard.copy.ts";
 import { HEALTH_TEXT } from "./workspaceHealth.copy.ts";
 
-/** Every sentence a table can produce, over sample arguments (one and many). */
-function sentences(table: Record<string, unknown>): [string, string][] {
+/** Every sentence a table can produce, over sample arguments (one and many). A
+ *  fixed sentence may be catalogue text with glosses in it (`CopyText`). */
+function sentences(table: Record<string, unknown>): [string, CopyText][] {
   return Object.entries(table).flatMap(([key, value]) => {
-    if (typeof value === "string") return [[key, value] as [string, string]];
+    if (typeof value === "string" || Array.isArray(value)) return [[key, value as CopyText] as [string, CopyText]];
     const fn = value as (...args: unknown[]) => string;
     return [
       [`${key}(1)`, fn(1, 1, 1, 1)],
@@ -28,8 +30,8 @@ describe("workspace catalogue sentences", () => {
     ...sentences(COVERAGE_TEXT),
     ...sentences(DASHBOARD_TEXT),
     ...sentences(HEALTH_TEXT),
-    ...Object.entries(NOT_RESOLVED_REMEDY).map(([k, r]) => [`remedy ${k}`, r.remedy] as [string, string]),
-    ["remedy (unlisted)", UNLISTED_REMEDY.remedy] as [string, string],
+    ...Object.entries(NOT_RESOLVED_REMEDY).map(([k, r]) => [`remedy ${k}`, r.remedy] as [string, CopyText]),
+    ["remedy (unlisted)", UNLISTED_REMEDY.remedy] as [string, CopyText],
   ];
 
   it("has sentences to check (a finding, not a floor)", () => {
@@ -38,7 +40,7 @@ describe("workspace catalogue sentences", () => {
   });
 
   it.each(all)("%s uses no internal term outside a gloss", (_key, text) => {
-    expect(findTermsInPlainText(text)).toEqual([]);
+    expect(findUnglossedUses([plainPart(text)])).toEqual([]);
   });
 
   it("gives every reason the server sends a remedy, and an unknown one the listing command", () => {

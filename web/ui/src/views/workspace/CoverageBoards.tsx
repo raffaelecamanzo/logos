@@ -29,6 +29,7 @@
 import {
   Badge,
   Card,
+  CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   ScoreBar,
@@ -359,16 +360,26 @@ export function CoverageShortfall({
   );
 }
 
+/** The server's composed edge line, verbatim, after a lead that glosses the
+ *  internal word it uses. The line is the edge count AND the rate in one string
+ *  (BR-51), so rendering it cannot show the count without the rate. */
+function EdgeLine({ line }: { line: string }) {
+  return (
+    <p className={styles.note}>
+      <CopyTextView text={COVERAGE_TEXT.edgeLineLead} /> <span className="mono">{line}</span>
+    </p>
+  );
+}
+
 /** The headline (S-376/CR-120, CR-203 §3.2 D item 4): resolved outbound call
  *  sites of those captured, drawn first because it is the figure a reader takes
  *  away. `bound_ratio` used to sit here and read 0.287 over an estate with zero
  *  caller→callee edges.
  *
  *  The figure is two server fields (the rate's own numerator and denominator),
- *  never recomputed; the edge count rides in the server's composed
- *  `resolvedEdgesSummary` line in the evidence, so BR-51's pairing — the count
- *  never without the rate — is the server's, not a fourth place that could
- *  forget it. Below 100% the action lists the not-resolved reasons across every
+ *  never recomputed, and beside it the edge count in the server's composed
+ *  `resolvedEdgesSummary` line, so BR-51's pairing — the count never without
+ *  the rate — is the server's, not a fourth place that could forget it. Below 100% the action lists the not-resolved reasons across every
  *  relation arm, largest first, with their remedies. */
 function ResolvedEdgesWidget({
   dashboard,
@@ -398,7 +409,7 @@ function ResolvedEdgesWidget({
           </>
         }
       >
-        <p className="muted mono">{dashboard.resolvedEdgesSummary}</p>
+        <EdgeLine line={dashboard.resolvedEdgesSummary} />
       </Widget>
     );
   }
@@ -411,14 +422,13 @@ function ResolvedEdgesWidget({
             <ScoreBar value={dashboard.egressResolution} max={1} tone="default" label={pct(dashboard.egressResolution)} />
             <span>{COVERAGE_TEXT.outboundResolved(state.resolved, state.measured)}</span>
           </div>
+          <EdgeLine line={dashboard.resolvedEdgesSummary} />
           {!dashboard.coversAllMembers || degraded.degraded_members.length > 0 ? (
             <p className={styles.note}>{shortfall}</p>
           ) : null}
         </div>
       }
-    >
-      <p className="muted mono">{dashboard.resolvedEdgesSummary}</p>
-    </Widget>
+    />
   );
 }
 

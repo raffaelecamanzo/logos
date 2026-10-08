@@ -14,7 +14,7 @@
 
 import type { UnboundReason } from "../api/types.ts";
 
-import { gloss, noAction, type CopyEntry, type WhereKind } from "./types.ts";
+import { gloss, noAction, type CopyEntry, type CopyText, type WhereKind } from "./types.ts";
 
 // ── Resolved cross-service edges (item 4) ────────────────────────────────────
 
@@ -204,6 +204,9 @@ export const COVERAGE_TEXT = {
   /** The headline figure: resolved sites of captured sites. */
   outboundResolved: (resolved: number, measured: number) =>
     `${resolved} of ${measured} outbound call ${plural(measured, "site", "sites")} resolved`,
+  /** Leads the server's composed edge line, glossing the word that line uses
+   *  ("egress") before the reader meets it there (FR-UI-39 first use). */
+  edgeLineLead: ["Edges and ", gloss("egress"), " rate, as the server reports them:"] as CopyText,
   /** No outbound call site was captured, so the rate has no denominator. */
   outboundNotMeasured:
     "Not measured: no outbound call site was captured in this workspace, so the rate has no denominator.",

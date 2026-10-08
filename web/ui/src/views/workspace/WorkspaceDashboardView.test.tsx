@@ -491,6 +491,9 @@ describe("every widget explains itself, in one stack (S-613)", () => {
     expectWidgetCopy(w, resolvedEdges, state);
 
     expect(figureText(w)).toContain("2 of 9 outbound call sites resolved");
+    // The edge count rides beside it in the server's composed line (CR-203 D4,
+    // BR-51), in the figure row and verbatim.
+    expect(figureText(w)).toContain(MULTI_REASON_COVERAGE.resolved_edges_summary);
     const [, resolved, measured] = figureText(w).match(/(\d+) of (\d+) outbound call sites resolved/)!.map(Number);
     const listed = [...actionText(w).matchAll(/(\d+) × ([^:]+): [^;(]+\(([^)]+)\)/g)].map((m) => ({
       count: Number(m[1]),
