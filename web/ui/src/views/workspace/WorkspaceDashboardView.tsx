@@ -45,9 +45,9 @@ import type {
   WorkspaceStatus,
 } from "../../api/types.ts";
 import {
+  ActionCell,
   Badge,
   Callout,
-  CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
@@ -58,7 +58,6 @@ import {
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
-import { NOTHING_TO_DO } from "../../copy/types.ts";
 import {
   DASHBOARD_TEXT,
   memberRowAction,
@@ -321,21 +320,7 @@ function tallyCell(row: RosterRow, pick: (t: MemberReachability) => number) {
 
 /** The per-row action cell: what this member's own row asks of the reader. */
 function RowAction({ row }: { row: RosterRow }) {
-  const action = memberRowAction({ degraded: row.degraded, unusedAcross: row.tally?.dead_app_wide ?? null });
-  if (action.kind === "none") return <span className="muted">{NOTHING_TO_DO}</span>;
-  return (
-    <>
-      <CopyTextView text={action.text} />
-      <br />
-      <span className="muted">{action.where}</span>
-      {action.target !== undefined && (
-        <>
-          {" "}
-          <code>{action.target}</code>
-        </>
-      )}
-    </>
-  );
+  return <ActionCell action={memberRowAction({ degraded: row.degraded, unusedAcross: row.tally?.dead_app_wide ?? null })} />;
 }
 
 /** The roster's columns. The figure headers are glossed (CR-203 §3.2 D item 3):

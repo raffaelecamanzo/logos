@@ -66,6 +66,15 @@
   gap: var(--space-1);
 }
 
+/* The bindings filter (S-614): its fields side by side, wrapping on a narrow
+   column, their inputs aligned on one baseline. */
+.filters {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
 .impactForm {
   display: flex;
   align-items: flex-end;

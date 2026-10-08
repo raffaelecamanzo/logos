@@ -40,6 +40,14 @@
  * Build dependencies — sit in one `WidgetStack`, with their words in
  * `copy/coverage.copy.ts`.
  *
+ * The service map tab (S-614, CR-203 §3.2 D items 6–9, FR-UI-42): the map with
+ * its legend and notes, then its widgets — Cross-service bindings (filtered by
+ * text, binding kind and provenance), Binding evidence (identical rows merged
+ * with a Calls count), Declared contracts (one Documents and one Bound calls
+ * table), the build twin and the Cross-context model hint — all in one
+ * `WidgetStack`, with their words in `copy/serviceMap.copy.ts`. The filter
+ * narrows the bindings table and the evidence, never the canvas.
+ *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
  * muted node, not a service with "no couplings"; a workspace with no bindings gets
@@ -79,6 +87,7 @@ import type {
   XserviceRouteProviders,
 } from "../../api/types.ts";
 import {
+  ActionCell,
   Badge,
   Button,
   Callout,
@@ -88,6 +97,7 @@ import {
   EmptyState,
   ErrorPanel,
   LoadingState,
+  SelectField,
   Tabs,
   TextField,
   Widget,
@@ -99,6 +109,15 @@ import {
   COVERAGE_TEXT,
   declaredRelations,
 } from "../../copy/coverage.copy.ts";
+import {
+  BINDING_KIND_LABEL,
+  bindingEvidence,
+  crossContextHint,
+  crossServiceBindings,
+  declaredContracts,
+  evidenceRowAction,
+  SERVICE_MAP_TEXT,
+} from "../../copy/serviceMap.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { GraphCanvas } from "../graph/GraphCanvas.tsx";
 import { ADMITTED_DASH } from "../graph/graphModel.ts";
@@ -112,23 +131,28 @@ import {
 } from "./coverageModel.ts";
 import { CoveragePanel } from "./CoverageBoards.tsx";
 import {
+  BINDING_KIND_FILTERS,
   BUILD_EDGE_TYPE,
   buildLayer,
   buildServiceMap,
   CONFIG_REFUSAL_LABEL,
   DECLARED_EDGE_TYPE,
   declaredLayer,
+  filterLinks,
+  groupEvidence,
   hasNonLiteralBinding,
   LINK_PROVENANCE_KINDS,
   LINK_PROVENANCE_LABEL,
   linkEvidence,
   memberOfServiceId,
+  NO_LINK_FILTER,
   serviceMembers,
   type BoundCall,
   type BuildLink,
   type DeclaredLayer,
   type DeclaredLink,
-  type EvidenceRow,
+  type EvidenceGroup,
+  type LinkFilter,
   type ServiceLink,
   type ServiceMember,
 } from "./serviceMapModel.ts";
@@ -355,19 +379,24 @@ const HINT_COLUMNS: Column<CrossContextHint>[] = [
   },
 ];
 
-/** The cross-context model hint (S-464, CR-148 §3.2 D) — a REPORT, never an
- *  edge: nothing here reaches the canvas, whatever the build toggle says. */
+/** The cross-context model hint (S-464, CR-148 §3.2 D; CR-203 §3.2 D item 9) —
+ *  a REPORT, never an edge: nothing here reaches the canvas, whatever the build
+ *  toggle says. A review hint, never a failure: its badge says so, and its
+ *  action points at the member's build manifest. */
 function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
   if (hints.length === 0) return null;
   return (
-    <Card title="Cross-context model hint">
-      <p className="muted">
-        {hints.length} {hints.length === 1 ? "member depends" : "members depend"} on the model
-        libraries of two or more bounded contexts — a context is named by its model library&apos;s coordinate,{" "}
-        <span className="mono">&lt;group&gt;.&lt;context&gt;:kafka-models</span> or{" "}
-        <span className="mono">&lt;context&gt;-kafka-models</span>. A hint for review, drawn as no
-        edge: a build dependency is not a runtime coupling.
-      </p>
+    <Widget
+      title="Cross-context model hint"
+      badge={<Badge tone="muted">Review hint</Badge>}
+      copy={crossContextHint}
+      figure={
+        <div className={styles.figure}>
+          <p className={styles.statement}>{SERVICE_MAP_TEXT.hintFigure(hints.length)}</p>
+        </div>
+      }
+    >
+      <p className="muted">{SERVICE_MAP_TEXT.hintNaming}</p>
       <DataTable
         caption="Members depending on two or more contexts' model libraries"
         columns={HINT_COLUMNS}
@@ -375,7 +404,7 @@ function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
         rowKey={(h) => h.member}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-    </Card>
+    </Widget>
   );
 }
 
@@ -515,14 +544,48 @@ const DECLARED_LINK_COLUMNS: Column<DeclaredLink>[] = [
   },
 ];
 
+/** One document behind a declared link, as a row of the one Documents table. */
+interface DeclaredDocumentRow {
+  link: DeclaredLink;
+  contract: DeclaredLink["contracts"][number];
+}
+
+/** One call bound to a link's external, as a row of the one Bound calls table. */
+interface BoundCallRow {
+  link: DeclaredLink;
+  call: BoundCall;
+}
+
+/** The two columns every flattened declared row leads with (CR-203 §3.2 D
+ *  item 8): the declaring member and its counterparty — what the per-link
+ *  disclosure's summary used to say once for all of its rows. */
+function declaredEndColumns<R extends { link: DeclaredLink }>(): Column<R>[] {
+  return [
+    { key: "member", header: "Member", mono: true, cell: (r) => r.link.from, sortValue: (r) => r.link.from },
+    {
+      key: "counterparty",
+      header: "Counterparty",
+      cell: (r) => counterparty(r.link.to),
+      sortValue: (r) => counterpartyText(r.link.to),
+    },
+  ];
+}
+
 /** One document behind a declared link: what it is, and why it names the
  *  counterparty — the identity score, or the external it groups into. */
-const DECLARED_DOCUMENT_COLUMNS: Column<DeclaredLink["contracts"][number]>[] = [
-  { key: "document", header: "Document", mono: true, cell: (c) => c.document, sortValue: (c) => c.document },
+const DECLARED_DOCUMENT_COLUMNS: Column<DeclaredDocumentRow>[] = [
+  ...declaredEndColumns<DeclaredDocumentRow>(),
+  {
+    key: "document",
+    header: "Document",
+    mono: true,
+    cell: ({ contract: c }) => c.document,
+    sortValue: ({ contract: c }) => c.document,
+  },
   {
     key: "identity",
     header: "Declares",
-    cell: (c) =>
+    cell: ({ contract: c }) =>
       c.target.kind === "member" ? (
         <>
           Document identity: {c.target.shared} of {c.target.total} operations match{" "}
@@ -534,26 +597,27 @@ const DECLARED_DOCUMENT_COLUMNS: Column<DeclaredLink["contracts"][number]>[] = [
           Named external {c.target.name} <span className="mono muted">{c.target.external}</span>
         </>
       ),
-    sortValue: (c) => c.target.kind,
+    sortValue: ({ contract: c }) => c.target.kind,
   },
 ];
 
 /** One call bound to a link's external: the matched operation and the base
  *  path's source — the evidence the join rests on. */
-const BOUND_CALL_COLUMNS: Column<BoundCall>[] = [
+const BOUND_CALL_COLUMNS: Column<BoundCallRow>[] = [
+  ...declaredEndColumns<BoundCallRow>(),
   {
     key: "call",
     header: "Call",
     mono: true,
-    cell: (b) => b.target,
-    sortValue: (b) => b.target,
+    cell: ({ call: b }) => b.target,
+    sortValue: ({ call: b }) => b.target,
   },
   {
     key: "operation",
     header: "Matched operation",
     mono: true,
-    cell: (b) => b.operation,
-    sortValue: (b) => b.operation,
+    cell: ({ call: b }) => b.operation,
+    sortValue: ({ call: b }) => b.operation,
   },
   {
     key: "base",
@@ -561,13 +625,13 @@ const BOUND_CALL_COLUMNS: Column<BoundCall>[] = [
     mono: true,
     // An empty base path is a base URL with no path — say so rather than render
     // an empty cell that reads as "not known".
-    cell: (b) => (b.base.path === "" ? <span className="muted">none (host only)</span> : b.base.path),
-    sortValue: (b) => b.base.path,
+    cell: ({ call: b }) => (b.base.path === "" ? <span className="muted">none (host only)</span> : b.base.path),
+    sortValue: ({ call: b }) => b.base.path,
   },
   {
     key: "source",
     header: "Base-path source",
-    cell: (b) => (
+    cell: ({ call: b }) => (
       <ul className={styles.reasons}>
         {b.base.sources.map((src) => (
           <li key={`${src.file}:${src.key}`}>
@@ -577,7 +641,7 @@ const BOUND_CALL_COLUMNS: Column<BoundCall>[] = [
         ))}
       </ul>
     ),
-    sortValue: (b) => b.base.origin,
+    sortValue: ({ call: b }) => b.base.origin,
   },
 ];
 
@@ -618,59 +682,66 @@ const EXTERNAL_COLUMNS: Column<DeclaredLayerExternal>[] = [
 
 type DeclaredLayerExternal = DeclaredLayer["externals"][number];
 
-/** The declared layer's twin and its evidence (S-461) — the edge detail: per
- *  link, each document with its identity score or external, and each call
- *  bound to the external with its matched operation and base-path source. */
+/** The declared layer's twin and its evidence (S-461; CR-203 §3.2 D item 8) —
+ *  the edge detail, flat: one contracts table, then ONE Documents table (each
+ *  document with its identity score or external) and ONE Bound calls table
+ *  (each call matched to an external, with its operation and base-path
+ *  source), every row naming its member and counterparty, then the named
+ *  externals. No per-link disclosure: one table per kind of fact. */
 function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: BoundExternal }) {
+  const documents: DeclaredDocumentRow[] = layer.links.flatMap((link) =>
+    link.contracts.map((contract) => ({ link, contract })),
+  );
+  const calls: BoundCallRow[] = layer.links.flatMap((link) => link.bound.map((call) => ({ link, call })));
   return (
-    <Card title="Declared contracts">
-      <p className="muted">
-        What each member declares by a spec document it holds and does not implement: a contract
-        with the member whose own spec the document is, or with a named external. Declared, never
-        observed — none of these is a binding above.
-      </p>
+    <Widget
+      title="Declared contracts"
+      copy={declaredContracts}
+      state={{ documents: documents.length }}
+      figure={
+        <div className={styles.figure}>
+          <p className={styles.statement}>
+            {SERVICE_MAP_TEXT.declaredFigure(layer.links.length, documents.length, calls.length)}
+          </p>
+        </div>
+      }
+    >
+      {/* The server's composed join line carries wire tokens, so it is the
+          evidence, verbatim (BR-51), never the figure. */}
       {join && <p className="muted mono">{join.headline.summary}</p>}
       {/* A relation can name externals and declare nothing: a declared `mock`
           stands in for an external no member vendors. Then there is no link to
           tabulate, and an empty twin table would read as a table that failed to
           fill (NFR-CC-04) — so it says what is true instead. */}
       {layer.links.length === 0 ? (
-        <p className="muted">
-          No member on this map declares a contract. The externals below are still named: each is
-          held by a declared <span className="mono">mock</span> member standing in for it.
-        </p>
+        <p className="muted">{SERVICE_MAP_TEXT.noDeclaredLinks}</p>
       ) : (
+        <>
+          <DataTable
+            caption="Declared contracts (the accessible twin of the declared layer)"
+            columns={DECLARED_LINK_COLUMNS}
+            rows={layer.links}
+            rowKey={(l) => `${l.from}->${counterpartyText(l.to)}`}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+          <DataTable
+            caption="Documents by which each member declares a contract with its counterparty"
+            columns={DECLARED_DOCUMENT_COLUMNS}
+            rows={documents}
+            rowKey={(r) => `${r.link.from}->${counterpartyText(r.link.to)}:${r.contract.document}`}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+        </>
+      )}
+      {calls.length > 0 && (
         <DataTable
-          caption="Declared contracts (the accessible twin of the declared layer)"
-          columns={DECLARED_LINK_COLUMNS}
-          rows={layer.links}
-          rowKey={(l) => `${l.from}->${counterpartyText(l.to)}`}
+          caption="Calls bound to a named external — each still counted as no provider here"
+          columns={BOUND_CALL_COLUMNS}
+          rows={calls}
+          rowKey={(r, i) => `${r.link.from}:${r.call.from.symbol}:${r.call.target}:${i}`}
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
       )}
-      {layer.links.map((l) => (
-        <details key={`${l.from}->${counterpartyText(l.to)}`}>
-          <summary>
-            <span className="mono">{l.from}</span> → {counterparty(l.to)}
-          </summary>
-          <DataTable
-            caption={`Documents by which ${l.from} declares a contract with ${counterpartyText(l.to)}`}
-            columns={DECLARED_DOCUMENT_COLUMNS}
-            rows={l.contracts}
-            rowKey={(c) => c.document}
-            pageSize={DEFAULT_TABLE_PAGE_SIZE}
-          />
-          {l.bound.length > 0 && (
-            <DataTable
-              caption={`Calls from ${l.from} bound to ${counterpartyText(l.to)} — each still counted as no provider here`}
-              columns={BOUND_CALL_COLUMNS}
-              rows={l.bound}
-              rowKey={(b, i) => `${b.from.symbol}:${b.target}:${i}`}
-              pageSize={DEFAULT_TABLE_PAGE_SIZE}
-            />
-          )}
-        </details>
-      ))}
       {layer.externals.length > 0 && (
         <DataTable
           caption="Named externals (APIs no member's own spec is)"
@@ -680,7 +751,7 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
       )}
-    </Card>
+    </Widget>
   );
 }
 
@@ -772,15 +843,19 @@ const PROVENANCE_COLUMN: Column<ServiceLink> = {
  *
  *  A function, not a constant, because the Provenance column appears only when
  *  the workspace HAS a non-literal binding. FR-UI-29 keeps a literal-only
- *  workspace rendering byte-for-byte as it did before this story (CR-132 AC6),
- *  and an always-present column of "Written at the call site" on every row would
+ *  workspace free of every provenance rendering (CR-132 AC6; re-asserted on
+ *  the S-614 layout), and an always-present column of "Written at the call site" on every row would
  *  break that while telling a reader nothing. */
 function linkColumns(withProvenance: boolean): Column<ServiceLink>[] {
   return withProvenance ? [...LINK_COLUMNS, PROVENANCE_COLUMN] : LINK_COLUMNS;
 }
 
-/** The evidence detail's columns (S-419, CR-132 AC4; FR-WS-19 AC2/AC6). */
-const EVIDENCE_COLUMNS: Column<EvidenceRow>[] = [
+/** The evidence detail's columns (S-419, CR-132 AC4; FR-WS-19 AC2/AC6), over
+ *  grouped rows (S-614): each states one fact once, with how many calls it
+ *  stands for and what its refusal asks of the reader. "Calls" is explained in
+ *  the widget's what rather than glossed: a `Term` inside the sort button
+ *  would nest one interactive element in another. */
+const EVIDENCE_COLUMNS: Column<EvidenceGroup>[] = [
   {
     key: "end",
     header: "End",
@@ -825,61 +900,177 @@ const EVIDENCE_COLUMNS: Column<EvidenceRow>[] = [
       r.sources.length > 0 ? r.sources.join(", ") : <span className="muted">—</span>,
     sortValue: (r) => r.sources.join(","),
   },
+  { key: "calls", header: "Calls", numeric: true, cell: (r) => r.calls, sortValue: (r) => r.calls },
+  {
+    key: "action",
+    header: "What you can do",
+    // The one `none` a row has is a value that arrives at runtime.
+    cell: (r) => <ActionCell action={evidenceRowAction(r)} none={SERVICE_MAP_TEXT.arrivesAtRuntime} />,
+  },
 ];
 
-/** The evidence behind every non-literal link (S-419, CR-132 AC4).
+/** The evidence behind every non-literal link (S-419, CR-132 AC4; CR-203
+ *  §3.2 D item 7).
  *
  *  Rendered only for the links that HAVE something to evidence, and the whole
- *  card only when at least one does — the same gate as the legend section and the
- *  table column, so a literal-only workspace renders exactly as before. */
-function BindingEvidence({ links }: { links: ServiceLink[] }) {
+ *  widget only when at least one does — the same gate as the legend section and
+ *  the table column, so a literal-only workspace gains no evidence widget. The
+ *  bindings filter narrows it with the table (`shown`); its figure states how
+ *  many of the links with evidence are shown. Each link's rows are grouped, so
+ *  one fact is one row with its Calls count (FR-UI-42). */
+function BindingEvidence({ links, shown }: { links: ServiceLink[]; shown: ServiceLink[] }) {
   const admitted = links.filter(hasNonLiteralBinding);
   if (admitted.length === 0) return null;
+  const visible = shown.filter(hasNonLiteralBinding).map((l) => ({ link: l, rows: groupEvidence(linkEvidence(l)) }));
+  const shownRows = visible.flatMap((v) => v.rows);
+  const state = {
+    define: shownRows.filter((r) => r.refusal === "missing-key").length,
+    replace: shownRows.filter((r) => r.refusal === "placeholder-value").length,
+  };
   return (
-    <Card title="Binding evidence">
-      <p className="muted">
-        What admitted each coupling below, per end: the configuration key, the committed value,
-        and the files that prove it. One row per overlay — a key its overlays spell differently
-        proves several values, and every one of them is carried rather than one shown as though
-        it were the value.
-      </p>
-      {admitted.map((l) => {
-        const rows = linkEvidence(l);
-        return (
-          <details key={`${l.from}->${l.to}:${l.relation}`}>
-            <summary>
-              <span className="mono">
-                {l.from} → {l.to}
-              </span>{" "}
-              · {armLabel(l.relation)}
-            </summary>
-            {rows.length === 0 ? (
-              // Reachable two ways, and the wording must not pick one of them:
-              // a link is non-literal when any binding is `unstated` (an end
-              // whose value never arrived — genuinely not stated), and ALSO
-              // when a `config-bound` end arrives with an empty `bound: []`
-              // (stated, but naming no key). Saying "its provenance was not
-              // stated" would be false in the second case — a fabricated
-              // explanation in place of a fabricated value (NFR-CC-04). So it
-              // states what is observable — no key reached this view — and
-              // draws no conclusion about why.
-              <p className="muted">
-                No configuration key is named for this coupling, so there is nothing here to
-                evidence it either way — its Provenance breakdown above says what is known.
-              </p>
-            ) : (
-              <DataTable
-                caption={`Configuration evidence for ${l.from} → ${l.to} (${armLabel(l.relation)})`}
-                columns={EVIDENCE_COLUMNS}
-                rows={rows}
-                rowKey={(r, i) => `${r.end}:${r.key}:${i}`}
-                pageSize={DEFAULT_TABLE_PAGE_SIZE}
-              />
-            )}
-          </details>
-        );
-      })}
-    </Card>
+    <Widget
+      title="Binding evidence"
+      copy={bindingEvidence}
+      state={state}
+      figure={
+        <div className={styles.figure}>
+          <p className={styles.statement}>{SERVICE_MAP_TEXT.evidenceShown(visible.length, admitted.length)}</p>
+        </div>
+      }
+    >
+      {visible.map(({ link: l, rows }) => (
+        <details key={`${l.from}->${l.to}:${l.relation}`}>
+          <summary>
+            <span className="mono">
+              {l.from} → {l.to}
+            </span>{" "}
+            · {armLabel(l.relation)}
+          </summary>
+          {rows.length === 0 ? (
+            // Reachable two ways, and the wording must not pick one of them:
+            // a link is non-literal when any binding is `unstated` (an end
+            // whose value never arrived — genuinely not stated), and ALSO
+            // when a `config-bound` end arrives with an empty `bound: []`
+            // (stated, but naming no key). Saying "its provenance was not
+            // stated" would be false in the second case — a fabricated
+            // explanation in place of a fabricated value (NFR-CC-04). So it
+            // states what is observable — no key reached this view — and
+            // draws no conclusion about why.
+            <p className="muted">{SERVICE_MAP_TEXT.noKeyNamed}</p>
+          ) : (
+            <DataTable
+              caption={`Configuration evidence for ${l.from} → ${l.to} (${armLabel(l.relation)})`}
+              columns={EVIDENCE_COLUMNS}
+              rows={rows}
+              rowKey={(r, i) => `${r.end}:${r.key}:${i}`}
+              pageSize={DEFAULT_TABLE_PAGE_SIZE}
+            />
+          )}
+        </details>
+      ))}
+    </Widget>
+  );
+}
+
+/** The bindings filter's controls (CR-203 §3.2 D item 6, FR-UI-42): text over
+ *  the two services, a binding kind, and — only when the Provenance column
+ *  exists — a provenance kind. */
+function LinkFilterControls({
+  filter,
+  onChange,
+  withProvenance,
+}: {
+  filter: LinkFilter;
+  onChange: (filter: LinkFilter) => void;
+  withProvenance: boolean;
+}) {
+  return (
+    <div className={styles.filters} role="search" aria-label="Filter the cross-service bindings">
+      <TextField
+        label={SERVICE_MAP_TEXT.filterText}
+        hint={SERVICE_MAP_TEXT.filterTextHint}
+        type="search"
+        value={filter.text}
+        onChange={(e) => onChange({ ...filter, text: e.target.value })}
+      />
+      <SelectField
+        label={SERVICE_MAP_TEXT.filterKind}
+        value={filter.kind}
+        onChange={(e) => onChange({ ...filter, kind: e.target.value as LinkFilter["kind"] })}
+      >
+        <option value="all">{SERVICE_MAP_TEXT.anyKind}</option>
+        {BINDING_KIND_FILTERS.map((k) => (
+          <option key={k} value={k}>
+            {BINDING_KIND_LABEL[k]}
+          </option>
+        ))}
+      </SelectField>
+      {withProvenance && (
+        <SelectField
+          label={SERVICE_MAP_TEXT.filterProvenance}
+          value={filter.provenance}
+          onChange={(e) => onChange({ ...filter, provenance: e.target.value as LinkFilter["provenance"] })}
+        >
+          <option value="all">{SERVICE_MAP_TEXT.anyProvenance}</option>
+          {LINK_PROVENANCE_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {LINK_PROVENANCE_LABEL[k]}
+            </option>
+          ))}
+        </SelectField>
+      )}
+    </div>
+  );
+}
+
+/** The bindings table (S-250; CR-203 §3.2 D item 6) — the accessible twin of
+ *  the map, filtered. Always rendered: with no binding resolved it states that
+ *  absence in its figure row, where the centred empty state used to stand. */
+function CrossServiceBindings({
+  links,
+  shown,
+  topics,
+  withProvenance,
+  filter,
+  onFilter,
+}: {
+  links: ServiceLink[];
+  shown: ServiceLink[];
+  topics: number;
+  withProvenance: boolean;
+  filter: LinkFilter;
+  onFilter: (filter: LinkFilter) => void;
+}) {
+  if (links.length === 0) {
+    return (
+      <Widget title="Cross-service bindings" copy={crossServiceBindings} absence={SERVICE_MAP_TEXT.noBindings(topics)} />
+    );
+  }
+  return (
+    <Widget
+      title="Cross-service bindings"
+      copy={crossServiceBindings}
+      figure={
+        <div className={styles.figure}>
+          <p className={styles.statement} role="status">
+            {SERVICE_MAP_TEXT.bindingsShown(shown.length, links.length)}
+          </p>
+        </div>
+      }
+    >
+      <LinkFilterControls filter={filter} onChange={onFilter} withProvenance={withProvenance} />
+      {shown.length === 0 ? (
+        <p className="muted">{SERVICE_MAP_TEXT.noneMatch}</p>
+      ) : (
+        <DataTable
+          caption="Cross-service bindings (the accessible twin of the service map)"
+          columns={linkColumns(withProvenance)}
+          rows={shown}
+          rowKey={(l) => `${l.from}->${l.to}:${l.relation}`}
+          pageSize={DEFAULT_TABLE_PAGE_SIZE}
+        />
+      )}
+    </Widget>
   );
 }
 
@@ -919,191 +1110,192 @@ function ServiceMap({
       : map.loaded;
   /* The one gate on every rendering the provenance channel adds (S-419,
      CR-132 AC3/AC6). A workspace whose bindings were all observed at call sites
-     has nothing to distinguish, so it renders exactly the DOM it rendered before
-     this story — no legend section, no table column, no evidence card. */
+     has nothing to distinguish, so it gains none of them — no legend section,
+     no table column, no provenance filter, no evidence widget. */
   const anyAdmitted = map.links.some(hasNonLiteralBinding);
+  // The bindings filter (S-614, FR-UI-42) narrows the table and the evidence,
+  // never `loaded`: the canvas always draws the whole map. The provenance
+  // choice applies only while its control exists.
+  const [filter, setFilter] = useState<LinkFilter>(NO_LINK_FILTER);
+  const shown = filterLinks(map.links, anyAdmitted ? filter : { ...filter, provenance: "all" });
 
+  // One stack for the tab (S-614, FR-UI-40): the map with its legend and notes
+  // is its first child, and every widget below it sits at the stack's one gap.
   return (
-    <div className={styles.panel}>
+    <WidgetStack>
+      <div className={styles.panel}>
+        {/* Clicking a service focuses its member: the shell selector switches to it and
+            every other view re-fetches scoped to that member (frontend-design §4.16).
+            A topic node is NOT a member, so clicking it selects nothing — `memberOfServiceId`
+            returns null for a `topic:` id, which is why the two namespaces are distinct. */}
+        <GraphCanvas
+          loaded={loaded}
+          selection={{ seed: null, focusId: null, lockedId: null, locatedId: null, depth: 0 }}
+          onNodeClick={(id) => {
+            const member = memberOfServiceId(id);
+            if (member) selectMember(member);
+          }}
+        />
+
+        <details className={graphStyles.legend} open>
+          <summary>Legend</summary>
+          <div className={graphStyles.legendBody}>
+            <span className={graphStyles.legendHeading}>Cross-service bindings</span>
+            <ul className={graphStyles.legendList}>
+              {RELATION_ARMS.map((arm) => (
+                <EdgeRow type={arm} key={arm} />
+              ))}
+            </ul>
+            {map.topics.length > 0 && (
+              <>
+                <span className={graphStyles.legendHeading}>Broker topics</span>
+                <ul className={graphStyles.legendList}>
+                  <EdgeRow type="publishes" />
+                  <EdgeRow type="subscribes" />
+                </ul>
+              </>
+            )}
+            {/* Provenance is a SECOND channel over the arm hue, so both rows are
+                drawn in one arm's colour and differ only in stroke — the same
+                distinction the canvas makes. Rendered only when the workspace has
+                something to distinguish (CR-132 AC3). */}
+            {anyAdmitted && (
+              <>
+                <span className={graphStyles.legendHeading}>Provenance</span>
+                <ul className={graphStyles.legendList}>
+                  <EdgeRow type="route" dash="0" label="Written at the call site" />
+                  <EdgeRow
+                    type="route"
+                    dash={ADMITTED_DASH.join(" ")}
+                    label="Admitted from committed configuration"
+                  />
+                </ul>
+                <p className={graphStyles.legendNote}>
+                  The stroke says where a coupling came from; the hue still says which arm it
+                  crosses. An admitted line was proved by a committed configuration value, not
+                  observed at a call site — the table below states the split per coupling.
+                </p>
+              </>
+            )}
+            {/* The declared layer (S-461): its own edge class and node kind,
+                rendered only when the relation exists. */}
+            {declared && coverage.declared_contracts && (
+              <>
+                <span className={graphStyles.legendHeading}>Declared contracts</span>
+                <ul className={graphStyles.legendList}>
+                  {/* The edge row only when an edge is drawn — a legend entry for
+                      a line the canvas never shows would describe nothing. */}
+                  {declared.edges.length > 0 && (
+                    <EdgeRow type={DECLARED_EDGE_TYPE} label="Declares a contract (a vendored spec)" />
+                  )}
+                  <li className={graphStyles.legendRow}>
+                    <span
+                      className={`${graphStyles.legendDot} ${graphStyles.legendDotArtifact}`}
+                      aria-hidden="true"
+                    />
+                    <span>Named external — not a member (topics share this hue)</span>
+                  </li>
+                </ul>
+                <p className={graphStyles.legendNote}>
+                  Declared by a spec document a member holds and does not implement — never an
+                  observed call, and counted apart from every binding above:{" "}
+                  {coverage.declared_contracts.headline.summary}
+                </p>
+              </>
+            )}
+            {/* The build layer's toggle (S-464): rendered only when a relation
+                exists, and unchecked until the reader checks it. */}
+            {build && (
+              <>
+                <span className={graphStyles.legendHeading}>Build dependencies</span>
+                <label className={graphStyles.check}>
+                  <input
+                    type="checkbox"
+                    checked={showBuild}
+                    onChange={(e) => setShowBuild(e.target.checked)}
+                  />{" "}
+                  Draw what each member builds against
+                </label>
+                {showBuild && (
+                  <ul className={graphStyles.legendList}>
+                    <EdgeRow type={BUILD_EDGE_TYPE} label="Builds against (from its build manifest)" />
+                  </ul>
+                )}
+                <p className={graphStyles.legendNote}>
+                  Drawn in its own class and counted apart from every binding above:{" "}
+                  {build.summary}
+                </p>
+              </>
+            )}
+          </div>
+        </details>
+
+        {/* A failed read is stated whatever the toggle says: the cross-context hint is
+            read from the same answer and shown with the toggle off, so an unstated
+            failure would read as "no hint" (NFR-CC-04). Only a workspace whose status
+            carries a build headline ever reads the relation, so a manifest-less one
+            never reaches this. */}
+        {depsError ? (
+          <ErrorPanel>
+            The build relation could not be read: {depsError.message} — the build layer and the
+            cross-context model hint are unknown, not absent.
+          </ErrorPanel>
+        ) : (
+          showBuild && !deps && <LoadingState label="Reading the build relation…" />
+        )}
+
+        {layer && layer.collapsed.length > 0 && (
+          <p className="muted">
+            Platform members collapsed:{" "}
+            {layer.collapsed.map((c, i) => (
+              <span key={c.member} data-testid="collapsed-platform">
+                {i > 0 && ", "}
+                <span className="mono">{c.member}</span> ({c.inbound}{" "}
+                {c.inbound === 1 ? "member builds" : "members build"} against it)
+              </span>
+            ))}{" "}
+            — declared <span className="mono">platform</span>, so their inbound build edges are
+            counted apart and not drawn.
+          </p>
+        )}
+
+        {map.topics.length > 0 && (
+          <p className="muted">
+            {map.topics.length} topic{map.topics.length === 1 ? "" : "s"} · a topic is drawn as its
+            own node, so a coupling reads as{" "}
+            <span className="mono">publisher → topic → subscriber</span>. A topic with no subscriber
+            yet is still drawn — it is unconsumed, not absent.
+          </p>
+        )}
+
+        {map.awaitingIndex.length > 0 && (
+          <p className="muted">
+            Awaiting index: <span className="mono">{map.awaitingIndex.join(", ")}</span> — drawn muted;
+            their couplings are unknown, not absent.
+          </p>
+        )}
+
+        {map.degraded.length > 0 && (
+          <p className="muted">
+            Unavailable: <span className="mono">{map.degraded.join(", ")}</span> — these members could
+            not be read (a fault, not an empty index); their couplings are unknown.
+          </p>
+        )}
+      </div>
+
       {/* A map with topics but no resolved bindings is NOT empty — a published topic is
           real coupling the user can see and act on, even before anything subscribes to
-          it (S-256, FR-WS-11). Reporting it as "nothing here" would hide the very thing
-          promoting topics to first-class nodes was meant to reveal. */}
-      {map.links.length === 0 && map.topics.length === 0 ? (
-        <EmptyState message="No cross-service bindings resolved yet — every service is drawn, and the Cross-service coverage tab reports why each reference has not bound." />
-      ) : null}
-
-      {/* Clicking a service focuses its member: the shell selector switches to it and
-          every other view re-fetches scoped to that member (frontend-design §4.16).
-          A topic node is NOT a member, so clicking it selects nothing — `memberOfServiceId`
-          returns null for a `topic:` id, which is why the two namespaces are distinct. */}
-      <GraphCanvas
-        loaded={loaded}
-        selection={{ seed: null, focusId: null, lockedId: null, locatedId: null, depth: 0 }}
-        onNodeClick={(id) => {
-          const member = memberOfServiceId(id);
-          if (member) selectMember(member);
-        }}
+          it (S-256, FR-WS-11) — so the absence the widget states names the topics. */}
+      <CrossServiceBindings
+        links={map.links}
+        shown={shown}
+        topics={map.topics.length}
+        withProvenance={anyAdmitted}
+        filter={filter}
+        onFilter={setFilter}
       />
 
-      <details className={graphStyles.legend} open>
-        <summary>Legend</summary>
-        <div className={graphStyles.legendBody}>
-          <span className={graphStyles.legendHeading}>Cross-service bindings</span>
-          <ul className={graphStyles.legendList}>
-            {RELATION_ARMS.map((arm) => (
-              <EdgeRow type={arm} key={arm} />
-            ))}
-          </ul>
-          {map.topics.length > 0 && (
-            <>
-              <span className={graphStyles.legendHeading}>Broker topics</span>
-              <ul className={graphStyles.legendList}>
-                <EdgeRow type="publishes" />
-                <EdgeRow type="subscribes" />
-              </ul>
-            </>
-          )}
-          {/* Provenance is a SECOND channel over the arm hue, so both rows are
-              drawn in one arm's colour and differ only in stroke — the same
-              distinction the canvas makes. Rendered only when the workspace has
-              something to distinguish (CR-132 AC3). */}
-          {anyAdmitted && (
-            <>
-              <span className={graphStyles.legendHeading}>Provenance</span>
-              <ul className={graphStyles.legendList}>
-                <EdgeRow type="route" dash="0" label="Written at the call site" />
-                <EdgeRow
-                  type="route"
-                  dash={ADMITTED_DASH.join(" ")}
-                  label="Admitted from committed configuration"
-                />
-              </ul>
-              <p className={graphStyles.legendNote}>
-                The stroke says where a coupling came from; the hue still says which arm it
-                crosses. An admitted line was proved by a committed configuration value, not
-                observed at a call site — the table below states the split per coupling.
-              </p>
-            </>
-          )}
-          {/* The declared layer (S-461): its own edge class and node kind,
-              rendered only when the relation exists. */}
-          {declared && coverage.declared_contracts && (
-            <>
-              <span className={graphStyles.legendHeading}>Declared contracts</span>
-              <ul className={graphStyles.legendList}>
-                {/* The edge row only when an edge is drawn — a legend entry for
-                    a line the canvas never shows would describe nothing. */}
-                {declared.edges.length > 0 && (
-                  <EdgeRow type={DECLARED_EDGE_TYPE} label="Declares a contract (a vendored spec)" />
-                )}
-                <li className={graphStyles.legendRow}>
-                  <span
-                    className={`${graphStyles.legendDot} ${graphStyles.legendDotArtifact}`}
-                    aria-hidden="true"
-                  />
-                  <span>Named external — not a member (topics share this hue)</span>
-                </li>
-              </ul>
-              <p className={graphStyles.legendNote}>
-                Declared by a spec document a member holds and does not implement — never an
-                observed call, and counted apart from every binding above:{" "}
-                {coverage.declared_contracts.headline.summary}
-              </p>
-            </>
-          )}
-          {/* The build layer's toggle (S-464): rendered only when a relation
-              exists, and unchecked until the reader checks it. */}
-          {build && (
-            <>
-              <span className={graphStyles.legendHeading}>Build dependencies</span>
-              <label className={graphStyles.check}>
-                <input
-                  type="checkbox"
-                  checked={showBuild}
-                  onChange={(e) => setShowBuild(e.target.checked)}
-                />{" "}
-                Draw what each member builds against
-              </label>
-              {showBuild && (
-                <ul className={graphStyles.legendList}>
-                  <EdgeRow type={BUILD_EDGE_TYPE} label="Builds against (from its build manifest)" />
-                </ul>
-              )}
-              <p className={graphStyles.legendNote}>
-                Drawn in its own class and counted apart from every binding above:{" "}
-                {build.summary}
-              </p>
-            </>
-          )}
-        </div>
-      </details>
-
-      {/* A failed read is stated whatever the toggle says: the cross-context hint is
-          read from the same answer and shown with the toggle off, so an unstated
-          failure would read as "no hint" (NFR-CC-04). Only a workspace whose status
-          carries a build headline ever reads the relation, so a manifest-less one
-          never reaches this. */}
-      {depsError ? (
-        <ErrorPanel>
-          The build relation could not be read: {depsError.message} — the build layer and the
-          cross-context model hint are unknown, not absent.
-        </ErrorPanel>
-      ) : (
-        showBuild && !deps && <LoadingState label="Reading the build relation…" />
-      )}
-
-      {layer && layer.collapsed.length > 0 && (
-        <p className="muted">
-          Platform members collapsed:{" "}
-          {layer.collapsed.map((c, i) => (
-            <span key={c.member} data-testid="collapsed-platform">
-              {i > 0 && ", "}
-              <span className="mono">{c.member}</span> ({c.inbound}{" "}
-              {c.inbound === 1 ? "member builds" : "members build"} against it)
-            </span>
-          ))}{" "}
-          — declared <span className="mono">platform</span>, so their inbound build edges are
-          counted apart and not drawn.
-        </p>
-      )}
-
-      {map.topics.length > 0 && (
-        <p className="muted">
-          {map.topics.length} topic{map.topics.length === 1 ? "" : "s"} · a topic is drawn as its
-          own node, so a coupling reads as{" "}
-          <span className="mono">publisher → topic → subscriber</span>. A topic with no subscriber
-          yet is still drawn — it is unconsumed, not absent.
-        </p>
-      )}
-
-      {map.awaitingIndex.length > 0 && (
-        <p className="muted">
-          Awaiting index: <span className="mono">{map.awaitingIndex.join(", ")}</span> — drawn muted;
-          their couplings are unknown, not absent.
-        </p>
-      )}
-
-      {map.degraded.length > 0 && (
-        <p className="muted">
-          Unavailable: <span className="mono">{map.degraded.join(", ")}</span> — these members could
-          not be read (a fault, not an empty index); their couplings are unknown.
-        </p>
-      )}
-
-      {map.links.length > 0 && (
-        <Card title="Cross-service bindings">
-          <DataTable
-            caption="Cross-service bindings (the accessible twin of the service map)"
-            columns={linkColumns(anyAdmitted)}
-            rows={map.links}
-            rowKey={(l) => `${l.from}->${l.to}:${l.relation}`}
-            pageSize={DEFAULT_TABLE_PAGE_SIZE}
-          />
-        </Card>
-      )}
-
-      <BindingEvidence links={map.links} />
+      <BindingEvidence links={map.links} shown={shown} />
 
       {declared && <DeclaredContractsCard layer={declared} join={coverage.bound_external} />}
 
@@ -1120,7 +1312,7 @@ function ServiceMap({
       )}
 
       {deps && <CrossContextHintCard hints={deps.cross_context} />}
-    </div>
+    </WidgetStack>
   );
 }
 

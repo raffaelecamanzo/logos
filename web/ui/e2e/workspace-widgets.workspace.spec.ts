@@ -1,6 +1,7 @@
 // The workspace views' widgets in one layout (S-613, CR-203 §3.2 D, FR-UI-40),
 // read as COMPUTED style from the real served views — the Workspace Dashboard,
-// Workspace Health and the Workspace tab's Cross-service coverage tab — over the
+// Workspace Health and the Workspace tab's Cross-service coverage tab and (S-614)
+// Service map — over the
 // two-member workspace fixture. Each view stacks its widgets in one
 // `WidgetStack`: consecutive widgets sit one equal gap apart (the coverage tab's
 // last three included, the gap CR-203 §3.1 item 10 found missing), every widget
@@ -76,3 +77,22 @@ test("the Cross-service coverage tab stacks its widgets at one gap, the last thr
   expect(specToIntake, "Spec conformance → Coverage by intake").toBeCloseTo(m.rowGap, 1);
   expect(intakeToBuild, "Coverage by intake → Build dependencies").toBeCloseTo(m.rowGap, 1);
 });
+
+test("the Service map stacks the map and its widgets at one gap, left-aligned, in one body size", async ({ page }) => {
+  await page.goto("/workspace");
+  // The Service map is the tab the Workspace view opens on.
+  await expect(page.getByRole("tab", { name: "Service map" })).toHaveAttribute("aria-selected", "true");
+  const panel = page.getByRole("tabpanel");
+  const stack = await stackWith(page, panel, "Cross-service bindings");
+  // The fixture resolves no cross-service binding, vendors no spec and holds no
+  // build manifest, so the bindings widget states that absence in its figure
+  // row and is the stack's one widget (S-419/S-461/S-464 gates hold).
+  expect(await widgetTitles(stack)).toEqual(["Cross-service bindings"]);
+  await expect(stack.locator("[data-widget-absence]")).toBeVisible();
+  const m = await expectWidgetStackLayout(stack);
+  // The map (canvas, legend and notes) is the stack's first child, the widget
+  // its second: one gap, the stack's own — not the map's inner spacing.
+  expect(m.gaps).toHaveLength(1);
+  expect(m.bodySizes).toHaveLength(1);
+});
+

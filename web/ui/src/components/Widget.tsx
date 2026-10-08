@@ -19,7 +19,7 @@
 
 import type { ReactNode } from "react";
 
-import { NOTHING_TO_DO, type CopyEntry, type CopyText } from "../copy/types.ts";
+import { NOTHING_TO_DO, type CopyEntry, type CopyText, type WidgetAction } from "../copy/types.ts";
 
 import { Card } from "./Card.tsx";
 import { Term } from "./Term.tsx";
@@ -69,6 +69,35 @@ export function CopyTextView({ text }: { text: CopyText }) {
             {seg.text}
           </Term>
         ),
+      )}
+    </>
+  );
+}
+
+/**
+ * One table row's own action, as a cell (S-613's Members column, S-614's
+ * evidence column): the action text, then where and its target on a second
+ * line. A `none` action reads `none` — by default the one "Nothing to do"
+ * sentence; a catalogue whose `none` says something more specific passes it.
+ */
+export function ActionCell({ action, none = NOTHING_TO_DO }: { action: WidgetAction; none?: CopyText }) {
+  if (action.kind === "none") {
+    return (
+      <span className="muted">
+        <CopyTextView text={none} />
+      </span>
+    );
+  }
+  return (
+    <>
+      <CopyTextView text={action.text} />
+      <br />
+      <span className="muted">{action.where}</span>
+      {action.target !== undefined && (
+        <>
+          {" "}
+          <code>{action.target}</code>
+        </>
       )}
     </>
   );

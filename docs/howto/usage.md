@@ -812,9 +812,21 @@ relation arm, the accessible table gains a **Provenance** column giving the per-
 breakdown (`literal` / `config-bound` / `config-unresolved` / `unstated`) rather than
 labelling an aggregated link as a single kind, and the edge detail names the evidence —
 for each `config-bound` end the key, its defining source paths and the profile set, one row
-per overlay; for a `config-unresolved` end its keys and the refusal. The legend's
-provenance section renders only when at least one link is non-literal, so a workspace with
-no admitted binding looks exactly as it did before (S-419, CR-132).
+per overlay; for a `config-unresolved` end its keys and the refusal. Rows identical in
+every column are merged into one, with a **Calls** count of how many calls it stands for,
+and each row says what to do: define the key, or replace the placeholder value, in the
+member's configuration; nothing, when the value arrives at runtime; otherwise, if the
+value is wrong, correct the file named under *Defining sources* (since S-614). The legend's
+provenance section, the Provenance column and filter, and the **Binding evidence** widget
+render only when at least one link is non-literal, so a workspace with no admitted binding
+gains none of them (S-419, CR-132).
+
+**Filtering the bindings (since S-614).** The **Cross-service bindings** widget below
+the map filters its table by text (a consumer or provider name, case-insensitive), by
+binding kind (HTTP, gRPC, broker) and, when the Provenance column exists, by provenance
+kind; its figure reads *n of m bindings shown*. The filter narrows that table and
+**Binding evidence** together and never the map, which always draws every binding. Each
+service-map widget states what it shows, why it matters and what you can do.
 
 **The build layer (since S-464).** When any member holds a Maven or Gradle manifest, the
 service map's legend gains a **Build dependencies** checkbox — *off* by default, so the
@@ -823,9 +835,11 @@ builds against, in its own `build` edge class (a hue no runtime arm uses), with 
 accessible **Build dependencies** table giving each pair's kinds, artifacts and reference
 count. A member declared [`kind = "platform"`](configuration.md#kind--platform--build-hubs)
 is **collapsed**: its inbound build edges are not drawn, and a line names it with how many
-members build against it. A **Cross-context model hint** card lists the members that
-depend on the model libraries (`<group>.<context>:kafka-models`, or
-`<context>-kafka-models`) of two or more bounded contexts, each library named — a report you review, never drawn as an edge. The **Cross-service coverage**
+members build against it. A **Cross-context model hint** widget, badged *Review hint*,
+lists the members that depend on the model libraries (`<group>.<context>:kafka-models`, or
+`<context>-kafka-models`) of two or more bounded contexts, each library named — a report you
+review in the member's build manifest (`pom.xml` / `build.gradle`), never a failure and
+never drawn as an edge. The **Cross-service coverage**
 tab gains a **Build dependencies** card after every runtime board, rendering the server's
 own headline line (pairs by kind beside their denominator), the declared platforms apart,
 the platform candidates and any colliding artifact. A build dependency is never a runtime
@@ -845,9 +859,11 @@ selects no member. Every registry external gets a node, including one only a
 toggle) and does not count toward node size, which reads as observed coupling.
 The legend gains a **Declared contracts** section: the edge row *Declares a
 contract (a vendored spec)* (only when an edge is drawn), the named-external row
-and the server's own headline line. Below the map, a **Declared contracts** card
+and the server's own headline line. Below the map, a **Declared contracts** widget
 holds the accessible twin table (member, *Declares a contract to*, documents,
-calls bound) and, per link, the edge detail: each document with its identity
+calls bound), then one **Documents** table and one **Bound calls** table (since
+S-614; each row names its member and counterparty, where a disclosure per link
+used to hold them): each document with its identity
 score — e.g. *Document identity: 31 of 31 operations match
 mailbox-aggregator-api's own src/main/resources/openapi/v1.yaml* — or the
 external it groups into, and each call bound to that external with its target,

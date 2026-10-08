@@ -16,6 +16,15 @@ import {
   specConformance,
 } from "../../copy/coverage.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import {
+  bindingEvidence,
+  crossContextHint,
+  crossServiceBindings,
+  declaredContracts,
+  evidenceRowAction,
+  SERVICE_MAP_TEXT,
+} from "../../copy/serviceMap.copy.ts";
+import { copyTextString } from "../../copy/text.ts";
 import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import {
   HEALTHY_COVERAGE,
@@ -59,7 +68,7 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
           (CR-132 AC3 — provenance must never become a new edge type).
 
           Filtered, not mapped: an edge carrying no marker renders nothing here, so
-          the literal-only DOM this file records stays byte-identical. */}
+          a literal-only fixture gains no element in the double. */}
       {loaded.edges
         .filter((e) => e.admitted)
         .map((e) => (
@@ -71,8 +80,7 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
           above — the real canvas strokes them into a <canvas> bitmap with no DOM
           to assert against — and the same discipline: FILTERED to the two hop
           types, never mapped over every edge, so a workspace with no topic hop
-          (which is every fixture recorded before this story, the literal-only
-          byte-for-byte snapshot included) renders exactly the DOM it did before.
+          (every fixture written before this story) gains no element here.
 
           What this lets a spec assert is the thing FR-WS-27 AC6 is about: that a
           resolved broker coupling is drawn as `publisher -> topic -> subscriber`
@@ -100,8 +108,7 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
         ))}
       {/* The BUILD layer's edges (S-464), surfaced as DOM for the same reason as
           the hops above, and FILTERED to the `build` class so every fixture
-          without a build layer — the recorded snapshots included — renders
-          exactly the DOM it did before. The edge type is printed, so "a distinct
+          without a build layer gains no element here. The edge type is printed, so "a distinct
           class" is asserted on what the canvas was handed, not on the model. */}
       {loaded.edges
         .filter((e) => e.edge_type === "build")
@@ -113,8 +120,7 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
       {/* The DECLARED layer (S-461): its edges and its external nodes, surfaced
           as DOM for the reason the build edges are, and FILTERED to the
           `declares-contract` class and the `external` node kind, so a workspace
-          that declares nothing — every snapshot recorded before this story —
-          renders exactly the DOM it did. An external is printed with its id, so
+          that declares nothing gains no element here. An external is printed with its id, so
           "keyed by identity, labelled by name" is asserted on what the canvas
           was handed. */}
       {loaded.edges
@@ -347,23 +353,39 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(screen.getByText(/HTTP \(OpenAPI ↔ route\)/)).toBeInTheDocument();
   });
 
-  /* CR-132 AC6 / FR-UI-29: a workspace with NO admitted binding must render
-     byte-for-byte as it did before the provenance channel existed.
-
-     The recorded file was written from the tree as it stood BEFORE that channel
-     was added, and is never re-recorded: `-u` on this spec would silently turn
-     the criterion into "renders however it renders today", which is the one thing
-     it exists to prevent. The subtree is the service-map panel itself (the mocked
-     canvas's parent), so a change anywhere in the map's own DOM — a legend
-     section, a table column, an evidence list — fails it. */
-  it("renders a literal-only service map identically to the DOM recorded before provenance", async () => {
+  /* CR-132 AC6 / FR-UI-29: a workspace with NO admitted binding gains none of
+     the provenance channel's renderings. This was a byte-for-byte recording of
+     the map panel from before that channel (`service-map.literal-only.html`);
+     CR-203 rewrote the bindings widget it recorded (S-614: copy, a filter, one
+     stack), so the recording could not hold, and it was retired rather than
+     re-recorded with `-u` — which would have turned the criterion into "renders
+     however it renders today". Its claim is asserted here directly instead:
+     the legend has only the arm section, the canvas no admitted line, the table
+     only the four pre-provenance columns, and there is no provenance filter and
+     no evidence widget. */
+  it("renders a literal-only service map with none of the provenance renderings (S-419 gate)", async () => {
     stubApi({ providers: [BINDING] });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
-    const panel = screen.getByTestId("canvas").parentElement!;
-    await expect(panel.innerHTML).toMatchFileSnapshot(
-      "./__snapshots__/service-map.literal-only.html",
-    );
+    const legend = screen.getByText("Legend").closest("details")!;
+    expect([...legend.querySelectorAll("span")].filter((el) => el.className.includes("legendHeading")).map((el) => el.textContent)).toEqual([
+      "Cross-service bindings",
+    ]);
+    expect(within(legend).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "route",
+      "grpc-call",
+      "broker-topic",
+    ]);
+    expect(screen.queryByTestId("canvas-admitted-edge")).toBeNull();
+    const table = screen.getByRole("table", { name: /accessible twin of the service map/ });
+    expect(within(table).getAllByRole("columnheader").map((th) => th.textContent?.replace("↕", ""))).toEqual([
+      "Consumer",
+      "Provider",
+      "Binding",
+      "Bindings",
+    ]);
+    expect(screen.queryByRole("combobox", { name: "Provenance" })).toBeNull();
+    expect(expectOneWidgetStack(screen.getByRole("tabpanel")).map(widgetTitle)).toEqual(["Cross-service bindings"]);
   });
 
   it("clicking a service focuses its member — the shell selector follows the canvas", async () => {
@@ -1765,53 +1787,64 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       ["web", "PSS (named external web:legacy/pss.yaml)", "1", "1"],
     ]);
 
-    // Identity: the document, the score, and the member's own document it matched.
-    const identity = within(card).getByRole("table", {
-      name: "Documents by which api declares a contract with web",
-      hidden: true,
-    });
-    // The whole row: the vendored DOCUMENT, then what it declares — a missing
-    // or empty document cell must fail here, not pass a `toContain`.
-    expect(within(identity).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
-      "specs/web.yaml",
-      "Document identity: 3 of 3 operations match web's own api/openapi.yaml",
+    // CR-203 item 8 / FR-UI-42: no disclosure per link — one Documents table and
+    // one Bound calls table, each row naming its member and counterparty, after
+    // the contracts table and before the named externals.
+    expect(card.querySelector("details")).toBeNull();
+    const tables = within(card)
+      .getAllByRole("table")
+      .map((t) => t.querySelector("caption")?.textContent ?? "");
+    expect(tables).toEqual([
+      "Declared contracts (the accessible twin of the declared layer)",
+      "Documents by which each member declares a contract with its counterparty",
+      "Calls bound to a named external — each still counted as no provider here",
+      "Named externals (APIs no member's own spec is)",
     ]);
-    // An external target: the document, and the external named WITH its
-    // identity — two externals here are both titled PSS.
-    const external = within(card).getByRole("table", {
-      name: "Documents by which web declares a contract with PSS (web:legacy/pss.yaml)",
-      hidden: true,
-    });
-    expect(within(external).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
-      "legacy/pss.yaml",
-      "Named external PSS web:legacy/pss.yaml",
+    const cellsOf = (table: HTMLElement) =>
+      within(table)
+        .getAllByRole("row")
+        .slice(1)
+        .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+
+    // Every document the four disclosures held, one row each: the vendored
+    // DOCUMENT, then what it declares — the identity score and the member's own
+    // document it matched, or the external named WITH its identity (two
+    // externals here are both titled PSS). Whole rows, so a missing or empty
+    // cell fails here rather than passing a `toContain`.
+    const documents = within(card).getByRole("table", { name: /^Documents by which each member/ });
+    expect(cellsOf(documents)).toEqual([
+      ["api", "PSS (named external api:pss.yaml)", "pss.yaml", "Named external PSS api:pss.yaml"],
+      ["api", "web", "specs/web.yaml", "Document identity: 3 of 3 operations match web's own api/openapi.yaml"],
+      ["web", "PSS (named external api:pss.yaml)", "vendor/pss-copy.yaml", "Named external PSS api:pss.yaml"],
+      ["web", "PSS (named external web:legacy/pss.yaml)", "legacy/pss.yaml", "Named external PSS web:legacy/pss.yaml"],
     ]);
 
-    // The bound call: target, matched operation, base path and its source.
-    const calls = within(card).getByRole("table", {
-      name: /Calls from api bound to PSS \(api:pss\.yaml\)/,
-      hidden: true,
-    });
-    expect(within(calls).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
-      "GET ${pss.uri-get-mailbox}",
-      "GET /prov/domain/{}/user/{}",
-      "/prov",
-      "Deploy overlay · deploy-coll/values.yaml · envfrom.pssbaseurl",
+    // The bound calls: member, counterparty, target, matched operation, base
+    // path and its source. The second is the other base-path shape: a host-only
+    // base URL committed by application configuration in two files — the path
+    // stated as none, the origin named, and EVERY source listed, not the first.
+    const calls = within(card).getByRole("table", { name: /^Calls bound to a named external/ });
+    const callRows = cellsOf(calls);
+    expect(callRows).toEqual([
+      [
+        "api",
+        "PSS (named external api:pss.yaml)",
+        "GET ${pss.uri-get-mailbox}",
+        "GET /prov/domain/{}/user/{}",
+        "/prov",
+        "Deploy overlay · deploy-coll/values.yaml · envfrom.pssbaseurl",
+      ],
+      [
+        "web",
+        "PSS (named external web:legacy/pss.yaml)",
+        "POST ${legacy.uri-send}",
+        "POST /v1/send",
+        "none (host only)",
+        "Application configuration · src/main/resources/application.yml · legacy.base-urlApplication configuration · src/test/resources/application-it.yml · legacy.base-url",
+      ],
     ]);
-    // The other base-path shape: a host-only base URL committed by application
-    // configuration in two files — the path stated as none, the origin named,
-    // and EVERY source listed, not the first.
-    const hostOnly = within(card).getByRole("table", {
-      name: /Calls from web bound to PSS \(web:legacy\/pss\.yaml\)/,
-      hidden: true,
-    });
-    const hostOnlyCells = within(hostOnly).getAllByRole("cell", { hidden: true });
-    expect(hostOnlyCells.slice(0, 3).map((c) => c.textContent)).toEqual([
-      "POST ${legacy.uri-send}",
-      "POST /v1/send",
-      "none (host only)",
-    ]);
-    expect(within(hostOnlyCells[3]).getAllByRole("listitem", { hidden: true }).map((li) => li.textContent)).toEqual([
+    const hostOnlySources = within(calls).getAllByRole("row")[2].querySelectorAll("li");
+    expect([...hostOnlySources].map((li) => li.textContent)).toEqual([
       "Application configuration · src/main/resources/application.yml · legacy.base-url",
       "Application configuration · src/test/resources/application-it.yml · legacy.base-url",
     ]);
@@ -2012,3 +2045,314 @@ describe("WorkspaceView — the coverage tab explains itself, in one stack (S-61
     expect(intake.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos workspace status");
   });
 });
+
+// ── S-614 / CR-203 items 6–9 / FR-UI-42: the service map's widgets ───────────
+
+/** `stubApi` with a third, indexed member `billing` on the status the map draws
+ *  from — two members cannot show a text filter narrowing anything, since
+ *  every link between them names both. */
+function stubThreeMembers(opts: Parameters<typeof stubApi>[0]) {
+  stubApi(opts);
+  const inner = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      const res = await inner(url);
+      if (!url.startsWith("/api/v1/workspace/status")) return res;
+      const body = await res.json();
+      body.members.push({ member: "billing", result: { indexed: true }, warm_state: "warm", open_state: "opened" });
+      return { ok: res.ok, status: res.status, json: () => Promise.resolve(body) } as Response;
+    }),
+  );
+}
+
+/** A committed value one consumer key proves, shared by every call carrying it. */
+const SHARED_VALUE: BridgeEdge["from_value"] = {
+  provenance: "config-bound",
+  bound: [
+    {
+      key: "billing.base-url",
+      source: "properties",
+      values: [{ value: "http://billing:8080", profiles: ["docker"], unprofiled: false, sources: ["application-docker.yml"] }],
+    },
+  ],
+};
+
+/** One link per binding kind across three services (FR-UI-42's fixture): HTTP
+ *  (two, literal), gRPC (a refused consumer key) and broker (an admitted value). */
+const KIND_LINKS: BridgeEdge[] = [
+  BINDING, // api → web, HTTP, literal
+  { ...REFUSED_BINDING, to: { member: "billing", symbol: "svc" } }, // api → billing, gRPC, refused
+  { ...BROKER_BINDING, from: { member: "web", symbol: "emit" }, to: { member: "billing", symbol: "on" }, from_value: SHARED_VALUE }, // web → billing, broker, admitted
+  { ...BINDING, from: { member: "billing", symbol: "op" }, to: { member: "api", symbol: "route" } }, // billing → api, HTTP, literal
+];
+
+function mapPanel(): HTMLElement {
+  return screen.getByRole("tabpanel");
+}
+
+function mapWidget(title: string): HTMLElement {
+  const found = expectOneWidgetStack(mapPanel()).filter((w) => widgetTitle(w) === title);
+  expect(found, title).toHaveLength(1);
+  return found[0];
+}
+
+/** The bindings table's rows as `consumer->provider`. */
+function shownPairs(): string[] {
+  const table = within(mapWidget("Cross-service bindings")).queryByRole("table");
+  if (!table) return [];
+  return within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((r) => {
+      const [from, to] = within(r).getAllByRole("cell");
+      return `${from.textContent}->${to.textContent}`;
+    });
+}
+
+/** The links the Binding evidence widget shows, by their disclosure summary. */
+function evidenceLinks(): string[] {
+  return [...mapWidget("Binding evidence").querySelectorAll("summary")].map((s) => s.textContent?.split(" · ")[0] ?? "");
+}
+
+function figureOf(widget: HTMLElement): string {
+  return widget.querySelector('[data-widget-part="figure"]')?.textContent ?? "";
+}
+
+describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)", () => {
+  it("each filter narrows the table and the evidence, states n of m, and never narrows the canvas", async () => {
+    stubThreeMembers({ providers: KIND_LINKS });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const edges = screen.getByTestId("canvas-edges").textContent;
+    const bindings = () => mapWidget("Cross-service bindings");
+    const evidence = () => mapWidget("Binding evidence");
+
+    expect(shownPairs()).toEqual(["api->billing", "api->web", "billing->api", "web->billing"]);
+    expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(4, 4));
+    expect(figureOf(evidence())).toBe(SERVICE_MAP_TEXT.evidenceShown(2, 2));
+
+    // Text: the consumer OR the provider, case-insensitively.
+    const text = within(bindings()).getByRole("searchbox", { name: SERVICE_MAP_TEXT.filterText });
+    await userEvent.type(text, "BILL");
+    expect(shownPairs()).toEqual(["api->billing", "billing->api", "web->billing"]);
+    expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(3, 4));
+    expect(evidenceLinks()).toEqual(["api → billing", "web → billing"]);
+    expect(screen.getByTestId("canvas-edges").textContent).toBe(edges);
+    await userEvent.clear(text);
+
+    // Binding kind: HTTP, gRPC, broker.
+    const kind = within(bindings()).getByRole("combobox", { name: SERVICE_MAP_TEXT.filterKind });
+    expect(within(kind).getAllByRole("option").map((o) => o.textContent)).toEqual(["All kinds", "HTTP", "gRPC", "Broker"]);
+    await userEvent.selectOptions(kind, "route");
+    expect(shownPairs()).toEqual(["api->web", "billing->api"]);
+    // Neither HTTP link has evidence: the widget says none of its 2 is shown.
+    expect(figureOf(evidence())).toBe(SERVICE_MAP_TEXT.evidenceShown(0, 2));
+    expect(evidenceLinks()).toEqual([]);
+    await userEvent.selectOptions(kind, "grpc-call");
+    expect(shownPairs()).toEqual(["api->billing"]);
+    expect(evidenceLinks()).toEqual(["api → billing"]);
+    await userEvent.selectOptions(kind, "broker-topic");
+    expect(shownPairs()).toEqual(["web->billing"]);
+    expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(1, 4));
+    expect(screen.getByTestId("canvas-edges").textContent).toBe(edges);
+    await userEvent.selectOptions(kind, "all");
+
+    // Provenance: offered because the column exists.
+    const provenance = within(bindings()).getByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance });
+    await userEvent.selectOptions(provenance, "config-unresolved");
+    expect(shownPairs()).toEqual(["api->billing"]);
+    expect(figureOf(evidence())).toBe(SERVICE_MAP_TEXT.evidenceShown(1, 2));
+    await userEvent.selectOptions(provenance, "literal");
+    expect(shownPairs()).toEqual(["api->web", "billing->api"]);
+
+    // Together, down to nothing: the table says so instead of rendering empty.
+    await userEvent.selectOptions(kind, "grpc-call");
+    expect(shownPairs()).toEqual([]);
+    expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(0, 4));
+    expect(within(bindings()).getByText(SERVICE_MAP_TEXT.noneMatch)).toBeInTheDocument();
+
+    // Cleared, every row is back; the canvas never moved.
+    await userEvent.selectOptions(kind, "all");
+    await userEvent.selectOptions(provenance, "all");
+    expect(shownPairs()).toEqual(["api->billing", "api->web", "billing->api", "web->billing"]);
+    expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(4, 4));
+    expect(screen.getByTestId("canvas-edges").textContent).toBe(edges);
+  });
+
+  it("offers no provenance filter when no binding was admitted — the column does not exist", async () => {
+    stubApi({ providers: [BINDING, BROKER_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const bindings = mapWidget("Cross-service bindings");
+    expect(within(bindings).getByRole("combobox", { name: SERVICE_MAP_TEXT.filterKind })).toBeInTheDocument();
+    expect(within(bindings).queryByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: /Provenance/ })).toBeNull();
+  });
+});
+
+describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI-42)", () => {
+  it("states five calls sharing one consumer key and value as one row with Calls 5", async () => {
+    const five = [1, 2, 3, 4, 5].map(
+      (i): BridgeEdge => ({ ...BINDING, from: { member: "api", symbol: `op${i}` }, from_value: SHARED_VALUE }),
+    );
+    stubApi({ providers: five });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const table = within(mapWidget("Binding evidence")).getByRole("table");
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(1);
+    const header = within(table).getAllByRole("columnheader").map((th) => th.textContent?.replace("↕", ""));
+    expect(rows[0].querySelectorAll("td")[header.indexOf("Calls")].textContent).toBe("5");
+    // The bindings table still counts all five calls on the one line.
+    expect(within(mapWidget("Cross-service bindings")).getByRole("cell", { name: "5" })).toBeInTheDocument();
+  });
+
+  /** A route link whose consumer ends carry each refusal, and one committed value. */
+  const REFUSALS: BridgeEdge[] = [
+    { ...BINDING, from: { member: "api", symbol: "a" }, from_value: { provenance: "config-unresolved", keys: ["k.missing"], refusal: "missing-key" } },
+    { ...BINDING, from: { member: "api", symbol: "b" }, from_value: { provenance: "config-unresolved", keys: ["k.placeholder"], refusal: "placeholder-value" } },
+    { ...BINDING, from: { member: "api", symbol: "c" }, from_value: { provenance: "config-unresolved", keys: ["k.runtime"], refusal: "uncommitted" } },
+    { ...BINDING, from: { member: "api", symbol: "d" }, from_value: SHARED_VALUE },
+  ];
+
+  it("gives each row the action its refusal calls for, each with where, and the widget the configuration action", async () => {
+    stubApi({ providers: REFUSALS });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const widget = mapWidget("Binding evidence");
+    const table = within(widget).getByRole("table");
+    const header = within(table).getAllByRole("columnheader").map((th) => th.textContent?.replace("↕", ""));
+    const action = header.indexOf("What you can do");
+    expect(action).toBe(header.length - 1);
+    const cells = within(table)
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.querySelectorAll("td")[action]);
+    const actOf = (refusal: "missing-key" | "placeholder-value" | null, key: string, sources: string[] = []) => {
+      const a = evidenceRowAction({ member: "api", key, refusal, sources });
+      if (a.kind !== "act") throw new Error("expected an act action");
+      return `${copyTextString(a.text)}${a.where} ${a.target}`;
+    };
+    expect(cells.map((c) => c.textContent)).toEqual([
+      // No committed source defines it → define the key, configuration, the key named.
+      actOf("missing-key", "k.missing"),
+      // A placeholder → replace the value, configuration, the key named.
+      actOf("placeholder-value", "k.placeholder"),
+      // Not committed by the repository → nothing to fix there.
+      SERVICE_MAP_TEXT.arrivesAtRuntime,
+      // A committed value → the file named in Defining sources.
+      actOf(null, "billing.base-url", ["application-docker.yml"]),
+    ]);
+    for (const c of cells.slice(0, 2)) expect(c.querySelector("code")?.textContent).toMatch(/^k\./);
+    expect(cells[3].querySelector("code")?.textContent).toBe("application-docker.yml");
+    // One key to define and one placeholder to replace: the widget acts, in
+    // configuration (written out, not read back from the catalogue).
+    expect(actionKind(widget)).toBe("act");
+    expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration");
+    expectWidgetCopy(widget, bindingEvidence, { define: 1, replace: 1 });
+  });
+
+  it("has nothing to do when every shown value is committed or arrives at runtime", async () => {
+    stubApi({ providers: REFUSALS.slice(2) });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const widget = mapWidget("Binding evidence");
+    expectWidgetCopy(widget, bindingEvidence, { define: 0, replace: 0 });
+    expect(actionKind(widget)).toBe("none");
+  });
+});
+
+describe("WorkspaceView — the service map's widgets explain themselves, in one stack (S-614)", () => {
+  it("every widget is a Widget under the map tab's one WidgetStack, with its own catalogue entry", async () => {
+    stubApi({
+      providers: [BINDING, ADMITTED_BINDING],
+      coverage: DECLARING,
+      buildDependency: BUILD_HEADLINE,
+      buildDeps: BUILD_DEPS,
+    });
+    mount();
+    await screen.findByText(/^1 member depends on the model libraries/);
+    const widgets = expectOneWidgetStack(mapPanel());
+    expect(widgets.map(widgetTitle)).toEqual([
+      "Cross-service bindings",
+      "Binding evidence",
+      "Declared contracts",
+      "Cross-context model hint",
+    ]);
+    // Each widget's action kind, written out rather than read back from the
+    // catalogue: the bindings are informational, the admitted value names its
+    // file only per row, the vendored documents ask for a counterparty check,
+    // and the hint asks for a review.
+    expect(widgets.map(actionKind)).toEqual(["none", "none", "act", "act"]);
+    expectWidgetCopy(mapWidget("Cross-service bindings"), crossServiceBindings);
+    expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence, { define: 0, replace: 0 });
+    expectWidgetCopy(mapWidget("Declared contracts"), declaredContracts, { documents: 4 });
+    expectWidgetCopy(mapWidget("Cross-context model hint"), crossContextHint);
+  });
+
+  it("the hint names the member's build manifest as where, and reads as a review hint, never a failure", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    await screen.findByText(/^1 member depends on the model libraries/);
+    const hint = mapWidget("Cross-context model hint");
+    expect(hint.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration pom.xml / build.gradle");
+    expect(hint.querySelector('[data-widget-part="title"]')?.textContent).toContain("Review hint");
+    expect(within(hint).queryByRole("alert")).toBeNull();
+    // "bounded contexts" is glossed at its first use.
+    expect(hint.querySelector('[data-widget-copy="what"] dfn')?.getAttribute("data-term")).toBe("boundedContext");
+  });
+
+  it("states an empty map's absence in the bindings widget's figure row, never a centred empty state", async () => {
+    stubApi({ providers: [] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const bindings = mapWidget("Cross-service bindings");
+    expect(bindings.querySelector("[data-widget-absence]")?.textContent).toBe(SERVICE_MAP_TEXT.noBindings(0));
+    expectWidgetCopy(bindings, crossServiceBindings);
+    expect(within(bindings).queryByRole("table")).toBeNull();
+    expect(mapPanel().querySelector('[class*="empty"]')).toBeNull();
+  });
+
+  it("names the drawn topics in that absence — a map with a topic is not empty", async () => {
+    stubApi({
+      providers: [],
+      topics: [{ member: "api", topics: [{ topic: "orders", producers: 1, consumers: 0 }] }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    expect(mapWidget("Cross-service bindings").querySelector("[data-widget-absence]")?.textContent).toBe(
+      SERVICE_MAP_TEXT.noBindings(1),
+    );
+  });
+
+  // The conditional-render gates of FR-UI-29, re-asserted on the new layout.
+  it("renders no Declared contracts widget without a vendored spec (S-461)", async () => {
+    stubApi({ providers: [BINDING, ADMITTED_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    expect(expectOneWidgetStack(mapPanel()).map(widgetTitle)).toEqual(["Cross-service bindings", "Binding evidence"]);
+  });
+
+  it("keeps the build layer off by default; switched on, its table joins the one stack (S-464)", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    await screen.findByText(/^1 member depends on the model libraries/);
+    expect(buildEdges()).toEqual([]);
+    expect(screen.queryByRole("table", { name: /accessible twin of the build layer/ })).toBeNull();
+    await userEvent.click(screen.getByRole("checkbox", { name: /draw what each member builds against/i }));
+    const twin = screen.getByRole("table", { name: /accessible twin of the build layer/ });
+    const stack = mapPanel().querySelector("[data-widget-stack]");
+    expect(twin.closest("section")?.parentElement).toBe(stack);
+  });
+
+  it("renders no Provenance column, filter or evidence widget on a literal-only workspace (S-419)", async () => {
+    stubApi({ providers: [BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    expect(expectOneWidgetStack(mapPanel()).map(widgetTitle)).toEqual(["Cross-service bindings"]);
+    expect(screen.queryByRole("columnheader", { name: /Provenance/ })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance })).toBeNull();
+  });
+});
+

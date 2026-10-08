@@ -52,6 +52,15 @@ describe("glossary", () => {
     }
   });
 
+  it("enforces the service map's 'bounded context' (S-614), and not the bare word 'context'", () => {
+    expect(VOCABULARY_TERMS).toContain("boundedContext");
+    expect(findTermsInPlainText("two or more bounded contexts")).toEqual(["boundedContext"]);
+    expect(findTermsInPlainText("a bounded-context model")).toEqual(["boundedContext"]);
+    // Near misses: the plain word, and "bounded" alone.
+    expect(findTermsInPlainText("two or more contexts")).toEqual([]);
+    expect(findTermsInPlainText("a bounded queue and its context")).toEqual([]);
+  });
+
   it("adds the column-header glosses (S-616) outside the vocabulary rule", () => {
     // Glossed where a table uses them as headers; ordinary English in prose, so
     // no detector: "the answered calls" in a catalogue sentence is not a violation.

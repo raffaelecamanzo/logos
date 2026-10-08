@@ -240,8 +240,8 @@ export interface ServiceLink {
 /** Does this link stand for any binding that was NOT observed at a call site?
  *  The gate on every rendering the provenance channel adds — the canvas stroke,
  *  the legend section, the table column and the evidence detail all appear only
- *  when it holds, which is what keeps a literal-only workspace rendering exactly
- *  as it did before this story (CR-132 AC6). */
+ *  when it holds, which is what keeps a literal-only workspace free of every
+ *  one of them (CR-132 AC6). */
 export function hasNonLiteralBinding(link: ServiceLink): boolean {
   const p = link.provenance;
   return p["config-bound"] + p["config-unresolved"] + p.unstated > 0;
@@ -327,6 +327,70 @@ export function linkEvidence(link: ServiceLink): EvidenceRow[] {
     ...endEvidence("consumer", b.from.member, b.from_value),
     ...endEvidence("provider", b.to.member, b.to_value),
   ]);
+}
+
+/** One row of the evidence as the Binding evidence widget states it: an
+ *  {@link EvidenceRow} and how many of the link's rows it stands for (S-614,
+ *  FR-UI-42). Each binding contributes its rows once, so `calls` is how many of
+ *  the link's calls proved the same fact. */
+export interface EvidenceGroup extends EvidenceRow {
+  calls: number;
+}
+
+/**
+ * Merge the evidence rows that state the same fact (S-614, FR-UI-42).
+ *
+ * `linkEvidence` yields one row per end per overlay per BINDING, so a link of
+ * five calls sharing one consumer key and value repeats that row five times.
+ * Rows merge only when identical in every field the widget shows — end, member,
+ * key, value or refusal, profiles (and the unprofiled source) and defining
+ * sources — so grouping never hides a difference (NFR-CC-04). Groups keep the
+ * order of their first row, and their `calls` sum to the rows handed in.
+ */
+export function groupEvidence(rows: readonly EvidenceRow[]): EvidenceGroup[] {
+  const groups = new Map<string, EvidenceGroup>();
+  for (const r of rows) {
+    // Every shown field, as one exact key: JSON keeps list order and tells
+    // `null` from a string, so no two different rows can share it.
+    const key = JSON.stringify([r.end, r.member, r.key, r.value, r.refusal, r.profiles, r.unprofiled, r.sources]);
+    const group = groups.get(key);
+    if (group) group.calls += 1;
+    else groups.set(key, { ...r, calls: 1 });
+  }
+  return [...groups.values()];
+}
+
+// ── The bindings filter (S-614, CR-203 item 6, FR-UI-42) ─────────────────────
+
+/** The binding kinds the filter offers, as the relation arms they select, in
+ *  the order the legend draws them. */
+export const BINDING_KIND_FILTERS = ["route", "grpc-call", "broker-topic"] as const;
+
+/** What the bindings table and the Binding evidence widget are narrowed to.
+ *  The canvas is never narrowed: it draws the whole loaded set. */
+export interface LinkFilter {
+  /** Free text, matched case-insensitively as a substring of the consumer or
+   *  the provider. Blank keeps every link. */
+  text: string;
+  /** A relation arm, or `all`. */
+  kind: (typeof BINDING_KIND_FILTERS)[number] | "all";
+  /** A provenance kind, or `all`. Offered only when the Provenance column
+   *  exists; a link matches when any of its bindings is of that kind. */
+  provenance: LinkProvenanceKind | "all";
+}
+
+/** The filter that keeps every link. */
+export const NO_LINK_FILTER: LinkFilter = { text: "", kind: "all", provenance: "all" };
+
+/** The links `filter` keeps, in their given order. */
+export function filterLinks(links: readonly ServiceLink[], filter: LinkFilter): ServiceLink[] {
+  const text = filter.text.trim().toLowerCase();
+  return links.filter(
+    (l) =>
+      (text === "" || l.from.toLowerCase().includes(text) || l.to.toLowerCase().includes(text)) &&
+      (filter.kind === "all" || l.relation === filter.kind) &&
+      (filter.provenance === "all" || l.provenance[filter.provenance] > 0),
+  );
 }
 
 /** One topic as the map draws it: the shared identity, and which members produce and
