@@ -26,10 +26,14 @@ export const filesAbsence = {
 } as const;
 
 /**
- * A nothing-ranked absence — this catalogue's, Coverage's, or the read-model's
- * own notice — closed with the command that ranks the files (CR-206). One
- * spelling for both views that rank files; a trailing full stop is folded into
- * the joint so the sentence reads as one.
+ * A catalogue's own nothing-ranked absence — this one's or Coverage's — closed
+ * with the command that ranks the files (CR-206). One spelling for both views
+ * that rank files; a trailing full stop is folded into the joint so the sentence
+ * reads as one. Never applied to the read-model's own `notice`: that names a
+ * degraded history (not a git repository, no `git`, a shallow clone) or a first
+ * mine, and running `logos hotspots` changes none of them (R1, R3 of
+ * `models::quality::absence`; FR-UI-39 "an absence nothing resolves names
+ * nothing").
  */
 export function withRankCommand(statement: string): string {
   return `${statement.replace(/\.\s*$/, "")}; run logos hotspots to rank the files from the git history.`;

@@ -183,13 +183,12 @@ describe("Coverage widgets explain themselves (S-617, FR-UI-39/40)", () => {
   });
 });
 
-it("states the read-model's notice when nothing was ranked, and names the ranking command (review fix)", async () => {
+it("states the read-model's notice alone when nothing was ranked: a degraded history is not fixed by the ranking command (HF-1 review)", async () => {
   stubFetch(notRanked);
   render(<CoverageView />);
   const heading = await screen.findByRole("heading", { name: "Untested hotspots" });
   const widget = heading.closest("[data-widget]")!;
-  // The read-model's notice, closed with the ranking command (CR-206).
-  expect(widget.querySelector("[data-widget-absence]")?.textContent).toBe(
-    "not a git repository: churn unavailable; run logos hotspots to rank the files from the git history.",
-  );
+  // Not a git repository: re-running `logos hotspots` returns the same degraded
+  // answer, so the absence names no command (R3; FR-UI-39).
+  expect(widget.querySelector("[data-widget-absence]")?.textContent).toBe("not a git repository: churn unavailable");
 });

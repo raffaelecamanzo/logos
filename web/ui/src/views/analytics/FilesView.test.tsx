@@ -142,16 +142,21 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expect(await screen.findByRole("table", { name: "Files ranked by risk" })).toBeInTheDocument();
   });
 
-  it("states the read-model's own notice as the absence when it has one, closed with the ranking command", async () => {
+  it.each([
+    ["a first mine", null, "First mine: history is being read."],
+    ["a repository that is not git", "NotGit", "not a git repository — temporal metrics unavailable"],
+    ["a shallow clone", "Shallow", "shallow clone — temporal metrics unavailable (history is truncated)"],
+  ] as const)("states the read-model's own notice alone for %s — the ranking command fixes none of them (HF-1 review)", async (_name, degraded, notice) => {
     stubFetch(() => {
       const m = EMPTY();
-      m.hotspots.notice = "First mine: history is being read.";
+      m.hotspots.notice = notice;
+      (m.hotspots as { degraded: unknown }).degraded = degraded;
       return m;
     });
     render(<FilesView />);
-    expect(
-      await screen.findByText("First mine: history is being read; run logos hotspots to rank the files from the git history."),
-    ).toHaveAttribute("data-widget-absence");
+    const absence = await screen.findByText(notice);
+    expect(absence).toHaveAttribute("data-widget-absence");
+    expect(absence.textContent).not.toMatch(/logos hotspots/);
   });
 
   it("the untested toggle re-fetches the board with ?untested", async () => {

@@ -141,7 +141,7 @@ function CoverageContent({ model }: { model: CoverageModel }) {
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          absence={withRankCommand(untested.notice ?? COVERAGE_VIEW_ABSENCE.notRanked)}
+          absence={untested.notice ?? withRankCommand(COVERAGE_VIEW_ABSENCE.notRanked)}
         />
       ) : untestedCount === 0 ? (
         <Widget

@@ -210,7 +210,7 @@ function FilesContent({
         <Widget
           title="Files ranked by risk"
           copy={filesRankedByRisk}
-          absence={filtered ? filesAbsence.filteredOut : withRankCommand(hotspots.notice ?? filesAbsence.unranked)}
+          absence={filtered ? filesAbsence.filteredOut : (hotspots.notice ?? withRankCommand(filesAbsence.unranked))}
         >
           {/* The filters stay reachable, or a filter that empties the board is a dead end. */}
           {filtered && toggles}
