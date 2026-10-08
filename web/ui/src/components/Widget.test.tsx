@@ -60,9 +60,25 @@ describe("Widget", () => {
     expect(actionText).toHaveClass(styles.body);
   });
 
-  it("omits the figure row and the evidence when it has neither", () => {
+  it("omits the figure row, the badge and the evidence when it has none", () => {
     const { container } = render(<Widget title="Observe" copy={observe} />);
     expect(parts(container)).toEqual(["title", "explanation", "action"]);
+    expect(container.querySelector(`.${styles.badge}`)).toBeNull();
+  });
+
+  it.each([
+    ["false", false],
+    ["null", null],
+    ["an empty string", ""],
+    ["an empty list", []],
+  ])("renders no empty part for a figure, badge or evidence of %s", (_name, nothing) => {
+    const { container } = render(
+      <Widget title="Observe" copy={observe} figure={nothing} badge={nothing}>
+        {nothing}
+      </Widget>,
+    );
+    expect(parts(container)).toEqual(["title", "explanation", "action"]);
+    expect(container.querySelector(`.${styles.badge}`)).toBeNull();
   });
 
   it("states an absence in the figure row, left-aligned, with no EmptyState", () => {

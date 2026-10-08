@@ -67,22 +67,32 @@ export function CopyTextView({ text }: { text: CopyText }) {
   );
 }
 
+/**
+ * Whether a node renders anything. `false`, `null`, `""` and `[]` render
+ * nothing in React, so a part holding only one of them is left out rather than
+ * rendered empty — an empty part would still take a gap in the frame.
+ */
+function isRendered(node: ReactNode): boolean {
+  if (node === undefined || node === null || node === false || node === "") return false;
+  return !(Array.isArray(node) && node.length === 0);
+}
+
 export function Widget<S>(props: WidgetProps<S>) {
   const { title, badge, copy, figure, absence, children, className } = props;
   const action = copy.action((props as { state: S }).state);
-  const hasFigureRow = absence !== undefined || figure !== undefined;
+  const hasAbsence = isRendered(absence);
 
   return (
     <Card className={[styles.widget, className].filter(Boolean).join(" ")}>
       <div className={styles.frame} data-widget="">
         <div className={styles.titleRow} data-widget-part="title">
           <h3 className={styles.title}>{title}</h3>
-          {badge !== undefined && <div className={styles.badge}>{badge}</div>}
+          {isRendered(badge) && <div className={styles.badge}>{badge}</div>}
         </div>
 
-        {hasFigureRow && (
+        {(hasAbsence || isRendered(figure)) && (
           <div className={styles.figureRow} data-widget-part="figure">
-            {absence !== undefined ? (
+            {hasAbsence ? (
               <p className={styles.absence} data-widget-absence="">
                 {absence}
               </p>
@@ -121,7 +131,7 @@ export function Widget<S>(props: WidgetProps<S>) {
           )}
         </div>
 
-        {children !== undefined && children !== null && children !== false && (
+        {isRendered(children) && (
           <div className={styles.evidence} data-widget-part="evidence">
             {children}
           </div>
