@@ -184,7 +184,6 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
       title="Cross-service reachability"
       badge={<Badge tone="muted">Advisory</Badge>}
       copy={reachability}
-      state={{ keep: promotions.length }}
       figure={
         <div className={styles.figure}>
           <p>{DASHBOARD_TEXT.keepThem(promotions.length, partial)}</p>
@@ -408,10 +407,6 @@ function MemberRoster({
     <Widget
       title="Members"
       copy={members}
-      state={{
-        degraded: rows.filter((r) => r.degraded).length,
-        withUnused: rows.filter((r) => (r.tally?.dead_app_wide ?? 0) > 0).length,
-      }}
       figure={
         <div className={styles.figure}>
           <p>{DASHBOARD_TEXT.membersRead(rollup.opened, rollup.members)}</p>

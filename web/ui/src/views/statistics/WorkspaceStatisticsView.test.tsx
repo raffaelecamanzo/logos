@@ -44,13 +44,14 @@ vi.mock("./echarts.ts", () => ({
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import type { CopyEntry } from "../../copy/types.ts";
 import {
+  WORKSPACE_STATISTICS_ABSENCE,
   membersNotSummed,
   workspaceDevVsMain,
   workspaceEstimatedValue,
   workspaceTopTools,
   workspaceUsageOverTime,
 } from "../../copy/workspaceStatistics.copy.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { isStatsEmpty, type UsageProjections } from "./statsModel.ts";
 import { WorkspaceStatisticsView } from "./WorkspaceStatisticsView.tsx";
 
@@ -754,7 +755,8 @@ describe("a workspace with no telemetry awaits data rather than reporting zeros 
     // and `logos stats` would be the wrong remedy — the blocker is the store.
     await mount(emptyWithFailedRead);
     expect(screen.queryByText(/No member recorded any telemetry/i)).toBeNull();
-    expect(screen.queryByText("logos stats")).toBeNull();
+    // Named inside a sentence since CR-206, so read as a substring, not a text node.
+    expect(document.body.textContent).not.toMatch(/logos stats/);
     // What it says instead: scoped to what was read, and honest about the rest.
     expect(
       screen.getByText(/None of the 1 member whose telemetry could be read recorded anything/i),
@@ -775,8 +777,9 @@ describe("a workspace with no telemetry awaits data rather than reporting zeros 
     // The positive half: the universal claim is earned when no read failed, because
     // every member then either recorded nothing or has no store at all.
     await mount(nothingRecorded);
-    expect(screen.getByText(/No member recorded any telemetry in this window/i)).toBeInTheDocument();
-    expect(screen.getByText("logos stats")).toBeInTheDocument();
+    expect(screen.getByText(/No member recorded any telemetry in this window/i)).toHaveTextContent(
+      /logos stats in a member shows what it has recorded\.$/,
+    );
   });
 
   it("does NOT await data on a populated aggregate", async () => {
@@ -977,102 +980,99 @@ describe("the guard this view owes because it SHARES rather than copies", () => 
 
 // ── S-617 (CR-203, FR-UI-39/40): every widget explains itself, in one stack ──
 
-const ENTRIES: Record<string, CopyEntry<never>> = {
-  "Estimated value": workspaceEstimatedValue as CopyEntry<never>,
-  "Usage over time": workspaceUsageOverTime as CopyEntry<never>,
-  "Top tools": workspaceTopTools as CopyEntry<never>,
-  "Dev vs main": workspaceDevVsMain as CopyEntry<never>,
-  "Members not summed": membersNotSummed as CopyEntry<never>,
+const ENTRIES: Record<string, CopyEntry> = {
+  "Estimated value": workspaceEstimatedValue,
+  "Usage over time": workspaceUsageOverTime,
+  "Top tools": workspaceTopTools,
+  "Dev vs main": workspaceDevVsMain,
+  "Members not summed": membersNotSummed,
 };
 
-/** Each covered state, with every widget's state and action kind written out. */
-const WIDGET_STATES: [name: string, build: (d: number) => WorkspaceStatistics, Record<string, [unknown, "act" | "none"]>][] = [
+/** Each covered state, with the widgets it renders, in order. */
+const WIDGET_STATES: [name: string, build: (d: number) => WorkspaceStatistics, string[]][] = [
   [
     "every member read",
     aggregate,
-    {
-      "Estimated value": [{ recorded: true, failed: 0 }, "none"],
-      "Usage over time": [undefined, "none"],
-      "Top tools": [undefined, "none"],
-      "Dev vs main": [undefined, "none"],
-    },
+    [
+      "Estimated value",
+      "Usage over time",
+      "Top tools",
+      "Dev vs main",
+    ],
   ],
   [
     "a member could not be read",
     partial,
-    {
-      "Estimated value": [{ recorded: true, failed: 1 }, "none"],
-      "Usage over time": [undefined, "none"],
-      "Top tools": [undefined, "none"],
-      "Dev vs main": [undefined, "none"],
-      "Members not summed": [{ failed: 1 }, "act"],
-    },
+    [
+      "Estimated value",
+      "Usage over time",
+      "Top tools",
+      "Dev vs main",
+      "Members not summed",
+    ],
   ],
   [
     "the only unread member is absent",
     absentOnly,
-    {
-      "Estimated value": [{ recorded: true, failed: 0 }, "none"],
-      "Usage over time": [undefined, "none"],
-      "Top tools": [undefined, "none"],
-      "Dev vs main": [undefined, "none"],
-      "Members not summed": [{ failed: 0 }, "none"],
-    },
+    [
+      "Estimated value",
+      "Usage over time",
+      "Top tools",
+      "Dev vs main",
+      "Members not summed",
+    ],
   ],
   [
     // Calls recorded, but none on a day, by a tool or with an origin in the
     // window: each charted widget states its own absence (review fix).
     "calls recorded, but no daily, tool or origin breakdown",
     (d) => aggregate(d, { activity_by_day: [], calls_by_tool: [], calls_by_origin: [] }),
-    {
-      "Estimated value": [{ recorded: true, failed: 0 }, "none"],
-      "Usage over time": [undefined, "none"],
-      "Top tools": [undefined, "none"],
-      "Dev vs main": [undefined, "none"],
-    },
+    [
+      "Estimated value",
+      "Usage over time",
+      "Top tools",
+      "Dev vs main",
+    ],
   ],
   [
     "every member read, nothing recorded",
     readButEventless,
-    { "Estimated value": [{ recorded: false, failed: 0 }, "act"] },
+    ["Estimated value"],
   ],
   [
     "nothing summed, and members could not be read",
     emptyWithFailedRead,
-    {
-      "Estimated value": [{ recorded: false, failed: 2 }, "act"],
-      "Members not summed": [{ failed: 2 }, "act"],
-    },
+    [
+      "Estimated value",
+      "Members not summed",
+    ],
   ],
 ];
 
 describe("Workspace Statistics widgets explain themselves (S-617, FR-UI-39/40)", () => {
-  it.each(WIDGET_STATES)("%s: one stack, each widget its catalogue entry at its state", async (_name, build, expected) => {
+  it.each(WIDGET_STATES)("%s: one stack, each widget its catalogue entry", async (_name, build, expected) => {
     const { container } = await mount(build);
     await screen.findByRole("heading", { name: "Estimated value" });
     const widgets = expectOneWidgetStack(container);
-    expect(widgets.map(widgetTitle)).toEqual(Object.keys(expected));
-    for (const widget of widgets) {
-      const title = widgetTitle(widget);
-      const [state, kind] = expected[title];
-      expect(actionKind(widget), title).toBe(kind);
-      expectWidgetCopy(widget, ENTRIES[title], state as never);
-    }
+    expect(widgets.map(widgetTitle)).toEqual(expected);
+    for (const widget of widgets) expectWidgetCopy(widget, ENTRIES[widgetTitle(widget)]);
   });
 
-  it("a failed read names the member's store as the remedy, never logos stats", async () => {
+  it("a failed read names the member's store in the absence, never logos stats", async () => {
     const { container } = await mount(emptyWithFailedRead);
     await screen.findByRole("heading", { name: "Estimated value" });
-    for (const widget of expectOneWidgetStack(container)) {
-      expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration .logos/telemetry.db");
-    }
+    const [value] = expectOneWidgetStack(container);
+    const absence = value.querySelector("[data-widget-absence]")!.textContent ?? "";
+    expect(absence).toContain(WORKSPACE_STATISTICS_ABSENCE.storeRepair);
+    expect(absence).toContain(".logos/telemetry.db");
+    expect(absence).not.toMatch(/logos stats/);
   });
 
   it("nothing recorded anywhere names logos stats, in the Estimated value widget's figure-row absence", async () => {
     const { container } = await mount(readButEventless);
     const [widget] = expectOneWidgetStack(container);
-    expect(widget.querySelector("[data-widget-absence]")).toHaveTextContent(/No member recorded any telemetry/);
-    expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos stats");
+    expect(widget.querySelector("[data-widget-absence]")?.textContent).toBe(WORKSPACE_STATISTICS_ABSENCE.nothingRecorded);
+    expect(WORKSPACE_STATISTICS_ABSENCE.nothingRecorded).toMatch(/^No member recorded any telemetry .*; logos stats in a member /);
     expect(container.querySelector('[class*="empty"]')).toBeNull();
   });
 });

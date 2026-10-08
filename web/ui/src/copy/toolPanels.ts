@@ -1,7 +1,7 @@
 /*
  * The tool-panel register (S-617, CR-203 §3.2 A, FR-UI-39). A tool panel is a
  * search box, a query form, a configuration editor, the chat or a wiki page
- * body: it presents no figure, so it is exempt from why, action and where. It
+ * body: it presents no figure, so it is exempt from why. It
  * still takes the layout standard and states in one line what it is for: a view
  * renders it as `<Widget panel="key" title=…>`, and the frame reads the line
  * from here.

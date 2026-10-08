@@ -108,7 +108,6 @@ function RulesCard({ report }: { report: RulesReport }) {
         title="Rule findings"
         badge={<Badge tone="red">FAIL</Badge>}
         copy={ruleFindings}
-        state={state}
         figure={<span>{RULE_FINDINGS_TEXT.findings(findings, report.checked_rules)}</span>}
       >
         <DataTable
@@ -123,7 +122,7 @@ function RulesCard({ report }: { report: RulesReport }) {
   }
   if (checked === 0) {
     return (
-      <Widget title="Rule findings" copy={ruleFindings} state={state} absence={RULE_FINDINGS_TEXT.noRules}>
+      <Widget title="Rule findings" copy={ruleFindings} absence={RULE_FINDINGS_TEXT.noRules}>
         <RulesOnboarding />
       </Widget>
     );
@@ -133,7 +132,6 @@ function RulesCard({ report }: { report: RulesReport }) {
       title="Rule findings"
       badge={<Badge tone="green">PASS</Badge>}
       copy={ruleFindings}
-      state={state}
       figure={<span>{RULE_FINDINGS_TEXT.clean(checked)}</span>}
     />
   );
@@ -160,8 +158,8 @@ reason = "the API layer must reach the database through core"`;
 
 /** The no-rules onboarding (NFR-CC-04, frontend-design §4.6), as the widget's
  *  evidence: what rules buy you and a runnable example contract, rather than an
- *  always-empty findings table. The file and the evaluating command are the
- *  widget's action. */
+ *  always-empty findings table. The file and the evaluating command are named in
+ *  the widget's absence sentence (CR-206). */
 function RulesOnboarding() {
   return (
     <div className={styles.onboarding}>

@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 import { Widget } from "../components/Widget.tsx";
 
 import { expectWidgetCopy } from "./expectWidgetCopy.ts";
-import { actionLiterals, copyTextString, findUnglossedTerms, findUnglossedUses, isCopyEntry, plainPart } from "./text.ts";
-import { gloss, noAction, type CopyEntry } from "./types.ts";
+import { copyTextString, findUnglossedTerms, findUnglossedUses, isCopyEntry, plainPart, sentenceLiterals } from "./text.ts";
+import { gloss, type CopyEntry } from "./types.ts";
 
 describe("the first-use rule", () => {
   it("flags a plain term", () => {
@@ -38,7 +38,7 @@ describe("catalogue text and rendered text read alike", () => {
   // A gloss in mid-sentence: the catalogue side and the DOM side both cut the
   // gloss out and scan the joined text, so neither can pass what the other fails.
   const what = ["3 unbound ", gloss("arm", "arms"), " were found."] as const;
-  const entry: CopyEntry = { what, why: "It matters.", action: () => noAction };
+  const entry: CopyEntry = { what, why: "It matters." };
 
   it("the catalogue side flags it", () => {
     expect(findUnglossedTerms(what)).toEqual(["bound"]);
@@ -50,31 +50,27 @@ describe("catalogue text and rendered text read alike", () => {
   });
 });
 
-describe("action text", () => {
-  it("is read from the action's string literals", () => {
-    const action = (s: { n: number }) =>
-      s.n > 0 ? { kind: "act" as const, where: "command" as const, text: "Split the SCC per arm." } : noAction;
-    expect(findUnglossedUses([actionLiterals(action)]).map((u) => u.term)).toEqual(["arm", "scc"]);
+describe("sentence function text", () => {
+  it("is read from the function's string literals", () => {
+    const sentence = (s: { n: number }) => (s.n > 0 ? "Split the SCC per arm." : "Nothing found.");
+    expect(findUnglossedUses([sentenceLiterals(sentence)]).map((u) => u.term)).toEqual(["arm", "scc"]);
   });
 
   it("reads a template's literal text, never the code inside ${…} (sprint review)", () => {
-    const action = (f: { baseline: number; n: number }) => ({
-      kind: "act" as const,
-      where: "command" as const,
-      text: `Compare with ${f.baseline}, then split the ${f.n === 1 ? "arm" : "SCC"}.`,
-    });
-    // `f.baseline` is an expression; "arm" and "SCC" are words the action can say.
-    expect(findUnglossedUses([actionLiterals(action)]).map((u) => u.term)).toEqual(["arm", "scc"]);
+    const sentence = (f: { baseline: number; n: number }) =>
+      `Compare with ${f.baseline}, then split the ${f.n === 1 ? "arm" : "SCC"}.`;
+    // `f.baseline` is an expression; "arm" and "SCC" are words the function can say.
+    expect(findUnglossedUses([sentenceLiterals(sentence)]).map((u) => u.term)).toEqual(["arm", "scc"]);
   });
 
   it("does not count a term inside a gloss call", () => {
-    const action = () => ({ kind: "act" as const, where: "command" as const, text: ["Check each ", gloss("arm"), "."] });
-    expect(findUnglossedUses([actionLiterals(action)])).toEqual([]);
+    const sentence = () => ["Check each ", gloss("arm"), "."];
+    expect(findUnglossedUses([sentenceLiterals(sentence)])).toEqual([]);
   });
 });
 
 describe("expectWidgetCopy reads the whole widget", () => {
-  const entry: CopyEntry = { what: "Shows a figure.", why: "It supports a decision.", action: () => noAction };
+  const entry: CopyEntry = { what: "Shows a figure.", why: "It supports a decision." };
 
   it("fails on a term in the title", () => {
     const { container } = render(<Widget title="Coverage by arm" copy={entry} />);
@@ -95,7 +91,7 @@ describe("copyTextString", () => {
   });
 
   it("is what a Widget renders for a gloss with its own wording", () => {
-    const entry: CopyEntry = { what: ["3 ", gloss("scc", "SCCs"), " found."], why: "w", action: () => noAction };
+    const entry: CopyEntry = { what: ["3 ", gloss("scc", "SCCs"), " found."], why: "w" };
     const { container } = render(<Widget title="T" copy={entry} />);
     expect(container.querySelector('dfn[data-term="scc"]')!.firstChild!.textContent).toBe("SCCs");
     expectWidgetCopy(container.firstElementChild!, entry);
@@ -103,10 +99,9 @@ describe("copyTextString", () => {
 });
 
 describe("isCopyEntry", () => {
-  const action = () => noAction;
   it.each([
-    ["string copy", { what: "a", why: "b", action }],
-    ["glossed copy", { what: ["a ", gloss("arm")], why: "b", action }],
+    ["string copy", { what: "a", why: "b" }],
+    ["glossed copy", { what: ["a ", gloss("arm")], why: "b" }],
   ])("accepts %s", (_name, value) => {
     expect(isCopyEntry(value)).toBe(true);
   });
@@ -114,10 +109,10 @@ describe("isCopyEntry", () => {
   it.each([
     ["null", null],
     ["a string", "what"],
-    ["an entry with no action", { what: "a", why: "b" }],
-    ["an entry with no why", { what: "a", action }],
-    ["an entry whose what is a number", { what: 1, why: "b", action }],
-    ["an entry whose action is not a function", { what: "a", why: "b", action: "none" }],
+    ["an entry with no why", { what: "a" }],
+    ["an entry with no what", { why: "b" }],
+    ["an entry whose what is a number", { what: 1, why: "b" }],
+    ["a disclosure, whose text is not what and why", { summary: "a", body: "b" }],
   ])("rejects %s", (_name, value) => {
     expect(isCopyEntry(value)).toBe(false);
   });

@@ -37,6 +37,22 @@ const catalogues: CatalogueIndex = new Map(
 
 const panels = new Set(Object.keys(TOOL_PANELS));
 
+/** Every view and component source, tests left out: where a widget's markup is written. */
+const markupSources = import.meta.glob<string>(
+  ["/src/views/**/*.tsx", "/src/components/**/*.tsx", "!/src/**/*.test.tsx"],
+  { query: "?raw", import: "default", eager: true },
+);
+
+/** The markers of the action line CR-206 removed: its part, its copy, its where chip. */
+const ACTION_LINE_MARKER = /data-widget-part=["{]?\W*action|data-widget-copy=["{]?\W*(action|where)\b/;
+
+/** The sources that write an action-line marker, as `file:line`. */
+function actionLineMarkers(files: Record<string, string>): string[] {
+  return Object.entries(files).flatMap(([file, src]) =>
+    src.split("\n").flatMap((line, i) => (ACTION_LINE_MARKER.test(line) ? [`${file}:${i + 1}`] : [])),
+  );
+}
+
 const scan = (files: Record<string, string>) => scanViewSources(files, catalogues, panels);
 
 describe("widget source scan (S-617)", () => {
@@ -65,6 +81,35 @@ describe("widget source scan (S-617)", () => {
       expect(Object.keys(sources)).toContain(file);
     }
     expect(Object.keys(sources).some((f) => f.endsWith(".test.tsx")), "tests are not views").toBe(false);
+  });
+
+  it("no view or component writes the action line CR-206 removed, and no catalogue entry carries one", () => {
+    expect(Object.keys(markupSources)).toContain("/src/components/Widget.tsx");
+    expect(actionLineMarkers(markupSources)).toEqual([]);
+    const withAction = Object.entries(catalogueModules).flatMap(([path, mod]) =>
+      Object.entries(mod).flatMap(([name, value]) => {
+        const entries = isCopyEntry(value) ? [[name, value]] : isEntryRecord(value) ? Object.entries(value as object).map(([k, v]) => [`${name}.${k}`, v]) : [];
+        return entries.filter(([, entry]) => Object.hasOwn(entry as object, "action")).map(([key]) => `${path}#${key}`);
+      }),
+    );
+    expect(withAction).toEqual([]);
+  });
+
+  it("finds an action-line marker written back into a source (falsifiable)", () => {
+    const widget = "/src/components/Widget.tsx";
+    expect(actionLineMarkers({ [widget]: markupSources[widget] })).toEqual([]);
+    for (const marker of [
+      '<div data-widget-part="action">',
+      '<span data-widget-copy="action">',
+      '<p data-widget-copy="where">',
+      "<p data-widget-copy={'where'}>",
+    ]) {
+      expect(actionLineMarkers({ [widget]: `${markupSources[widget]}\n${marker}` }), marker).toEqual([
+        `${widget}:${markupSources[widget].split("\n").length + 1}`,
+      ]);
+    }
+    // A near miss is not the marker: a data attribute naming another part, or a word.
+    expect(actionLineMarkers({ x: '<div data-widget-part="evidence">actionable where</div>\n<td data-row-action="">' })).toEqual([]);
   });
 
   it("every registered tool panel is rendered by some view", () => {
@@ -135,7 +180,7 @@ export function D({ a }: { a: boolean }) { return <Widget title="D" copy={a ? ga
     });
 
     it("fails a Widget that names no catalogue entry", () => {
-      const local = `const mine = { what: "w", why: "y", action: () => ({ kind: "none" }) };\nexport const A = () => <Widget title="A" copy={mine} />;\n`;
+      const local = `const mine = { what: "w", why: "y" };\nexport const A = () => <Widget title="A" copy={mine} />;\n`;
       expect(names(local).problems).toEqual([expect.stringMatching(/copy=\{\{|does not name a catalogue entry/)]);
       expect(names(`export const A = () => <Widget title="A" />;\n`).problems).toEqual([
         expect.stringMatching(/names neither a catalogue entry \(copy\) nor a tool panel \(panel\)/),
@@ -155,7 +200,7 @@ export const B = () => <Widget title="B" copy={HEALTH_TEXT} />;
 
     it("fails a conditional copy when either arm names no catalogue entry (review fix)", () => {
       const src = `import { gate } from "../../copy/health.copy.ts";
-const mine = { what: "w", why: "y", action: () => ({ kind: "none" }) };
+const mine = { what: "w", why: "y" };
 export const A = ({ c }: { c: boolean }) => <Widget title="A" copy={c ? { ...mine } : gate} />;
 export const B = ({ c }: { c: boolean }) => <Widget title="B" copy={c ? gate : { ...mine }} />;
 `;
@@ -167,7 +212,7 @@ export const B = ({ c }: { c: boolean }) => <Widget title="B" copy={c ? gate : {
 
     it("fails an indexed copy whose base is not imported, or not a record of entries (review fix)", () => {
       const src = `import { HEALTH_TEXT } from "../../copy/workspaceHealth.copy.ts";
-const LOCAL = { x: { what: "w", why: "y", action: () => ({ kind: "none" }) } };
+const LOCAL = { x: { what: "w", why: "y" } };
 export const A = () => <Widget title="A" copy={LOCAL.x} />;
 export const B = ({ k }: { k: "noRules" }) => <Widget title="B" copy={HEALTH_TEXT[k]} />;
 `;

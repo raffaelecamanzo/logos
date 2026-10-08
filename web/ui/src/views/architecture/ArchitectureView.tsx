@@ -106,7 +106,6 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
       <Widget
         title="Cycles"
         copy={cycles}
-        state={{ backEdges: 0 }}
         absence="No cycles detected — every dependency respects layer order. The full dependency matrix is available below."
       />
     );
@@ -144,7 +143,6 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
     <Widget
       title="Cycles"
       copy={cycles}
-      state={{ backEdges: edges.length }}
       figure={
         <span>
           {edges.length}{" "}
@@ -193,7 +191,6 @@ function MatrixCard({ report, backEdges }: { report: DsmReport; backEdges: numbe
     <Widget
       title="Dependency matrix"
       copy={dependencyMatrix}
-      state={{ backEdges }}
       figure={
         <span>
           {n}{" "}

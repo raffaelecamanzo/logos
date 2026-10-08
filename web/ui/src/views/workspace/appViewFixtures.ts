@@ -375,8 +375,8 @@ function ref(
 }
 
 /** A self-consistent coverage payload whose captured calls fail for four reasons
- *  across three arms — so the Resolved cross-service edges action has a reason
- *  list to order and sum (CR-203 §3.2 D item 4).
+ *  across three arms — so the Resolved cross-service edges evidence table has a
+ *  reason list to order and sum (CR-203 §3.2 D item 4, CR-206).
  *
  *  Captured (invocation): 2 resolved; 3 `base-url-runtime` (route), 2
  *  `topic-not-literal` (broker), 1 `ambiguous` (gRPC), 1 `path-not-composed`

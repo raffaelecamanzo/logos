@@ -14,32 +14,24 @@
 
 import type { UnboundReason } from "../api/types.ts";
 
-import { gloss, noAction, plural, type CopyEntry, type CopyText, type WhereKind } from "./types.ts";
+import { gloss, plural, type CopyEntry, type CopyText, type WhereKind } from "./types.ts";
 
 // ── Resolved cross-service edges (item 4) ────────────────────────────────────
 
-/** What to do about one not-resolved reason: CR-203's remedy table. */
+/** A remedy a Binding evidence row's action takes (S-614): the clause and the
+ *  kind of place it happens in. */
 export interface Remedy {
-  /** The remedy, as a clause that follows the reason ("commit the base URL…"). */
+  /** The remedy, as a clause that follows the reason ("define the named key…"). */
   readonly remedy: string;
   /** The kind of place the remedy happens in. */
   readonly where: WhereKind;
-  /** The place in words when the table names two kinds ("source code or configuration"). */
-  readonly whereText?: string;
 }
 
-/** One remedy per reason token the server sends (CR-203 §3.2, "Remedies for
- *  not-bound reasons"). Keyed by the closed union, so a reason added to
- *  `UnboundReason` without a remedy here is a `tsc -b` error. */
-export const NOT_RESOLVED_REMEDY: Record<UnboundReason, Remedy> = {
-  "base-url-runtime": {
-    remedy: "commit the base URL, or a default, in the member's application configuration",
-    where: "configuration",
-  },
-  "path-not-composed": {
-    remedy: "build the path from literals or from constants of the same member",
-    where: "source code",
-  },
+/** The remedies for the two not-bound reasons a repository can fix in its
+ *  configuration, which the Binding evidence rows' own actions take
+ *  (`evidenceRowAction`). Only these two: the Resolved cross-service edges
+ *  widget states its reasons as evidence, with no remedy (CR-206). */
+export const NOT_RESOLVED_REMEDY: Readonly<Record<Extract<UnboundReason, "config-key-missing" | "config-placeholder-value">, Remedy>> = {
   "config-key-missing": {
     remedy: "define the named key in a committed configuration source",
     where: "configuration",
@@ -48,44 +40,17 @@ export const NOT_RESOLVED_REMEDY: Record<UnboundReason, Remedy> = {
     remedy: "replace the placeholder with the real committed value",
     where: "configuration",
   },
-  "topic-not-literal": {
-    remedy: "name the topic by a literal or by a committed configuration value",
-    where: "source code",
-    whereText: "source code or configuration",
-  },
-  ambiguous: {
-    remedy: "two services serve the same endpoint, so make one path or method distinct, or remove the duplicate",
-    where: "source code",
-  },
-  "no-provider-in-workspace": {
-    remedy:
-      "add the called service as a member in logos.workspace.toml, or vendor its spec to name it; otherwise there is nothing to do",
-    where: "configuration",
-    whereText: "configuration or documentation",
-  },
 };
 
-/** The remedy for a reason this build does not know (the wire union is OPEN),
- *  and for sites the answer counts but does not itemise. */
-export const UNLISTED_REMEDY: Remedy = {
-  remedy: "list these call sites with logos workspace status and read each one's reason",
-  where: "command",
-};
-
-/** The remedy for one reason token, known or not. */
-export function remedyFor(reason: string): Remedy {
-  return Object.hasOwn(NOT_RESOLVED_REMEDY, reason)
-    ? NOT_RESOLVED_REMEDY[reason as UnboundReason]
-    : UNLISTED_REMEDY;
-}
-
-/** One line of the not-resolved list: a reason, its words and its count. */
+/** One row of the not-resolved evidence table: a reason, its words and its count. */
 export interface NotResolvedReason {
   readonly reason: string;
   readonly label: string;
   readonly count: number;
 }
 
+/** What the Resolved cross-service edges widget renders from (S-613): its figure
+ *  and the not-resolved evidence table. */
 export interface ResolvedEdgesState {
   /** The captured outbound call sites the rate is over; `0` is nothing measured. */
   readonly measured: number;
@@ -98,46 +63,16 @@ export interface ResolvedEdgesState {
   readonly outside: number;
 }
 
-export const resolvedEdges: CopyEntry<ResolvedEdgesState> = {
+export const resolvedEdges: CopyEntry = {
   what: "How many of the outbound calls captured in this workspace's code reach a service in the workspace, and how many cross-service edges they resolve to.",
   why: "The service map and impact analysis see only resolved calls, so every unresolved call is a coupling they miss.",
-  action: ({ unresolved, reasons, outside }) => {
-    if (unresolved === 0 || reasons.length === 0) return noAction;
-    const items = reasons.map((r) => {
-      const m = remedyFor(r.reason);
-      return `${r.count} × ${r.label}: ${m.remedy} (${m.whereText ?? m.where})`;
-    });
-    const apart =
-      outside === 0
-        ? ""
-        : ` A further ${outside} call ${plural(outside, "site calls", "sites call")} a service outside this workspace and ${plural(outside, "is", "are")} not counted above: ${NOT_RESOLVED_REMEDY["no-provider-in-workspace"].remedy}.`;
-    return {
-      kind: "act",
-      where: remedyFor(reasons[0].reason).where,
-      text: `Fix why ${unresolved} call ${plural(unresolved, "site", "sites")} did not resolve, largest reason first — ${items.join("; ")}.${apart}`,
-    };
-  },
 };
 
 // ── Spec conformance (item 10) ───────────────────────────────────────────────
 
-export interface SpecConformanceState {
-  /** References that matched no provider or several — ambiguous plus unmatched. */
-  readonly notMatched: number;
-}
-
-export const specConformance: CopyEntry<SpecConformanceState> = {
+export const specConformance: CopyEntry = {
   what: "How many cross-service references — endpoints declared in API documents and calls captured in code — match exactly one provider in this workspace, of those that could match here.",
   why: "An endpoint that matches no controller is an API document that has drifted from the code; the figure is mostly declared endpoints, so it is not a measure of coupling.",
-  action: ({ notMatched }) =>
-    notMatched === 0
-      ? noAction
-      : {
-          kind: "act",
-          where: "command",
-          target: "logos workspace status",
-          text: "List the references that did not match, then align each API document with its controller's path and method, or remove the stale operation.",
-        },
 };
 
 // ── Coverage by intake (item 10) ─────────────────────────────────────────────
@@ -154,22 +89,13 @@ export type IntakeFinding =
   /** Some captured call sites resolve. */
   | "captured-resolves";
 
-export const coverageByIntake: CopyEntry<{ finding: IntakeFinding }> = {
+export const coverageByIntake: CopyEntry = {
   what: [
     "The same references split by ",
     gloss("intake"),
     ": endpoints declared in API documents, and calls captured in code.",
   ],
   why: "A healthy count of declared endpoints can hide outbound calls that resolve nowhere; the split shows which of the two carries the figure.",
-  action: ({ finding }) =>
-    finding === "captured-unresolved"
-      ? {
-          kind: "act",
-          where: "command",
-          target: "logos workspace status",
-          text: "List the captured call sites that did not resolve, and fix each by the reason given under Resolved cross-service edges.",
-        }
-      : noAction,
 };
 
 // ── Coverage by relation arm (item 1: hidden, S-612) ─────────────────────────
@@ -177,9 +103,8 @@ export const coverageByIntake: CopyEntry<{ finding: IntakeFinding }> = {
 /**
  * The per-arm board is hidden through the hidden-widget register (S-612); it
  * carries its entry so removing the register entry brings it back explained
- * (S-617). Its not-bound reasons are acted on through Resolved cross-service
- * edges, which aggregates them across every arm (item 1), so this board itself
- * is informational.
+ * (S-617). Resolved cross-service edges aggregates its not-bound reasons across
+ * every arm (item 1).
  */
 export const coverageByArm: CopyEntry = {
   what: [
@@ -188,7 +113,6 @@ export const coverageByArm: CopyEntry = {
     " — HTTP, gRPC and broker — each with how many resolved, are ambiguous or did not resolve, and why.",
   ],
   why: "It shows which kind of cross-service call the service map sees least of.",
-  action: () => noAction,
 };
 
 // ── Declared contracts and named externals (item 10, the coverage tab) ───────
@@ -196,23 +120,13 @@ export const coverageByArm: CopyEntry = {
 export const declaredRelations: CopyEntry = {
   what: "Contracts members declare by vendoring another service's API document, and the named external services those documents describe.",
   why: "A declared contract is a dependency someone wrote down rather than one observed in code, so it shows which services expect each other even where no call was captured.",
-  action: () => noAction,
 };
 
 // ── Build dependencies (item 10, the coverage tab) ───────────────────────────
 
-export const buildDependencies: CopyEntry<{ unread: number }> = {
+export const buildDependencies: CopyEntry = {
   what: "What each member builds against, read from its Maven or Gradle manifests.",
   why: "A build dependency is never a runtime call, so it is counted apart from every figure above; it shows which services share a library or a parent build.",
-  action: ({ unread }) =>
-    unread === 0
-      ? noAction
-      : {
-          kind: "act",
-          where: "command",
-          target: "logos index",
-          text: "Run logos index in each member whose build facts were not read, so they are read on the next answer.",
-        },
 };
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
@@ -270,6 +184,10 @@ export const COVERAGE_TEXT = {
   /** The external join's figure, likewise. */
   externalsMatched: (matched: number, rows: number) =>
     `${matched} of ${rows} outbound REST ${plural(rows, "call", "calls")} to a service outside this workspace matched a named external`,
+  /** The caption of Resolved cross-service edges' not-resolved evidence table:
+   *  the reasons, largest first, summing to `unresolved`. */
+  notResolvedCaption: (unresolved: number) =>
+    `Why ${unresolved} outbound call ${plural(unresolved, "site", "sites")} did not resolve, largest reason first`,
   /** The label of unresolved call sites the answer counts but does not itemise. */
   notItemised: "Not itemised in this answer",
   /** The build relation is absent: no member holds a build manifest. */

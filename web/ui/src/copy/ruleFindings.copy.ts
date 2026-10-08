@@ -5,12 +5,13 @@
  * of words (the `coverage.copy.ts` precedent for a board two views render).
  *
  * A check over zero rules is not a pass (CR-141, S-438): with nothing checked
- * the action is to declare rules, never "nothing to do".
+ * the absence says so, and names where rules are declared and the command that
+ * evaluates them (CR-206).
  */
 
 import type { RulesReport } from "../api/types.ts";
 
-import { noAction, plural, type CopyEntry } from "./types.ts";
+import { plural, type CopyEntry } from "./types.ts";
 
 export interface RuleFindingsState {
   /** Findings in the report (always-on structural fold-ins included). */
@@ -30,28 +31,9 @@ export function ruleFindingsState(report: RulesReport): RuleFindingsState {
   return { findings, checked: findings === 0 && !report.rules_present ? 0 : report.checked_rules };
 }
 
-export const ruleFindings: CopyEntry<RuleFindingsState> = {
+export const ruleFindings: CopyEntry = {
   what: "Where the code breaks the architecture rules declared in .logos/rules.toml, with how many rules were checked.",
   why: "A finding is code your declared architecture forbids, such as a layer reached past or a forbidden import; the quality gate fails on it.",
-  action: ({ findings, checked }) => {
-    // Findings first: the always-on structural checks fire with no contract too.
-    if (findings > 0) {
-      return {
-        kind: "act",
-        where: "source code",
-        text: "Fix each listed finding, or change the rule in .logos/rules.toml if the code is right.",
-      };
-    }
-    if (checked === 0) {
-      return {
-        kind: "act",
-        where: "configuration",
-        target: ".logos/rules.toml",
-        text: "Declare rules for your layers and forbidden imports, then run logos check to evaluate them.",
-      };
-    }
-    return noAction;
-  },
 };
 
 /** The figure-row and absence sentences. */
@@ -64,5 +46,6 @@ export const RULE_FINDINGS_TEXT = {
   /** The view's verdict line over zero checked rules. */
   noneChecked: "no rules checked",
   /** Nothing declared, or a contract that declares nothing: not a pass. */
-  noRules: "No architecture rules yet, so nothing was checked — this is not a pass.",
+  noRules:
+    "No architecture rules yet, so nothing was checked — this is not a pass; declare rules in .logos/rules.toml, then run logos check.",
 } as const;

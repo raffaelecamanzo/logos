@@ -1,7 +1,10 @@
 // Every `logos …` command a catalogue names is a documented command (S-617,
-// FR-UI-39, CR-203 §8). The reference is `docs/howto/commands.md` — tracked in the
-// public repository, so this runs in public CI; nothing here reads docs/specs or
-// docs/planning, which public CI does not have.
+// FR-UI-39, CR-203 §8). Since CR-206 the commands a catalogue names live in its
+// absence and not-current sentences — an absent state names the command that
+// fixes it — so this holds those sentences to the reference. The reference is
+// `docs/howto/commands.md` — tracked in the public repository, so this runs in
+// public CI; nothing here reads docs/specs or docs/planning, which public CI does
+// not have.
 import { describe, expect, it } from "vitest";
 
 import reference from "../../../../docs/howto/commands.md?raw";
@@ -49,7 +52,7 @@ describe("the check itself (falsifiable)", () => {
   });
 
   it("reads a template literal's text around its substitutions (review fix)", () => {
-    // health.copy.ts names `logos gate --save` inside a template literal.
+    // health.copy.ts names `logos scan` inside a template literal (staleNote).
     const src = "export const x = (n: number) => `Start at ${n}, then run logos frobnicate; later ${n} logos gate --save.`;\n";
     const found = commandsIn("/src/copy/x.copy.ts", src);
     expect(found.map((c) => c.words.join(" "))).toEqual(["frobnicate", "gate"]);

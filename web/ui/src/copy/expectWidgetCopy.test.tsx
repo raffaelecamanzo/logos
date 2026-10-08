@@ -1,5 +1,6 @@
-// expectWidgetCopy (S-611, FR-UI-39): passes over both action kinds rendered by
-// the real `Widget`, and fails on each broken shape it exists to catch.
+// expectWidgetCopy (S-611, CR-206, FR-UI-39): passes over widgets rendered by
+// the real `Widget`, and fails on each broken shape it exists to catch — the
+// action line CR-206 removed among them.
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
@@ -7,9 +8,6 @@ import { Widget } from "../components/Widget.tsx";
 
 import { expectWidgetCopy } from "./expectWidgetCopy.ts";
 import { coverage, observe, thresholds } from "./fixture.copy.ts";
-import type { WidgetAction } from "./types.ts";
-
-const actThresholds = thresholds.action({ breached: 2 }) as Extract<WidgetAction, { kind: "act" }>;
 
 function frame(html: string): Element {
   const host = document.createElement("div");
@@ -17,61 +15,73 @@ function frame(html: string): Element {
   return host.firstElementChild!;
 }
 
-// A hand-built frame, so each test can break exactly one thing.
+// A hand-built frame, so each test can break exactly one thing. `after` is
+// markup placed after the explanation, where the action line used to render.
 function widgetHtml({
   what = "Shows a figure.",
   why = "It supports a decision.",
-  kind = "none",
-  action = "Nothing to do — informational.",
-  where = "",
-}: Partial<Record<"what" | "why" | "kind" | "action" | "where", string>>): string {
+  after = "",
+}: Partial<Record<"what" | "why" | "after", string>>): string {
   return `<div data-widget="">
     <div data-widget-part="title"><h3>Fixture</h3></div>
     <div data-widget-part="explanation">
       <p data-widget-copy="what">${what}</p><p data-widget-copy="why">${why}</p>
     </div>
-    <div data-widget-part="action" data-action-kind="${kind}">
-      <p>What you can do: <span data-widget-copy="action">${action}</span></p>
-      ${where ? `<p data-widget-copy="where">${where}</p>` : ""}
-    </div>
+    ${after}
   </div>`;
 }
 
 describe("expectWidgetCopy", () => {
-  it("passes on an observe widget (action none) and names its catalogue entry", () => {
+  it("passes on a widget and names its catalogue entry", () => {
     const { container } = render(<Widget title="Observe" copy={observe} />);
     expectWidgetCopy(container.firstElementChild!, observe);
   });
 
-  it("passes on an act widget, in both of the states its action distinguishes", () => {
-    for (const state of [{ breached: 2 }, { breached: 0 }]) {
-      const { container, unmount } = render(<Widget title="Thresholds" copy={thresholds} state={state} />);
-      expectWidgetCopy(container.firstElementChild!, thresholds, state);
-      unmount();
-    }
+  it("passes on a widget whose copy glosses a term", () => {
+    const { container } = render(<Widget title="Thresholds" copy={thresholds} figure="2 of 9 measures" />);
+    expectWidgetCopy(container.firstElementChild!, thresholds);
   });
 
-  it("passes on an absent widget whose action is to act", () => {
-    const state = { ingested: false };
+  it("passes on an absent widget", () => {
     const { container } = render(
-      <Widget title="Coverage" copy={coverage} state={state} absence="No coverage ingested yet." />,
+      <Widget title="Coverage" copy={coverage} absence="No coverage ingested yet; run logos coverage ingest." />,
     );
-    expectWidgetCopy(container.firstElementChild!, coverage, state);
+    expectWidgetCopy(container.firstElementChild!, coverage);
+  });
+
+  it("passes on a row's own action column inside the evidence (row content, CR-206 §3.3)", () => {
+    const html = widgetHtml({
+      after: `<div data-widget-part="evidence"><table><tr><th>What you can do</th></tr><tr><td>Run logos index in this member.</td></tr></table></div>`,
+    });
+    expect(() => expectWidgetCopy(frame(html))).not.toThrow();
   });
 
   it.each([
     ["an empty what", widgetHtml({ what: "" }), /what part is empty/],
     ["an empty why", widgetHtml({ why: " " }), /why part is empty/],
-    ["an act action with no where", widgetHtml({ kind: "act", action: "Fix it." }), /must say where/],
-    [
-      "a none action that names a where",
-      widgetHtml({ where: "command <code>logos scan</code>" }),
-      /must not name a where/,
-    ],
-    ["a none action with other words", widgetHtml({ action: "Relax." }), /Nothing to do/],
     ["an unglossed arm", widgetHtml({ what: "Coverage by arm." }), /outside a Term gloss/],
     ["an element that is not a Widget", "<div><p>plain</p></div>", /not a Widget/],
-    ["an unknown action kind", widgetHtml({ kind: "maybe" }), /unknown action kind/],
+    // The action line CR-206 removed: each of its pieces, alone, fails.
+    [
+      "an action part",
+      widgetHtml({ after: `<div data-widget-part="action" data-action-kind="none"><p>Relax.</p></div>` }),
+      /action line was removed .*data-widget-part="action"/,
+    ],
+    [
+      "action copy",
+      widgetHtml({ after: `<p><span data-widget-copy="action">Fix it.</span></p>` }),
+      /action line was removed .*data-widget-copy="action"/,
+    ],
+    [
+      "a where chip",
+      widgetHtml({ after: `<p data-widget-copy="where">command <code>logos scan</code></p>` }),
+      /action line was removed .*data-widget-copy="where"/,
+    ],
+    [
+      "the \"What you can do\" label",
+      widgetHtml({ after: `<p>What you can do: Nothing to do — informational.</p>` }),
+      /action line was removed .*"What you can do"/,
+    ],
   ])("fails on %s", (_name, html, message) => {
     expect(() => expectWidgetCopy(frame(html))).toThrow(message);
   });
@@ -100,29 +110,11 @@ describe("expectWidgetCopy", () => {
     expectWidgetCopy(container.firstElementChild!, entry);
   });
 
-  it("fails when the rendered copy is not the named entry's", () => {
-    const { container } = render(<Widget title="Observe" copy={observe} />);
-    const other = { ...observe, why: "A different reason." };
-    expect(() => expectWidgetCopy(container.firstElementChild!, other)).toThrow(/why/);
-  });
-
   it.each([
+    ["why", { why: "A different reason." }, /why/],
     ["what", { what: "Another figure." }, /what/],
-    ["the action text", { action: () => ({ ...actThresholds, text: "Do something else." }) }, /action/],
-    ["the where kind", { action: () => ({ ...actThresholds, where: "source code" as const }) }, /where/],
-    ["the where target", { action: () => ({ ...actThresholds, target: "logos scan" }) }, /where/],
-  ])("fails when %s differs from the named entry", (_name, override, message) => {
-    const state = { breached: 2 };
-    const { container } = render(<Widget title="Thresholds" copy={thresholds} state={state} />);
-    expect(() => expectWidgetCopy(container.firstElementChild!, { ...thresholds, ...override }, state)).toThrow(
-      message,
-    );
-  });
-
-  it("fails when the action kind is not the one the state calls for", () => {
-    const { container } = render(<Widget title="Thresholds" copy={thresholds} state={{ breached: 0 }} />);
-    expect(() => expectWidgetCopy(container.firstElementChild!, thresholds, { breached: 3 })).toThrow(
-      /action kind/,
-    );
+  ])("fails when the rendered %s is not the named entry's", (_name, override, message) => {
+    const { container } = render(<Widget title="Observe" copy={observe} />);
+    expect(() => expectWidgetCopy(container.firstElementChild!, { ...observe, ...override })).toThrow(message);
   });
 });

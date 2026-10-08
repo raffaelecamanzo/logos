@@ -108,11 +108,13 @@ describe("FilesView (S-188, FR-UI-11)", () => {
   it("states an empty board in the figure row and names the command that ranks it", async () => {
     stubFetch(() => EMPTY());
     render(<FilesView />);
-    const absence = await screen.findByText(filesAbsence.unranked);
+    // The absence names the command that ranks the files, in its sentence (CR-206).
+    const absence = await screen.findByText(
+      "No files ranked yet; run logos hotspots to rank the files from the git history.",
+    );
     expect(absence).toHaveAttribute("data-widget-absence");
     const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, filtered: false, coverageMissing: false });
-    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("logos hotspots");
+    expectWidgetCopy(w, filesRankedByRisk);
     expect(screen.queryByRole("table")).toBeNull();
   });
 
@@ -132,21 +134,29 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     const absence = await screen.findByText(filesAbsence.filteredOut);
     expect(absence).toHaveAttribute("data-widget-absence");
     const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 0, filtered: true, coverageMissing: false });
-    expect(w.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "none");
+    expectWidgetCopy(w, filesRankedByRisk);
+    // The filter's answer is not a missing ranking: no ranking command.
+    expect(absence.textContent).not.toMatch(/logos hotspots/);
     // The way back is on the page.
     await user.click(within(w as HTMLElement).getByRole("button", { name: "Show all files" }));
     expect(await screen.findByRole("table", { name: "Files ranked by risk" })).toBeInTheDocument();
   });
 
-  it("states the read-model's own notice as the absence when it has one", async () => {
+  it.each([
+    ["a first mine", null, "First mine: history is being read."],
+    ["a repository that is not git", "NotGit", "not a git repository — temporal metrics unavailable"],
+    ["a shallow clone", "Shallow", "shallow clone — temporal metrics unavailable (history is truncated)"],
+  ] as const)("states the read-model's own notice alone for %s — the ranking command fixes none of them (HF-1 review)", async (_name, degraded, notice) => {
     stubFetch(() => {
       const m = EMPTY();
-      m.hotspots.notice = "First mine: history is being read.";
+      m.hotspots.notice = notice;
+      (m.hotspots as { degraded: unknown }).degraded = degraded;
       return m;
     });
     render(<FilesView />);
-    expect(await screen.findByText("First mine: history is being read.")).toHaveAttribute("data-widget-absence");
+    const absence = await screen.findByText(notice);
+    expect(absence).toHaveAttribute("data-widget-absence");
+    expect(absence.textContent).not.toMatch(/logos hotspots/);
   });
 
   it("the untested toggle re-fetches the board with ?untested", async () => {
@@ -186,12 +196,12 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expect(screen.getAllByRole("table").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("explains the risk ranking; with no coverage ingested, the action is the ingest command", async () => {
+  it("explains the risk ranking, with coverage ingested and without", async () => {
     stubFetch(() => model());
     render(<FilesView />);
     await screen.findByRole("table", { name: "Files ranked by risk" });
     // src/hot.rs is fresh: one ranked file has a coverage figure.
-    expectWidgetCopy(widget("Files ranked by risk"), filesRankedByRisk, { ranked: 2, filtered: false, coverageMissing: false });
+    expectWidgetCopy(widget("Files ranked by risk"), filesRankedByRisk);
     cleanup();
 
     // No report ingested: the read-model falls back to static reachability.
@@ -202,33 +212,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     });
     render(<FilesView />);
     await screen.findByRole("table", { name: "Files ranked by risk" });
-    const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, filtered: false, coverageMissing: true });
-    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos coverage ingest");
-  });
-
-  it("never asks to ingest coverage that is ingested, even when every listed file reads n/a", async () => {
-    // "Untested only" over an ingested report keeps exactly the files with no
-    // fresh coverage, so every remaining cell can read n/a — the report exists.
-    stubFetch(() => {
-      const m = model({ untested: true, coverage_basis: "coverage" });
-      for (const f of m.hotspots.files) f.coverage = { state: "n/a", coverage_bp: null };
-      return m;
-    });
-    render(<FilesView />);
-    await screen.findByRole("table", { name: "Files ranked by risk" });
-    const w = widget("Files ranked by risk");
-    expectWidgetCopy(w, filesRankedByRisk, { ranked: 2, filtered: true, coverageMissing: false });
-    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent(/^source code$/);
-  });
-
-  it("with coverage, the action is to test or split the top files, in source code", async () => {
-    stubFetch(() => model());
-    render(<FilesView />);
-    await screen.findByRole("table", { name: "Files ranked by risk" });
-    expect(widget("Files ranked by risk").querySelector('[data-widget-copy="where"]')).toHaveTextContent(
-      /^source code$/,
-    );
+    expectWidgetCopy(widget("Files ranked by risk"), filesRankedByRisk);
   });
 
   it("glosses the Co-change and Defect headers", async () => {
@@ -239,13 +223,12 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     expect(glossed).toEqual(["coChange", "defect"]);
   });
 
-  it("explains ownership dispersion, and names CODEOWNERS when files have several authors", async () => {
+  it("explains ownership dispersion, over every file with history", async () => {
     stubFetch(() => model());
     render(<FilesView />);
     await screen.findByRole("table", { name: "Ownership dispersion" });
     const w = widget("Ownership dispersion");
-    expectWidgetCopy(w, ownershipDispersion, { multiAuthor: true });
-    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("documentation CODEOWNERS");
+    expectWidgetCopy(w, ownershipDispersion);
     expect(w.querySelector('[data-widget-part="figure"]')).toHaveTextContent("1 of 1 files have more than one author");
     cleanup();
 
@@ -262,7 +245,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     );
   });
 
-  it("reads a single-author history as nothing to do", async () => {
+  it("states a single-author history as its absence", async () => {
     stubFetch(() => {
       const m = model();
       m.temporal.files[0].ownership_dispersion_bp = 0;
@@ -272,10 +255,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     render(<FilesView />);
     await screen.findByRole("table", { name: "Files ranked by risk" });
     const w = widget("Ownership dispersion");
-    expectWidgetCopy(w, ownershipDispersion, { multiAuthor: false });
-    // Pinned apart from the catalogue: expectWidgetCopy compares against the
-    // catalogue's own action, so a wrong branch there would agree with itself.
-    expect(w.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "none");
+    expectWidgetCopy(w, ownershipDispersion);
     expect(within(w as HTMLElement).getByText(filesAbsence.singleAuthor)).toHaveAttribute("data-widget-absence");
     expect(screen.queryByRole("table", { name: "Ownership dispersion" })).toBeNull();
   });

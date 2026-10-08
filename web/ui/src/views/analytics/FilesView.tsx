@@ -1,7 +1,7 @@
 /*
  * FilesView (S-188, S-616, FR-UI-11, FR-UI-21, FR-UI-44) — the Files & Risk tab
- * over `/api/v1/files`: two widgets in one stack, each saying what it shows, why
- * it matters and what to do (CR-203 items 23–24; copy in `copy/files.copy.ts`).
+ * over `/api/v1/files`: two widgets in one stack, each saying what it shows and
+ * why it matters (CR-203 items 23–24, CR-206; copy in `copy/files.copy.ts`).
  *
  * "Files ranked by risk" leads with the top hotspot in its figure row (or the
  * named absence when the board is empty), then the merged per-file risk table —
@@ -31,7 +31,7 @@ import {
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
-import { filesAbsence, filesRankedByRisk, ownershipDispersion } from "../../copy/files.copy.ts";
+import { filesAbsence, filesRankedByRisk, ownershipDispersion, withRankCommand } from "../../copy/files.copy.ts";
 import { fileRiskRows, ownershipRows, pctBp, type FileRiskRow } from "./analyticsModel.ts";
 import { CoverageCellView, Na } from "./cells.tsx";
 
@@ -210,8 +210,7 @@ function FilesContent({
         <Widget
           title="Files ranked by risk"
           copy={filesRankedByRisk}
-          state={{ ranked: 0, filtered, coverageMissing: hotspots.coverage_basis !== "coverage" }}
-          absence={filtered ? filesAbsence.filteredOut : (hotspots.notice ?? filesAbsence.unranked)}
+          absence={filtered ? filesAbsence.filteredOut : (hotspots.notice ?? withRankCommand(filesAbsence.unranked))}
         >
           {/* The filters stay reachable, or a filter that empties the board is a dead end. */}
           {filtered && toggles}
@@ -220,17 +219,11 @@ function FilesContent({
     );
   }
 
-  // "Coverage reads n/a" because no report is ingested: the read-model then ranks
-  // on its static-reachability fallback. Not "every listed cell is n/a" — the
-  // untested filter over an ingested report leaves exactly such a list.
-  const coverageMissing = hotspots.coverage_basis !== "coverage";
-
   return (
     <WidgetStack>
       <Widget
         title="Files ranked by risk"
         copy={filesRankedByRisk}
-        state={{ ranked: hotspots.ranked_files, filtered, coverageMissing }}
         figure={
           <>
             <span>
@@ -263,14 +256,12 @@ function FilesContent({
         <Widget
           title="Ownership dispersion"
           copy={ownershipDispersion}
-          state={{ multiAuthor: false }}
           absence={filesAbsence.singleAuthor}
         />
       ) : (
         <Widget
           title="Ownership dispersion"
           copy={ownershipDispersion}
-          state={{ multiAuthor: true }}
           figure={
             <span>
               {ownership.length} <FigureNote>of {temporal.files.length} files have more than one author</FigureNote>

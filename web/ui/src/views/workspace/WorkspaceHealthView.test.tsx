@@ -12,7 +12,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import statesStyles from "../../components/States.module.css";
-import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import {
   brokerTopics,
   HEALTH_TEXT,
@@ -22,7 +22,7 @@ import {
   workspaceRules,
 } from "../../copy/workspaceHealth.copy.ts";
 import type { CopyEntry } from "../../copy/types.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import {
@@ -406,33 +406,19 @@ describe("Workspace rules explains itself, in the view's one stack (S-613)", () 
     expect(Object.keys(WIDGET_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
   });
 
-  /** The where each state calls for, written out rather than read back from the
-   *  catalogue, so a wrong branch or priority in it fails here. `null` is a
-   *  `none` action. */
-  const EXPECTED_WHERE: Record<keyof typeof WIDGET_STATES, string | null> = {
-    healthy: null,
-    // An unknown member outranks the finding beside it: fix the rule first.
-    "partial coverage": "configuration logos.workspace.toml",
-    "nothing measured": "configuration logos.workspace.toml [[governance.boundaries]]",
-    "degraded member": "source code",
-  };
-
   it.each(Object.entries(WIDGET_STATES))(
     "%s: Workspace rules is a Widget under the view's one WidgetStack and carries the message standard",
-    async (state, { status, governance }) => {
+    async (_state, { status, governance }) => {
       await mount({ status, governance });
       const w = await rulesWidget();
-      expectWidgetCopy(w);
-      const where = EXPECTED_WHERE[state as keyof typeof WIDGET_STATES];
-      expect(actionKind(w)).toBe(where === null ? "none" : "act");
-      expect(w.querySelector('[data-widget-copy="where"]')?.textContent ?? null).toBe(where);
+      expectWidgetCopy(w, workspaceRules);
     },
   );
 
   it("carries the Advisory badge and the figure 'r rules checked over b bindings · v findings'", async () => {
     await mount();
     const w = await rulesWidget();
-    expectWidgetCopy(w, workspaceRules, { declared: true, findings: 1, unknownMembers: 0 });
+    expectWidgetCopy(w, workspaceRules);
     expect(w.querySelector('[data-widget-part="title"]')?.textContent).toBe("Workspace rulesAdvisory");
     expect(figureOf(w)).toBe("2 rules checked over 9 bindings · 1 finding");
     expect(within(w).getByRole("table", { name: /rule findings/i })).toBeInTheDocument();
@@ -441,92 +427,53 @@ describe("Workspace rules explains itself, in the view's one stack (S-613)", () 
   it("with no rules, states the absence left-aligned and names the configuration to declare", async () => {
     await mount({ governance: governanceAnswer(null) });
     const w = await rulesWidget();
-    expectWidgetCopy(w, workspaceRules, { declared: false, findings: 0, unknownMembers: 0 });
+    expectWidgetCopy(w, workspaceRules);
     expect(w.querySelector("[data-widget-absence]")?.textContent).toBe(HEALTH_TEXT.noRules);
     expect(w.querySelector(`.${statesStyles.empty}`)).toBeNull();
-    const where = w.querySelector('[data-widget-copy="where"]')?.textContent ?? "";
-    expect(where).toContain("configuration");
-    expect(where).toContain("logos.workspace.toml");
-    expect(where).toContain("[[governance.boundaries]]");
+    // The absence itself names where rules are declared (CR-206).
+    expect(HEALTH_TEXT.noRules).toMatch(/; declare \[\[governance\.boundaries\]\] in logos\.workspace\.toml /);
   });
 
-  it("a clean report over checked bindings has nothing to do", async () => {
+  it("a clean report over checked bindings shows no evidence", async () => {
     await mount({ governance: governanceAnswer(governanceReport({ violations: [] })) });
     const w = await rulesWidget();
-    expectWidgetCopy(w, workspaceRules, { declared: true, findings: 0, unknownMembers: 0 });
+    expectWidgetCopy(w, workspaceRules);
     expect(figureOf(w)).toBe("2 rules checked over 9 bindings · 0 findings");
     expect(w.querySelector('[data-widget-part="evidence"]')).toBeNull();
   });
 
-  it("a rule naming an unknown member asks for the configuration to be corrected first", async () => {
+  it("a rule naming an unknown member is stated with the member, as evidence", async () => {
     await mount({ governance: governanceAnswer(governanceReport({ unknown_member_refs: ["billing"] })) });
     const w = await rulesWidget();
-    expectWidgetCopy(w, workspaceRules, { declared: true, findings: 1, unknownMembers: 1 });
-    expect(w.querySelector('[data-widget-copy="action"]')?.textContent).toMatch(/^Correct each rule/);
-    expect(w.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration logos.workspace.toml");
+    expectWidgetCopy(w, workspaceRules);
+    expect(readerText(w)).toContain(HEALTH_TEXT.unknownMembers(1));
+    expect(readerText(w)).toMatch(/billing/);
   });
 });
 
 // ── S-617: the view's other four widgets (CR-203, FR-UI-39/40) ───────────────
 
-const ENTRIES: Record<string, CopyEntry<never>> = {
-  "Members answering": membersAnswering as CopyEntry<never>,
-  Members: memberFreshness as CopyEntry<never>,
-  "Warm state across the workspace": warmState as CopyEntry<never>,
-  "Workspace rules": workspaceRules as CopyEntry<never>,
-  "Broker topics": brokerTopics as CopyEntry<never>,
-};
-
-/** Each widget's state and action kind per WIDGET_STATES entry, written out so a
- *  wrong branch in the catalogue fails here. Workspace rules is S-613's, above. */
-const EXPECTED: Record<keyof typeof WIDGET_STATES, Record<string, [state: unknown, kind: "act" | "none"]>> = {
-  healthy: {
-    "Members answering": [{ failed: 0 }, "none"],
-    Members: [{ degraded: 0 }, "none"],
-    "Warm state across the workspace": [{ degraded: 0 }, "none"],
-    "Broker topics": [undefined, "none"],
-  },
-  "partial coverage": {
-    "Members answering": [{ failed: 0 }, "none"],
-    Members: [{ degraded: 0 }, "none"],
-    "Warm state across the workspace": [{ degraded: 0 }, "none"],
-    "Broker topics": [undefined, "none"],
-  },
-  "nothing measured": {
-    "Members answering": [{ failed: 0 }, "none"],
-    Members: [{ degraded: 0 }, "none"],
-    "Warm state across the workspace": [{ degraded: 0 }, "none"],
-    "Broker topics": [undefined, "none"],
-  },
-  "degraded member": {
-    "Members answering": [{ failed: 1 }, "act"],
-    Members: [{ degraded: 1 }, "act"],
-    "Warm state across the workspace": [{ degraded: 0 }, "none"],
-    "Broker topics": [undefined, "none"],
-  },
+const ENTRIES: Record<string, CopyEntry> = {
+  "Members answering": membersAnswering,
+  Members: memberFreshness,
+  "Warm state across the workspace": warmState,
+  "Workspace rules": workspaceRules,
+  "Broker topics": brokerTopics,
 };
 
 describe("every Workspace Health widget explains itself, in one stack (S-617)", () => {
-  it.each(Object.entries(WIDGET_STATES))("%s: each widget its catalogue entry at its state", async (name, { status, governance }) => {
+  it.each(Object.entries(WIDGET_STATES))("%s: each widget its catalogue entry", async (_name, { status, governance }) => {
     await mount({ status, governance });
     await screen.findByRole("heading", { name: /^Workspace rules$/ });
     const widgets = expectOneWidgetStack(document.body);
     expect(widgets.map(widgetTitle)).toEqual(Object.keys(ENTRIES));
-    const expected = EXPECTED[name as keyof typeof WIDGET_STATES];
-    for (const widget of widgets) {
-      const title = widgetTitle(widget);
-      if (title === "Workspace rules") continue;
-      const [state, kind] = expected[title];
-      expect(actionKind(widget), `${title} (${name})`).toBe(kind);
-      expectWidgetCopy(widget, ENTRIES[title], state as never);
-    }
+    for (const widget of widgets) expectWidgetCopy(widget, ENTRIES[widgetTitle(widget)]);
   });
 
-  it("a member whose indexing failed asks for the index in that member", async () => {
+  it("a member whose indexing failed is counted in the warm figure", async () => {
     await mount(PARTIAL);
     const warm = expectOneWidgetStack(document.body).find((w) => widgetTitle(w) === "Warm state across the workspace")!;
-    expectWidgetCopy(warm, warmState, { degraded: 1 });
-    expect(warm.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos index");
+    expectWidgetCopy(warm, warmState);
     expect(warm.querySelector('[data-widget-part="figure"]')).toHaveTextContent("2 of 3 members are warm");
   });
 

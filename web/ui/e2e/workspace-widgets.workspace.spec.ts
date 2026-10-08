@@ -5,7 +5,8 @@
 // two-member workspace fixture. Each view stacks its widgets in one
 // `WidgetStack`: consecutive widgets sit one equal gap apart (the coverage tab's
 // last three included, the gap CR-203 §3.1 item 10 found missing), every widget
-// part is left-aligned, and explanation and action share one body size.
+// part is left-aligned, the explanation is set at the body size, and no widget
+// renders an action line (CR-206).
 import { expect, test, type Locator } from "@playwright/test";
 
 import { expectWidgetStackLayout } from "./layout.ts";

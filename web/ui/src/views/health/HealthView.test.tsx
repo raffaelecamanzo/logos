@@ -12,9 +12,7 @@ import {
   gate as gateCopy,
   qualitySignal as qualitySignalCopy,
   signalTrend as signalTrendCopy,
-  type DimensionState,
 } from "../../copy/health.copy.ts";
-import { NOTHING_TO_DO } from "../../copy/types.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { HealthView } from "./HealthView.tsx";
 import { widgetsIn, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
@@ -112,8 +110,8 @@ const frames = () => widgetsIn(document.body);
 /** The one widget with this title. */
 const widget = (title: string) => widgetTitled(document.body, title);
 
-/** A part of a widget: the copy element of that name (what, why, action, where),
- *  else the frame part (title, figure, evidence). */
+/** A part of a widget: the copy element of that name (what, why), else the
+ *  frame part (title, figure, evidence). */
 function part(frame: Element, name: string): HTMLElement | null {
   return (
     frame.querySelector<HTMLElement>(`[data-widget-copy="${name}"]`) ??
@@ -126,13 +124,15 @@ function seen(el: Element | null): string {
   return el === null ? "" : readerText(el);
 }
 
-/** The state a dimension widget's entry is checked at, for a scored dimension. */
-function scored(
-  normalized: number,
-  offenders: Extract<DimensionState, { kind: "scored" }>["offenders"],
-  listed = 0,
-): DimensionState {
-  return { kind: "scored", normalized, offenders, listed };
+/** The titles of the widgets whose text names `command`, as a word, in page
+ *  order. Since CR-206 a command is named inside an absence or not-current
+ *  sentence, never as a text node of its own, so an exact-text query would find
+ *  nothing and pass over nothing. */
+function widgetsNaming(command: string): string[] {
+  const named = new RegExp(`\\b${command.replace(/ /g, "\\s+")}\\b`);
+  return frames()
+    .filter((w) => named.test(seen(w)))
+    .map(widgetTitle);
 }
 
 afterEach(() => {
@@ -173,35 +173,23 @@ describe("HealthView on the widget frame (S-615, FR-UI-43)", () => {
     stub(HEALTH);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "verdict", passed: true, lowest: "Redundancy" });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "scored", lowest: "Redundancy" });
-    expectWidgetCopy(widget("Signal trend"), signalTrendCopy, { snapshots: 2 });
-    const states: Record<DimensionKey, DimensionState> = {
-      modularity: scored(0.9, "unlisted"),
-      acyclicity: scored(0.8, "unlisted"),
-      depth: scored(0.7, "unlisted"),
-      equality: scored(0.6, "unlisted"),
-      redundancy: scored(0.5, "unlisted"),
-      nesting: scored(0.9, "listed", 1),
-      conciseness: scored(0.8, "none-flagged"),
-      cohesion: scored(0.6, "none-flagged"),
-      focus: scored(0.6, "none-flagged"),
-      uniqueness: scored(0.7, "none-flagged"),
-    };
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
+    expectWidgetCopy(widget("Signal trend"), signalTrendCopy);
     for (const row of metricRows(HEALTH.scan.metrics)) {
-      expectWidgetCopy(widget(row.name), DIMENSION_COPY[row.key], states[row.key]);
+      expectWidgetCopy(widget(row.name), DIMENSION_COPY[row.key]);
     }
   });
 });
 
 describe("Gate widget (CR-203 item 12)", () => {
-  it("PASS: the verdict against the baseline with ε's pass condition, and nothing to do", async () => {
+  it("PASS: the verdict against the baseline with ε's pass condition, and no dimension named", async () => {
     stub(HEALTH);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
     const gate = widget("Gate");
     expect(seen(part(gate, "figure"))).toBe("PASS · signal 8000 vs baseline 7800; passes at ≥ 7799 (ε = 1)");
-    expect(seen(part(gate, "action"))).toBe(NOTHING_TO_DO);
+    expect(seen(gate)).not.toContain("Lowest-scoring dimension");
     // The verdict chip is the title row's one badge, in the pass tone.
     const chip = within(part(gate, "title")!).getByText("PASS");
     expect(chip.className).toBe(chipClass("green"));
@@ -220,7 +208,7 @@ describe("Gate widget (CR-203 item 12)", () => {
     expect(seen(part(widget("Gate"), "figure"))).toBe("PASS · signal 8000 vs baseline 7800; passes at ≥ 7797.5 (ε = 2.5)");
   });
 
-  it("FAIL: names the lowest dimension (source code) and `logos gate --save` for an intended drop", async () => {
+  it("FAIL: names the lowest-scoring dimension as a fact under the figure, and no action (CR-206)", async () => {
     const m = clone();
     m.gate.passed = false;
     m.gate.signal = 7700;
@@ -229,13 +217,14 @@ describe("Gate widget (CR-203 item 12)", () => {
     render(<HealthView />);
     await screen.findByText("Signal evolution");
     const gate = widget("Gate");
-    expect(seen(part(gate, "figure"))).toBe("FAIL · signal 7700 vs baseline 7800; passes at ≥ 7799 (ε = 1)");
+    expect(seen(part(gate, "figure"))).toBe(
+      "FAIL · signal 7700 vs baseline 7800; passes at ≥ 7799 (ε = 1)Lowest-scoring dimension: Depth.",
+    );
     expect(within(part(gate, "title")!).getByText("FAIL").className).toBe(chipClass("red"));
-    expectWidgetCopy(gate, gateCopy, { kind: "verdict", passed: false, lowest: "Depth" });
-    expect(gate.querySelector('[data-widget-part="action"]')?.getAttribute("data-action-kind")).toBe("act");
-    expect(seen(part(gate, "where"))).toBe("source code");
-    expect(seen(part(gate, "action"))).toMatch(/^Start with Depth, the lowest-scoring dimension below\./);
-    expect(seen(part(gate, "action"))).toContain("logos gate --save (command)");
+    expectWidgetCopy(gate, gateCopy);
+    const notes = [...part(gate, "figure")!.querySelectorAll("[data-figure-note]")].map(seen);
+    expect(notes).toEqual(["Lowest-scoring dimension: Depth."]);
+    expect(seen(gate)).not.toContain("logos gate --save");
   });
 
   it("states a missing baseline as n/a and an informational pass, with no fabricated pass floor", async () => {
@@ -248,7 +237,6 @@ describe("Gate widget (CR-203 item 12)", () => {
     render(<HealthView />);
     await screen.findByText("Signal evolution");
     expect(seen(part(widget("Gate"), "figure"))).toBe("PASS · signal 8000 vs baseline n/a; informational pass");
-    expect(seen(part(widget("Gate"), "action"))).toBe(NOTHING_TO_DO);
   });
 
   // FR-GV-10: after a `[metric_thresholds]` change the read-only verdict cannot
@@ -271,7 +259,7 @@ describe("Gate widget (CR-203 item 12)", () => {
       expect(figure).toMatch(/^PASS · signal 7000 vs baseline 7800; not compared, informational pass/);
       expect(figure).not.toMatch(/passes at/);
       expect(figure).toContain("the next logos gate run saves the current score as the new baseline");
-      expectWidgetCopy(gate, gateCopy, { kind: "verdict", passed: true, lowest: "Redundancy" });
+      expectWidgetCopy(gate, gateCopy);
     }
   });
 
@@ -298,26 +286,16 @@ function allFull(): HealthModel {
 }
 
 describe("no dimension below a full score", () => {
-  it("the Quality signal has nothing to do", async () => {
-    stub(allFull());
-    render(<HealthView />);
-    await screen.findByText("Signal evolution");
-    const q = widget("Quality signal");
-    expect(seen(part(q, "action"))).toBe(NOTHING_TO_DO);
-    expect(part(q, "where")).toBeNull();
-  });
-
-  it("a Gate FAIL names no dimension it cannot point to, and still offers logos gate --save", async () => {
+  it("a Gate FAIL names no dimension it cannot point to", async () => {
     const m = allFull();
     m.gate.passed = false;
     m.gate.signal = 7700;
     stub(m);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
-    const action = seen(part(widget("Gate"), "action"));
-    expect(action).toMatch(/^Start with the lowest-scoring dimension below\./);
-    for (const name of DIMENSION_TITLES) expect(action, name).not.toContain(name);
-    expect(action).toContain("logos gate --save (command)");
+    const figure = seen(part(widget("Gate"), "figure"));
+    expect(figure).toBe("FAIL · signal 7700 vs baseline 7800; passes at ≥ 7799 (ε = 1)");
+    expect(figure).not.toContain("Lowest-scoring dimension");
   });
 });
 
@@ -331,10 +309,6 @@ describe("Quality signal widget (CR-203 items 13 and 20)", () => {
       "8000 / 10000, geometric mean of the 10 applicable dimensions90 production functions scored · 12 test functions excluded",
     );
     expect(within(part(q, "figure")!).getByText("90 production functions scored · 12 test functions excluded")).toBeInTheDocument();
-    // The action names the lowest dimension (Redundancy, 0.5).
-    expect(seen(part(q, "action"))).toBe(
-      "Start with Redundancy, the lowest-scoring dimension; its widget below says what to change.",
-    );
   });
 
   it("counts only the applicable dimensions in k", async () => {
@@ -486,72 +460,23 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     expect(seen(part(widget("Modularity"), "evidence"))).toMatch(/as a whole/);
   });
 
-  it("an unlisted dimension below a full score acts through its pointer; at a full score, nothing to do", async () => {
+  it("no dimension widget carries an action line, at any score, listed or not (CR-206)", async () => {
     const m = clone();
     m.scan.metrics.acyclicity = mv(1);
-    stub(m);
-    render(<HealthView />);
-    await screen.findByText("Signal evolution");
-    expectWidgetCopy(widget("Acyclicity"), DIMENSION_COPY.acyclicity, scored(1, "unlisted"));
-    expect(seen(part(widget("Acyclicity"), "action"))).toBe(NOTHING_TO_DO);
-    expectWidgetCopy(widget("Depth"), DIMENSION_COPY.depth, scored(0.7, "unlisted"));
-    expect(seen(part(widget("Depth"), "where"))).toBe("command logos dsm");
-    expect(seen(part(widget("Equality"), "where"))).toBe("command logos hotspots");
-    // Files & Risk and `logos hotspots` rank FILES by summed complexity, not functions.
-    expect(seen(part(widget("Equality"), "action"))).toMatch(/^Find the files that hold the most complexity/);
-    expect(seen(part(widget("Equality"), "evidence"))).toContain("The files that hold the most complexity are ranked in");
-    expect(seen(part(widget("Redundancy"), "where"))).toBe("command logos node <symbol>");
-    expect(seen(part(widget("Modularity"), "where"))).toBe("source code");
-  });
-
-  it("a listed dimension's action refactors the listed units and names its [metric_thresholds] key", async () => {
-    const m = clone();
     m.scan.worst_offenders = realOffenders.recorded;
     stub(m);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
-    const nesting = widget("Nesting");
-    expectWidgetCopy(nesting, DIMENSION_COPY.nesting, scored(0.9, "listed", 3));
-    expect(seen(part(nesting, "where"))).toBe("source code");
-    expect(seen(part(nesting, "action"))).toContain("Flatten the 3 listed functions");
-    expect(seen(part(nesting, "action"))).toContain("nesting_depth under [metric_thresholds] in .logos/rules.toml (configuration)");
-  });
-
-  // Each listed action names the `[metric_thresholds]` keys docs/howto/configuration.md
-  // documents for its dimension — and Cohesion, which has none, names no key.
-  it.each([
-    ["Nesting", "nesting", /^Flatten the 1 listed function /, "nesting_depth"],
-    ["Conciseness", "conciseness", /^Split the 1 listed function into smaller ones/, "brain_complexity, brain_lines or brain_nesting"],
-    ["Cohesion", "cohesion", /^Split the 1 listed class along the groups of methods that share state\.$/, null],
-    ["Focus", "focus", /^Split the 1 listed container by responsibility/, "god_methods or god_span"],
-    ["Uniqueness", "uniqueness", /^Merge the 1 listed near-clone into shared functions/, "clone_similarity or clone_min_tokens"],
-  ] as const)("%s's listed action refactors the unit and names its threshold keys", async (name, key, refactor, keys) => {
-    const m = clone();
-    m.scan.metrics[key] = { raw: 0.1, normalized: 0.9 };
-    m.scan.worst_offenders = { ...realOffenders.recordedEmpty, [key]: [{ name: "unit", file: "src/a.rs", line: 1, detail: "d" }] };
-    stub(m);
-    render(<HealthView />);
-    await screen.findByText("Signal evolution");
-    const w = widget(name);
-    const action = seen(part(w, "action"));
-    expect(action).toMatch(refactor);
-    expect(seen(part(w, "where"))).toBe("source code");
-    if (keys === null) {
-      expect(action).not.toContain("[metric_thresholds]");
-    } else {
-      expect(action).toContain(`raise ${keys} under [metric_thresholds] in .logos/rules.toml (configuration)`);
+    for (const row of metricRows(m.scan.metrics)) {
+      const w = widget(row.name);
+      expectWidgetCopy(w, DIMENSION_COPY[row.key]);
+      expect(seen(w), row.name).not.toMatch(/\[metric_thresholds\] in \.logos\/rules\.toml|What you can do/);
     }
+    // The pointer to an unlisted dimension's units is evidence, not an action.
+    expect(seen(part(widget("Equality"), "evidence"))).toContain("The files that hold the most complexity are ranked in");
   });
 
-  it("Acyclicity below a full score points to logos dsm", async () => {
-    stub(HEALTH); // acyclicity 0.8
-    render(<HealthView />);
-    await screen.findByText("Signal evolution");
-    expect(seen(part(widget("Acyclicity"), "where"))).toBe("command logos dsm");
-    expect(seen(part(widget("Acyclicity"), "action"))).toMatch(/^Find the cycles in the Architecture dependency matrix/);
-  });
-
-  it("renders an ADR-21 drop-out as a stated n/a, never a fabricated zero, with nothing to do", async () => {
+  it("renders an ADR-21 drop-out as a stated n/a, never a fabricated zero", async () => {
     const m = clone();
     m.scan.metrics.cohesion = null;
     m.scan.metrics.focus = null;
@@ -566,11 +491,11 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
       expect(w.querySelector("[data-widget-absence]")).not.toBeNull();
       expect(within(w).queryByRole("meter")).toBeNull();
       expect(within(w).queryByRole("table")).toBeNull();
-      expectWidgetCopy(w, DIMENSION_COPY[key], { kind: "not-applicable" });
+      expectWidgetCopy(w, DIMENSION_COPY[key]);
     }
   });
 
-  it("renders a CR-156 Modularity drop-out as not applicable with its reason — no score bar, nothing to do", async () => {
+  it("renders a CR-156 Modularity drop-out as not applicable with its reason — no score bar", async () => {
     const m = clone();
     m.scan.metrics.modularity = { raw: -0.5, normalized: 0 };
     m.scan.metrics.modularity_not_applicable = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
@@ -589,7 +514,7 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
       "not applicable 3 of 5 dependency edges — too few for community structure",
       "Q -0.50 (Newman's modularity, from −0.5 to 1)",
     ]);
-    expectWidgetCopy(w, DIMENSION_COPY.modularity, { kind: "not-applicable" });
+    expectWidgetCopy(w, DIMENSION_COPY.modularity);
   });
 });
 
@@ -612,7 +537,6 @@ describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
       expect(seen(w)).not.toMatch(NOT_RECORDED);
       expect(within(w).queryByRole("table")).toBeNull();
       expect(within(part(w, "title")!).getByText("none flagged")).toBeInTheDocument();
-      expect(seen(part(w, "action"))).toBe(NOTHING_TO_DO);
     }
   });
 
@@ -629,10 +553,10 @@ describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
       expect(seen(w)).not.toMatch(/none flagged/i);
       expect(within(w).queryByRole("table")).toBeNull();
       expect(within(part(w, "title")!).getByText("not recorded")).toBeInTheDocument();
-      // The remedy is named as the command, in the where chip.
-      expect(seen(part(w, "where"))).toBe("command logos scan");
+      // The absence names the command that records them (CR-206).
+      expect(seen(part(w, "evidence"))).toBe("Offenders were not recorded for this snapshot; run logos scan to record them.");
       const key = name.toLowerCase() as DimensionKey;
-      expectWidgetCopy(w, DIMENSION_COPY[key], scored(HEALTH.scan.metrics[key]!.normalized, "not-recorded"));
+      expectWidgetCopy(w, DIMENSION_COPY[key]);
     }
   });
 
@@ -778,18 +702,20 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
       // Pinned by its claim, not by the catalogue that wrote it: no scan, never the index.
       expect(seen(part(widget(title), "figure"))).toMatch(/no scan has been run/);
       expect(seen(part(widget(title), "figure"))).not.toMatch(/nothing indexed/);
-      expect(seen(part(widget(title), "where"))).toBe("command logos scan");
-      expect(seen(part(widget(title), "action"))).toMatch(/^Run a scan/);
+      // The absence names the command that changes it (CR-206).
+      expect(seen(part(widget(title), "figure"))).toMatch(/; run logos scan\.$/);
     }
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "absent", absence: "unscanned" });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "absent", absence: "unscanned" });
-    expectWidgetCopy(widget("Signal trend"), signalTrendCopy, { snapshots: 0 });
-    // …and all three name the command that produces the missing figure.
-    expect(screen.getAllByText("logos scan").length).toBe(3);
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
+    expectWidgetCopy(widget("Signal trend"), signalTrendCopy);
+    // …and all three name the command that produces the missing figure, the
+    // empty trend in its own absence sentence.
+    expect(widgetsNaming("logos scan")).toEqual(["Gate", "Quality signal", "Signal trend"]);
+    expect(seen(part(widget("Signal trend"), "figure"))).toBe("No snapshots yet; run logos scan to record the first.");
     // No dimension widget without a figure, no step that cannot change the readout,
     // no blame on the graph, and no centred EmptyState inside a widget.
     expect(frames().map(widgetTitle)).toEqual(["Gate", "Quality signal", "Signal trend"]);
-    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    expect(widgetsNaming("logos index")).toEqual([]);
     expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
     expect(document.querySelectorAll("[data-widget-absence]")).toHaveLength(3);
   });
@@ -802,12 +728,12 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
     render(<HealthView />);
     expect((await screen.findAllByText(READING_ABSENCE["no-production-scope"])).length).toBe(2);
     expect(READING_ABSENCE["no-production-scope"]).toMatch(/no production functions to score/);
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "absent", absence: "no-production-scope" });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "absent", absence: "no-production-scope" });
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
     // The false claim the old discriminant would have made, and the no-op remedy.
     expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
-    expect(screen.queryByText("logos scan")).not.toBeInTheDocument();
-    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    expect(widgetsNaming("logos scan")).toEqual([]);
+    expect(widgetsNaming("logos index")).toEqual([]);
   });
 
   it("keeps a distinct state naming `logos index` for a genuinely empty graph", async () => {
@@ -816,12 +742,11 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
     expect((await screen.findAllByText(READING_ABSENCE.unindexed)).length).toBe(2);
     for (const title of ["Gate", "Quality signal"]) {
       expect(seen(part(widget(title), "figure"))).toMatch(/nothing indexed/);
-      expect(seen(part(widget(title), "where"))).toBe("command logos index");
-      expect(seen(part(widget(title), "action"))).toMatch(/^Index the project/);
+      expect(seen(part(widget(title), "figure"))).toMatch(/; run logos index, then logos scan\.$/);
     }
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "absent", absence: "unindexed" });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "absent", absence: "unindexed" });
-    expect(screen.getAllByText("logos index").length).toBe(2);
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
+    expect(widgetsNaming("logos index")).toEqual(["Gate", "Quality signal"]);
     expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
   });
 });
@@ -839,31 +764,27 @@ describe("not-current readings (CR-135, S-436)", () => {
     // Both widgets carry the same single sentence — one classification, two widgets.
     expect((await screen.findAllByText(/no longer indexed/i)).length).toBe(2);
     expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
-    // …each naming the command that does change what is reported (FR-EH-04): the
-    // Gate, the Quality signal and the ten dimension widgets scored from it.
-    expect(screen.getAllByText("logos index").length).toBe(12);
-    const currency = { date: "2025-09-19" };
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "stale", currency });
+    // …each naming the command that does change what is reported (FR-EH-04), in
+    // that sentence (CR-206); the dimension widgets point to the Gate for why.
+    expect(widgetsNaming("logos index")).toEqual(["Gate", "Quality signal"]);
+    expect(screen.getAllByText(/; run logos index before reading them as current\.$/).length).toBe(2);
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
     // The figures are still there — labelled, never discarded — under a red STALE chip.
     const chip = within(part(widget("Gate"), "title")!).getByText("STALE");
     expect(chip.className).toBe(chipClass("red"));
     expect(chip.className).not.toBe(chipClass("orange"));
     expect(seen(part(widget("Gate"), "figure"))).toMatch(/^PASS · signal 8000 vs baseline 7800/);
     expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
-    for (const title of ["Gate", "Quality signal"]) {
-      expect(seen(part(widget(title), "where"))).toBe("command logos index");
-      expect(seen(part(widget(title), "action"))).toMatch(/^Re-index the project/);
-    }
     // …but nothing asserts they are current: no green PASS chip.
     expect(within(part(widget("Gate"), "title")!).queryByText("PASS")).toBeNull();
   });
 
   // CR-135: one classification for the whole page. A dimension widget scored from
-  // the same not-current snapshot says so and takes the Gate's remedy — it never
-  // prescribes source changes from figures the graph has moved on from.
-  it("carries the not-current reading into every dimension widget, with the Gate's remedy", async () => {
-    for (const [indexed, where] of [[false, "command logos index"], [true, "command logos scan"]] as const) {
+  // the same not-current snapshot says so and points to the Gate, whose sentence
+  // names the command — it states no remedy of its own.
+  it("carries the not-current reading into every dimension widget, pointing to the Gate", async () => {
+    for (const [indexed, command] of [[false, "logos index"], [true, "logos scan"]] as const) {
       cleanup();
       const m = clone();
       m.scan.worst_offenders = realOffenders.recorded; // Nesting would otherwise act on 3 listed
@@ -873,16 +794,12 @@ describe("not-current readings (CR-135, S-436)", () => {
       stub(m);
       render(<HealthView />);
       await screen.findByText("Signal evolution");
-      const currency = indexed
-        ? ({ date: "2025-09-19", cause: "moved-past" } as const)
-        : ({ date: "2025-09-19" } as const);
       for (const row of metricRows(m.scan.metrics)) {
         const w = widget(row.name);
-        expect(seen(part(w, "figure")), row.name).toContain("not established as a current reading");
-        expect(seen(part(w, "where")), row.name).toBe(where);
-        expect(seen(part(w, "action")), row.name).not.toMatch(/Flatten|Split|Merge|Find|Move/);
-        expectWidgetCopy(w, DIMENSION_COPY[row.key], { kind: "stale", currency });
+        expect(seen(part(w, "figure")), row.name).toContain("not established as a current reading — see the Gate for why");
+        expectWidgetCopy(w, DIMENSION_COPY[row.key]);
       }
+      expect(widgetsNaming(command)).toEqual(["Gate", "Quality signal"]);
     }
   });
 
@@ -897,8 +814,33 @@ describe("not-current readings (CR-135, S-436)", () => {
     render(<HealthView />);
     await screen.findAllByText(/no longer indexed/i);
     expect(seen(part(widget("Gate"), "figure"))).toMatch(/^FAIL · signal 7000 vs baseline 7800/);
-    expect(seen(part(widget("Gate"), "where"))).toBe("command logos index");
-    expect(seen(part(widget("Gate"), "action"))).not.toMatch(/lowest-scoring/);
+    expect(seen(part(widget("Gate"), "figure"))).toMatch(/run logos index before reading them as current/);
+    expect(seen(part(widget("Gate"), "figure"))).not.toMatch(/Lowest-scoring dimension/);
+  });
+
+  // CRA-02: only a CURRENT FAIL names its lowest-scoring dimension. Each stale
+  // arm, not only the de-index above, keeps the FAIL figure and drops the fact.
+  it.each([
+    ["moved past", (m: HealthModel) => {
+      m.evolution.snapshots[1].created_at = 1_758_240_000;
+      m.status.last_full_index_at = String(1_758_240_000 + 86_400);
+    }, /the graph has been indexed or synced since/],
+    ["indeterminate", (m: HealthModel) => {
+      m.status.last_full_index_at = null;
+      m.status.last_sync_at = null;
+    }, /no index or sync time is recorded/],
+  ] as const)("names no lowest-scoring dimension on a FAIL whose snapshot is %s (HF-1 review)", async (_name, stale, note) => {
+    const m = clone();
+    m.gate.passed = false;
+    m.gate.signal = 7700;
+    m.scan.metrics.depth = mv(0.2);
+    stale(m);
+    stub(m);
+    render(<HealthView />);
+    await screen.findAllByText(note);
+    const figure = seen(part(widget("Gate"), "figure"));
+    expect(figure).toMatch(/^FAIL · signal 7700 vs baseline 7800/);
+    expect(figure).not.toMatch(/Lowest-scoring dimension/);
   });
 
   it("renders the undated fallback rather than a fabricated date when nothing dates the snapshot", async () => {
@@ -919,7 +861,7 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(screen.queryByText("STALE")).not.toBeInTheDocument();
     expect(screen.queryByText(/no longer indexed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
-    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    expect(widgetsNaming("logos index")).toEqual([]);
   });
 
   // S-436: `status.indexed` is TRUE here, so before S-436 this rendered a green PASS
@@ -935,16 +877,12 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
     // …naming the step that changes what IS reported: a new snapshot, not a new index
     // (Gate, Quality signal, and the ten dimension widgets scored from it).
-    expect(screen.getAllByText("logos scan").length).toBe(12);
-    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
-    const currency = { date: "2025-09-19", cause: "moved-past" } as const;
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "stale", currency });
+    expect(widgetsNaming("logos scan")).toEqual(["Gate", "Quality signal"]);
+    expect(screen.getAllByText(/Run logos scan to record a snapshot of the graph as it stands now\.$/).length).toBe(2);
+    expect(widgetsNaming("logos index")).toEqual([]);
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
     expect(within(part(widget("Gate"), "title")!).getByText("MOVED PAST").className).toBe(chipClass("red"));
-    for (const title of ["Gate", "Quality signal"]) {
-      expect(seen(part(widget(title), "where"))).toBe("command logos scan");
-      expect(seen(part(widget(title), "action"))).toMatch(/^Run a scan/);
-    }
     expect(seen(part(widget("Gate"), "figure"))).toMatch(/^PASS · signal 8000 vs baseline 7800/);
     // It claims what the comparison establishes and no more, and says the over-report out loud.
     expect(screen.queryByText("STALE")).not.toBeInTheDocument();
@@ -982,9 +920,8 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
     expect(screen.queryByText("STALE")).not.toBeInTheDocument();
     // No command: none of the three missing facts is fixed by running one.
-    expect(screen.queryByText("logos scan")).not.toBeInTheDocument();
-    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
-    for (const title of ["Gate", "Quality signal"]) expect(seen(part(widget(title), "action"))).toBe(NOTHING_TO_DO);
+    expect(widgetsNaming("logos scan")).toEqual([]);
+    expect(widgetsNaming("logos index")).toEqual([]);
     // The figures are still there.
     expect(seen(part(widget("Gate"), "figure"))).toMatch(/^PASS · signal 8000 vs baseline 7800/);
   });
@@ -998,9 +935,8 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect((await screen.findAllByText(/no index or sync time is recorded/i)).length).toBe(2);
     expect(screen.getByText("UNVERIFIED")).toBeInTheDocument();
     // The third stale variant passes the message standard on both widgets too.
-    const currency = { date: null, cause: "indeterminate", detail: "no index or sync time is recorded" } as const;
-    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });
-    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "stale", currency });
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
   });
 
   // The third indeterminate sentence, pinned where it is RENDERED, so its wording
@@ -1018,7 +954,8 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
     // "Names no command" holds of the two widgets; the empty trend legitimately
     // names `logos scan` for its own, different absence.
-    for (const title of ["Gate", "Quality signal"]) expect(part(widget(title), "where")).toBeNull();
+    expect(widgetsNaming("logos scan")).toEqual(["Signal trend"]);
+    expect(widgetsNaming("logos index")).toEqual([]);
     expect(screen.queryByText(/no index or sync time is recorded/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/recorded ahead of now/i)).not.toBeInTheDocument();
   });

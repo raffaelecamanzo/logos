@@ -2,10 +2,9 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CoverageModel } from "../../api/types.ts";
-import { perFileCoverage, untestedHotspots } from "../../copy/coverageView.copy.ts";
+import { COVERAGE_VIEW_ABSENCE, perFileCoverage, untestedHotspots } from "../../copy/coverageView.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
-import type { CopyEntry } from "../../copy/types.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { CoverageView } from "./CoverageView.tsx";
 
 const STATUS = { indexed: true, file_count: 9, node_count: 99, edge_count: 80, db_path: ".logos/graph.db", db_size_bytes: 12288, last_full_index_at: "1719600000", last_sync_at: null, graph_revision: 7, refs_total: 120, refs_resolved: 118, refs_unresolved: 2, resolution_coverage: 0.983, total_line_count: null, source_line_count: null, test_line_count: null, freshness: "fresh", warnings: [] };
@@ -97,8 +96,10 @@ describe("CoverageView (S-188, FR-UI-11)", () => {
     stubFetch(empty);
     render(<CoverageView />);
     expect((await screen.findAllByText(/No coverage ingested/)).length).toBe(2);
-    // Both widgets name the ingest command in their where chip.
-    expect(screen.getAllByText("logos coverage ingest <report>")).toHaveLength(2);
+    // Both widgets name the ingest command in their absence sentence (CR-206).
+    const absences = [...document.querySelectorAll("[data-widget-absence]")].map((a) => a.textContent);
+    expect(absences).toEqual([COVERAGE_VIEW_ABSENCE.notIngested, COVERAGE_VIEW_ABSENCE.notIngested]);
+    expect(COVERAGE_VIEW_ABSENCE.notIngested).toMatch(/; run logos coverage ingest <report> /);
   });
 });
 
@@ -123,24 +124,24 @@ const STATES = [
     name: "populated (an untested file, a stale file)",
     model: populated,
     expected: [
-      ["Untested hotspots", { ingested: true, ranked: true, files: 1 }, "act"],
-      ["Per-file coverage", { ingested: true, stale: 1 }, "act"],
+      "Untested hotspots",
+      "Per-file coverage",
     ],
   },
   {
     name: "all fresh, nothing untested",
     model: allFresh,
     expected: [
-      ["Untested hotspots", { ingested: true, ranked: true, files: 0 }, "none"],
-      ["Per-file coverage", { ingested: true, stale: 0 }, "none"],
+      "Untested hotspots",
+      "Per-file coverage",
     ],
   },
   {
     name: "no coverage ingested",
     model: empty,
     expected: [
-      ["Untested hotspots", { ingested: false, ranked: false, files: 0 }, "act"],
-      ["Per-file coverage", { ingested: false, stale: 0 }, "act"],
+      "Untested hotspots",
+      "Per-file coverage",
     ],
   },
   {
@@ -148,23 +149,21 @@ const STATES = [
     name: "nothing ranked (no git history)",
     model: notRanked,
     expected: [
-      ["Untested hotspots", { ingested: true, ranked: false, files: 0 }, "act"],
-      ["Per-file coverage", { ingested: true, stale: 0 }, "none"],
+      "Untested hotspots",
+      "Per-file coverage",
     ],
   },
 ] as const;
 
 describe("Coverage widgets explain themselves (S-617, FR-UI-39/40)", () => {
-  it.each(STATES)("$name: one stack, each widget its catalogue entry at its state", async ({ model, expected }) => {
+  it.each(STATES)("$name: one stack, each widget its catalogue entry", async ({ model, expected }) => {
     stubFetch(model);
     const { container } = render(<CoverageView />);
     await screen.findByRole("heading", { name: "Per-file coverage" });
     const widgets = expectOneWidgetStack(container);
-    expect(widgets.map(widgetTitle)).toEqual(expected.map(([title]) => title));
-    for (const [i, [, state, kind]] of expected.entries()) {
-      expect(actionKind(widgets[i])).toBe(kind);
-      expectWidgetCopy(widgets[i], (i === 0 ? untestedHotspots : perFileCoverage) as CopyEntry<never>, state as never);
-    }
+    expect(widgets.map(widgetTitle)).toEqual([...expected]);
+    expectWidgetCopy(widgets[0], untestedHotspots);
+    expectWidgetCopy(widgets[1], perFileCoverage);
   });
 
   it("states an un-ingested report in each widget's figure row, never as a centred empty state", async () => {
@@ -184,11 +183,25 @@ describe("Coverage widgets explain themselves (S-617, FR-UI-39/40)", () => {
   });
 });
 
-it("states the read-model's notice when nothing was ranked, and names the ranking command (review fix)", async () => {
+it("names the ranking command in its own nothing-ranked absence, when the read-model has no notice (HF-1 review)", async () => {
+  stubFetch(() => {
+    const m = notRanked();
+    m.untested = { ...m.untested, notice: null, degraded: null } as CoverageModel["untested"];
+    return m;
+  });
+  render(<CoverageView />);
+  const heading = await screen.findByRole("heading", { name: "Untested hotspots" });
+  expect(heading.closest("[data-widget]")!.querySelector("[data-widget-absence]")?.textContent).toBe(
+    "No files ranked yet, so no untested file can be named; run logos hotspots to rank the files from the git history.",
+  );
+});
+
+it("states the read-model's notice alone when nothing was ranked: a degraded history is not fixed by the ranking command (HF-1 review)", async () => {
   stubFetch(notRanked);
   render(<CoverageView />);
   const heading = await screen.findByRole("heading", { name: "Untested hotspots" });
   const widget = heading.closest("[data-widget]")!;
-  expect(widget.querySelector("[data-widget-absence]")).toHaveTextContent("not a git repository: churn unavailable");
-  expect(widget.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos hotspots");
+  // Not a git repository: re-running `logos hotspots` returns the same degraded
+  // answer, so the absence names no command (R3; FR-UI-39).
+  expect(widget.querySelector("[data-widget-absence]")?.textContent).toBe("not a git repository: churn unavailable");
 });

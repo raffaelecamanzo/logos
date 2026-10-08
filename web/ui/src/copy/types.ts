@@ -1,15 +1,19 @@
 /*
- * The copy-catalogue entry type (S-611, CR-203, FR-UI-39).
+ * The copy-catalogue entry type (S-611, CR-203, CR-206, FR-UI-39).
  *
- * Every figure widget states four parts: what it shows, why it matters, what to
- * do, and — exactly when there is something to do — where. A view's catalogue is
- * one `*.copy.ts` module beside the view whose entries are `CopyEntry`s; the
- * `Widget` frame renders an entry for the widget's current state.
+ * Every figure widget states two parts: what it shows and why it matters. A
+ * view's catalogue is one `*.copy.ts` module beside the view whose entries are
+ * `CopyEntry`s; the `Widget` frame renders an entry's parts. The action line
+ * ("What you can do", with its where chip) was removed end to end by CR-206: an
+ * absent state names the command that fixes it in its absence sentence instead.
  *
- * The type is the enforcement: `what`, `why` and `action` are all required, so a
- * catalogue entry missing a part is a `tsc -b` error, and `where` exists only on
- * the `act` arm of `WidgetAction`, so "where present iff act" holds by
- * construction for every entry the type admits.
+ * The type is the enforcement: `what` and `why` are required, so a catalogue
+ * entry missing either is a `tsc -b` error, and `action` is typed `never`, so an
+ * entry that brings one back is a `tsc -b` error too.
+ *
+ * A table row's own action (`ActionCell`: the Members and Binding evidence
+ * columns) is row content, not the widget's action line, and keeps its own
+ * type, `RowAction`, below.
  */
 
 import type { GlossaryTerm } from "./glossary.ts";
@@ -31,11 +35,25 @@ export interface Gloss {
  */
 export type CopyText = string | readonly (string | Gloss)[];
 
-/** The four kinds of place a reader acts on (FR-UI-39 "Where"). */
-export type WhereKind = "source code" | "documentation" | "configuration" | "command";
+/** One widget's copy. */
+export interface CopyEntry {
+  /** One sentence: what the widget shows; a share carries its denominator. */
+  readonly what: CopyText;
+  /** One sentence: the decision the figure supports or the failure it guards. */
+  readonly why: CopyText;
+  /** Removed by CR-206: an entry carrying an action line is a type error. */
+  readonly action?: never;
+}
 
-/** What the reader can do, as a function of the widget's state. */
-export type WidgetAction =
+// ── A table row's own action (ActionCell) ────────────────────────────────────
+
+/** The kinds of place a row action names. (The widget action line also named
+ *  "documentation"; no row action does, so CR-206 dropped it with that line.) */
+export type WhereKind = "source code" | "configuration" | "command";
+
+/** What a reader can do about one table row (the Members and Binding evidence
+ *  columns, rendered by `ActionCell`). */
+export type RowAction =
   | {
       readonly kind: "act";
       /** Which kind of place the action happens in. */
@@ -47,18 +65,11 @@ export type WidgetAction =
     }
   | { readonly kind: "none" };
 
-/** One widget's copy. `S` is the widget's state, as the view computes it. */
-export interface CopyEntry<S = void> {
-  /** One sentence: what the widget shows; a share carries its denominator. */
-  readonly what: CopyText;
-  /** One sentence: the decision the figure supports or the failure it guards. */
-  readonly why: CopyText;
-  /** The action for a state: `act` with where, or `none` ("Nothing to do"). */
-  readonly action: (state: S) => WidgetAction;
-}
-
-/** The fixed text a `none` action renders. One spelling, every widget. */
+/** The fixed text a row's `none` action renders by default. */
 export const NOTHING_TO_DO = "Nothing to do — informational.";
+
+/** A row with nothing to do. */
+export const noRowAction: RowAction = { kind: "none" };
 
 /** Shorthand for a gloss inside catalogue text. */
 export function gloss(term: GlossaryTerm, text?: string): Gloss {
@@ -70,6 +81,3 @@ export function gloss(term: GlossaryTerm, text?: string): Gloss {
 export function plural(n: number, one: string, many: string): string {
   return n === 1 ? one : many;
 }
-
-/** Shorthand for an action with nothing to do. */
-export const noAction: WidgetAction = { kind: "none" };

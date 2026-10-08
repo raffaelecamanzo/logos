@@ -1,4 +1,4 @@
-// The widget frame (S-611, FR-UI-40). Vitest asserts DOM order and class
+// The widget frame (S-611, CR-206, FR-UI-40). Vitest asserts DOM order and class
 // PLACEMENT; under `css: false` a CSS-module import is a proxy that returns the
 // class name, so computed style is the Playwright spec's job (web/ui/e2e/).
 import { render, screen } from "@testing-library/react";
@@ -21,19 +21,20 @@ const parts = (root: Element) =>
   [...root.querySelectorAll("[data-widget-part]")].map((el) => el.getAttribute("data-widget-part"));
 
 describe("Widget", () => {
-  it("renders title, figure, explanation, action and evidence in that order", () => {
+  it("renders title, figure, explanation and evidence in that order — no action line (CR-206)", () => {
     const { container } = render(
       <Widget
         title="Thresholds"
         badge={<Badge tone="red">fail</Badge>}
         copy={thresholds}
-        state={{ breached: 2 }}
         figure={<span>2 of 9 measures</span>}
       >
         <table aria-label="evidence" />
       </Widget>,
     );
-    expect(parts(container)).toEqual(["title", "figure", "explanation", "action", "evidence"]);
+    expect(parts(container)).toEqual(["title", "figure", "explanation", "evidence"]);
+    expect(container.querySelector('[data-widget-copy="action"], [data-widget-copy="where"]')).toBeNull();
+    expect(container).not.toHaveTextContent("What you can do");
     expect(screen.getByRole("table", { name: "evidence" }).closest("[data-widget-part]")).toHaveAttribute(
       "data-widget-part",
       "evidence",
@@ -54,18 +55,15 @@ describe("Widget", () => {
     expect(part("title").lastElementChild).toHaveClass(styles.badge);
     expect(part("figure")).toHaveClass(styles.figureRow);
     expect(part("explanation")).toHaveClass(styles.explanation);
-    expect(part("action")).toHaveClass(styles.action);
     expect(part("evidence")).toHaveClass(styles.evidence);
-    // Explanation and action carry the SAME body class: one body size (FR-UI-40).
-    const what = container.querySelector('[data-widget-copy="what"]')!;
-    const actionText = container.querySelector('[data-widget-copy="action"]')!.closest("p")!;
-    expect(what).toHaveClass(styles.body);
-    expect(actionText).toHaveClass(styles.body);
+    // What and why carry the body class: the explanation is set at the body size (FR-UI-40).
+    expect(container.querySelector('[data-widget-copy="what"]')).toHaveClass(styles.body);
+    expect(container.querySelector('[data-widget-copy="why"]')).toHaveClass(styles.body);
   });
 
   it("omits the figure row, the badge and the evidence when it has none", () => {
     const { container } = render(<Widget title="Observe" copy={observe} />);
-    expect(parts(container)).toEqual(["title", "explanation", "action"]);
+    expect(parts(container)).toEqual(["title", "explanation"]);
     expect(container.querySelector(`.${styles.badge}`)).toBeNull();
   });
 
@@ -80,13 +78,13 @@ describe("Widget", () => {
         {nothing}
       </Widget>,
     );
-    expect(parts(container)).toEqual(["title", "explanation", "action"]);
+    expect(parts(container)).toEqual(["title", "explanation"]);
     expect(container.querySelector(`.${styles.badge}`)).toBeNull();
   });
 
   it("states an absence in the figure row, left-aligned, with no EmptyState", () => {
     const { container } = render(
-      <Widget title="Coverage" copy={coverage} state={{ ingested: false }} absence="No coverage ingested yet." />,
+      <Widget title="Coverage" copy={coverage} absence="No coverage ingested yet." />,
     );
     const figure = container.querySelector('[data-widget-part="figure"]')!;
     const statement = screen.getByText("No coverage ingested yet.");
@@ -117,35 +115,15 @@ describe("Widget", () => {
     expect(container.querySelector("[data-widget-note]")).toBeNull();
   });
 
-  it("labels the action line \"What you can do\"", () => {
-    const { container } = render(<Widget title="T" copy={observe} />);
-    expect(container.querySelector('[data-widget-part="action"]')).toHaveTextContent(/^What you can do: /);
-  });
-
-  it("renders the where chip with its target only for an act action", () => {
-    const { container, rerender } = render(<Widget title="T" copy={thresholds} state={{ breached: 1 }} />);
-    const where = container.querySelector('[data-widget-copy="where"]')!;
-    expect(where).toHaveClass(styles.where);
-    expect(where).toHaveTextContent("configuration .logos/rules.toml [metric_thresholds]");
-    expect(where.querySelector("code")).toHaveClass(styles.target);
-    expect(container.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "act");
-
-    rerender(<Widget title="T" copy={thresholds} state={{ breached: 0 }} />);
-    expect(container.querySelector('[data-widget-copy="where"]')).toBeNull();
-    expect(container.querySelector('[data-widget-copy="action"]')).toHaveTextContent(
-      "Nothing to do — informational.",
-    );
-  });
-
   it("renders a glossed term through Term", () => {
-    const { container } = render(<Widget title="T" copy={thresholds} state={{ breached: 0 }} />);
+    const { container } = render(<Widget title="T" copy={thresholds} />);
     const dfn = container.querySelector('[data-widget-copy="what"] dfn')!;
     expect(dfn).toHaveAttribute("data-term", "arm");
   });
 });
 
 describe("Widget in panel mode (S-617, a tool panel)", () => {
-  it("renders the title, the register's one line, then the tool — no figure, why or action", () => {
+  it("renders the title, the register's one line, then the tool — no figure or why", () => {
     const { container } = render(
       <Widget panel="graphQuery" title="Query the whole graph" badge={<Badge tone="muted">idle</Badge>}>
         <form aria-label="query" />

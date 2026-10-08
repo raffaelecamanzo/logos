@@ -27,7 +27,7 @@ import {
   SERVICE_MAP_TEXT,
 } from "../../copy/serviceMap.copy.ts";
 import { copyTextString } from "../../copy/text.ts";
-import { actionKind, expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import {
   HEALTHY_COVERAGE,
   MULTI_REASON_COVERAGE,
@@ -752,7 +752,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     // S-617: restored, the board returns already explained, in the tab's one stack.
     const board = routeRow.closest("section")!;
     expect(widgetTitle(board)).toBe("Coverage by relation arm");
-    expectWidgetCopy(board, coverageByArm, undefined);
+    expectWidgetCopy(board, coverageByArm);
     const tab = screen.getByRole("tabpanel", { name: /cross-service coverage/i });
     expect(expectOneWidgetStack(tab)).toContain(board);
   });
@@ -1972,10 +1972,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     const card = screen.getByRole("heading", { name: "Declared contracts" }).closest("section")!;
     expect(within(card).queryByRole("table", { name: /accessible twin of the declared layer/i })).toBeNull();
     expect(card).toHaveTextContent("No member on this map declares a contract.");
-    // No document to check, so nothing to do (S-614): the widget's `none`
-    // state, held to the message standard like its `act` one.
-    expect(actionKind(card)).toBe("none");
-    expectWidgetCopy(card, declaredContracts, { documents: 0 });
+    expectWidgetCopy(card, declaredContracts);
     const registry = within(card).getByRole("table", { name: /Named externals/ });
     expect(within(registry).getAllByRole("cell").map((c) => c.textContent)).toEqual([
       "PSS pss-mock:source.yaml",
@@ -2045,59 +2042,36 @@ describe("WorkspaceView — the coverage tab explains itself, in one stack (S-61
     expect(Object.keys(COVERAGE_TAB_STATES)).toEqual(["healthy", "partial coverage", "nothing measured", "degraded member"]);
   });
 
-  /** Each widget's action kind in each state, written out rather than read back
-   *  from the catalogue (which `expectWidgetCopy` derives its expectation from),
-   *  so a wrong catalogue branch or a wrong view state fails here. */
-  const EXPECTED_ACTIONS: Record<keyof typeof COVERAGE_TAB_STATES, string[]> = {
-    // Resolved, Spec, Intake, Declared, Build — all clean, build facts all read.
-    healthy: ["none", "none", "none", "none", "none"],
-    // 7 calls unresolved, 7 references unmatched, captured calls resolve, a
-    // declared relation is informational, one member's build facts unread.
-    "partial coverage": ["act", "act", "none", "none", "act"],
-    // Resolved, Spec, Intake, Build (absent): nothing to act on.
-    "nothing measured": ["none", "none", "none", "none"],
-    // Resolved, Spec, Intake, Build (absent).
-    "degraded member": ["act", "act", "none", "none"],
-  };
-
   it.each(Object.entries(COVERAGE_TAB_STATES))(
     "%s: every widget is a Widget under the tab's one WidgetStack and carries the message standard",
-    async (state, opts) => {
+    async (_state, opts) => {
       const panel = await openCoverageTab(opts);
       const widgets = expectOneWidgetStack(panel);
       expect(widgets.map(widgetTitle)).toEqual(
         opts.coverage?.declared_contracts ? COVERAGE_TAB_WIDGETS : WITHOUT_DECLARED,
       );
       for (const w of widgets) expectWidgetCopy(w);
-      expect(widgets.map(actionKind)).toEqual(EXPECTED_ACTIONS[state as keyof typeof COVERAGE_TAB_STATES]);
     },
   );
 
-  it("each widget renders its own catalogue entry for its state", async () => {
+  it("each widget renders its own catalogue entry", async () => {
     const panel = await openCoverageTab(COVERAGE_TAB_STATES["partial coverage"]);
     const spec = tabWidget(panel, "Spec conformance (declared endpoints vs controllers)");
-    expectWidgetCopy(spec, specConformance, { notMatched: 7 });
+    expectWidgetCopy(spec, specConformance);
     // The ratio is over the contract-surface walk the shortfall describes, so
     // the rider sits beside it, not only on the headline.
     expect(spec.querySelector('[data-widget-part="figure"]')?.textContent).toContain(
       COVERAGE_TEXT.shortfall(PARTIAL_COVERAGE.members_read, PARTIAL_COVERAGE.members_total),
     );
-    expectWidgetCopy(tabWidget(panel, "Coverage by intake"), coverageByIntake, { finding: "captured-resolves" });
+    expectWidgetCopy(tabWidget(panel, "Coverage by intake"), coverageByIntake);
     expectWidgetCopy(tabWidget(panel, "Declared contracts and named externals"), declaredRelations);
-    expectWidgetCopy(tabWidget(panel, "Build dependencies"), buildDependencies, { unread: 1 });
+    expectWidgetCopy(tabWidget(panel, "Build dependencies"), buildDependencies);
   });
 
   it("glosses 'intake' in the Coverage by intake title", async () => {
     const panel = await openCoverageTab({ coverage: MULTI_REASON_COVERAGE });
     const title = tabWidget(panel, "Coverage by intake").querySelector('[data-widget-part="title"]')!;
     expect(title.querySelector("dfn")?.getAttribute("data-term")).toBe("intake");
-  });
-
-  it("the captured-call finding asks for action only when captured calls resolve nowhere", async () => {
-    const panel = await openCoverageTab({ coverage: COVERAGE });
-    const intake = tabWidget(panel, "Coverage by intake");
-    expectWidgetCopy(intake, coverageByIntake, { finding: "captured-unresolved" });
-    expect(intake.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos workspace status");
   });
 });
 
@@ -2206,16 +2180,12 @@ describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)"
     expect(within(kind).getAllByRole("option").map((o) => o.textContent)).toEqual(["All kinds", "HTTP", "gRPC", "Broker"]);
     await userEvent.selectOptions(kind, "route");
     expect(shownPairs()).toEqual(["api->web", "billing->api"]);
-    // Neither HTTP link has evidence: the widget says none of its 2 is shown,
-    // and — the refused key being filtered out — has nothing to ask.
+    // Neither HTTP link has evidence: the widget says none of its 2 is shown.
     expect(figureOf(evidence())).toBe(SERVICE_MAP_TEXT.evidenceShown(0, 2));
     expect(evidenceLinks()).toEqual([]);
-    expect(actionKind(evidence())).toBe("none");
     await userEvent.selectOptions(kind, "grpc-call");
     expect(shownPairs()).toEqual(["api->billing"]);
     expect(evidenceLinks()).toEqual(["api → billing"]);
-    // The refused key is shown again, so the widget asks for it again.
-    expect(actionKind(evidence())).toBe("act");
     await userEvent.selectOptions(kind, "broker-topic");
     expect(shownPairs()).toEqual(["web->billing"]);
     expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(1, 4));
@@ -2282,7 +2252,7 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     { ...BINDING, from: { member: "api", symbol: "d" }, from_value: SHARED_VALUE },
   ];
 
-  it("gives each row the action its refusal calls for, each with where, and the widget the configuration action", async () => {
+  it("gives each row the action its refusal calls for, each with where", async () => {
     stubApi({ providers: REFUSALS });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
@@ -2312,11 +2282,8 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     ]);
     for (const c of cells.slice(0, 2)) expect(c.querySelector("code")?.textContent).toMatch(/^k\./);
     expect(cells[3].querySelector("code")?.textContent).toBe("application-docker.yml");
-    // One key to define and one placeholder to replace: the widget acts, in
-    // configuration (written out, not read back from the catalogue).
-    expect(actionKind(widget)).toBe("act");
-    expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration");
-    expectWidgetCopy(widget, bindingEvidence, { define: 1, replace: 1 });
+    // The rows keep their own actions; the widget carries no action line (CR-206).
+    expectWidgetCopy(widget, bindingEvidence);
   });
 
   it("shows a refusal token this build does not know verbatim, and points at its reason — never 'correct the file'", async () => {
@@ -2344,13 +2311,11 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     expect(within(widget).getByText(SERVICE_MAP_TEXT.noKeyNamed)).toBeInTheDocument();
   });
 
-  it("has nothing to do when every shown value is committed or arrives at runtime", async () => {
+  it("explains itself when every shown value is committed or arrives at runtime", async () => {
     stubApi({ providers: REFUSALS.slice(2) });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
-    const widget = mapWidget("Binding evidence");
-    expectWidgetCopy(widget, bindingEvidence, { define: 0, replace: 0 });
-    expect(actionKind(widget)).toBe("none");
+    expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence);
   });
 });
 
@@ -2371,14 +2336,9 @@ describe("WorkspaceView — the service map's widgets explain themselves, in one
       "Declared contracts",
       "Cross-context model hint",
     ]);
-    // Each widget's action kind, written out rather than read back from the
-    // catalogue: the bindings are informational, the admitted value names its
-    // file only per row, the vendored documents ask for a counterparty check,
-    // and the hint asks for a review.
-    expect(widgets.map(actionKind)).toEqual(["none", "none", "act", "act"]);
     expectWidgetCopy(mapWidget("Cross-service bindings"), crossServiceBindings);
-    expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence, { define: 0, replace: 0 });
-    expectWidgetCopy(mapWidget("Declared contracts"), declaredContracts, { documents: 4 });
+    expectWidgetCopy(mapWidget("Binding evidence"), bindingEvidence);
+    expectWidgetCopy(mapWidget("Declared contracts"), declaredContracts);
     // The figure counts the widget's own tables, written out: 4 drawn links,
     // 4 documents, 2 bound calls.
     expect(figureOf(mapWidget("Declared contracts"))).toBe(
@@ -2399,12 +2359,11 @@ describe("WorkspaceView — the service map's widgets explain themselves, in one
     expect(figureOf(declared)).toBe("1 declared contract, from 1 document");
   });
 
-  it("the hint names the member's build manifest as where, and reads as a review hint, never a failure", async () => {
+  it("the hint reads as a review hint, never a failure", async () => {
     stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
     mount();
     await screen.findByText(/^1 member depends on the model libraries/);
     const hint = mapWidget("Cross-context model hint");
-    expect(hint.querySelector('[data-widget-copy="where"]')?.textContent).toBe("configuration pom.xml / build.gradle");
     expect(hint.querySelector('[data-widget-part="title"]')?.textContent).toContain("Review hint");
     expect(within(hint).queryByRole("alert")).toBeNull();
     // "bounded contexts" is glossed at its first use.

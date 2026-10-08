@@ -3,9 +3,8 @@
  * NFR-CC-04) — the in-app usage view over `GET /api/v1/statistics` (S-234). The
  * last read surface; it sits immediately above Config in the sidebar's last group.
  *
- * It stacks five widgets (S-616, CR-203 item 25), each saying what it shows, why
- * it matters and — every one of them informational — that there is nothing to
- * do: the value estimate (the dogfood metric, NFR-OO-03), a daily-activity line,
+ * It stacks five widgets (S-616, CR-203 item 25), each saying what it shows and
+ * why it matters: the value estimate (the dogfood metric, NFR-OO-03), a daily-activity line,
  * a top-tools & surfaces ranking, a dev-vs-`main` origin split, and the tool ×
  * origin cross-tab as one table with a Class column (FR-OB-11) — every chart
  * surface paired with an accessible data-table twin (WCAG 2.1 AA); the cross-tab
@@ -127,7 +126,6 @@ function ValueWidget({ stats }: { stats: StatsInfo }) {
     <Widget
       title="Estimated value"
       copy={estimatedValue}
-      state={{ recorded: true }}
       figure={
         <>
           <span>
@@ -401,7 +399,6 @@ function AwaitingData() {
       <Widget
         title="Estimated value"
         copy={estimatedValue}
-        state={{ recorded: false }}
         absence={statisticsAbsence.awaiting}
       />
     </WidgetStack>

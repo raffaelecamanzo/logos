@@ -8,66 +8,24 @@
  * formats the numbers it is handed and computes none.
  */
 
-import { gloss, noAction, plural, type CopyEntry, type WidgetAction } from "./types.ts";
+import { noRowAction, plural, type CopyEntry, type RowAction } from "./types.ts";
 
 // ── Cross-service reachability (item 2) ──────────────────────────────────────
 
-export interface ReachabilityState {
-  /** Callables unused in their own service but called from another. */
-  readonly keep: number;
-}
-
-export const reachability: CopyEntry<ReachabilityState> = {
+export const reachability: CopyEntry = {
   what: "Callables that nothing in their own service calls, but that another service in this workspace does.",
   why: "Their own repository's dead-code report lists them, yet deleting one breaks the service that calls it.",
-  action: ({ keep }) =>
-    keep === 0
-      ? noAction
-      : {
-          kind: "act",
-          where: "source code",
-          text: "Keep these callables when you remove dead code: another service still calls each one.",
-        },
 };
 
 // ── Members (item 3) ─────────────────────────────────────────────────────────
 
-export interface MembersState {
-  /** Members that could not be opened. */
-  readonly degraded: number;
-  /** Members with at least one callable unused across the workspace. */
-  readonly withUnused: number;
-}
-
-export const members: CopyEntry<MembersState> = {
+export const members: CopyEntry = {
   what: "Each service's own figures, one row per service: how much of its code links up, and how many of its callables nothing calls.",
   why: "A service that could not be opened adds nothing to any figure on this page, and a callable nothing in the workspace calls is a safe candidate for deletion.",
-  action: ({ degraded, withUnused }) => {
-    if (degraded > 0) {
-      return {
-        kind: "act",
-        where: "command",
-        target: "logos index",
-        text: "Run logos index in each member marked degraded, so it is read again; the row says what failed.",
-      };
-    }
-    if (withUnused > 0) {
-      return {
-        kind: "act",
-        where: "source code",
-        text: [
-          "Review the callables ",
-          gloss("unusedAcrossWorkspace", "unused across the workspace"),
-          " for deletion, starting with the service that has the most.",
-        ],
-      };
-    }
-    return noAction;
-  },
 };
 
 /** One member row's own action (the Members table's last column). */
-export function memberRowAction(row: { degraded: boolean; unusedAcross: number | null }): WidgetAction {
+export function memberRowAction(row: { degraded: boolean; unusedAcross: number | null }): RowAction {
   if (row.degraded) {
     return { kind: "act", where: "command", target: "logos index", text: "Run logos index in this member." };
   }
@@ -78,7 +36,7 @@ export function memberRowAction(row: { degraded: boolean; unusedAcross: number |
       text: `Review ${row.unusedAcross} ${plural(row.unusedAcross, "callable", "callables")} for deletion.`,
     };
   }
-  return noAction;
+  return noRowAction;
 }
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────

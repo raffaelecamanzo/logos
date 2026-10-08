@@ -45,6 +45,7 @@ import {
   resolvedEdges,
   specConformance,
   type IntakeFinding,
+  type NotResolvedReason,
 } from "../../copy/coverage.copy.ts";
 import {
   armLabel,
@@ -206,13 +207,12 @@ export function IntakeCard({ dashboard }: { dashboard: CoverageDashboard }) {
       <Widget
         title={title}
         copy={coverageByIntake}
-        state={{ finding }}
         absence={COVERAGE_TEXT.nothingFound(dashboard.coversAllMembers, dashboard.membersRead, dashboard.membersTotal)}
       />
     );
   }
   return (
-    <Widget title={title} copy={coverageByIntake} state={{ finding }} figure={<IntakeFigure finding={finding} captured={captured} />}>
+    <Widget title={title} copy={coverageByIntake} figure={<IntakeFigure finding={finding} captured={captured} />}>
       <DataTable
         caption="Cross-service coverage by intake population"
         columns={INTAKE_COLUMNS}
@@ -381,16 +381,17 @@ function EdgeLine({ line }: { line: string }) {
  *  never recomputed, and beside it the edge count in the server's composed
  *  `resolvedEdgesSummary` line, so BR-51's pairing — the count never without
  *  the rate — is the server's, not a fourth place that could forget it. Below
- *  100% the action lists the not-resolved reasons across every relation arm,
- *  largest first, with their remedies. The coverage shortfall is stated once,
- *  on Spec conformance, the board computed over the walk it describes. */
+ *  100% the evidence is the not-resolved reasons across every relation arm, as a
+ *  table of reason and count, largest first, summing to the unresolved figure —
+ *  measured counts, with no remedy text (CR-206). The coverage shortfall is
+ *  stated once, on Spec conformance, the board computed over the walk it
+ *  describes. */
 function ResolvedEdgesWidget({ dashboard }: { dashboard: CoverageDashboard }) {
   const state = resolvedEdgesState(dashboard);
   const common = {
     title: "Resolved cross-service edges",
     badge: <Badge tone="muted">Advisory</Badge>,
     copy: resolvedEdges,
-    state,
   } as const;
   if (dashboard.isEmpty || dashboard.egressResolution === null) {
     return (
@@ -420,9 +421,26 @@ function ResolvedEdgesWidget({ dashboard }: { dashboard: CoverageDashboard }) {
           <EdgeLine line={dashboard.resolvedEdgesSummary} />
         </div>
       }
-    />
+    >
+      {state.unresolved > 0 && state.reasons.length > 0 && (
+        <DataTable
+          columns={NOT_RESOLVED_COLUMNS}
+          rows={[...state.reasons]}
+          rowKey={(r) => r.reason}
+          caption={COVERAGE_TEXT.notResolvedCaption(state.unresolved)}
+          captionVisible
+        />
+      )}
+    </Widget>
   );
 }
+
+/** The not-resolved evidence: each reason and its count, in the largest-first
+ *  order `resolvedEdgesState` gives them. */
+const NOT_RESOLVED_COLUMNS: Column<NotResolvedReason>[] = [
+  { key: "reason", header: "Reason", cell: (r) => r.label, sortValue: (r) => r.label },
+  { key: "count", header: "Call sites", numeric: true, cell: (r) => r.count, sortValue: (r) => r.count },
+];
 
 /** Spec conformance (CR-203 §3.2 D item 10). Advisory only — never a gate input
  *  (ADR-53). The ratio is the server's, displayed verbatim:
@@ -455,7 +473,6 @@ function SpecConformanceWidget({
     title: "Spec conformance (declared endpoints vs controllers)",
     badge: <Badge tone="muted">Advisory</Badge>,
     copy: specConformance,
-    state: { notMatched: dashboard.ambiguous + dashboard.unbound },
   } as const;
   const evidence = <p className="muted mono">{dashboard.specConformanceSummary}</p>;
   if (dashboard.isEmpty || dashboard.specConformanceRatio === null) {
