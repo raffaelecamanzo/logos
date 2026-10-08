@@ -1,9 +1,9 @@
-// Every copy catalogue keeps internal vocabulary inside a `Term` gloss (S-611,
-// FR-UI-39). Catalogues are DISCOVERED (every `*.copy.ts` under src/), so a view's
+// Every copy catalogue glosses each internal term at its first use (S-611,
+// FR-UI-39) — in what, why, and the text its action can return. Catalogues are DISCOVERED (every `*.copy.ts` under src/), so a view's
 // catalogue is held to the rule the moment it exists — no hand-kept list to forget.
 import { describe, expect, it } from "vitest";
 
-import { findUnglossedTerms, isCopyEntry } from "./text.ts";
+import { actionLiterals, findUnglossedUses, isCopyEntry, plainPart } from "./text.ts";
 import type { CopyEntry } from "./types.ts";
 
 const modules = import.meta.glob<Record<string, unknown>>("/src/**/*.copy.ts", { eager: true });
@@ -21,8 +21,10 @@ describe("copy catalogues", () => {
     console.info(`copy catalogues: ${entries.length} entries in ${Object.keys(modules).length} modules`);
   });
 
-  it.each(entries)("%s glosses every internal term in what and why", (_key, entry) => {
-    expect(findUnglossedTerms(entry.what), "what").toEqual([]);
-    expect(findUnglossedTerms(entry.why), "why").toEqual([]);
+  it.each(entries)("%s glosses every internal term at its first use", (_key, entry) => {
+    // what, then why, then every word the action can say (its string literals).
+    const parts = [plainPart(entry.what), plainPart(entry.why), actionLiterals(entry.action)];
+    const names = ["what", "why", "action"];
+    expect(findUnglossedUses(parts).map((u) => `${u.term} (in the ${names[u.part]})`)).toEqual([]);
   });
 });

@@ -50,6 +50,11 @@ describe("glossary", () => {
     ["12 bound, 3 unbound.", "bound"],
     ["bound and unbound", "bound"],
     ["the unbound", "bound"],
+    ["3 unbound remain", "bound"],
+    ["12 bound/3 unbound per service", "bound"],
+    // Known limit, documented beside the pattern: a predicate adjective at a
+    // sentence end is flagged too.
+    ["the call is bound.", "bound"],
   ])("detects %j as %s", (text, term) => {
     expect(findTermsInPlainText(text)).toContain(term);
   });

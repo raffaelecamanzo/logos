@@ -8,7 +8,8 @@
  *   - what, why and action render non-empty;
  *   - where renders if and only if the action is `act`, and a `none` action
  *     reads the one fixed "Nothing to do" sentence;
- *   - no glossary term appears outside a `Term` gloss.
+ *   - no glossary term's first use in the widget — title, figure row or copy —
+ *     is outside a `Term` gloss.
  * Given the catalogue entry and the state, it also asserts the rendered parts
  * ARE that entry's parts — a test names the catalogue key, never the prose, so a
  * wording change edits the catalogue alone.
@@ -19,8 +20,8 @@
 
 import { expect } from "vitest";
 
-import { findTermsInPlainText } from "./glossary.ts";
-import { copyTextString } from "./text.ts";
+import type { GlossaryTerm } from "./glossary.ts";
+import { copyTextString, findUnglossedUses, type PlainPart } from "./text.ts";
 import { NOTHING_TO_DO, type CopyEntry } from "./types.ts";
 
 /** Text a reader sees: tooltips (a Term's definition) excluded. */
@@ -30,11 +31,25 @@ function readerText(el: Element): string {
   return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-/** Text outside every gloss: what must carry no internal vocabulary. */
-function unglossedText(el: Element): string {
-  const clone = el.cloneNode(true) as Element;
-  clone.querySelectorAll("dfn").forEach((dfn) => dfn.remove());
-  return clone.textContent ?? "";
+/**
+ * A rendered part as the vocabulary rule reads it: the text outside every gloss,
+ * and where each `<dfn>` stood — the same shape `plainPart` gives catalogue text.
+ */
+function renderedPart(el: Element | null): PlainPart {
+  let text = "";
+  const glosses: { term: GlossaryTerm; at: number }[] = [];
+  const walk = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.textContent ?? "";
+    } else if (node instanceof Element && node.tagName === "DFN") {
+      const term = node.getAttribute("data-term");
+      if (term !== null) glosses.push({ term: term as GlossaryTerm, at: text.length });
+    } else {
+      node.childNodes.forEach(walk);
+    }
+  };
+  if (el) walk(el);
+  return { text, glosses };
 }
 
 function part(frame: Element, name: string): Element | null {
@@ -56,11 +71,20 @@ export function expectWidgetCopy<S>(widget: Element, entry?: CopyEntry<S>, state
     const el = part(frame, name);
     expect(el, `${label}: the ${name} part is missing`).not.toBeNull();
     expect(readerText(el!), `${label}: the ${name} part is empty`).not.toBe("");
-    expect(
-      findTermsInPlainText(unglossedText(el!)),
-      `${label}: the ${name} part uses internal vocabulary outside a Term gloss`,
-    ).toEqual([]);
   }
+
+  // The vocabulary rule over the whole widget, in reading order: an internal
+  // term's first use — in the title, the figure row or the copy — is glossed.
+  const order = ["title", "figure", "what", "why", "action"] as const;
+  const parts = order.map((name) =>
+    renderedPart(
+      name === "title" || name === "figure"
+        ? frame.querySelector(`[data-widget-part="${name}"]`)
+        : part(frame, name),
+    ),
+  );
+  const unglossed = findUnglossedUses(parts).map((u) => `${u.term} (in the ${order[u.part]})`);
+  expect(unglossed, `${label}: internal vocabulary used outside a Term gloss`).toEqual([]);
 
   const actionLine = frame.querySelector('[data-widget-part="action"]');
   const kind = actionLine?.getAttribute("data-action-kind");

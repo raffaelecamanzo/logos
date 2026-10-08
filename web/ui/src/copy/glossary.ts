@@ -4,8 +4,8 @@
  * The internal terms a reader cannot be expected to know. In catalogue text each
  * is either replaced by plain words or rendered through a `Term` gloss at its
  * first use in a widget. This module is the one list: the catalogue test and
- * `expectWidgetCopy` both detect unglossed use through `findUnglossedTerms`, so a
- * term added here is enforced everywhere at once.
+ * `expectWidgetCopy` both apply the rule through `findUnglossedUses` (text.ts),
+ * so a term added here is enforced everywhere at once.
  *
  * Each entry carries the pattern that detects the term in plain text. Most are a
  * whole-word match; where one needs more care, a comment beside it says why.
@@ -105,10 +105,12 @@ export const GLOSSARY = {
       "As a noun: a bound call is one linked to the code it reaches; an unbound call is one that could not be linked.",
     // Noun use only (FR-UI-39 "bound/unbound used as nouns"). The adjective
     // ("unbound calls") and the verb ("bound to a route") are plain English, so
-    // the pattern matches the word only where it ends a noun phrase: before
-    // punctuation, the end of the text, or a conjunction ("12 bound and 3
-    // unbound", "bound vs unbound").
-    pattern: /\b(?:un)?bound\b(?=\s*(?:$|[.,;:!?)]|(?:and|or|vs\.?|versus)\b))/i,
+    // the pattern matches the word as a counted noun ("3 unbound remain") or
+    // where it ends a noun phrase: before punctuation, a slash, the end of the
+    // text, or a conjunction ("12 bound and 3 unbound", "bound vs unbound").
+    // Known limit: a predicate adjective at a sentence end ("the call is
+    // bound.") is flagged too; write "linked" there.
+    pattern: /\b\d[\d,]*\s+(?:un)?bound\b|\b(?:un)?bound\b(?=\s*(?:$|[.,;:!?)/]|(?:and|or|vs\.?|versus)\b))/i,
   },
 } as const satisfies Record<string, GlossaryEntry>;
 
