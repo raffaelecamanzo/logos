@@ -543,3 +543,16 @@ describe("every Workspace Health widget explains itself, in one stack (S-617)", 
     expect(figure("Broker topics")).toHaveTextContent("1 topic across 1 member");
   });
 });
+
+it("counts a topic two members use once in the Broker topics figure (review fix)", async () => {
+  await mount({
+    status: workspaceStatus({
+      topics: [
+        { member: "orders", topics: [{ topic: "orders.created", producers: 1, consumers: 0 }] },
+        { member: "billing", topics: [{ topic: "orders.created", producers: 0, consumers: 1 }] },
+      ],
+    }),
+  });
+  const topics = expectOneWidgetStack(document.body).find((w) => widgetTitle(w) === "Broker topics")!;
+  expect(topics.querySelector('[data-widget-part="figure"]')).toHaveTextContent("1 topic across 2 members");
+});

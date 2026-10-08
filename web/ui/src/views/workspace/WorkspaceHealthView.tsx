@@ -484,11 +484,14 @@ function TopicsCard({ status }: { status: WorkspaceStatus }) {
     );
   }
   const members = topics.filter((m) => m.topics.length > 0).length;
+  // Distinct topics: one used by two members is one topic (the coupling this
+  // widget is about), though it is two rows of the table.
+  const distinct = new Set(rows.map((r) => r.topic)).size;
   return (
     <Widget
       title="Broker topics"
       copy={brokerTopics}
-      figure={<span className={styles.statement}>{HEALTH_TEXT.topics(rows.length, members)}</span>}
+      figure={<span className={styles.statement}>{HEALTH_TEXT.topics(distinct, members)}</span>}
     >
       <DataTable
         caption="Broker topics by member"
