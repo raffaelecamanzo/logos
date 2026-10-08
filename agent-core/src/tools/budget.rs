@@ -64,11 +64,11 @@ impl ToolBudget {
     /// Atomically refuses (without consuming a slot) once the cap is reached —
     /// the honest budget halt ([NFR-CC-04]).
     pub fn charge(&self) -> Result<usize, BudgetExhausted> {
-        // `fetch_update` makes the check-and-increment a single atomic step, so
+        // `try_update` makes the check-and-increment a single atomic step, so
         // two subagents sharing this budget can never both pass the final slot.
         match self
             .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 (used < self.max_calls).then_some(used + 1)
             }) {
             Ok(prev) => Ok(prev + 1),
