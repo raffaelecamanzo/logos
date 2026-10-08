@@ -13,6 +13,7 @@ import {
   applicableCount,
   dimensionDetails,
   gateFigure,
+  isInformationalPass,
   lowestDimension,
   metricRows,
   optDelta,
@@ -179,6 +180,34 @@ describe("passFloor / gateFigure (BR-10)", () => {
     expect(gateFigure(1.0)).toBe("1");
     expect(gateFigure(8162.5)).toBe("8162.5");
     expect(gateFigure(0.123)).toBe("0.12");
+  });
+});
+
+describe("isInformationalPass (FR-GV-05, FR-GV-10)", () => {
+  const gate = (over: { passed?: boolean; baseline_signal?: number | null; message?: string }) => ({
+    passed: true,
+    baseline_signal: 7800,
+    message: "",
+    ...over,
+  });
+  it("is every informational arm of the read-only verdict", () => {
+    for (const message of [
+      "no baseline saved — informational pass (save one with `gate --save`)",
+      "baseline recorded under different metric semantics — informational pass (re-save with `gate --save`)",
+      "baseline thresholds differ — informational pass (re-save with `gate --save`)",
+      "signal or baseline is n/a — informational pass",
+    ]) {
+      expect(isInformationalPass(gate({ message })), message).toBe(true);
+    }
+  });
+  it("is a missing baseline whatever the message says", () => {
+    expect(isInformationalPass(gate({ baseline_signal: null }))).toBe(true);
+  });
+  it("is never a compared verdict, passed or failed", () => {
+    expect(isInformationalPass(gate({ message: "signal 8000 holds the baseline 7800 (ε 1)" }))).toBe(false);
+    expect(isInformationalPass(gate({ passed: false, message: "signal regressed: 7000 < baseline 7800 − ε (1)" }))).toBe(false);
+    // Near miss: the words apart are not the marker.
+    expect(isInformationalPass(gate({ message: "informational; pass" }))).toBe(false);
   });
 });
 

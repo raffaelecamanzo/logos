@@ -359,6 +359,21 @@ export function passFloor(gate: Pick<GateResult, "baseline_signal" | "epsilon">)
   return gate.baseline_signal === null ? null : gate.baseline_signal - gate.epsilon;
 }
 
+/**
+ * Whether the gate passed WITHOUT comparing the signal to the baseline — an
+ * informational pass (FR-GV-05, FR-GV-10). The read-only verdict Health gets
+ * (`gate_from_snapshot`) passes informationally when there is no baseline, when
+ * the baseline or the signal has no figure, and when the baseline was recorded
+ * under other metric semantics or other `[metric_thresholds]` (an incomparable
+ * anchor the persisting `gate` re-baselines on its next run). `GateResult` carries
+ * no flag for this: the server's one marker is its message, every informational
+ * arm of which says "informational pass" and no comparing arm does. A missing
+ * baseline is informational whatever the message says.
+ */
+export function isInformationalPass(gate: Pick<GateResult, "passed" | "baseline_signal" | "message">): boolean {
+  return gate.passed && (gate.baseline_signal === null || /\binformational pass\b/.test(gate.message));
+}
+
 /** A gate figure (signal, floor, ε) as text: an integer as-is, otherwise to two
  *  decimal places at most — ε is a float on the wire (≈1.0). */
 export function gateFigure(n: number): string {

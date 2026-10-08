@@ -64,6 +64,7 @@ import {
   type DimensionState,
   gate as gateCopy,
   gateFigureText,
+  GATE_NOT_COMPARED,
   offenderBadge,
   qualitySignal as qualitySignalCopy,
   scopeLine,
@@ -77,6 +78,7 @@ import {
   applicableCount,
   dimensionDetails,
   gateFigure,
+  isInformationalPass,
   lowestDimension,
   metricRows,
   optDelta,
@@ -144,10 +146,20 @@ function Health({ data }: { data: HealthModel }) {
 
 /** The figure row of a populated reading: the figure, then — when the graph has
  *  moved on from it — the one not-current sentence both widgets render. */
-function ReadingFigure({ figure, currency }: { figure: ReactNode; currency: SnapshotCurrency | null }) {
+function ReadingFigure({
+  figure,
+  currency,
+  note,
+}: {
+  figure: ReactNode;
+  currency: SnapshotCurrency | null;
+  /** A further qualifying line under the figure (the Gate's not-compared line). */
+  note?: string;
+}) {
   return (
     <div className={styles.figureLines}>
       <span>{figure}</span>
+      {note !== undefined && <p className={styles.note}>{note}</p>}
       {currency !== null && <p className={styles.note}>{staleNote(currency)}</p>}
     </div>
   );
@@ -197,6 +209,9 @@ function GateWidget({
       <Badge tone={gate.passed ? "green" : "red"}>{verdict}</Badge>
     );
   const floor = passFloor(gate);
+  // A pass reached without a comparison never shows the floor it did not apply
+  // (FR-GV-10): after a `[metric_thresholds]` change the signal may sit below it.
+  const informational = isInformationalPass(gate);
   const figure = (
     <span className="mono">
       <CopyTextView
@@ -206,6 +221,7 @@ function GateWidget({
           baseline: gate.baseline_signal === null ? null : gateFigure(gate.baseline_signal),
           floor: floor === null ? null : gateFigure(floor),
           epsilon: gateFigure(gate.epsilon),
+          informational,
         })}
       />
     </span>
@@ -220,7 +236,13 @@ function GateWidget({
           ? { kind: "stale", currency }
           : { kind: "verdict", passed: gate.passed, lowest: lowest?.name ?? null }
       }
-      figure={<ReadingFigure figure={figure} currency={currency} />}
+      figure={
+        <ReadingFigure
+          figure={figure}
+          currency={currency}
+          note={informational && gate.baseline_signal !== null ? GATE_NOT_COMPARED : undefined}
+        />
+      }
     />
   );
 }

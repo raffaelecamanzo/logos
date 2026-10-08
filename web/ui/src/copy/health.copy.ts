@@ -115,7 +115,9 @@ export const gate: CopyEntry<GateState> = {
  * The Gate figure: the verdict, the signal against the baseline, and the pass
  * condition `baseline − ε` (BR-10). Every number arrives formatted, so this is
  * words only; "baseline" and ε are glossed here because the figure is a Gate
- * widget's first use of them. No baseline → no floor: nothing is fabricated.
+ * widget's first use of them. A pass the gate reached without comparing (no
+ * baseline, or one it could not compare) states that instead of a floor it never
+ * applied — nothing is fabricated.
  */
 export function gateFigureText(f: {
   readonly verdict: "PASS" | "FAIL";
@@ -123,11 +125,18 @@ export function gateFigureText(f: {
   readonly baseline: string | null;
   readonly floor: string | null;
   readonly epsilon: string;
+  readonly informational: boolean;
 }): CopyText {
   const head = [`${f.verdict} · signal ${f.signal} vs `, gloss("baseline")];
-  if (f.baseline === null || f.floor === null) return [...head, " none recorded"];
+  if (f.baseline === null || f.floor === null) return [...head, " n/a; informational pass"];
+  if (f.informational) return [...head, ` ${f.baseline}; not compared, informational pass`];
   return [...head, ` ${f.baseline}; passes at ≥ ${f.floor} (`, gloss("epsilon", "ε"), ` = ${f.epsilon})`];
 }
+
+/** Why a pass against a recorded baseline was not a comparison — the line under
+ *  the Gate figure. The persisting `logos gate` re-baselines on its own (FR-GV-10). */
+export const GATE_NOT_COMPARED =
+  "The baseline was recorded under different metric thresholds or semantics, so it cannot be compared with this score; the next logos gate run saves the current score as the new baseline.";
 
 // ── Quality signal (items 13 and 20) ─────────────────────────────────────────
 

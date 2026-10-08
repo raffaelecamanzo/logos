@@ -251,13 +251,50 @@ describe("Gate widget (CR-203 item 12)", () => {
     expect(seen(part(gate, "action"))).toContain("logos gate --save (command)");
   });
 
-  it("states a missing baseline as none recorded, with no fabricated pass floor", async () => {
+  it("states a missing baseline as n/a and an informational pass, with no fabricated pass floor", async () => {
+    // `baseline_signal: null` is both "no baseline saved" and "a baseline with no
+    // signal" (SIGNAL_OR_BASELINE_ABSENT); the figure claims neither.
     const m = clone();
     m.gate.baseline_signal = null;
+    m.gate.message = "no baseline saved — informational pass (save one with `gate --save`)";
     stub(m);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
-    expect(seen(part(widget("Gate"), "figure"))).toBe("PASS · signal 8000 vs baseline none recorded");
+    expect(seen(part(widget("Gate"), "figure"))).toBe("PASS · signal 8000 vs baseline n/a; informational pass");
+    expect(seen(part(widget("Gate"), "action"))).toBe(NOTHING_TO_DO);
+  });
+
+  // FR-GV-10: after a `[metric_thresholds]` change the read-only verdict cannot
+  // compare against the old baseline and passes informationally — the signal may
+  // sit far below the old floor, so the floor must not be shown as a condition held.
+  it("never shows a pass floor the gate did not apply: an incomparable baseline is an informational pass", async () => {
+    for (const message of [
+      "baseline thresholds differ — informational pass (re-save with `gate --save`)",
+      "baseline recorded under different metric semantics — informational pass (re-save with `gate --save`)",
+    ]) {
+      cleanup();
+      const m = clone();
+      m.gate.signal = 7000; // below 7800 − 1, yet passed: no comparison was made
+      m.gate.message = message;
+      stub(m);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      const gate = widget("Gate");
+      const figure = seen(part(gate, "figure"));
+      expect(figure).toMatch(/^PASS · signal 7000 vs baseline 7800; not compared, informational pass/);
+      expect(figure).not.toMatch(/passes at/);
+      expect(figure).toContain("the next logos gate run saves the current score as the new baseline");
+      expectWidgetCopy(gate, gateCopy, { kind: "verdict", passed: true, lowest: "Redundancy" });
+    }
+  });
+
+  it("keeps the pass floor for a compared verdict, whatever the server's message", async () => {
+    const m = clone();
+    m.gate.message = "signal 8000 holds the baseline 7800 (ε 1)";
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(widget("Gate"), "figure"))).toBe("PASS · signal 8000 vs baseline 7800; passes at ≥ 7799 (ε = 1)");
   });
 
 });
