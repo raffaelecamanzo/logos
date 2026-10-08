@@ -181,6 +181,14 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     // The lead value widget (labeled an estimate, NFR-CC-04).
     expect(await screen.findByText(/12,345/)).toBeInTheDocument();
     expect(within(widget("Estimated value") as HTMLElement).getByText(/over the last 7 days/i)).toBeInTheDocument();
+    // Each figure row states the read-model's own figures.
+    const figure = (title: string) => widget(title).querySelector('[data-widget-part="figure"]')?.textContent;
+    expect(figure("Estimated value")).toBe(
+      "12,345 tokens88 ad-hoc file readsestimated saved over the last 7 days",
+    );
+    // calls_total (42), not the number of days with activity (2).
+    expect(figure("Usage over time")).toBe("42 calls over the last 7 days");
+    expect(figure("Dev vs main")).toBe("30 main12 devof 42 calls");
 
     // The four surface widgets.
     expect(screen.getByRole("heading", { name: "Usage over time" })).toBeInTheDocument();
