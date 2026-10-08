@@ -180,10 +180,12 @@ export const THRESHOLDS_DISCLOSURE: { readonly summary: string; readonly body: C
 
 // ── The ten dimensions (items 14–19) ─────────────────────────────────────────
 
-/** A dimension widget's state: dropped out, or scored with its offender state and
- *  the number of offenders listed. */
+/** A dimension widget's state: dropped out; scored from a snapshot not established
+ *  as current (the Gate's own classification, CR-135 — one derivation per page);
+ *  or scored with its offender state and the number of offenders listed. */
 export type DimensionState =
   | { readonly kind: "not-applicable" }
+  | { readonly kind: "stale"; readonly currency: SnapshotCurrency }
   | {
       readonly kind: "scored";
       readonly normalized: number;
@@ -222,6 +224,7 @@ const resetsBaseline = gloss("baseline");
 /** The offender-backed action: refactor the listed units (source code), naming the
  *  threshold keys that tune the detection (configuration). Not recorded → scan. */
 function offenderAction(state: DimensionState, refactor: (listed: number) => string, keys: string | null): WidgetAction {
+  if (state.kind === "stale") return readingAction(state);
   if (state.kind === "not-applicable") return noAction;
   if (state.offenders === "not-recorded") {
     return {
@@ -245,8 +248,10 @@ function offenderAction(state: DimensionState, refactor: (listed: number) => str
 }
 
 /** The action for a dimension with no list: act through its pointer while it is
- *  below a full score; nothing to do at a full score or when it drops out. */
+ *  below a full score; nothing to do at a full score or when it drops out. A
+ *  snapshot not established as current takes the Gate's remedy instead. */
 function unlistedAction(state: DimensionState, act: Extract<WidgetAction, { kind: "act" }>): WidgetAction {
+  if (state.kind === "stale") return readingAction(state);
   return state.kind === "scored" && state.normalized < 1 ? act : noAction;
 }
 
@@ -429,6 +434,11 @@ export const DIMENSION_COPY: Readonly<Record<DimensionKey, DimensionCopy>> = {
   focus,
   uniqueness,
 };
+
+/** The line under a dimension's figure when the snapshot is not established as
+ *  current: the Gate states why, once; each dimension points to it. */
+export const DIMENSION_NOT_CURRENT =
+  "From the same snapshot as the Gate, which is not established as a current reading — see the Gate for why.";
 
 /** The figure-row statement of a dimension that dropped out with no value (ADR-21). */
 export const NO_APPLICABLE_CONSTRUCT = "n/a — no applicable construct in this codebase";

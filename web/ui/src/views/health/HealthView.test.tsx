@@ -746,8 +746,9 @@ describe("not-current readings (CR-135, S-436)", () => {
     // Both widgets carry the same single sentence — one classification, two widgets.
     expect((await screen.findAllByText(/no longer indexed/i)).length).toBe(2);
     expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
-    // …each naming the command that does change what is reported (FR-EH-04).
-    expect(screen.getAllByText("logos index").length).toBe(2);
+    // …each naming the command that does change what is reported (FR-EH-04): the
+    // Gate, the Quality signal and the ten dimension widgets scored from it.
+    expect(screen.getAllByText("logos index").length).toBe(12);
     const currency = { date: "2025-09-19" };
     expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });
     expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "stale", currency });
@@ -759,6 +760,33 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
     // …but nothing asserts they are current: no green PASS chip.
     expect(within(part(widget("Gate"), "title")!).queryByText("PASS")).toBeNull();
+  });
+
+  // CR-135: one classification for the whole page. A dimension widget scored from
+  // the same not-current snapshot says so and takes the Gate's remedy — it never
+  // prescribes source changes from figures the graph has moved on from.
+  it("carries the not-current reading into every dimension widget, with the Gate's remedy", async () => {
+    for (const [indexed, where] of [[false, "command logos index"], [true, "command logos scan"]] as const) {
+      cleanup();
+      const m = clone();
+      m.scan.worst_offenders = realOffenders.recorded; // Nesting would otherwise act on 3 listed
+      m.status.indexed = indexed;
+      m.evolution.snapshots[1].created_at = 1_758_240_000;
+      m.status.last_full_index_at = String(1_758_240_000 + 86_400); // moved past when still indexed
+      stub(m);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      const currency = indexed
+        ? ({ date: "2025-09-19", cause: "moved-past" } as const)
+        : ({ date: "2025-09-19" } as const);
+      for (const row of metricRows(m.scan.metrics)) {
+        const w = widget(row.name);
+        expect(seen(part(w, "figure")), row.name).toContain("not established as a current reading");
+        expect(seen(part(w, "where")), row.name).toBe(where);
+        expect(seen(part(w, "action")), row.name).not.toMatch(/Flatten|Split|Merge|Find|Move/);
+        expectWidgetCopy(w, DIMENSION_COPY[row.key], { kind: "stale", currency });
+      }
+    }
   });
 
   // A stale verdict keeps the figures it recorded, and a FAIL recorded before the
@@ -808,8 +836,9 @@ describe("not-current readings (CR-135, S-436)", () => {
     render(<HealthView />);
     expect((await screen.findAllByText(/the graph has been indexed or synced since/i)).length).toBe(2);
     expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
-    // …naming the step that changes what IS reported: a new snapshot, not a new index.
-    expect(screen.getAllByText("logos scan").length).toBe(2);
+    // …naming the step that changes what IS reported: a new snapshot, not a new index
+    // (Gate, Quality signal, and the ten dimension widgets scored from it).
+    expect(screen.getAllByText("logos scan").length).toBe(12);
     expect(screen.queryByText("logos index")).not.toBeInTheDocument();
     const currency = { date: "2025-09-19", cause: "moved-past" } as const;
     expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });

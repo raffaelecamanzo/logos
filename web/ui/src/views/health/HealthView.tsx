@@ -56,6 +56,7 @@ import {
 } from "../../components/index.ts";
 import {
   DIMENSION_COPY,
+  DIMENSION_NOT_CURRENT,
   NO_APPLICABLE_CONSTRUCT,
   NO_SNAPSHOTS,
   OFFENDER_STATEMENT,
@@ -129,7 +130,7 @@ function Health({ data }: { data: HealthModel }) {
       <QualitySignalWidget scan={data.scan} absence={absence} currency={currency} lowest={lowest} />
       {!data.scan.metrics.empty &&
         dimensionDetails(data.scan).map((dim) => (
-          <DimensionWidget key={dim.key} dim={dim} />
+          <DimensionWidget key={dim.key} dim={dim} currency={currency} />
         ))}
       {!isWidgetHidden("non-gated-tier") && (
         <Callout label="Non-gated tier" tone="muted">
@@ -371,11 +372,14 @@ function MetricsTable({ rows }: { rows: MetricRow[] }) {
   return <DataTable columns={columns} rows={rows} rowKey={(r) => r.name} caption="Quality metrics" />;
 }
 
-/** The state a dimension's catalogue entry is evaluated at. */
-function dimensionState(dim: DimensionDetail): DimensionState {
+/** The state a dimension's catalogue entry is evaluated at. A figure from a
+ *  snapshot the graph has moved on from is the Gate's stale state, never a reading
+ *  to act on (CR-135: one classification for the whole page). */
+function dimensionState(dim: DimensionDetail, currency: SnapshotCurrency | null): DimensionState {
   if (dim.value === null || dim.notApplicable !== null || dim.offenderState === "not-applicable") {
     return { kind: "not-applicable" };
   }
+  if (currency !== null) return { kind: "stale", currency };
   return {
     kind: "scored",
     normalized: dim.value.normalized,
@@ -394,14 +398,14 @@ function dimensionState(dim: DimensionDetail): DimensionState {
  * the payload: each states that, and points to where its units are found — never
  * an empty table (NFR-CC-04).
  */
-function DimensionWidget({ dim }: { dim: DimensionDetail }) {
+function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: SnapshotCurrency | null }) {
   const copy = DIMENSION_COPY[dim.key];
   const badge = offenderBadge(dim.offenderState, dim.offenders.length);
   const common = {
     title: dim.name,
     badge: badge === null ? undefined : <span className="muted">{badge}</span>,
     copy,
-    state: dimensionState(dim),
+    state: dimensionState(dim, currency),
   };
   const evidence = <DimensionEvidence dim={dim} />;
   if (dim.value === null) {
@@ -428,6 +432,7 @@ function DimensionWidget({ dim }: { dim: DimensionDetail }) {
       <span className={styles.note}>
         <CopyTextView text={copy.raw(value.raw)} />
       </span>
+      {currency !== null && <p className={styles.note}>{DIMENSION_NOT_CURRENT}</p>}
     </div>
   );
   return (
