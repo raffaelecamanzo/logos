@@ -114,6 +114,11 @@ describe("workspace catalogue sentences", () => {
     expect(remedyFor("constructor")).toBe(UNLISTED_REMEDY);
   });
 
+  it("states the service map's shares as n of m, numerator first (S-614)", () => {
+    expect(SERVICE_MAP_TEXT.evidenceShown(0, 2)).toBe("Shown: 0 of 2 bindings not observed at a call site");
+    expect(SERVICE_MAP_TEXT.evidenceShown(1, 1)).toBe("Shown: 1 of 1 binding not observed at a call site");
+  });
+
   it("agrees verb and noun with a count of one and of many", () => {
     expect(COVERAGE_TEXT.capturedResolves(1, 3)).toBe("1 of 3 captured call sites resolves.");
     expect(COVERAGE_TEXT.capturedResolves(2, 3)).toBe("2 of 3 captured call sites resolve.");

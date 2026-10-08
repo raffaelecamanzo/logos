@@ -157,9 +157,11 @@ export const SERVICE_MAP_TEXT = {
   filterProvenance: "Provenance",
   anyKind: "All kinds",
   anyProvenance: "All provenances",
-  /** The evidence figure: links with evidence the filter keeps, of all of them. */
+  /** The evidence figure: the links not observed at a call site that the
+   *  filter keeps, of all of them. Not "with configuration evidence": a link
+   *  whose provenance was never stated is counted, and has none to show. */
   evidenceShown: (shown: number, total: number) =>
-    `${shown} of ${total} ${plural(total, "binding", "bindings")} with configuration evidence shown`,
+    `Shown: ${shown} of ${total} ${plural(total, "binding", "bindings")} not observed at a call site`,
   /** A link with evidence names no key. Reachable two ways, so it draws no
    *  conclusion about why: an `unstated` end, or a config end naming no key. */
   noKeyNamed:

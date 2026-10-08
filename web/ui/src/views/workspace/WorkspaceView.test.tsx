@@ -2289,6 +2289,16 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     expect(cells[cells.length - 1]).toMatch(/command logos workspace status$/);
   });
 
+  it("counts a link whose provenance was never stated, and says it names no key — never 'configuration evidence'", async () => {
+    const { from_value: _dropped, ...unstated } = BINDING;
+    stubApi({ providers: [unstated] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const widget = mapWidget("Binding evidence");
+    expect(figureOf(widget)).toBe("Shown: 1 of 1 binding not observed at a call site");
+    expect(within(widget).getByText(SERVICE_MAP_TEXT.noKeyNamed)).toBeInTheDocument();
+  });
+
   it("has nothing to do when every shown value is committed or arrives at runtime", async () => {
     stubApi({ providers: REFUSALS.slice(2) });
     mount();
