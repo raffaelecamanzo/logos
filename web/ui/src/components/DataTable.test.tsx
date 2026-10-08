@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import * as ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ReactNode } from "react";
+
+import { takeNestedSortControls } from "../test/nestedSortControls.ts";
+
 import { DataTable, type Column } from "./DataTable.tsx";
+import { Term } from "./Term.tsx";
 
 afterEach(() => {
   cleanup();
@@ -207,10 +212,12 @@ describe("DataTable header gloss (S-616, FR-UI-39)", () => {
   });
 });
 
-// CR-208 AC-4, "every DataTable": a `Term` written into a column's `header` lands
-// inside the sort button (the Members defect). The views' SOURCE is read, as the
-// widget scan reads it (`views/widgetScan.test.ts`), so a table added later is held
-// the day it exists: a header glosses through the column's `gloss` slot or not at all.
+// CR-208 AC-4: a `Term` written into a column's `header` lands inside the sort
+// button (the Members defect). "Every DataTable" is held by the rendered guard the
+// test setup installs (`test/nestedSortControls.ts`), whatever route the `Term`
+// takes to `header`; this source scan names the commonest shape — a literal
+// `header:` holding a `Term` — at its line, as the widget scan reads the views
+// (`views/widgetScan.test.ts`).
 const viewSources = import.meta.glob<string>(["/src/views/**/*.tsx", "!/src/views/**/*.test.tsx"], {
   query: "?raw",
   import: "default",
@@ -239,6 +246,26 @@ function termsInHeaders(file: string, source: string): string[] {
   visit(sf);
   return found;
 }
+
+describe("the rendered guard over every table's sort buttons (CR-208 AC-4)", () => {
+  it("records a Term that reaches a header through a column builder, and consumes it", () => {
+    const col = (key: string, header: ReactNode): Column<Row> => ({ key, header, cell: (r) => r.score, sortValue: (r) => r.score });
+    render(
+      <DataTable caption="t" columns={[col("score", <Term term="coChange">Co-change</Term>)]} rows={ROWS.slice(0, 1)} rowKey={(r) => r.name} />,
+    );
+    const nested = takeNestedSortControls();
+    expect(nested).toHaveLength(1);
+    expect(nested[0]).toMatch(/^<dfn> inside the sort button of header "Co-change/);
+  });
+
+  it("records nothing for a gloss in the column's gloss slot, beside the button", () => {
+    const cols: Column<Row>[] = [
+      { key: "score", header: "Co-change", gloss: "coChange", cell: (r) => r.score, sortValue: (r) => r.score },
+    ];
+    render(<DataTable caption="t" columns={cols} rows={ROWS.slice(0, 1)} rowKey={(r) => r.name} />);
+    expect(takeNestedSortControls()).toEqual([]);
+  });
+});
 
 describe("no column header renders a Term inside its sort button (CR-208 AC-4)", () => {
   it("reads the view sources (a finding, not a floor)", () => {
