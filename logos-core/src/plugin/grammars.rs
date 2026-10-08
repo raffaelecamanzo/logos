@@ -33,8 +33,10 @@ use tree_sitter_language::LanguageFn;
 /// `concat!`, so the three cannot disagree ([CR-211]).
 ///
 /// [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
-// Every use is behind a `lang-*` feature, so a `--no-default-features` build has
-// no call site; the macro is still the one declaration of the shape.
+// Every use is behind a `lang-*` feature, and `query!` is used only by a grammar
+// that ships `.scm` queries: a build with no such grammar (`--no-default-features`,
+// or only structural ones like `lang-markdown`) has no call site. The macro is
+// still the one declaration of the shape.
 #[allow(unused_macros)]
 macro_rules! query {
     ($lang:literal, $name:literal) => {
@@ -53,8 +55,10 @@ macro_rules! query {
 /// ([CR-211]).
 ///
 /// [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
-// Every use is behind a `lang-*` feature, so a `--no-default-features` build has
-// no call site; the macro is still the one declaration of the shape.
+// Every use is behind a `lang-*` feature, and `query!` is used only by a grammar
+// that ships `.scm` queries: a build with no such grammar (`--no-default-features`,
+// or only structural ones like `lang-markdown`) has no call site. The macro is
+// still the one declaration of the shape.
 #[allow(unused_macros)]
 macro_rules! entry {
     ($lang:literal, $language:expr) => {
