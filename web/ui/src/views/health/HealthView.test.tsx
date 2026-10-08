@@ -746,7 +746,11 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
     // Gate and Quality signal state the one absence they can establish, in the figure row…
     for (const title of ["Gate", "Quality signal"]) {
       expect(seen(part(widget(title), "figure"))).toBe(READING_ABSENCE.unscanned);
+      // Pinned by its claim, not by the catalogue that wrote it: no scan, never the index.
+      expect(seen(part(widget(title), "figure"))).toMatch(/no scan has been run/);
+      expect(seen(part(widget(title), "figure"))).not.toMatch(/nothing indexed/);
       expect(seen(part(widget(title), "where"))).toBe("command logos scan");
+      expect(seen(part(widget(title), "action"))).toMatch(/^Run a scan/);
     }
     expectWidgetCopy(widget("Gate"), gateCopy, { kind: "absent", absence: "unscanned" });
     expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "absent", absence: "unscanned" });
@@ -768,6 +772,7 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
     stub(absent(true, [{ snapshot_id: 1, created_at: 100, commit_sha: null, signal: null, signal_delta: null }]));
     render(<HealthView />);
     expect((await screen.findAllByText(READING_ABSENCE["no-production-scope"])).length).toBe(2);
+    expect(READING_ABSENCE["no-production-scope"]).toMatch(/no production functions to score/);
     expectWidgetCopy(widget("Gate"), gateCopy, { kind: "absent", absence: "no-production-scope" });
     expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "absent", absence: "no-production-scope" });
     // The false claim the old discriminant would have made, and the no-op remedy.
@@ -780,6 +785,11 @@ describe("absent readings (FR-EH-04, CR-130)", () => {
     stub(absent(false, []));
     render(<HealthView />);
     expect((await screen.findAllByText(READING_ABSENCE.unindexed)).length).toBe(2);
+    for (const title of ["Gate", "Quality signal"]) {
+      expect(seen(part(widget(title), "figure"))).toMatch(/nothing indexed/);
+      expect(seen(part(widget(title), "where"))).toBe("command logos index");
+      expect(seen(part(widget(title), "action"))).toMatch(/^Index the project/);
+    }
     expectWidgetCopy(widget("Gate"), gateCopy, { kind: "absent", absence: "unindexed" });
     expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "absent", absence: "unindexed" });
     expect(screen.getAllByText("logos index").length).toBe(2);
@@ -812,6 +822,10 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(chip.className).not.toBe(chipClass("orange"));
     expect(seen(part(widget("Gate"), "figure"))).toMatch(/^PASS · signal 8000 vs baseline 7800/);
     expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    for (const title of ["Gate", "Quality signal"]) {
+      expect(seen(part(widget(title), "where"))).toBe("command logos index");
+      expect(seen(part(widget(title), "action"))).toMatch(/^Re-index the project/);
+    }
     // …but nothing asserts they are current: no green PASS chip.
     expect(within(part(widget("Gate"), "title")!).queryByText("PASS")).toBeNull();
   });
@@ -898,6 +912,10 @@ describe("not-current readings (CR-135, S-436)", () => {
     expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });
     expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "stale", currency });
     expect(within(part(widget("Gate"), "title")!).getByText("MOVED PAST").className).toBe(chipClass("red"));
+    for (const title of ["Gate", "Quality signal"]) {
+      expect(seen(part(widget(title), "where"))).toBe("command logos scan");
+      expect(seen(part(widget(title), "action"))).toMatch(/^Run a scan/);
+    }
     expect(seen(part(widget("Gate"), "figure"))).toMatch(/^PASS · signal 8000 vs baseline 7800/);
     // It claims what the comparison establishes and no more, and says the over-report out loud.
     expect(screen.queryByText("STALE")).not.toBeInTheDocument();
