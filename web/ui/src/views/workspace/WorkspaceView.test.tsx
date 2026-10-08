@@ -385,6 +385,10 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       "grpc-call",
       "broker-topic",
     ]);
+    // No note either: the retired recording held the legend's whole text, and
+    // the provenance note is the one part a heading check does not see.
+    expect([...legend.querySelectorAll("p")].filter((p) => p.className.includes("legendNote"))).toEqual([]);
+    expect(legend.textContent).not.toMatch(/admitted|committed configuration/i);
     expect(screen.queryByTestId("canvas-admitted-edge")).toBeNull();
     const table = screen.getByRole("table", { name: /accessible twin of the service map/ });
     expect(within(table).getAllByRole("columnheader").map((th) => th.textContent?.replace("↕", ""))).toEqual([
