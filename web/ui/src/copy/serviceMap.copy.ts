@@ -11,6 +11,7 @@
  */
 
 import type { ConfigValueRefusal } from "../api/types.ts";
+import type { BINDING_KIND_FILTERS } from "../views/workspace/serviceMapModel.ts";
 
 import { NOT_RESOLVED_REMEDY } from "./coverage.copy.ts";
 import { gloss, noAction, plural, type CopyEntry, type WidgetAction } from "./types.ts";
@@ -132,8 +133,9 @@ export const crossContextHint: CopyEntry = {
 // ── Figure-row, absence and evidence sentences ───────────────────────────────
 
 /** The short names the binding-kind filter offers, by relation (FR-UI-42:
- *  HTTP, gRPC, broker). */
-export const BINDING_KIND_LABEL: Readonly<Record<string, string>> = {
+ *  HTTP, gRPC, broker). Keyed by the filter's own tuple, so a kind offered
+ *  without a label is a `tsc -b` error. */
+export const BINDING_KIND_LABEL: Readonly<Record<(typeof BINDING_KIND_FILTERS)[number], string>> = {
   route: "HTTP",
   "grpc-call": "gRPC",
   "broker-topic": "Broker",

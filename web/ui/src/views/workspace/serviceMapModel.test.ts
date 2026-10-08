@@ -11,6 +11,7 @@ import type {
   XserviceBuildDeps,
 } from "../../api/types.ts";
 import { BOUND_EXTERNAL, DECLARED_CONTRACTS } from "../../workspace/testFixtures.ts";
+import { ARM_LABEL } from "./coverageModel.ts";
 import {
   BUILD_EDGE_TYPE,
   buildLayer,
@@ -18,6 +19,7 @@ import {
   CONFIG_REFUSAL_LABEL,
   DECLARED_EDGE_TYPE,
   declaredLayer,
+  BINDING_KIND_FILTERS,
   externalNodeId,
   edgeProvenanceKind,
   filterLinks,
@@ -976,6 +978,12 @@ describe("filterLinks (S-614, FR-UI-42)", () => {
   const pairs = (links: { from: string; to: string; relation: string }[]) =>
     links.map((l) => `${l.from}->${l.to}:${l.relation}`);
   const only = (f: Partial<LinkFilter>) => pairs(filterLinks(map.links, { ...NO_LINK_FILTER, ...f }));
+
+  it("offers exactly the arms the legend draws (ARM_LABEL), in its order", () => {
+    // The legend's rows are derived from ARM_LABEL; an arm added there must
+    // reach the filter too, or a binding of it could be shown only under "All".
+    expect([...BINDING_KIND_FILTERS]).toEqual(Object.keys(ARM_LABEL));
+  });
 
   it("keeps every link under the empty filter, in the map's order", () => {
     expect(map.links).toHaveLength(4);
