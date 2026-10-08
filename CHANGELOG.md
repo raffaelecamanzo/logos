@@ -23,17 +23,17 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   figure row rather than a centred empty state. `WidgetStack` spaces widgets one
   token apart, and `Term` glosses internal vocabulary (a `<dfn>` whose
   explanation shows on hover and keyboard focus) from one glossary: the
-  fourteen terms FR-UI-39 names, plus table-header terms. A widget's words come from a typed catalogue
+  fourteen terms FR-UI-39 names, plus the terms later catalogues add. A widget's words come from a typed catalogue
   entry `{ what, why, action(state) }`, so a catalogue missing a part does not
   type-check, and the test helper `expectWidgetCopy` asserts the four parts on
-  a rendered widget. Files & Risk and Statistics render through it (below).
+  a rendered widget. Every view renders through it (below).
 - **Browser tests in the full gate (S-611).** `web/ui` gains Playwright
   (Chromium only): `npm run test:e2e` drives a `logos serve --ui` built from the
   tree over a checked-in single-repository fixture and a two-member workspace
   fixture, and asserts layout in computed style — equal gaps between stacked
   widgets, left-aligned widget text, one font size for explanation and action.
   The frame's own checks run on a harness page built from the same components
-  and served from the same server; Files & Risk and Statistics are checked on
+  and served from the same server; every view of both sidebars is checked on
   the real pages, and the app shell on both fixtures. `scripts/gate.sh full` runs it as a
   new `ui-e2e` leg and prints its pass count; `gate.sh fast` never runs it. A
   missing browser, an empty run, a skipped spec or a run past its time limit is
@@ -130,7 +130,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   a registered tool panel; a test looks up every `logos …` command a catalogue
   names in `docs/howto/commands.md`; and the browser layout check now runs on
   every view of both sidebars. `docs/howto/usage.md` describes how to read a
-  widget. No HTTP, CLI or MCP answer changes.
+  widget. A figure's unit or qualifier ("files ranked", "of lines covered", a
+  scope or not-current line) is set at one body size, in muted ink, on every
+  view; it had rendered at three sizes. No HTTP, CLI or MCP answer changes.
 - **The Workspace Dashboard, the Cross-service coverage tab and Workspace rules
   say what each widget shows, why it matters and what to do, in one layout
   (CR-203, S-613).** Eight widgets now render through the shared widget frame

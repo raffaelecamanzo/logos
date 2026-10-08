@@ -50,8 +50,8 @@
  *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
- * muted node, not a service with "no couplings"; a workspace with no bindings gets
- * the awaiting-data state, never a fabricated 100%.
+ * muted node, not a service with "no couplings"; a workspace with no bindings
+ * states that absence in the Cross-service bindings widget, never a fabricated 100%.
  *
  * Every read here is a GET (ADR-28). In single-root mode this view is unreachable —
  * no nav item is rendered — and it says so honestly if navigated to by hand.

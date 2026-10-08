@@ -1,8 +1,8 @@
 /*
  * ArchitectureView (S-189, FR-UI-06, FR-UI-21) — the Architecture (DSM) tab
- * migrated to React over `/api/v1`. Cycles-first (frontend-design §4.5): the
- * back-edge list leads, then the full module heat-grid matrix is demoted to a
- * collapsible, threshold-gated disclosure. The CYCLES band and the cycle list are
+ * migrated to React over `/api/v1`. It was cycles-first (frontend-design §4.5:
+ * the back-edge list led, the full module heat-grid matrix a collapsible,
+ * threshold-gated disclosure below it). The CYCLES band and the cycle list are
  * hidden through the hidden-widget register (S-612, FR-UI-41), so the page leads
  * with the matrix, whose back-edge cells stay outlined `↺`; `GET
  * /api/v1/architecture`, `logos dsm` and MCP `dsm` still serve the back-edges, and

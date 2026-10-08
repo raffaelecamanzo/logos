@@ -204,7 +204,9 @@ export const GLOSSARY = {
 } as const satisfies Record<string, GlossaryEntry>;
 
 /** The FR-UI-39 vocabulary, in the order the requirement lists it. Every other
- *  glossary entry is a later story's addition (S-613: the Members headers). */
+ *  glossary entry is a later story's addition: the Members headers (S-613), the
+ *  bounded context (S-614), Health's brain method, god container and near-clone
+ *  (S-615), and the Co-change, Defect and Answered headers (S-616). */
 export const FR_UI_39_TERMS = [
   "arm",
   "intake",
