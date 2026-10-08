@@ -23,7 +23,7 @@ function isCopyText(value: unknown): value is CopyText {
  * Walks every export of every catalogue, recursively (a record of entries such as
  * Health's `DIMENSION_COPY` included), and sorts what it finds into the entries
  * and every OTHER piece of reader text: the `*_TEXT` and `*_ABSENCE` tables, a
- * disclosure, an entry's extra fields (a dimension's `raw`), a per-row action. A
+ * disclosure, an entry's extra fields (a dimension's `raw`). A
  * function is read by its string literals — so a new
  * sentence is held to the rule the moment it is exported, with no list to extend.
  */
@@ -77,7 +77,7 @@ describe("copy catalogues", () => {
 
 describe("every other sentence a catalogue exports (sprint review)", () => {
   // The entries above are not the only reader text a catalogue holds: figure-row
-  // and absence tables, disclosures and per-row actions render in widgets too.
+  // and absence tables and disclosures render in widgets too.
   // S-613 checked its own four tables by name (workspaceCopy.test.ts); this walk
   // holds every catalogue's, so a later story's table cannot be left out.
 

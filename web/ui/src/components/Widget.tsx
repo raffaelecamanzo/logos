@@ -11,7 +11,8 @@
  *                    `note`: payload text the catalogue cannot hold);
  *   4. evidence    — the table, chart or list (the children).
  *
- * There is no action line: CR-206 removed "What you can do" and its where chip.
+ * There is no action line: CR-206 removed "What you can do" and its where chip,
+ * and CR-207 removed the per-row action columns that still rendered it.
  *
  * The words come from a catalogue entry (`copy`), so a view never writes copy
  * inline and a wording change edits one catalogue. An absence renders as a
@@ -28,7 +29,7 @@
 import type { ReactNode } from "react";
 
 import { TOOL_PANELS, type ToolPanelKey } from "../copy/toolPanels.ts";
-import { NOTHING_TO_DO, type CopyEntry, type CopyText, type RowAction } from "../copy/types.ts";
+import type { CopyEntry, CopyText } from "../copy/types.ts";
 
 import { Card } from "./Card.tsx";
 import { Term } from "./Term.tsx";
@@ -114,35 +115,6 @@ export function FigureNote({ children, block = false }: { children: ReactNode; b
     <Tag className={styles.figureNote} data-figure-note="">
       {children}
     </Tag>
-  );
-}
-
-/**
- * One table row's own action, as a cell (S-613's Members column, S-614's
- * evidence column): the action text, then where and its target on a second
- * line. A `none` action reads `none` — by default the one "Nothing to do"
- * sentence; a catalogue whose `none` says something more specific passes it.
- */
-export function ActionCell({ action, none = NOTHING_TO_DO }: { action: RowAction; none?: CopyText }) {
-  if (action.kind === "none") {
-    return (
-      <span className="muted">
-        <CopyTextView text={none} />
-      </span>
-    );
-  }
-  return (
-    <>
-      <CopyTextView text={action.text} />
-      <br />
-      <span className="muted">{action.where}</span>
-      {action.target !== undefined && (
-        <>
-          {" "}
-          <code>{action.target}</code>
-        </>
-      )}
-    </>
   );
 }
 

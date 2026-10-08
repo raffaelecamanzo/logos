@@ -9,7 +9,7 @@
  * fails the build either way.
  */
 
-import type { CopyEntry, RowAction } from "./types.ts";
+import type { CopyEntry } from "./types.ts";
 
 // @ts-expect-error — `what` is missing.
 export const missingWhat: CopyEntry = { why: "w" };
@@ -25,15 +25,3 @@ export const withAction: CopyEntry = { what: "w", why: "w", action: () => ({ kin
 const built = { what: "w", why: "w", action: () => ({ kind: "none" as const }) };
 // @ts-expect-error — an entry built elsewhere that carries an action is still refused.
 export const builtWithAction: CopyEntry = built;
-
-// @ts-expect-error — a row action must say where.
-export const actWithoutWhere: RowAction = { kind: "act", text: "Do it." };
-
-// @ts-expect-error — `where` exists only on an `act` row action.
-export const noneWithWhere: RowAction = { kind: "none", where: "command" };
-
-// @ts-expect-error — `where` is one of the row action's kinds of place.
-export const unknownWhere: RowAction = { kind: "act", where: "somewhere", text: "Do it." };
-
-// @ts-expect-error — "documentation" left with the widget action line (CR-206); no row action names it.
-export const documentationWhere: RowAction = { kind: "act", where: "documentation", text: "Do it." };

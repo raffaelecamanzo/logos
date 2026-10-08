@@ -11,9 +11,8 @@
  * entry missing either is a `tsc -b` error, and `action` is typed `never`, so an
  * entry that brings one back is a `tsc -b` error too.
  *
- * A table row's own action (`ActionCell`: the Members and Binding evidence
- * columns) is row content, not the widget's action line, and keeps its own
- * type, `RowAction`, below.
+ * Tables carry no per-row action either: CR-207 removed the Members and Binding
+ * evidence "What you can do" columns, so the web UI has no action text at all.
  */
 
 import type { GlossaryTerm } from "./glossary.ts";
@@ -44,32 +43,6 @@ export interface CopyEntry {
   /** Removed by CR-206: an entry carrying an action line is a type error. */
   readonly action?: never;
 }
-
-// ── A table row's own action (ActionCell) ────────────────────────────────────
-
-/** The kinds of place a row action names. (The widget action line also named
- *  "documentation"; no row action does, so CR-206 dropped it with that line.) */
-export type WhereKind = "source code" | "configuration" | "command";
-
-/** What a reader can do about one table row (the Members and Binding evidence
- *  columns, rendered by `ActionCell`). */
-export type RowAction =
-  | {
-      readonly kind: "act";
-      /** Which kind of place the action happens in. */
-      readonly where: WhereKind;
-      /** The file, setting or command, when known (rendered in mono). */
-      readonly target?: string;
-      /** What to do, in one sentence. */
-      readonly text: CopyText;
-    }
-  | { readonly kind: "none" };
-
-/** The fixed text a row's `none` action renders by default. */
-export const NOTHING_TO_DO = "Nothing to do — informational.";
-
-/** A row with nothing to do. */
-export const noRowAction: RowAction = { kind: "none" };
 
 /** Shorthand for a gloss inside catalogue text. */
 export function gloss(term: GlossaryTerm, text?: string): Gloss {

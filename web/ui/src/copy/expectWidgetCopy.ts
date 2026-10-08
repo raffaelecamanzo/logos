@@ -6,8 +6,10 @@
  *
  * It asserts, over the rendered DOM:
  *   - what and why render non-empty;
- *   - no action line renders: no action part, no action or where copy, and no
- *     "What you can do" label (CR-206 removed it end to end);
+ *   - no action text renders: no action part, no action or where copy, and
+ *     nowhere in the widget — evidence tables included — the "What you can do"
+ *     label or the "Nothing to do — informational." sentence (CR-206 removed the
+ *     action line, CR-207 the per-row action columns);
  *   - no glossary term's first use in the widget — title, figure row or copy —
  *     is outside a `Term` gloss.
  * Given the catalogue entry, it also asserts the rendered parts ARE that
@@ -19,6 +21,8 @@
  */
 
 import { expect } from "vitest";
+
+import { REMOVED_ACTION_TEXT } from "../test/removedActionText.ts";
 
 import type { GlossaryTerm } from "./glossary.ts";
 import { copyTextString, findUnglossedUses, type PlainPart } from "./text.ts";
@@ -82,22 +86,18 @@ function frameOf(widget: Element): Element {
   return frame;
 }
 
-/** The label the removed action line opened with. */
-const ACTION_LABEL = "What you can do";
-
-/** Asserts the frame renders no part of the action line CR-206 removed: the
- *  part, its copy, its where chip, or its label. The frame's own text is read,
- *  so a row's own action column inside a table (row content, kept) is not it:
- *  only the frame outside the evidence part is searched for the label. */
+/** Asserts the frame renders no action text: not the part, its copy or its
+ *  where chip CR-206 removed, and not the label or the empty-row sentence
+ *  anywhere in the frame. The evidence part is searched too: CR-207 removed the
+ *  per-row action columns, so no table may carry either. */
 function expectNoActionLine(frame: Element, label: string): void {
   for (const selector of ['[data-widget-part="action"]', '[data-widget-copy="action"]', '[data-widget-copy="where"]']) {
     expect(frame.querySelector(selector), `${label}: the action line was removed (CR-206), yet ${selector} renders`).toBeNull();
   }
-  const outsideEvidence = frame.cloneNode(true) as Element;
-  outsideEvidence.querySelectorAll('[data-widget-part="evidence"]').forEach((ev) => ev.remove());
-  expect(readerText(outsideEvidence), `${label}: the action line was removed (CR-206), yet "${ACTION_LABEL}" renders`).not.toContain(
-    ACTION_LABEL,
-  );
+  const text = readerText(frame);
+  for (const removed of REMOVED_ACTION_TEXT) {
+    expect(text, `${label}: action text was removed (CR-206, CR-207), yet "${removed}" renders`).not.toContain(removed);
+  }
 }
 
 export function expectWidgetCopy(widget: Element, entry?: CopyEntry): void {

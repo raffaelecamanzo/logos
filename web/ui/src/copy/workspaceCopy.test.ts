@@ -1,18 +1,14 @@
 // The workspace catalogues' sentences (S-613, FR-UI-39). The catalogue test holds
 // every `CopyEntry` to the vocabulary rule; this holds the figure-row and absence
-// sentences and the row-action remedies beside them, which render in the parts
-// `expectWidgetCopy` reads but are not entries themselves.
+// sentences beside them, which render in the parts `expectWidgetCopy` reads but
+// are not entries themselves.
 import { describe, expect, it } from "vitest";
 
-import { COVERAGE_TEXT, NOT_RESOLVED_REMEDY } from "./coverage.copy.ts";
+import { COVERAGE_TEXT } from "./coverage.copy.ts";
 import { findUnglossedUses, plainPart } from "./text.ts";
 import type { CopyText } from "./types.ts";
-import { DASHBOARD_TEXT, memberRowAction } from "./workspaceDashboard.copy.ts";
-import {
-  BINDING_KIND_LABEL,
-  evidenceRowAction,
-  SERVICE_MAP_TEXT,
-} from "./serviceMap.copy.ts";
+import { DASHBOARD_TEXT } from "./workspaceDashboard.copy.ts";
+import { BINDING_KIND_LABEL, SERVICE_MAP_TEXT } from "./serviceMap.copy.ts";
 import { HEALTH_TEXT } from "./workspaceHealth.copy.ts";
 
 /** The arguments each sentence function is sampled with: every branch its body
@@ -82,7 +78,6 @@ describe("workspace catalogue sentences", () => {
     ...sentences("HEALTH_TEXT"),
     ...sentences("SERVICE_MAP_TEXT"),
     ...Object.entries(BINDING_KIND_LABEL).map(([k, label]) => [`kind ${k}`, label] as [string, CopyText]),
-    ...Object.entries(NOT_RESOLVED_REMEDY).map(([k, r]) => [`remedy ${k}`, r.remedy] as [string, CopyText]),
   ];
 
   it("samples every sentence function, so none goes unchecked", () => {
@@ -129,47 +124,6 @@ describe("workspace catalogue sentences", () => {
     expect(HEALTH_TEXT.unknownMembers(1)).toContain("so that rule was silently narrowed");
     expect(COVERAGE_TEXT.notResolvedCaption(1)).toBe("Why 1 outbound call site did not resolve, largest reason first");
     expect(COVERAGE_TEXT.notResolvedCaption(7)).toBe("Why 7 outbound call sites did not resolve, largest reason first");
-  });
-
-  it("per-row member actions: re-index a degraded member, review deletions, else nothing", () => {
-    expect(memberRowAction({ degraded: true, unusedAcross: null })).toMatchObject({
-      kind: "act",
-      where: "command",
-      target: "logos index",
-    });
-    expect(memberRowAction({ degraded: false, unusedAcross: 3 })).toMatchObject({ kind: "act", where: "source code" });
-    expect(memberRowAction({ degraded: false, unusedAcross: 0 })).toEqual({ kind: "none" });
-    expect(memberRowAction({ degraded: false, unusedAcross: null })).toEqual({ kind: "none" });
-  });
-
-  it("gives each evidence row the action its refusal calls for, each with where (S-614, CR-203 item 7)", () => {
-    const row = { member: "api", key: "billing.url", sources: [] as string[] };
-    // No committed source defines it → define the key, in the member's configuration.
-    expect(evidenceRowAction({ ...row, refusal: "missing-key" })).toEqual({
-      kind: "act",
-      where: "configuration",
-      target: "billing.url",
-      text: `In api, ${NOT_RESOLVED_REMEDY["config-key-missing"].remedy}.`,
-    });
-    // A placeholder → replace the committed value, worded as the coverage tab words it.
-    expect(evidenceRowAction({ ...row, refusal: "placeholder-value" })).toEqual({
-      kind: "act",
-      where: "configuration",
-      target: "billing.url",
-      text: `In api, ${NOT_RESOLVED_REMEDY["config-placeholder-value"].remedy}.`,
-    });
-    // Not committed by the repository → nothing to fix there.
-    expect(evidenceRowAction({ ...row, refusal: "uncommitted" })).toEqual({ kind: "none" });
-    expect(SERVICE_MAP_TEXT.arrivesAtRuntime).toMatch(/^Nothing to fix in the repository/);
-    // A committed value → the file named in Defining sources.
-    expect(
-      evidenceRowAction({ ...row, refusal: null, sources: ["application.yml", "application-docker.yml"] }),
-    ).toMatchObject({ kind: "act", where: "configuration", target: "application.yml, application-docker.yml" });
-    // A refusal token newer than this build is never told to correct a value
-    // (its row shows none, and its sources are empty): it names the command
-    // that states its reason.
-    const later = evidenceRowAction({ ...row, refusal: "secret-ref" as unknown as null });
-    expect(later).toMatchObject({ kind: "act", where: "command", target: "logos workspace status" });
   });
 });
 

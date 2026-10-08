@@ -8,7 +8,7 @@
  * formats the numbers it is handed and computes none.
  */
 
-import { noRowAction, plural, type CopyEntry, type RowAction } from "./types.ts";
+import { plural, type CopyEntry } from "./types.ts";
 
 // ── Cross-service reachability (item 2) ──────────────────────────────────────
 
@@ -23,21 +23,6 @@ export const members: CopyEntry = {
   what: "Each service's own figures, one row per service: how much of its code links up, and how many of its callables nothing calls.",
   why: "A service that could not be opened adds nothing to any figure on this page, and a callable nothing in the workspace calls is a safe candidate for deletion.",
 };
-
-/** One member row's own action (the Members table's last column). */
-export function memberRowAction(row: { degraded: boolean; unusedAcross: number | null }): RowAction {
-  if (row.degraded) {
-    return { kind: "act", where: "command", target: "logos index", text: "Run logos index in this member." };
-  }
-  if (row.unusedAcross !== null && row.unusedAcross > 0) {
-    return {
-      kind: "act",
-      where: "source code",
-      text: `Review ${row.unusedAcross} ${plural(row.unusedAcross, "callable", "callables")} for deletion.`,
-    };
-  }
-  return noRowAction;
-}
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
 

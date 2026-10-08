@@ -7,7 +7,8 @@ import { describe, expect, it } from "vitest";
 
 import { isCopyEntry } from "../copy/text.ts";
 import { TOOL_PANELS } from "../copy/toolPanels.ts";
-import { scanViewSources, type CatalogueExport, type CatalogueIndex } from "../test/widgetScan.ts";
+import { REMOVED_ACTION_TEXT } from "../test/removedActionText.ts";
+import { scanViewSources, textSites, type CatalogueExport, type CatalogueIndex } from "../test/widgetScan.ts";
 
 const sources = import.meta.glob<string>(["/src/views/**/*.tsx", "!/src/views/**/*.test.tsx"], {
   query: "?raw",
@@ -52,6 +53,28 @@ function actionLineMarkers(files: Record<string, string>): string[] {
     src.split("\n").flatMap((line, i) => (ACTION_LINE_MARKER.test(line) ? [`${file}:${i + 1}`] : [])),
   );
 }
+
+/** Every source under src/ but tests, `src/test/` (which holds the removed text
+ *  in order to refuse it) and compile-time probes: the views, components and
+ *  catalogues the bundle renders text from. A test helper kept elsewhere, such as
+ *  `copy/expectWidgetCopy.ts`, is read like any source; it names the text only
+ *  through the shared constant. */
+const renderedSources = import.meta.glob<string>(
+  [
+    "/src/**/*.ts",
+    "/src/**/*.tsx",
+    "!/src/**/*.test.ts",
+    "!/src/**/*.test.tsx",
+    "!/src/**/*.typecheck.ts",
+    "!/src/test/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+/** The sources that still write action text CR-206/CR-207 removed, as
+ *  `file:line`. Comments are left out — a doc comment may name the text to
+ *  record its removal — by the parser's own comment ranges (`textSites`). */
+const removedActionTextSites = (files: Record<string, string>) => textSites(files, REMOVED_ACTION_TEXT);
 
 const scan = (files: Record<string, string>) => scanViewSources(files, catalogues, panels);
 
@@ -110,6 +133,58 @@ describe("widget source scan (S-617)", () => {
     }
     // A near miss is not the marker: a data attribute naming another part, or a word.
     expect(actionLineMarkers({ x: '<div data-widget-part="evidence">actionable where</div>\n<td data-row-action="">' })).toEqual([]);
+  });
+
+  it("no source the UI renders from writes \"What you can do\" or the empty-row sentence (CR-207 AC-4)", () => {
+    for (const file of [
+      "/src/views/workspace/WorkspaceDashboardView.tsx",
+      "/src/views/workspace/WorkspaceView.tsx",
+      "/src/components/Widget.tsx",
+      "/src/copy/types.ts",
+      "/src/copy/serviceMap.copy.ts",
+    ]) {
+      expect(Object.keys(renderedSources), "the scan reads every view, component and catalogue").toContain(file);
+    }
+    expect(Object.keys(renderedSources).some((f) => f.includes(".test.")), "tests are not rendered").toBe(false);
+    expect(removedActionTextSites(renderedSources)).toEqual([]);
+    console.info(`removed-action-text scan: ${Object.keys(renderedSources).length} source files`);
+  });
+
+  it("finds the removed text written back into a source, in code or JSX, never in a comment (falsifiable)", () => {
+    const view = "/src/views/workspace/WorkspaceDashboardView.tsx";
+    const lines = renderedSources[view].split("\n").length;
+    for (const added of [
+      '  { key: "action", header: "What you can do", cell: () => null },',
+      '      <span className="muted">Nothing to do — informational.</span>',
+      'const emptyRow = "Nothing to do — informational."; // a trailing comment does not hide it',
+    ]) {
+      expect(removedActionTextSites({ [view]: `${renderedSources[view]}\n${added}` }), added).toEqual([`${view}:${lines + 1}`]);
+    }
+    // A comment recording the removal is not rendered text, nor is a near miss.
+    expect(
+      removedActionTextSites({
+        "x.tsx":
+          '/* CR-207 removed "What you can do". */\n// Nothing to do — informational. (gone)\nconst s = "Nothing to do unless the change was unintended.";\nconst j = <p>{/* What you can do */}ok</p>;',
+      }),
+    ).toEqual([]);
+  });
+
+  // Review fix: a regular-expression comment strip read the `/*` in a glob
+  // string, a line comment or a template literal as a comment opener and blanked
+  // real code up to the next `*\/` — forty lines of the sidebar, App's return,
+  // GapsView's example rules. Each shape below hid its line from that strip.
+  it.each([
+    ["after a glob in a string", 'const glob = "src/*.ts";\nconst header = "What you can do";\n/** doc */\n'],
+    ["after a glob in a line comment", '// serves workspace/*\nexport const A = () => <th>What you can do</th>;\n/** doc */\n'],
+    ["inside a template literal holding a glob", 'const rules = `\n  "src/core/**"\n  # Nothing to do — informational.\n`;\n/** doc */\n'],
+  ])("finds the removed text %s", (_shape, src) => {
+    const line = src.split("\n").findIndex((l) => /What you can do|Nothing to do —/.test(l)) + 1;
+    expect(removedActionTextSites({ "x.tsx": src })).toEqual([`x.tsx:${line}`]);
+  });
+
+  it("finds removed text a formatter wrapped across lines in JSX", () => {
+    const src = "export const A = () => (\n  <th>\n    What you can\n    do\n  </th>\n);\n";
+    expect(removedActionTextSites({ "x.tsx": src })).toEqual(["x.tsx:3"]);
   });
 
   it("every registered tool panel is rendered by some view", () => {

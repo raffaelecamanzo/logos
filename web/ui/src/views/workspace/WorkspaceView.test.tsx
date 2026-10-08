@@ -23,10 +23,8 @@ import {
   crossContextHint,
   crossServiceBindings,
   declaredContracts,
-  evidenceRowAction,
   SERVICE_MAP_TEXT,
 } from "../../copy/serviceMap.copy.ts";
-import { copyTextString } from "../../copy/text.ts";
 import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import {
   HEALTHY_COVERAGE,
@@ -2252,41 +2250,36 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     { ...BINDING, from: { member: "api", symbol: "d" }, from_value: SHARED_VALUE },
   ];
 
-  it("gives each row the action its refusal calls for, each with where", async () => {
+  /** The evidence table's headers, without the sort glyph. */
+  const headersOf = (table: HTMLElement) =>
+    within(table).getAllByRole("columnheader").map((th) => th.textContent?.replace("↕", ""));
+
+  it("has no per-row action column, and states each refusal in words in Committed value (CR-207 AC-2)", async () => {
     stubApi({ providers: REFUSALS });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
     const widget = mapWidget("Binding evidence");
     const table = within(widget).getByRole("table");
-    const header = within(table).getAllByRole("columnheader").map((th) => th.textContent?.replace("↕", ""));
-    const action = header.indexOf("What you can do");
-    expect(action).toBe(header.length - 1);
-    const cells = within(table)
-      .getAllByRole("row")
-      .slice(1)
-      .map((r) => r.querySelectorAll("td")[action]);
-    const actOf = (refusal: "missing-key" | "placeholder-value" | null, key: string, sources: string[] = []) => {
-      const a = evidenceRowAction({ member: "api", key, refusal, sources });
-      if (a.kind !== "act") throw new Error("expected an act action");
-      return `${copyTextString(a.text)}${a.where} ${a.target}`;
-    };
-    expect(cells.map((c) => c.textContent)).toEqual([
-      // No committed source defines it → define the key, configuration, the key named.
-      actOf("missing-key", "k.missing"),
-      // A placeholder → replace the value, configuration, the key named.
-      actOf("placeholder-value", "k.placeholder"),
-      // Not committed by the repository → nothing to fix there.
-      SERVICE_MAP_TEXT.arrivesAtRuntime,
-      // A committed value → the file named in Defining sources.
-      actOf(null, "billing.base-url", ["application-docker.yml"]),
+    // The table ends at Calls: no "What you can do" header, and no cell past it.
+    expect(headersOf(table)).toEqual(["End", "Key", "Committed value", "Profiles", "Defining sources", "Calls"]);
+    expect(widget).not.toHaveTextContent("What you can do");
+    expect(widget).not.toHaveTextContent("Nothing to fix in the repository");
+    const rows = within(table).getAllByRole("row").slice(1);
+    for (const r of rows) expect(r.querySelectorAll("td")).toHaveLength(6);
+    const value = headersOf(table).indexOf("Committed value");
+    expect(rows.map((r) => r.querySelectorAll("td")[value].textContent)).toEqual([
+      // Each refusal in words — FR-UI-42's own, written out so only a literal pins them.
+      "No committed source defines it",
+      "The committed value is itself a placeholder",
+      "Not committed by the repository",
+      // A committed value is the value itself.
+      "http://billing:8080",
     ]);
-    for (const c of cells.slice(0, 2)) expect(c.querySelector("code")?.textContent).toMatch(/^k\./);
-    expect(cells[3].querySelector("code")?.textContent).toBe("application-docker.yml");
-    // The rows keep their own actions; the widget carries no action line (CR-206).
+    // The widget carries no action line either (CR-206).
     expectWidgetCopy(widget, bindingEvidence);
   });
 
-  it("shows a refusal token this build does not know verbatim, and points at its reason — never 'correct the file'", async () => {
+  it("shows a refusal token this build does not know verbatim in Committed value, with no action beside it", async () => {
     const later = {
       ...REFUSED_BINDING,
       from_value: { provenance: "config-unresolved", keys: ["k.later"], refusal: "secret-ref" },
@@ -2294,11 +2287,12 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     stubApi({ providers: [later] });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
-    const table = within(mapWidget("Binding evidence")).getByRole("table");
+    const widget = mapWidget("Binding evidence");
+    const table = within(widget).getByRole("table");
     const cells = [...within(table).getAllByRole("row")[1].querySelectorAll("td")].map((c) => c.textContent);
-    expect(cells[2]).toBe("secret-ref");
-    expect(cells[cells.length - 1]).not.toMatch(/correct it in the file/);
-    expect(cells[cells.length - 1]).toMatch(/command logos workspace status$/);
+    expect(cells[headersOf(table).indexOf("Committed value")]).toBe("secret-ref");
+    expect(cells).toHaveLength(6);
+    expect(widget).not.toHaveTextContent(/logos workspace status|What you can do/);
   });
 
   it("counts a link whose provenance was never stated, and says it names no key — never 'configuration evidence'", async () => {

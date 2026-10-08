@@ -49,13 +49,6 @@ describe("expectWidgetCopy", () => {
     expectWidgetCopy(container.firstElementChild!, coverage);
   });
 
-  it("passes on a row's own action column inside the evidence (row content, CR-206 §3.3)", () => {
-    const html = widgetHtml({
-      after: `<div data-widget-part="evidence"><table><tr><th>What you can do</th></tr><tr><td>Run logos index in this member.</td></tr></table></div>`,
-    });
-    expect(() => expectWidgetCopy(frame(html))).not.toThrow();
-  });
-
   it.each([
     ["an empty what", widgetHtml({ what: "" }), /what part is empty/],
     ["an empty why", widgetHtml({ why: " " }), /why part is empty/],
@@ -79,8 +72,24 @@ describe("expectWidgetCopy", () => {
     ],
     [
       "the \"What you can do\" label",
-      widgetHtml({ after: `<p>What you can do: Nothing to do — informational.</p>` }),
-      /action line was removed .*"What you can do"/,
+      widgetHtml({ after: `<p>What you can do: Relax.</p>` }),
+      /action text was removed .*"What you can do"/,
+    ],
+    // CR-207: the per-row action columns are gone too, so the evidence part is
+    // no exception — a header or an empty-row sentence inside a table fails.
+    [
+      "a \"What you can do\" column inside the evidence",
+      widgetHtml({
+        after: `<div data-widget-part="evidence"><table><tr><th>What you can do</th></tr><tr><td>Run logos index in this member.</td></tr></table></div>`,
+      }),
+      /action text was removed .*"What you can do"/,
+    ],
+    [
+      "an empty row action's sentence inside the evidence",
+      widgetHtml({
+        after: `<div data-widget-part="evidence"><table><tr><td>Nothing to do — informational.</td></tr></table></div>`,
+      }),
+      /action text was removed .*"Nothing to do — informational\."/,
     ],
   ])("fails on %s", (_name, html, message) => {
     expect(() => expectWidgetCopy(frame(html))).toThrow(message);

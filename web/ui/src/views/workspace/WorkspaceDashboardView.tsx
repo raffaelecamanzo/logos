@@ -45,7 +45,6 @@ import type {
   WorkspaceStatus,
 } from "../../api/types.ts";
 import {
-  ActionCell,
   Badge,
   Callout,
   DataTable,
@@ -61,7 +60,6 @@ import {
 } from "../../components/index.ts";
 import {
   DASHBOARD_TEXT,
-  memberRowAction,
   members,
   reachability,
 } from "../../copy/workspaceDashboard.copy.ts";
@@ -318,11 +316,6 @@ function tallyCell(row: RosterRow, pick: (t: MemberReachability) => number) {
   return pick(row.tally);
 }
 
-/** The per-row action cell: what this member's own row asks of the reader. */
-function RowAction({ row }: { row: RosterRow }) {
-  return <ActionCell action={memberRowAction({ degraded: row.degraded, unusedAcross: row.tally?.dead_app_wide ?? null })} />;
-}
-
 /** The roster's columns. The figure headers are glossed (CR-203 §3.2 D item 3):
  *  plain words, each naming a precise figure the gloss defines.
  *
@@ -391,7 +384,6 @@ const rosterColumns = (): Column<RosterRow>[] => [
     cell: (r) => tallyCell(r, (t) => t.dead_app_wide),
     sortValue: (r) => r.tally?.dead_app_wide ?? -1,
   },
-  { key: "action", header: "What you can do", cell: (r) => <RowAction row={r} /> },
 ];
 
 function MemberRoster({

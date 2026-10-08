@@ -2,20 +2,16 @@
  * The service-map catalogue (S-614, CR-203 §3.2 D items 6–9, FR-UI-39,
  * FR-UI-42): Cross-service bindings, Binding evidence, Declared contracts and
  * Cross-context model hint — the four widgets under the Workspace tab's Service
- * map. The coverage tab speaks from `coverage.copy.ts`; the two config-refusal
- * remedies the Binding evidence rows take are worded there once
- * (`NOT_RESOLVED_REMEDY`) and reused here.
+ * map. The coverage tab speaks from `coverage.copy.ts`.
  *
  * Every figure the sentences carry is the view's count of what it renders
  * (NFR-MA-02): `SERVICE_MAP_TEXT` formats the numbers it is handed and computes
  * none, so the view tests name a key, not the prose.
  */
 
-import type { ConfigValueRefusal } from "../api/types.ts";
 import type { BINDING_KIND_FILTERS } from "../views/workspace/serviceMapModel.ts";
 
-import { NOT_RESOLVED_REMEDY } from "./coverage.copy.ts";
-import { gloss, noRowAction, plural, type CopyEntry, type RowAction } from "./types.ts";
+import { gloss, plural, type CopyEntry } from "./types.ts";
 
 // ── Cross-service bindings (item 6) ──────────────────────────────────────────
 
@@ -30,61 +26,6 @@ export const bindingEvidence: CopyEntry = {
   what: "The committed configuration behind each binding not written at the call site — per end, the key, its value or why it has none, and the files that define it — with identical rows merged and Calls counting the calls each row stands for.",
   why: "A binding taken from configuration holds only while that value is right, so a missing key or a placeholder value is a coupling the repository does not prove.",
 };
-
-/** One evidence row, as its own action reads it. */
-export interface EvidenceRowFacts {
-  readonly member: string;
-  readonly key: string;
-  readonly refusal: ConfigValueRefusal | null;
-  readonly sources: readonly string[];
-}
-
-/**
- * One evidence row's own action (the Binding evidence table's last column),
- * following its refusal (CR-203 item 7). The two refusals the repository can
- * fix take their remedy — sentence and where — from `NOT_RESOLVED_REMEDY`. A value the repository does not commit has
- * nothing to fix in the repository: that is the one `none`, and its sentence is
- * `SERVICE_MAP_TEXT.arrivesAtRuntime`.
- *
- * Exhaustive over the closed union, so a refusal added to `ConfigValueRefusal`
- * without an action here is a `tsc -b` error. The wire is not runtime
- * validated, so a token this build does not know still reaches the last arm:
- * it is pointed at the command that states its reason, never told to correct a
- * value the row does not show.
- */
-export function evidenceRowAction(row: EvidenceRowFacts): RowAction {
-  switch (row.refusal) {
-    case "missing-key":
-      return remedyAction(row, NOT_RESOLVED_REMEDY["config-key-missing"]);
-    case "placeholder-value":
-      return remedyAction(row, NOT_RESOLVED_REMEDY["config-placeholder-value"]);
-    case "uncommitted":
-      return noRowAction;
-    case null:
-      // A committed value: right or wrong, its file is the one the row names.
-      return {
-        kind: "act",
-        where: "configuration",
-        target: row.sources.join(", "),
-        text: "If this value is wrong, correct it in the file named under Defining sources.",
-      };
-    default: {
-      const unknown: never = row.refusal;
-      void unknown;
-      return {
-        kind: "act",
-        where: "command",
-        target: "logos workspace status",
-        text: "This refusal is newer than this page; read its reason in the workspace status.",
-      };
-    }
-  }
-}
-
-/** A refusal's action from its coverage-tab remedy, scoped to the row's member. */
-function remedyAction(row: EvidenceRowFacts, remedy: (typeof NOT_RESOLVED_REMEDY)[keyof typeof NOT_RESOLVED_REMEDY]): RowAction {
-  return { kind: "act", where: remedy.where, target: row.key, text: `In ${row.member}, ${remedy.remedy}.` };
-}
 
 // ── Declared contracts (item 8) ──────────────────────────────────────────────
 
@@ -138,9 +79,6 @@ export const SERVICE_MAP_TEXT = {
    *  conclusion about why: an `unstated` end, or a config end naming no key. */
   noKeyNamed:
     "No configuration key is named for this coupling, so there is nothing here to evidence it either way — its Provenance breakdown above says what is known.",
-  /** The one `none` an evidence row has: the value arrives at runtime. */
-  arrivesAtRuntime:
-    "Nothing to fix in the repository: the value arrives at runtime, from an environment variable with no committed default.",
   /** The declared figure, from the widget's own tables. `calls` is `null`
    *  when no drawn link names an external: then no call was matched against
    *  one, and "0 calls matched" would state an answer to a question never
