@@ -33,7 +33,7 @@ export interface BindingEvidenceState {
 }
 
 export const bindingEvidence: CopyEntry<BindingEvidenceState> = {
-  what: "The committed configuration behind each binding not written at the call site: per end, the key, its value or why it has none, and the files that define it. Identical rows are merged, and Calls says how many calls each row stands for.",
+  what: "The committed configuration behind each binding not written at the call site — per end, the key, its value or why it has none, and the files that define it — with identical rows merged and Calls counting the calls each row stands for.",
   why: "A binding taken from configuration holds only while that value is right, so a missing key or a placeholder value is a coupling the repository does not prove.",
   action: ({ define, replace }) =>
     define + replace === 0
