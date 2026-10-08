@@ -33,6 +33,9 @@
   line-height: var(--leading-base);
   text-align: left;
   white-space: normal;
+  /* A term in a table header must not pass on the header's label voice. */
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .term:hover .tip,

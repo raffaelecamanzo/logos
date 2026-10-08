@@ -81,3 +81,31 @@ describe("DataTable pagination (S-188, FR-UI-11)", () => {
     expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
   });
 });
+
+describe("DataTable header gloss (S-616, FR-UI-39)", () => {
+  const GLOSSED: Column<Row>[] = [
+    { key: "name", header: "Name", cell: (r) => r.name, sortValue: (r) => r.name },
+    { key: "score", header: "Co-change", gloss: "coChange", numeric: true, cell: (r) => r.score, sortValue: (r) => r.score },
+  ];
+
+  it("glosses the header through Term, beside — never inside — the sort button", async () => {
+    const user = userEvent.setup();
+    render(<DataTable caption="t" columns={GLOSSED} rows={ROWS.slice(0, 3)} rowKey={(r) => r.name} />);
+    const header = screen.getAllByRole("columnheader")[1];
+    const term = header.querySelector("dfn[data-term='coChange']");
+    expect(term).not.toBeNull();
+    expect(term).toHaveTextContent(/^Co-change/);
+    // A focusable <dfn> inside a <button> is invalid nesting, and a click on the
+    // term would sort: the term sits outside the button.
+    const sort = within(header).getByRole("button", { name: "Co-change" });
+    expect(sort.contains(term)).toBe(false);
+    await user.click(sort);
+    expect(header).toHaveAttribute("aria-sort", "ascending");
+  });
+
+  it("glosses an unsortable header too", () => {
+    const cols: Column<Row>[] = [{ key: "score", header: "Co-change", gloss: "coChange", cell: (r) => r.score }];
+    render(<DataTable caption="t" columns={cols} rows={ROWS.slice(0, 1)} rowKey={(r) => r.name} />);
+    expect(screen.getByRole("columnheader").querySelector("dfn[data-term='coChange']")).not.toBeNull();
+  });
+});

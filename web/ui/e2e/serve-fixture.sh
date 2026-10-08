@@ -76,7 +76,12 @@ expect_root() { # expect_root <wanted-toplevel-or-empty>
 if [ "$KIND" = single ]; then
     git_repo "$RUN"
     expect_root "$(cd "$RUN" && pwd -P)"
+    # The fixture's later commits (more authors, a fix), so Files & Risk has
+    # churn to rank and ownership to disperse; then rank it, which mines that
+    # history — the files view reads the ranking, it never mines on a GET.
+    bash "$HERE/fixtures/single.history.sh" "$RUN"
     "$BIN" --project "$RUN" index --quiet
+    "$BIN" --project "$RUN" hotspots --quiet >/dev/null
 else
     for member in "$RUN"/*/; do
         git_repo "${member%/}"

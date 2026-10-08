@@ -18,13 +18,22 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
+import type { GlossaryTerm } from "../copy/glossary.ts";
+
 import styles from "./DataTable.module.css";
+import { Term } from "./Term.tsx";
 
 export interface Column<Row> {
   /** Stable key for the column. */
   key: string;
   /** Header text. */
   header: ReactNode;
+  /**
+   * Gloss the header through `Term` (S-616, FR-UI-39): the term renders beside
+   * the sort button, never inside it — a focusable `<dfn>` cannot nest in a
+   * `<button>` — and the button keeps the header as its name.
+   */
+  gloss?: GlossaryTerm;
   /** Cell renderer. */
   cell: (row: Row) => ReactNode;
   /** Right-align the header + cells (numeric columns). */
@@ -142,19 +151,24 @@ export function DataTable<Row>({
                   className={col.numeric ? styles.num : undefined}
                   aria-sort={ariaSort}
                 >
+                  {col.gloss && (
+                    <>
+                      <Term term={col.gloss}>{col.header}</Term>{" "}
+                    </>
+                  )}
                   {col.sortValue ? (
                     <button
                       type="button"
                       className={styles.sortBtn}
                       onClick={() => onSort(col)}
                     >
-                      {col.header}
+                      {col.gloss ? <span className="sr-only">{col.header}</span> : col.header}
                       <span aria-hidden="true" className={styles.sortGlyph}>
                         {active ? (sortDir === "asc" ? "▲" : "▼") : "↕"}
                       </span>
                     </button>
                   ) : (
-                    col.header
+                    !col.gloss && col.header
                   )}
                 </th>
               );

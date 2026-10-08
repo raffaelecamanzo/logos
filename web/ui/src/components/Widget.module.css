@@ -75,6 +75,20 @@
   color: var(--text-1);
 }
 
+/* A note: secondary detail in the explanation, so muted and one step smaller. */
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--text-2);
+}
+
+.note > * {
+  margin: 0;
+}
+
 .actionLabel {
   font-weight: var(--weight-semibold);
 }

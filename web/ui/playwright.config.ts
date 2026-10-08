@@ -8,11 +8,11 @@ import { defineConfig, devices } from "@playwright/test";
 // Each project drives a TREE-BUILT `logos serve --ui` over a checked-in fixture
 // (e2e/fixtures/), so a spec reads computed style in a real browser — the one
 // thing vitest cannot do, because its CSS modules are a proxy under `css: false`.
-// The shell specs load the bundle the server serves. No view renders a `Widget`
-// yet, so the frame spec loads a separate Vite build of the same components and
-// stylesheets (e2e/harness/) at the server's origin, under the CSP header the
-// server sends; the layout specs of the stories that convert views load the
-// real views.
+// The shell specs load the bundle the server serves. The frame spec loads a
+// fixed page of every frame state — a separate Vite build of the same components
+// and stylesheets (e2e/harness/) — at the server's origin, under the CSP header
+// the server sends; the layout specs of the views that render through the frame
+// (`files`, `statistics`, …) load the real views.
 //
 //   project   — a single repository: the project views.
 //   workspace — a parent of two member repositories: the workspace views.

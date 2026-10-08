@@ -4,7 +4,7 @@
  * `Widget` frame renders it.
  */
 
-import { GLOSSARY, GLOSSARY_TERMS, type GlossaryTerm } from "./glossary.ts";
+import { GLOSSARY, VOCABULARY_TERMS, vocabularyPattern, type GlossaryTerm } from "./glossary.ts";
 import type { CopyEntry, CopyText } from "./types.ts";
 
 /** The text as a reader sees it: plain segments and gloss words, joined. */
@@ -45,7 +45,7 @@ export interface UnglossedUse {
 
 /**
  * The FR-UI-39 vocabulary rule over a widget's parts, in reading order: a
- * glossary term must be glossed at its FIRST use in the widget. A plain use is
+ * vocabulary term must be glossed at its FIRST use in the widget. A plain use is
  * a violation unless the same term was glossed before it — in an earlier part,
  * or earlier in the same part.
  */
@@ -53,8 +53,8 @@ export function findUnglossedUses(parts: readonly PlainPart[]): UnglossedUse[] {
   const glossed = new Set<GlossaryTerm>();
   const uses: UnglossedUse[] = [];
   parts.forEach((part, index) => {
-    for (const term of GLOSSARY_TERMS) {
-      const at = part.text.search(GLOSSARY[term].pattern);
+    for (const term of VOCABULARY_TERMS) {
+      const at = part.text.search(vocabularyPattern(term)!);
       if (at < 0 || glossed.has(term)) continue;
       if (!part.glosses.some((g) => g.term === term && g.at <= at)) uses.push({ term, part: index });
     }
@@ -63,7 +63,7 @@ export function findUnglossedUses(parts: readonly PlainPart[]): UnglossedUse[] {
   return uses;
 }
 
-/** Glossary terms whose first use across `texts` (in order) has no gloss. */
+/** Vocabulary terms whose first use across `texts` (in order) has no gloss. */
 export function findUnglossedTerms(...texts: CopyText[]): GlossaryTerm[] {
   return [...new Set(findUnglossedUses(texts.map(plainPart)).map((u) => u.term))];
 }

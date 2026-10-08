@@ -7,8 +7,11 @@
  * `expectWidgetCopy` both apply the rule through `findUnglossedUses` (text.ts),
  * so a term added here is enforced everywhere at once.
  *
- * Each entry carries the pattern that detects the term in plain text. Most are a
- * whole-word match; where one needs more care, a comment beside it says why.
+ * A vocabulary entry carries the pattern that detects the term in plain text.
+ * Most are a whole-word match; where one needs more care, a comment beside it
+ * says why. An entry WITHOUT a pattern is a column-header gloss (S-616): a
+ * label a table defines through `Term` — "Co-change", "Defect", "Answered" —
+ * that is ordinary English in prose, so the vocabulary rule does not police it.
  */
 
 export interface GlossaryEntry {
@@ -16,8 +19,11 @@ export interface GlossaryEntry {
   readonly label: string;
   /** The plain-words explanation shown on hover and focus. */
   readonly definition: string;
-  /** Detects the term in plain catalogue text. */
-  readonly pattern: RegExp;
+  /**
+   * Detects the term in plain catalogue text: present exactly on the FR-UI-39
+   * internal vocabulary, which must be glossed at its first use in a widget.
+   */
+  readonly pattern?: RegExp;
 }
 
 export const GLOSSARY = {
@@ -112,6 +118,22 @@ export const GLOSSARY = {
     // bound.") is flagged too; write "linked" there.
     pattern: /\b\d[\d,]*\s+(?:un)?bound\b|\b(?:un)?bound\b(?=\s*(?:$|[.,;:!?)/]|(?:and|or|vs\.?|versus)\b))/i,
   },
+  // Column-header glosses (S-616, CR-203 items 23 and 25): no pattern.
+  coChange: {
+    label: "Co-change",
+    definition:
+      "How many other files repeatedly changed in the same commits as this one. A file that always changes with others is coupled to them.",
+  },
+  defect: {
+    label: "Defect",
+    definition:
+      "Commits to this file whose message looks like a fix. A commit-hygiene heuristic read from commit messages, not a count of real defects.",
+  },
+  answered: {
+    label: "Answered",
+    definition:
+      "Calls that returned a non-empty answer, out of the calls whose answer could be classified.",
+  },
 } as const satisfies Record<string, GlossaryEntry>;
 
 export type GlossaryTerm = keyof typeof GLOSSARY;
@@ -119,10 +141,18 @@ export type GlossaryTerm = keyof typeof GLOSSARY;
 /** Every glossary key, in declaration order. */
 export const GLOSSARY_TERMS = Object.keys(GLOSSARY) as GlossaryTerm[];
 
+/** The detector of a vocabulary term; `undefined` for a column-header gloss. */
+export function vocabularyPattern(term: GlossaryTerm): RegExp | undefined {
+  return (GLOSSARY[term] as GlossaryEntry).pattern;
+}
+
+/** The FR-UI-39 internal vocabulary: the terms that carry a detector. */
+export const VOCABULARY_TERMS = GLOSSARY_TERMS.filter((term) => vocabularyPattern(term) !== undefined);
+
 /**
- * The glossary terms found in plain text, in glossary order (each at most once).
- * Callers pass only text that sits OUTSIDE a gloss.
+ * The vocabulary terms found in plain text, in glossary order (each at most
+ * once). Callers pass only text that sits OUTSIDE a gloss.
  */
 export function findTermsInPlainText(text: string): GlossaryTerm[] {
-  return GLOSSARY_TERMS.filter((term) => GLOSSARY[term].pattern.test(text));
+  return VOCABULARY_TERMS.filter((term) => vocabularyPattern(term)!.test(text));
 }

@@ -55,3 +55,7 @@ export type { WidgetStackProps } from "./WidgetStack.tsx";
 
 export { Term } from "./Term.tsx";
 export type { TermProps } from "./Term.tsx";
+
+// Abbreviated file paths in tables (S-616, CR-203 §3.2 E, FR-UI-44).
+export { abbreviatePaths, PATH_BUDGET, PathCell, pathColumn } from "./PathCell.tsx";
+export type { PathCellProps } from "./PathCell.tsx";

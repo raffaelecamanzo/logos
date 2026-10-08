@@ -7,7 +7,7 @@ import {
   activityLineOption,
   activitySeries,
   answeredLabel,
-  attributionByClass,
+  attributionRows,
   bySurface,
   isStatsEmpty,
   originBarOption,
@@ -219,58 +219,39 @@ describe("answeredLabel (FR-OB-14)", () => {
   });
 });
 
-describe("attributionByClass (FR-OB-11)", () => {
-  it("groups the cross-tab by class, classes sorted by name", () => {
+describe("attributionRows (FR-OB-11, CR-203 item 25)", () => {
+  const cell = (tool: string, cls: string, origin: string, calls: number, answered = 1, classified = 1) => ({
+    tool,
+    class: cls,
+    origin,
+    calls,
+    ok_calls: calls,
+    answered_calls: answered,
+    classified_calls: classified,
+    outcome_absence: classified === 0 ? "none recorded" : null,
+  });
+
+  it("is one list with a class per row, ordered by class and then by calls", () => {
     const stats = emptyStats({
+      // The read-model's own (tool, origin) order: neither by class nor by calls.
       calls_by_tool_origin: [
-        {
-          tool: "search",
-          class: "navigation",
-          origin: "dev",
-          calls: 5,
-          ok_calls: 5,
-          answered_calls: 3,
-          classified_calls: 4,
-          outcome_absence: null,
-        },
-        {
-          tool: "config_write",
-          class: "engine-internal",
-          origin: "main",
-          calls: 2,
-          ok_calls: 2,
-          answered_calls: 0,
-          classified_calls: 0,
-          outcome_absence: "none recorded",
-        },
-        {
-          tool: "impact",
-          class: "navigation",
-          origin: "main",
-          calls: 1,
-          ok_calls: 1,
-          answered_calls: 1,
-          classified_calls: 1,
-          outcome_absence: null,
-        },
+        cell("impact", "navigation", "main", 1),
+        cell("config_write", "engine-internal", "main", 2, 0, 0),
+        cell("search", "navigation", "dev", 5, 3, 4),
+        cell("callers", "navigation", "dev", 1),
       ],
     });
-    const groups = attributionByClass(stats);
-    expect(groups.map((g) => g.class)).toEqual(["engine-internal", "navigation"]);
-    const navigation = groups.find((g) => g.class === "navigation");
-    // Row order follows the read-model's own (tool, origin) order — not re-sorted.
-    expect(navigation?.rows).toEqual([
-      { tool: "search", origin: "dev", calls: 5, ok_calls: 5, answered: "3 of 4 answered" },
-      { tool: "impact", origin: "main", calls: 1, ok_calls: 1, answered: "1 of 1 answered" },
-    ]);
-    const engineInternal = groups.find((g) => g.class === "engine-internal");
-    expect(engineInternal?.rows).toEqual([
-      { tool: "config_write", origin: "main", calls: 2, ok_calls: 2, answered: "none recorded" },
+    expect(attributionRows(stats)).toEqual([
+      { class: "engine-internal", tool: "config_write", origin: "main", calls: 2, ok_calls: 2, answered: "none recorded" },
+      { class: "navigation", tool: "search", origin: "dev", calls: 5, ok_calls: 5, answered: "3 of 4 answered" },
+      // Equal calls keep the read-model's order ("impact" came first).
+      { class: "navigation", tool: "impact", origin: "main", calls: 1, ok_calls: 1, answered: "1 of 1 answered" },
+      { class: "navigation", tool: "callers", origin: "dev", calls: 1, ok_calls: 1, answered: "1 of 1 answered" },
     ]);
   });
 
   it("is empty when the cross-tab is empty (raw-events-only, honestly)", () => {
-    expect(attributionByClass(emptyStats())).toEqual([]);
+    expect(attributionRows(emptyStats())).toEqual([]);
   });
 });
 

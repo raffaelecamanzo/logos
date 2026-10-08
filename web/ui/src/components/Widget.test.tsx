@@ -95,6 +95,25 @@ describe("Widget", () => {
     expect(container.querySelector(`.${statesStyles.emptyText}`)).toBeNull();
   });
 
+  it("renders a note in the explanation, after why, outside the catalogue copy (S-616)", () => {
+    // A read-model's own caveats, rendered verbatim: payload text a catalogue
+    // cannot hold, so it is not a `data-widget-copy` part.
+    const { container } = render(
+      <Widget title="T" copy={observe} note={<p>Raw events only.</p>} />,
+    );
+    const explanation = container.querySelector('[data-widget-part="explanation"]')!;
+    const note = screen.getByText("Raw events only.").closest("[data-widget-note]");
+    expect(explanation).toContainElement(note as HTMLElement);
+    expect(note).toHaveClass(styles.note);
+    expect(note?.previousElementSibling).toHaveAttribute("data-widget-copy", "why");
+    expect(note?.closest("[data-widget-copy]")).toBeNull();
+  });
+
+  it("renders no note element without a note", () => {
+    const { container } = render(<Widget title="T" copy={observe} />);
+    expect(container.querySelector("[data-widget-note]")).toBeNull();
+  });
+
   it("labels the action line \"What you can do\"", () => {
     const { container } = render(<Widget title="T" copy={observe} />);
     expect(container.querySelector('[data-widget-part="action"]')).toHaveTextContent(/^What you can do: /);

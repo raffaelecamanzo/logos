@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -15,7 +15,23 @@ vi.mock("./echarts.ts", () => ({
   }),
 }));
 
+import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import {
+  devVsMain,
+  estimatedValue,
+  statisticsAbsence,
+  toolAttribution,
+  topToolsAndSurfaces,
+  usageOverTime,
+} from "../../copy/statistics.copy.ts";
 import { StatisticsView } from "./StatisticsView.tsx";
+
+/** The widget frame titled `title`. */
+function widget(title: string): Element {
+  const frame = screen.getByRole("heading", { name: title }).closest("[data-widget]");
+  if (!frame) throw new Error(`no widget titled ${title}`);
+  return frame;
+}
 
 /** The `attribution_coverage` rider (FR-OB-11): the raw-events-only limit, the
  *  legacy-`NULL`-origin caveat, and the pre-origin-stamp label, exactly as the
@@ -161,12 +177,11 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     stubFetch(populated);
     render(<StatisticsView />);
 
-    // The verdict-first value callout (labeled an estimate, NFR-CC-04).
+    // The lead value widget (labeled an estimate, NFR-CC-04).
     expect(await screen.findByText(/12,345/)).toBeInTheDocument();
-    expect(screen.getByText(/Estimated value/i)).toBeInTheDocument();
-    expect(screen.getByText(/over the last 7 days/i)).toBeInTheDocument();
+    expect(within(widget("Estimated value") as HTMLElement).getByText(/over the last 7 days/i)).toBeInTheDocument();
 
-    // The four surface cards.
+    // The four surface widgets.
     expect(screen.getByRole("heading", { name: "Usage over time" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Top tools & surfaces" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Dev vs main" })).toBeInTheDocument();
@@ -188,7 +203,11 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     );
 
     // The accessible data-table twins carry the same figures across all surfaces.
-    expect(screen.getByText("context")).toBeInTheDocument(); // top-tools twin
+    expect(within(screen.getByRole("table", { name: "Top tools" })).getByText("context")).toBeInTheDocument();
+    // ...and the figure row names the most-used tool with its calls.
+    expect(widget("Top tools & surfaces").querySelector('[data-widget-part="figure"]')).toHaveTextContent(
+      "context most used, 107 calls",
+    );
     expect(screen.getByText("cli")).toBeInTheDocument(); // by-surface twin
     expect(screen.getByText("mcp")).toBeInTheDocument();
     // "dev" appears in both the dev-vs-main twin and the attribution cross-tab.
@@ -228,7 +247,7 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
   it("re-queries and updates every surface when the window changes (UAT-UI-09)", async () => {
     stubFetch(populated);
     render(<StatisticsView />);
-    await screen.findByText(/over the last 7 days/i);
+    await screen.findAllByText(/over the last 7 days/i);
     // A per-surface figure that tracks the 7-day window is visible in the data-table
     // twins (the tools `context` row and the by-surface `cli` row both read 107).
     expect(screen.getAllByText("107").length).toBeGreaterThan(0);
@@ -236,8 +255,9 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     const before = setOption.mock.calls.length;
     await userEvent.selectOptions(screen.getByLabelText("Window"), "30");
 
-    // The value callout re-renders against the 30-day model...
-    expect(await screen.findByText(/over the last 30 days/i)).toBeInTheDocument();
+    // The value widget re-renders against the 30-day model...
+    await screen.findAllByText(/over the last 30 days/i);
+    expect(within(widget("Estimated value") as HTMLElement).getByText(/over the last 30 days/i)).toBeInTheDocument();
     // ...AND the surface data-table twins now show the 30-day figure (proving the
     // surfaces refreshed, not just the callout text) — the old figure is gone.
     expect((await screen.findAllByText("130")).length).toBeGreaterThan(0);
@@ -248,14 +268,21 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     expect(screen.getByLabelText("Window")).toHaveValue("30");
   });
 
-  it("renders an honest awaiting-data empty state, never fabricated zeros (NFR-CC-04)", async () => {
+  it("renders an honest awaiting-data state naming logos stats, never fabricated zeros (NFR-CC-04)", async () => {
     stubFetch(empty);
     render(<StatisticsView />);
 
-    expect(await screen.findByText(/no telemetry recorded yet/i)).toBeInTheDocument();
-    // No charts and no fabricated value figure.
+    const absence = await screen.findByText(statisticsAbsence.awaiting);
+    // The absence is stated in the value widget's figure row, and its action is
+    // the command — the one Statistics state with something to do.
+    expect(absence).toHaveAttribute("data-widget-absence");
+    const w = widget("Estimated value");
+    expectWidgetCopy(w, estimatedValue, { recorded: false });
+    expect(w.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos stats");
+    // No charts, no other widget, and no fabricated value figure.
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Estimated value/i)).not.toBeInTheDocument();
+    expect(document.querySelectorAll("[data-widget]")).toHaveLength(1);
+    expect(w.querySelector('[data-widget-part="figure"]')?.textContent).toBe(statisticsAbsence.awaiting);
     // The window selector still renders so the user can widen the window.
     expect(screen.getByLabelText("Window")).toBeInTheDocument();
   });
@@ -268,7 +295,7 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     expect(alert).toHaveTextContent(/500/);
     // A fault is NEVER shown as awaiting-data or as fabricated zeros.
     expect(screen.queryByText(/no telemetry recorded yet/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Estimated value/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Estimated value" })).not.toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 
@@ -276,33 +303,96 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     stubFetch(partial);
     render(<StatisticsView />);
 
-    // Body renders (calls_total > 0), but the empty sub-series show per-card empties.
-    expect(await screen.findByText(/No activity in this window/i)).toBeInTheDocument();
-    expect(screen.getByText(/No attributed usage in this window/i)).toBeInTheDocument();
-    expect(screen.getByText(/No attributed tool calls in this window/i)).toBeInTheDocument();
+    // Body renders (calls_total > 0), but each empty sub-series is a named absence
+    // in its widget's figure row — never the centred view-level empty state.
+    for (const text of [statisticsAbsence.activity, statisticsAbsence.origins, statisticsAbsence.attribution]) {
+      expect(await screen.findByText(text)).toHaveAttribute("data-widget-absence");
+    }
+    expectWidgetCopy(widget("Usage over time"), usageOverTime);
+    expectWidgetCopy(widget("Dev vs main"), devVsMain);
+    expectWidgetCopy(widget("Tool attribution by class"), toolAttribution);
     // The ranked bar caps at TOP_TOOLS_LIMIT and says so.
     expect(screen.getByText(/Showing the top 8 tools/i)).toBeInTheDocument();
   });
 
-  it("groups the tool × origin cross-tab by class and renders its coverage caveats beside the figures (FR-OB-11)", async () => {
-    stubFetch(populated);
+  it("renders the tool × origin cross-tab as one table with a Class column, grouped by class then calls (CR-203 item 25)", async () => {
+    stubFetch((w) => ({
+      ...populated(w),
+      calls_by_tool_origin: [
+        ...populated(w).calls_by_tool_origin,
+        {
+          tool: "impact",
+          class: "navigation",
+          origin: "main",
+          calls: 9,
+          ok_calls: 9,
+          answered_calls: 9,
+          classified_calls: 9,
+          outcome_absence: null,
+        },
+      ],
+    }));
     render(<StatisticsView />);
     await screen.findByRole("heading", { name: "Tool attribution by class" });
+    const w = widget("Tool attribution by class");
 
-    // Grouped by class — the class name is a heading, not folded into the row.
-    expect(screen.getByRole("heading", { name: "navigation" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "read-model" })).toBeInTheDocument();
+    // ONE table; the class is a column, not a heading per class.
+    const tables = within(w as HTMLElement).getAllByRole("table");
+    expect(tables).toHaveLength(1);
+    expect(within(w as HTMLElement).queryByRole("heading", { name: "navigation" })).toBeNull();
+    const headers = within(tables[0]).getAllByRole("columnheader").map((h) => h.querySelector("button")?.textContent);
+    expect(headers.map((h) => h?.replace(/[↕▲▼]/g, ""))).toEqual(["Class", "Tool", "Origin", "Calls", "OK", "Answered"]);
+    const rows = within(tables[0])
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").slice(0, 2).map((c) => c.textContent));
+    // navigation (impact 9 calls, then search 5), then read-model.
+    expect(rows).toEqual([
+      ["navigation", "impact"],
+      ["navigation", "search"],
+      ["read-model", "stats"],
+    ]);
 
+    // "Answered" is glossed, in the header.
+    expect(tables[0].querySelector("th dfn[data-term='answered']")).not.toBeNull();
     // The answered/classified pair renders as prose, never a rate.
     expect(screen.getByText("3 of 4 answered")).toBeInTheDocument();
     // A cell with nothing classified renders the read-model's own named absence.
     expect(screen.getByText("none recorded")).toBeInTheDocument();
     expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+  });
 
-    // The coverage limits render beside the figures, not on a separate help page —
-    // exactly the read-model's own `attribution_coverage.notes`, verbatim.
-    expect(screen.getByText(/computed from raw events only/i)).toBeInTheDocument();
-    expect(screen.getByText(/legacy NULL origins fold into main/i)).toBeInTheDocument();
-    expect(screen.getByText(/predates the origin stamp: every surface of the time/i)).toBeInTheDocument();
+  it("renders attribution_coverage.notes verbatim in the attribution widget's explanation (FR-OB-11)", async () => {
+    stubFetch(populated);
+    render(<StatisticsView />);
+    await screen.findByRole("heading", { name: "Tool attribution by class" });
+    const explanation = widget("Tool attribution by class").querySelector('[data-widget-part="explanation"]')!;
+    const notes = [...explanation.querySelectorAll("[data-widget-note] p")].map((p) => p.textContent);
+    // Exactly the read-model's own notes, verbatim and in order, after the lead.
+    expect(notes.slice(1)).toEqual(coverage().notes);
+  });
+
+  it("every widget explains itself, informational on a populated store (FR-UI-39)", async () => {
+    stubFetch(populated);
+    render(<StatisticsView />);
+    await screen.findByRole("heading", { name: "Tool attribution by class" });
+    expectWidgetCopy(widget("Estimated value"), estimatedValue, { recorded: true });
+    expectWidgetCopy(widget("Usage over time"), usageOverTime);
+    expectWidgetCopy(widget("Top tools & surfaces"), topToolsAndSurfaces);
+    expectWidgetCopy(widget("Dev vs main"), devVsMain);
+    expectWidgetCopy(widget("Tool attribution by class"), toolAttribution);
+    for (const frame of document.querySelectorAll("[data-widget]")) {
+      expect(frame.querySelector('[data-widget-part="action"]')).toHaveAttribute("data-action-kind", "none");
+    }
+    // One stack, five widgets, in reading order.
+    const stacks = document.querySelectorAll("[data-widget-stack]");
+    expect(stacks).toHaveLength(1);
+    expect([...stacks[0].children].map((c) => c.querySelector("h3")?.textContent)).toEqual([
+      "Estimated value",
+      "Usage over time",
+      "Top tools & surfaces",
+      "Dev vs main",
+      "Tool attribution by class",
+    ]);
   });
 });

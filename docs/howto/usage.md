@@ -866,7 +866,17 @@ co-change, defect density, complexity, and a coverage cell — with `?untested`
 keeping only files lacking fresh positive coverage. The per-file table renders
 inside a white widget card on the muted `NON-GATED TIER` band, and its `n/a`
 cells (e.g. churn/age for a file with no history) right-align to their numeric
-columns (CR-042). On **Health** (`/health`) the Quality-signal table carries a
+columns (CR-042). A path longer than 40 characters is abbreviated to its first
+segment, an ellipsis and its last two segments (`logos-core/…/resolve/binder.rs`),
+in both the risk table and **Ownership dispersion**; hover it for the full path,
+or focus it with the keyboard to see it as a tip. Two rows that would abbreviate
+the same keep more segments until they differ, and the File column sorts by the
+full path. Each of the two widgets says what it ranks, why it matters and what
+to do: add tests to or split the top files, `logos coverage ingest` when Coverage
+reads n/a, `logos hotspots` when nothing is ranked yet, and an owner in
+`CODEOWNERS` for dispersed files; a single-author history needs nothing. The
+**Co-change** and **Defect** headers explain themselves on hover and focus
+(CR-203). On **Health** (`/health`) the Quality-signal table carries a
 **Score** column rendering each metric's normalized value as a CSP-safe `<meter>`
 bar — the same widget the Dashboard roll-ups use; applicability drop-outs
 (Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042).
@@ -1671,9 +1681,10 @@ the same local telemetry the `logos stats` CLI reports, now visualized
 ([CR-058](../requests/CR-058-durable-worktree-telemetry-and-statistics-tab.md),
 [FR-UI-27](../specs/requirements/FR-UI-27.md)). It reads the enriched read-model
 over `GET /api/v1/statistics[?window=<days>]` — a thin, read-only pass-through of
-`Engine::stats(window)` — and renders four surfaces:
+`Engine::stats(window)` — and renders five widgets, each stating what it shows
+and why, and that there is nothing to do — it is informational (CR-203):
 
-1. A **value-estimate callout** leading with the reads/tokens-saved figures (the
+1. An **Estimated value** widget leading with the reads/tokens-saved figures (the
    dogfood metric), clearly labeled as *estimates*, not measured truth.
 2. A **daily-activity line** — calls per UTC day over the window.
 3. A **top-tools / by-surface** ranking bar. Self-referential reads — the tab's
@@ -1684,14 +1695,15 @@ over `GET /api/v1/statistics[?window=<days>]` — a thin, read-only pass-through
    name, or `"main"`), charted as-is and **never normalized to total calls**
    (rolled-up days carry no `origin`, so the split can legitimately sum to less
    than the total — the tab does not hide that gap).
-5. A **Tool attribution by class** card — the tool × origin cross-tab
-   (`calls_by_tool_origin`), grouped by tool class (`navigation`,
-   `quality-gate`, …), so *"which navigation came from dev panes?"* is readable
-   in place. Each row states what the calls **answered**: `N of M answered` for
+5. A **Tool attribution by class** widget — the tool × origin cross-tab
+   (`calls_by_tool_origin`) as one table with a **Class** column (`navigation`,
+   `quality-gate`, …), ordered by class and then by calls, so *"which navigation
+   came from dev panes?"* is readable in place. **Answered** explains itself on
+   hover and focus. Each row states what the calls **answered**: `N of M answered` for
    a tool whose outcomes are recorded (today `callers`, `impact`, `precedent`
    and `affected`), or **none recorded** when no call in that cell was
-   classified — never a percentage. The coverage limits render **beside the
-   figures**, verbatim from the read-model's `attribution_coverage.notes`: the
+   classified — never a percentage. The coverage limits render in the widget's
+   explanation, verbatim from the read-model's `attribution_coverage.notes`: the
    cross-tab covers raw events only, a window past raw retention is truncated,
    and events written before the origin stamp existed came from every surface of
    the time with their dev/`main` split unknown.
@@ -1702,8 +1714,9 @@ re-renders every surface. Each chart is paired with an accessible data-table twi
 intent token, same-origin, self-only CSP preserved.
 
 **Honest empty state.** Against a repository with no telemetry history, the tab
-renders an explicit "No telemetry recorded yet" awaiting-data state — never
-fabricated zeros — and the sidebar item is **muted** (dimmed, with a tooltip) but
+renders an explicit "No telemetry recorded yet" awaiting-data state in the
+Estimated value widget — never fabricated zeros — naming `logos stats` to check
+what has been recorded, and the sidebar item is **muted** (dimmed, with a tooltip) but
 still clickable. Because telemetry is repo-global and durable (see
 [commands.md § `stats`](commands.md)), the figures include usage recorded from
 linked worktrees that have since been removed.
