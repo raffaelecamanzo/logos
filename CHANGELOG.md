@@ -61,13 +61,19 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   frame. The Gate reads "PASS/FAIL · signal *s* vs baseline *b*; passes at ≥
   *b − ε*", with ε taken from the gate result; on FAIL it names the
   lowest-scoring dimension to start with and `logos gate --save` for an
-  intended drop, and on PASS it says there is nothing to do. The stale and
-  absent states keep their wording and commands. The Quality signal reads
+  intended drop, and on PASS it says there is nothing to do. A pass the gate
+  reached without comparing — no baseline, or one recorded under other
+  thresholds or metric semantics — says so instead of showing a pass floor it
+  never applied. The stale and absent states keep their classification and
+  commands; the command now sits on the widget's action line, and when the
+  snapshot is not current the dimension widgets say so and name the same
+  command. The Quality signal reads
   "*n* / 10000, geometric mean of the *k* applicable dimensions", with the
   production functions scored and test functions excluded beneath it and a
   disclosure explaining the thresholds fingerprint: it changes when
-  `[metric_thresholds]` in `.logos/rules.toml` changes, and a change resets the
-  gate's baseline. The separate Aggregate scope card is gone. All ten
+  `[metric_thresholds]` in `.logos/rules.toml` changes, and the next `logos
+  gate` then saves the new score as the baseline by itself. The separate
+  Aggregate scope card is gone. All ten
   dimensions — Modularity through Uniqueness, in the table's order — now have a
   widget with their plain question, score, raw value with its unit, any
   not-applicable reason, and what to do and where. Nesting, Conciseness,

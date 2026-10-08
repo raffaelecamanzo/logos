@@ -926,8 +926,11 @@ CR-203).** Health renders the Gate, the Quality signal, one widget per quality
 dimension — all ten, in the Quality signal table's order — and the Signal trend,
 each stating what it shows, why it matters, and what you can do and where (source
 code, configuration or a command), or "Nothing to do". The Gate states its pass
-condition, *passes at ≥ baseline − ε*, with ε read from the gate result. The
-Quality signal folds in what the Aggregate scope card used to show: the functions
+condition, *passes at ≥ baseline − ε*, with ε read from the gate result; a pass
+the gate reached without comparing (no baseline, or one recorded under other
+thresholds or metric semantics) is stated as an informational pass instead. When
+the snapshot is not current, every dimension widget says so and names the Gate's
+command rather than a code change. The Quality signal folds in what the Aggregate scope card used to show: the functions
 scored and excluded, and the thresholds fingerprint with what a change to
 `[metric_thresholds]` does to the gate. Modularity, Acyclicity, Depth, Equality
 and Redundancy carry no offender list in the payload; their widgets say so and
