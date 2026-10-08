@@ -869,7 +869,10 @@ pub fn worst_offenders(
         .iter()
         .filter_map(|f| f.cyclomatic_complexity.map(|cc| (f.id, cc)))
         .collect();
-    let (count, total) = (measured.len() as i64, measured.iter().map(|&(_, cc)| cc).sum::<i64>());
+    let (count, total) = (
+        measured.len() as i64,
+        measured.iter().map(|&(_, cc)| cc).sum::<i64>(),
+    );
     let mut equality: Vec<(NodeId, i64)> = measured
         .into_iter()
         .filter(|&(_, cc)| cc * count > total)
@@ -887,7 +890,14 @@ pub fn worst_offenders(
     // (`is_dead = NULL`) is never listed as dead.
     let mut redundancy: Vec<(NodeId, Option<i64>, bool, bool)> = production
         .iter()
-        .map(|f| (f.id, f.line_count, f.is_dead == Some(true), f.is_duplicate == Some(true)))
+        .map(|f| {
+            (
+                f.id,
+                f.line_count,
+                f.is_dead == Some(true),
+                f.is_duplicate == Some(true),
+            )
+        })
         .filter(|&(_, _, dead, duplicate)| dead || duplicate)
         .collect();
     redundancy.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1504,7 +1514,11 @@ fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String], cap: usize) -> Vec<(St
     let mut heads: Vec<usize> = (0..sccs.len())
         .filter(|&c| is_head[c] && longest[c] >= 2)
         .collect();
-    let rank = |a: &usize, b: &usize| longest[*b].cmp(&longest[*a]).then(labels[*a].cmp(&labels[*b]));
+    let rank = |a: &usize, b: &usize| {
+        longest[*b]
+            .cmp(&longest[*a])
+            .then(labels[*a].cmp(&labels[*b]))
+    };
     heads.sort_by(rank);
 
     heads
@@ -1512,7 +1526,7 @@ fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String], cap: usize) -> Vec<(St
         .take(cap)
         .map(|head| {
             let (mut chain, mut at) = (vec![head], head);
-            while let Some(&next) = successors[at].iter().min_by(|a, b| rank(*a, *b)) {
+            while let Some(&next) = successors[at].iter().min_by(|a, b| rank(a, b)) {
                 chain.push(next);
                 at = next;
             }

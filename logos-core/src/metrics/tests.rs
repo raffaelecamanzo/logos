@@ -2552,7 +2552,12 @@ fn the_five_cr005_lists_are_byte_identical_to_before_cr209() {
 }
 
 /// A function row with a line count and the two Redundancy verdicts.
-fn func_lines(id: i64, lines: Option<i64>, dead: Option<bool>, dup: Option<bool>) -> FunctionMetricRow {
+fn func_lines(
+    id: i64,
+    lines: Option<i64>,
+    dead: Option<bool>,
+    dup: Option<bool>,
+) -> FunctionMetricRow {
     FunctionMetricRow {
         line_count: lines,
         ..func(id, Some(1), dead, dup)
@@ -2651,7 +2656,10 @@ fn acyclicity_ranks_by_size_then_lowest_member_and_skips_what_it_does_not_count(
 fn depth_spells_the_longest_chain_first_then_the_next_chain_heads() {
     let dirs = ["d1", "d2", "d3", "d4", "d5"];
     let mut nodes: Vec<NodeRow> = (1..=5)
-        .map(|id| node(id, "f", NodeKind::Function, Some(&format!("{}/f.rs", dirs[id as usize - 1]))))
+        .map(|id| {
+            let file = format!("{}/f.rs", dirs[id as usize - 1]);
+            node(id, "f", NodeKind::Function, Some(&file))
+        })
         .collect();
     nodes.push(node(6, "side", NodeKind::Function, Some("side/s.rs")));
     let edges = [
@@ -2789,7 +2797,10 @@ fn redundancy_lists_dead_or_duplicate_functions_by_lines_then_id() {
         ]
     );
 
-    let clean = [func_lines(1, Some(10), Some(false), Some(false)), func_lines(5, Some(9), None, None)];
+    let clean = [
+        func_lines(1, Some(10), Some(false), Some(false)),
+        func_lines(5, Some(9), None, None),
+    ];
     assert!(offenders(&nodes, &[], &clean).redundancy.is_empty());
 }
 
@@ -2812,7 +2823,14 @@ fn the_four_cr209_lists_are_capped() {
         functions.push(func(a, Some(50), Some(true), None));
         functions.push(func(b, Some(1), None, None));
     }
-    let w = offenders_of(&nodes, &edges, &functions, &HashSet::new(), super::Thresholds::default(), 3);
+    let w = offenders_of(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        3,
+    );
     for (dimension, list) in w.lists().into_iter().skip(5) {
         assert_eq!(list.len(), 3, "{dimension} is capped at 3");
     }
@@ -2824,7 +2842,9 @@ fn the_four_cr209_lists_are_capped() {
 #[test]
 fn a_fresh_snapshot_never_reports_an_unrecorded_list() {
     let (nodes, edges, functions) = every_list_fixture();
-    let even: Vec<FunctionMetricRow> = (1..=997).map(|id| func(id, Some(7), Some(false), Some(false))).collect();
+    let even: Vec<FunctionMetricRow> = (1..=997)
+        .map(|id| func(id, Some(7), Some(false), Some(false)))
+        .collect();
     let uneven: Vec<FunctionMetricRow> = (1..=997)
         .map(|id| func(id, Some(1 + id % 13), Some(false), Some(false)))
         .collect();
@@ -2881,7 +2901,10 @@ fn a_row_names_three_directories_and_counts_the_rest() {
     let nodes: Vec<NodeRow> = ["d", "a", "c", "b", "e"]
         .iter()
         .zip(1..)
-        .map(|(dir, id)| node(id, &format!("f{id}"), NodeKind::Function, Some(&format!("{dir}/f.rs"))))
+        .map(|(dir, id)| {
+            let file = format!("{dir}/f.rs");
+            node(id, &format!("f{id}"), NodeKind::Function, Some(&file))
+        })
         .chain([node(6, "sink", NodeKind::Function, Some("z/s.rs"))])
         .collect();
     // One five-directory cycle 1 → 2 → 3 → 4 → 5 → 1, feeding `z`.

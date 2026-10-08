@@ -1002,8 +1002,17 @@ impl WorstOffenders {
     /// Each list paired with its [`DIMENSIONS`](Self::DIMENSIONS) name, in
     /// that order.
     pub fn lists(&self) -> [(&'static str, &[Offender]); 9] {
-        let [nesting, conciseness, cohesion, focus, uniqueness, acyclicity, depth, equality, redundancy] =
-            Self::DIMENSIONS;
+        let [
+            nesting,
+            conciseness,
+            cohesion,
+            focus,
+            uniqueness,
+            acyclicity,
+            depth,
+            equality,
+            redundancy,
+        ] = Self::DIMENSIONS;
         [
             (nesting, &self.nesting),
             (conciseness, &self.conciseness),
