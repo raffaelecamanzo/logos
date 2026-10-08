@@ -16,6 +16,9 @@ const INGEST = {
 export interface UntestedState {
   /** Whether a coverage report has been ingested. */
   readonly ingested: boolean;
+  /** Whether the hotspot board ranked any file; with none ranked (no git
+   *  history, say), an empty board measured nothing. */
+  readonly ranked: boolean;
   /** Files on the board. */
   readonly files: number;
 }
@@ -23,8 +26,16 @@ export interface UntestedState {
 export const untestedHotspots: CopyEntry<UntestedState> = {
   what: "The files ranked most at risk — they change often and are complex — that no fresh coverage covers.",
   why: "A risky file with no tests is where a change most likely breaks something unnoticed.",
-  action: ({ ingested, files }) => {
+  action: ({ ingested, ranked, files }) => {
     if (!ingested) return INGEST;
+    if (!ranked) {
+      return {
+        kind: "act",
+        where: "command",
+        target: "logos hotspots",
+        text: "Rank the files first: the command reads the git history and scores each file.",
+      };
+    }
     if (files > 0) {
       return { kind: "act", where: "source code", text: "Add tests to the listed files, starting at the top." };
     }
@@ -60,5 +71,7 @@ export const perFileCoverage: CopyEntry<PerFileState> = {
 export const COVERAGE_VIEW_ABSENCE = {
   notIngested: "No coverage ingested yet.",
   noUntested: "No untested file among the files ranked most at risk.",
+  /** Shown when the read-model carries no notice of its own. */
+  notRanked: "No files ranked yet, so no untested file can be named.",
   noFiles: "No covered files in the ingested reports.",
 } as const;

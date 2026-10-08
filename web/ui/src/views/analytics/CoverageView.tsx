@@ -108,7 +108,7 @@ function CoverageContent({ model }: { model: CoverageModel }) {
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: false, files: 0 }}
+          state={{ ingested: false, ranked: false, files: 0 }}
           absence={COVERAGE_VIEW_ABSENCE.notIngested}
         />
         <Widget
@@ -135,18 +135,27 @@ function CoverageContent({ model }: { model: CoverageModel }) {
         </span>
       </Callout>
 
-      {untestedCount === 0 ? (
+      {untested.ranked_files === 0 ? (
+        // Nothing was ranked (no git history, a shallow clone…): an empty board
+        // here measured nothing, so it is not "no untested file" (NFR-CC-04).
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: true, files: 0 }}
+          state={{ ingested: true, ranked: false, files: 0 }}
+          absence={untested.notice ?? COVERAGE_VIEW_ABSENCE.notRanked}
+        />
+      ) : untestedCount === 0 ? (
+        <Widget
+          title="Untested hotspots"
+          copy={untestedHotspots}
+          state={{ ingested: true, ranked: true, files: 0 }}
           absence={COVERAGE_VIEW_ABSENCE.noUntested}
         />
       ) : (
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
-          state={{ ingested: true, files: untestedCount }}
+          state={{ ingested: true, ranked: true, files: untestedCount }}
           figure={
             <span>
               {untestedCount}{" "}

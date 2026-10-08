@@ -112,12 +112,18 @@ function allFresh(): CoverageModel {
   return m;
 }
 
+function notRanked(): CoverageModel {
+  const m = allFresh();
+  m.untested = { ...m.untested, ranked_files: 0, files: [], degraded: "NotGit", notice: "not a git repository: churn unavailable" } as CoverageModel["untested"];
+  return m;
+}
+
 const STATES = [
   {
     name: "populated (an untested file, a stale file)",
     model: populated,
     expected: [
-      ["Untested hotspots", { ingested: true, files: 1 }, "act"],
+      ["Untested hotspots", { ingested: true, ranked: true, files: 1 }, "act"],
       ["Per-file coverage", { ingested: true, stale: 1 }, "act"],
     ],
   },
@@ -125,7 +131,7 @@ const STATES = [
     name: "all fresh, nothing untested",
     model: allFresh,
     expected: [
-      ["Untested hotspots", { ingested: true, files: 0 }, "none"],
+      ["Untested hotspots", { ingested: true, ranked: true, files: 0 }, "none"],
       ["Per-file coverage", { ingested: true, stale: 0 }, "none"],
     ],
   },
@@ -133,8 +139,17 @@ const STATES = [
     name: "no coverage ingested",
     model: empty,
     expected: [
-      ["Untested hotspots", { ingested: false, files: 0 }, "act"],
+      ["Untested hotspots", { ingested: false, ranked: false, files: 0 }, "act"],
       ["Per-file coverage", { ingested: false, stale: 0 }, "act"],
+    ],
+  },
+  {
+    // Review fix (S-617): no history to rank → nothing measured, never "nothing untested".
+    name: "nothing ranked (no git history)",
+    model: notRanked,
+    expected: [
+      ["Untested hotspots", { ingested: true, ranked: false, files: 0 }, "act"],
+      ["Per-file coverage", { ingested: true, stale: 0 }, "none"],
     ],
   },
 ] as const;
@@ -167,4 +182,13 @@ describe("Coverage widgets explain themselves (S-617, FR-UI-39/40)", () => {
     const figure = heading.closest("[data-widget]")!.querySelector('[data-widget-part="figure"]');
     expect(figure).toHaveTextContent("73.0% of lines covered · 1 of 3 files stale");
   });
+});
+
+it("states the read-model's notice when nothing was ranked, and names the ranking command (review fix)", async () => {
+  stubFetch(notRanked);
+  render(<CoverageView />);
+  const heading = await screen.findByRole("heading", { name: "Untested hotspots" });
+  const widget = heading.closest("[data-widget]")!;
+  expect(widget.querySelector("[data-widget-absence]")).toHaveTextContent("not a git repository: churn unavailable");
+  expect(widget.querySelector('[data-widget-copy="where"]')).toHaveTextContent("command logos hotspots");
 });
