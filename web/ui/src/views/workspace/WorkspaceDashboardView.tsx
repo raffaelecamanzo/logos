@@ -342,7 +342,7 @@ const rosterColumns = (): Column<RosterRow>[] => [
     // This member's OWN signal, named with it. Never averaged across the roster
     // (BR-56): the figure is defined against one member's graph.
     key: "resolution",
-    header: "Reference resolution (its own)",
+    header: `${GLOSSARY.referenceResolution.label} (its own)`,
     gloss: "referenceResolution",
     glossText: GLOSSARY.referenceResolution.label,
     cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
