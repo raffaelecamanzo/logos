@@ -752,6 +752,8 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     const board = routeRow.closest("section")!;
     expect(widgetTitle(board)).toBe("Coverage by relation arm");
     expectWidgetCopy(board, coverageByArm, undefined);
+    const tab = screen.getByRole("tabpanel", { name: /cross-service coverage/i });
+    expect(expectOneWidgetStack(tab)).toContain(board);
   });
 
   // S-377/CR-120: the headline counts two populations as one, and the arm board
