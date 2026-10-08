@@ -200,7 +200,9 @@ describe("the Architecture widgets explain themselves (S-617, FR-UI-39/40)", () 
     expect(actionKind(matrix)).toBe(kind);
     expectWidgetCopy(matrix, dependencyMatrix, { backEdges });
     expect(matrix.querySelector('[data-widget-part="figure"]')).toHaveTextContent(
-      `2 modules · ${backEdges} ${backEdges === 1 ? "dependency" : "dependencies"} against layer order`,
+      // A count of module pairs (cells marked ↺), not of the dependencies in them:
+      // the one ↺ cell here holds 4.
+      `2 modules · ${backEdges} ${backEdges === 1 ? "module pair" : "module pairs"} against layer order`,
     );
   });
 

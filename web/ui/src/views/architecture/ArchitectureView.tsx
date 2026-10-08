@@ -149,7 +149,7 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
         <span>
           {edges.length}{" "}
           <span className="muted">
-            {pluralWord(edges.length, "dependency", "dependencies")} against layer order
+            {pluralWord(edges.length, "module pair", "module pairs")} against layer order
           </span>
         </span>
       }
@@ -198,7 +198,7 @@ function MatrixCard({ report, backEdges }: { report: DsmReport; backEdges: numbe
         <span>
           {n}{" "}
           <span className="muted">
-            module{plural} · {backEdges} {pluralWord(backEdges, "dependency", "dependencies")} against layer order
+            module{plural} · {backEdges} {pluralWord(backEdges, "module pair", "module pairs")} against layer order
           </span>
         </span>
       }

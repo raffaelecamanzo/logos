@@ -8,7 +8,7 @@
 import { noAction, type CopyEntry } from "./types.ts";
 
 export interface CyclesState {
-  /** Dependencies that point back against layer order. */
+  /** Module pairs (cells marked ↺) whose dependencies point back against layer order. */
   readonly backEdges: number;
 }
 
