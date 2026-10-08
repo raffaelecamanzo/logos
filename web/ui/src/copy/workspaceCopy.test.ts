@@ -10,29 +10,71 @@ import type { CopyText } from "./types.ts";
 import { DASHBOARD_TEXT, memberRowAction } from "./workspaceDashboard.copy.ts";
 import { HEALTH_TEXT } from "./workspaceHealth.copy.ts";
 
-/** Every sentence a table can produce, over sample arguments (one and many). A
- *  fixed sentence may be catalogue text with glosses in it (`CopyText`). */
-function sentences(table: Record<string, unknown>): [string, CopyText][] {
-  return Object.entries(table).flatMap(([key, value]) => {
-    if (typeof value === "string" || Array.isArray(value)) return [[key, value as CopyText] as [string, CopyText]];
+/** The arguments each sentence function is sampled with: every branch its body
+ *  takes — zero, one and many; both booleans; a one- and a two-element list. A
+ *  function with no entry here fails the guard test below, so a new sentence
+ *  cannot go unchecked. */
+const SAMPLES: Record<string, Record<string, unknown[][]>> = {
+  COVERAGE_TEXT: {
+    outboundResolved: [[0, 1], [1, 1], [2, 9]],
+    outboundAllOutside: [[1], [899]],
+    nothingFound: [[true, 3, 3], [false, 2, 3]],
+    shortfall: [[1, 1], [2, 3]],
+    degradedPrefix: [[1], [2]],
+    specMatched: [[1, 1], [3, 10]],
+    specBreakdown: [[0, 0, 0, 0], [1, 1, 1, 1], [3, 1, 6, 2]],
+    specNotMeasured: [[1], [899]],
+    capturedUnresolved: [[1], [7]],
+    capturedOutside: [[1], [2]],
+    capturedResolves: [[0, 3], [1, 1], [2, 3]],
+    declaredPairs: [[0, 0], [1, 1], [3, 2]],
+    externalsMatched: [[1, 1], [2, 5]],
+  },
+  DASHBOARD_TEXT: {
+    keepThem: [[0, false], [0, true], [1, false], [1, true], [7, false], [7, true]],
+    keepThemBasis: [[1, 3, 3, false], [9, 2, 3, true]],
+    skipped: [[["web"]], [["api", "web"]]],
+    deadCount: [[1], [5]],
+    membersRead: [[3, 3], [2, 3]],
+  },
+  HEALTH_TEXT: {
+    rulesChecked: [[1, 1, 1], [2, 9, 0]],
+    unknownMembers: [[1], [2]],
+    incomplete: [[1], [2]],
+  },
+};
+
+const TABLES: Record<string, Record<string, unknown>> = { COVERAGE_TEXT, DASHBOARD_TEXT, HEALTH_TEXT };
+
+/** Every sentence a table can produce: fixed ones as they are (a fixed sentence
+ *  may be catalogue text with glosses in it), functions over their samples. */
+function sentences(name: string): [string, CopyText][] {
+  return Object.entries(TABLES[name]).flatMap(([key, value]) => {
+    if (typeof value !== "function") return [[`${name}.${key}`, value as CopyText] as [string, CopyText]];
     const fn = value as (...args: unknown[]) => string;
-    return [
-      [`${key}(1)`, fn(1, 1, 1, 1)],
-      [`${key}(7)`, fn(7, 9, 7, 3)],
-      [`${key}(partial)`, fn(false, 2, 3, true)],
-      [`${key}([…])`, fn(["a", "b"], 2, 3, false)],
-    ].filter(([, text]) => typeof text === "string") as [string, string][];
+    return (SAMPLES[name][key] ?? []).map(
+      (args) => [`${name}.${key}(${JSON.stringify(args).slice(1, -1)})`, fn(...args)] as [string, CopyText],
+    );
   });
 }
 
 describe("workspace catalogue sentences", () => {
   const all = [
-    ...sentences(COVERAGE_TEXT),
-    ...sentences(DASHBOARD_TEXT),
-    ...sentences(HEALTH_TEXT),
+    ...sentences("COVERAGE_TEXT"),
+    ...sentences("DASHBOARD_TEXT"),
+    ...sentences("HEALTH_TEXT"),
     ...Object.entries(NOT_RESOLVED_REMEDY).map(([k, r]) => [`remedy ${k}`, r.remedy] as [string, CopyText]),
     ["remedy (unlisted)", UNLISTED_REMEDY.remedy] as [string, CopyText],
   ];
+
+  it("samples every sentence function, so none goes unchecked", () => {
+    const unsampled = Object.entries(TABLES).flatMap(([name, table]) =>
+      Object.entries(table)
+        .filter(([key, value]) => typeof value === "function" && !SAMPLES[name][key]?.length)
+        .map(([key]) => `${name}.${key}`),
+    );
+    expect(unsampled).toEqual([]);
+  });
 
   it("has sentences to check (a finding, not a floor)", () => {
     expect(all.length).toBeGreaterThan(20);
