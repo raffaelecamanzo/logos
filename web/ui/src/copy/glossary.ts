@@ -192,6 +192,15 @@ export const GLOSSARY = {
       "Callables that nothing reaches in any service of the workspace: the candidates for deletion.",
     pattern: /\bunused across the workspace\b/i,
   },
+  // ── The service map (S-614, CR-203 §3.2 D item 9) ─────────────────────────
+  // Domain-driven-design jargon in the cross-context hint: enforced, so no
+  // service-map sentence uses it unexplained.
+  boundedContext: {
+    label: "bounded context",
+    definition:
+      "A part of the system with its own model and vocabulary, usually owned by one team; services in different contexts should depend on each other only through agreed contracts.",
+    pattern: /\bbounded[\s-]+contexts?\b/i,
+  },
 } as const satisfies Record<string, GlossaryEntry>;
 
 /** The FR-UI-39 vocabulary, in the order the requirement lists it. Every other

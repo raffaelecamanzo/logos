@@ -11,6 +11,7 @@ import type {
   XserviceBuildDeps,
 } from "../../api/types.ts";
 import { BOUND_EXTERNAL, DECLARED_CONTRACTS } from "../../workspace/testFixtures.ts";
+import { ARM_LABEL } from "./coverageModel.ts";
 import {
   BUILD_EDGE_TYPE,
   buildLayer,
@@ -18,8 +19,11 @@ import {
   CONFIG_REFUSAL_LABEL,
   DECLARED_EDGE_TYPE,
   declaredLayer,
+  BINDING_KIND_FILTERS,
   externalNodeId,
   edgeProvenanceKind,
+  filterLinks,
+  groupEvidence,
   hasNonLiteralBinding,
   LINK_PROVENANCE_KINDS,
   LINK_PROVENANCE_LABEL,
@@ -30,6 +34,9 @@ import {
   topicId,
   topicLinks,
   topicOfTopicId,
+  NO_LINK_FILTER,
+  type EvidenceRow,
+  type LinkFilter,
   type ServiceMember,
 } from "./serviceMapModel.ts";
 
@@ -946,5 +953,189 @@ describe("declaredLayer (S-461)", () => {
     const layer = declaredLayer(stray, undefined, roster)!;
     expect(layer.links).toEqual([]);
     expect(layer.edges).toEqual([]);
+  });
+});
+
+// ── The bindings filter and grouped evidence (S-614, CR-203 items 6–7, FR-UI-42) ──
+
+describe("filterLinks (S-614, FR-UI-42)", () => {
+  /** One link per arm and one per non-literal kind, over three members — the
+   *  HTTP, gRPC and broker fixture the criterion names. */
+  const ADMITTED: ValueProvenance = {
+    provenance: "config-bound",
+    bound: [boundKey("orders.topic", "orders")],
+  };
+  const REFUSED: ValueProvenance = { provenance: "config-unresolved", keys: ["billing.url"], refusal: "uncommitted" };
+  const map = buildServiceMap(
+    [member("api"), member("web"), member("billing")],
+    [
+      binding("api", "web", "route"),
+      binding("api", "billing", "grpc-call"),
+      bindingWith("web", "billing", { from_value: ADMITTED }, "broker-topic"),
+      bindingWith("billing", "api", { to_value: REFUSED }, "route"),
+    ],
+  );
+  const pairs = (links: { from: string; to: string; relation: string }[]) =>
+    links.map((l) => `${l.from}->${l.to}:${l.relation}`);
+  const only = (f: Partial<LinkFilter>) => pairs(filterLinks(map.links, { ...NO_LINK_FILTER, ...f }));
+
+  it("offers exactly the arms the legend draws (ARM_LABEL), in its order", () => {
+    // The legend's rows are derived from ARM_LABEL; an arm added there must
+    // reach the filter too, or a binding of it could be shown only under "All".
+    expect([...BINDING_KIND_FILTERS]).toEqual(Object.keys(ARM_LABEL));
+  });
+
+  it("keeps every link under the empty filter, in the map's order", () => {
+    expect(map.links).toHaveLength(4);
+    expect(only({})).toEqual(pairs(map.links));
+  });
+
+  it("matches the text against the consumer OR the provider, case-insensitively, as a substring", () => {
+    expect(only({ text: "API" })).toEqual(["api->billing:grpc-call", "api->web:route", "billing->api:route"]);
+    expect(only({ text: "  bill  " })).toEqual(["api->billing:grpc-call", "billing->api:route", "web->billing:broker-topic"]);
+    // A substring of a name matches; one character past it does not.
+    expect(only({ text: "we" })).toEqual(["api->web:route", "web->billing:broker-topic"]);
+    expect(only({ text: "webx" })).toEqual([]);
+  });
+
+  it("never matches the text against the binding kind — only the two services", () => {
+    expect(only({ text: "route" })).toEqual([]);
+    expect(only({ text: "grpc" })).toEqual([]);
+  });
+
+  it("narrows to one binding kind: HTTP, gRPC or broker", () => {
+    expect(only({ kind: "route" })).toEqual(["api->web:route", "billing->api:route"]);
+    expect(only({ kind: "grpc-call" })).toEqual(["api->billing:grpc-call"]);
+    expect(only({ kind: "broker-topic" })).toEqual(["web->billing:broker-topic"]);
+  });
+
+  it("narrows to the links carrying at least one binding of a provenance kind", () => {
+    expect(only({ provenance: "literal" })).toEqual(["api->billing:grpc-call", "api->web:route"]);
+    expect(only({ provenance: "config-bound" })).toEqual(["web->billing:broker-topic"]);
+    expect(only({ provenance: "config-unresolved" })).toEqual(["billing->api:route"]);
+    expect(only({ provenance: "unstated" })).toEqual([]);
+  });
+
+  it("applies every filter at once", () => {
+    expect(only({ text: "api", kind: "route" })).toEqual(["api->web:route", "billing->api:route"]);
+    expect(only({ text: "api", kind: "route", provenance: "literal" })).toEqual(["api->web:route"]);
+  });
+
+  it("leaves the links it was handed untouched", () => {
+    const before = pairs(map.links);
+    filterLinks(map.links, { ...NO_LINK_FILTER, text: "api" });
+    expect(pairs(map.links)).toEqual(before);
+  });
+});
+
+describe("groupEvidence (S-614, FR-UI-42, NFR-CC-04)", () => {
+  const SHARED: ValueProvenance = {
+    provenance: "config-bound",
+    bound: [boundKey("billing.base-url", "http://billing:8080")],
+  };
+
+  it("states five calls sharing one consumer key and value as ONE row, with Calls 5", () => {
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [1, 2, 3, 4, 5].map((i) => bindingWith("api", "web", { from_value: SHARED }, "route", `op${i}`)),
+    );
+    const rows = linkEvidence(map.links[0]);
+    expect(rows).toHaveLength(5);
+    const groups = groupEvidence(rows);
+    expect(groups).toEqual([{ ...rows[0], calls: 5 }]);
+  });
+
+  it("over every link, the Calls counts sum to linkEvidence's row count", () => {
+    const twoOverlays: ValueProvenance = {
+      provenance: "config-bound",
+      bound: [
+        {
+          key: "orders.topic",
+          source: "properties",
+          values: [
+            { value: "orders-v1", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+            { value: "orders-v2", profiles: [], unprofiled: true, sources: ["b.yml"] },
+          ],
+        },
+      ],
+    };
+    const refused: ValueProvenance = { provenance: "config-unresolved", keys: ["x.y", "x.z"], refusal: "missing-key" };
+    const map = buildServiceMap(
+      [member("api"), member("web"), member("billing")],
+      [
+        ...[1, 2, 3].map((i) => bindingWith("api", "web", { from_value: SHARED }, "route", `a${i}`)),
+        bindingWith("api", "web", { from_value: twoOverlays, to_value: refused }, "route", "b"),
+        bindingWith("api", "web", { from_value: twoOverlays }, "route", "c"),
+        ...[1, 2].map((i) => bindingWith("web", "billing", { to_value: refused }, "grpc-call", `d${i}`)),
+        binding("billing", "api", "broker-topic"),
+      ],
+    );
+    expect(map.links).toHaveLength(3);
+    for (const link of map.links) {
+      const rows = linkEvidence(link);
+      const groups = groupEvidence(rows);
+      expect(groups.reduce((sum, g) => sum + g.calls, 0), `${link.from}->${link.to}`).toBe(rows.length);
+    }
+    // And the grouping did merge: 3 shared + 2×2 overlays + 1×2 refused keys = 9 rows, 5 groups.
+    const route = map.links.find((l) => l.relation === "route")!;
+    expect(linkEvidence(route)).toHaveLength(9);
+    expect(groupEvidence(linkEvidence(route)).map((g) => [g.key, g.value, g.calls])).toEqual([
+      ["billing.base-url", "http://billing:8080", 3],
+      ["orders.topic", "orders-v1", 2],
+      ["orders.topic", "orders-v2", 2],
+      ["x.y", null, 1],
+      ["x.z", null, 1],
+    ]);
+  });
+
+  it("never merges two rows that differ in any shown field", () => {
+    const base: EvidenceRow = {
+      end: "consumer",
+      member: "api",
+      key: "k",
+      value: "v",
+      profiles: ["docker"],
+      unprofiled: false,
+      sources: ["a.yml"],
+      refusal: null,
+    };
+    const variants: [string, Partial<EvidenceRow>][] = [
+      ["end", { end: "provider" }],
+      ["member", { member: "web" }],
+      ["key", { key: "k2" }],
+      ["value", { value: "v2" }],
+      ["refusal", { value: null, refusal: "uncommitted" }],
+      ["profiles", { profiles: ["k8s"] }],
+      ["profile order", { profiles: ["docker", "k8s"] }],
+      ["unprofiled", { unprofiled: true }],
+      ["sources", { sources: ["b.yml"] }],
+    ];
+    for (const [field, change] of variants) {
+      const groups = groupEvidence([base, { ...base, ...change }, base]);
+      expect(groups.map((g) => g.calls), field).toEqual([2, 1]);
+    }
+    // A refusal never merges with another refusal of a different kind.
+    const refused = { ...base, value: null, refusal: "missing-key" as const };
+    expect(groupEvidence([refused, { ...refused, refusal: "placeholder-value" }])).toHaveLength(2);
+  });
+
+  it("keeps the first occurrence's order, and groups nothing out of nothing", () => {
+    const row = (key: string): EvidenceRow => ({
+      end: "consumer",
+      member: "api",
+      key,
+      value: "v",
+      profiles: [],
+      unprofiled: true,
+      sources: ["a.yml"],
+      refusal: null,
+    });
+    // The group seen first has FEWER calls than the one after it, so neither a
+    // sort by count nor one by key can pass for first-occurrence order.
+    expect(groupEvidence([row("z.first"), row("a.second"), row("a.second")]).map((g) => [g.key, g.calls])).toEqual([
+      ["z.first", 1],
+      ["a.second", 2],
+    ]);
+    expect(groupEvidence([])).toEqual([]);
   });
 });

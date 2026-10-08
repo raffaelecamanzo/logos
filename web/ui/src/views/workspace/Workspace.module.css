@@ -66,6 +66,10 @@
   gap: var(--space-1);
 }
 
+/* A row of form fields side by side, wrapping on a narrow column, their inputs
+   aligned on one baseline: the bindings filter (S-614) and the impact form —
+   one rule, so the two rows on this tab cannot drift apart. */
+.filters,
 .impactForm {
   display: flex;
   align-items: flex-end;

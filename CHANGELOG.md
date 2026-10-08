@@ -130,6 +130,33 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   last three widgets no longer touch. A Playwright spec checks the equal gaps,
   left alignment and single body size on the real views. No figure, endpoint,
   CLI command or MCP tool changed.
+- **The service map's bindings can be filtered, and its evidence states each
+  fact once (CR-203, S-614).** On the Workspace tab's Service map:
+  - **Cross-service bindings** gains a filter: text matching the consumer or the
+    provider, a binding kind (HTTP, gRPC, broker) and — only when the Provenance
+    column exists — a provenance kind. Its figure reads "n of m bindings shown".
+    The filter narrows this table and Binding evidence; the map itself always
+    draws every binding. A map with no binding resolved states that in the
+    widget rather than as a centred empty state.
+  - **Binding evidence** merges rows identical in end, member, key, value or
+    refusal, profiles and defining sources into one row with a **Calls** count,
+    so five calls sharing one key and value read as one row, "Calls 5". Each row
+    says what to do: define the key, or replace the placeholder, in the member's
+    configuration; nothing to fix in the repository when the value arrives at
+    runtime; otherwise, if the value is wrong, correct it in the file named
+    under Defining sources.
+  - **Declared contracts** replaces its one disclosure per link with one
+    Documents table and one Bound calls table, each row naming its member and
+    counterparty.
+  - **Cross-context model hint** carries a *Review hint* badge and points at the
+    member's build manifest (`pom.xml` / `build.gradle`); *bounded context* joins
+    the glossary.
+
+  The four widgets take the shared frame with words in
+  `web/ui/src/copy/serviceMap.copy.ts`, and the map and its widgets sit in one
+  stack. A literal-only workspace still shows no Provenance column, filter or
+  evidence; no vendored spec, no Declared contracts; and the build layer stays
+  off until asked for. No figure, endpoint, CLI command or MCP tool changed.
 
 ### Fixed
 

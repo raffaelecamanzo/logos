@@ -8,6 +8,11 @@ import { COVERAGE_TEXT, NOT_RESOLVED_REMEDY, remedyFor, UNLISTED_REMEDY } from "
 import { findUnglossedUses, plainPart } from "./text.ts";
 import type { CopyText } from "./types.ts";
 import { DASHBOARD_TEXT, memberRowAction } from "./workspaceDashboard.copy.ts";
+import {
+  BINDING_KIND_LABEL,
+  evidenceRowAction,
+  SERVICE_MAP_TEXT,
+} from "./serviceMap.copy.ts";
 import { HEALTH_TEXT } from "./workspaceHealth.copy.ts";
 
 /** The arguments each sentence function is sampled with: every branch its body
@@ -42,9 +47,16 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     unknownMembers: [[1], [2]],
     incomplete: [[1], [2]],
   },
+  SERVICE_MAP_TEXT: {
+    bindingsShown: [[0, 1], [1, 1], [3, 12]],
+    noBindings: [[0], [1], [3]],
+    evidenceShown: [[0, 1], [1, 1], [2, 5]],
+    declaredFigure: [[0, 0, 0], [1, 1, 1], [3, 4, 2], [1, 1, null]],
+    hintFigure: [[1], [2]],
+  },
 };
 
-const TABLES: Record<string, Record<string, unknown>> = { COVERAGE_TEXT, DASHBOARD_TEXT, HEALTH_TEXT };
+const TABLES: Record<string, Record<string, unknown>> = { COVERAGE_TEXT, DASHBOARD_TEXT, HEALTH_TEXT, SERVICE_MAP_TEXT };
 
 /** Every sentence a table can produce: fixed ones as they are (a fixed sentence
  *  may be catalogue text with glosses in it), functions over their samples. */
@@ -63,6 +75,8 @@ describe("workspace catalogue sentences", () => {
     ...sentences("COVERAGE_TEXT"),
     ...sentences("DASHBOARD_TEXT"),
     ...sentences("HEALTH_TEXT"),
+    ...sentences("SERVICE_MAP_TEXT"),
+    ...Object.entries(BINDING_KIND_LABEL).map(([k, label]) => [`kind ${k}`, label] as [string, CopyText]),
     ...Object.entries(NOT_RESOLVED_REMEDY).map(([k, r]) => [`remedy ${k}`, r.remedy] as [string, CopyText]),
     ["remedy (unlisted)", UNLISTED_REMEDY.remedy] as [string, CopyText],
   ];
@@ -100,6 +114,20 @@ describe("workspace catalogue sentences", () => {
     expect(remedyFor("constructor")).toBe(UNLISTED_REMEDY);
   });
 
+  it("states the service map's shares as n of m, numerator first (S-614)", () => {
+    // FR-UI-42's own words, written out: the view tests read this sentence
+    // back from the catalogue, so only a literal here pins it.
+    expect(SERVICE_MAP_TEXT.bindingsShown(3, 4)).toBe("3 of 4 bindings shown");
+    expect(SERVICE_MAP_TEXT.bindingsShown(0, 1)).toBe("0 of 1 binding shown");
+    expect(SERVICE_MAP_TEXT.declaredFigure(4, 4, 2)).toBe(
+      "4 declared contracts, from 4 documents · 2 calls matched to a named external",
+    );
+    // No external drawn: no count of calls matched against one.
+    expect(SERVICE_MAP_TEXT.declaredFigure(1, 1, null)).toBe("1 declared contract, from 1 document");
+    expect(SERVICE_MAP_TEXT.evidenceShown(0, 2)).toBe("Shown: 0 of 2 bindings not observed at a call site");
+    expect(SERVICE_MAP_TEXT.evidenceShown(1, 1)).toBe("Shown: 1 of 1 binding not observed at a call site");
+  });
+
   it("agrees verb and noun with a count of one and of many", () => {
     expect(COVERAGE_TEXT.capturedResolves(1, 3)).toBe("1 of 3 captured call sites resolves.");
     expect(COVERAGE_TEXT.capturedResolves(2, 3)).toBe("2 of 3 captured call sites resolve.");
@@ -122,4 +150,35 @@ describe("workspace catalogue sentences", () => {
     expect(memberRowAction({ degraded: false, unusedAcross: 0 })).toEqual({ kind: "none" });
     expect(memberRowAction({ degraded: false, unusedAcross: null })).toEqual({ kind: "none" });
   });
+
+  it("gives each evidence row the action its refusal calls for, each with where (S-614, CR-203 item 7)", () => {
+    const row = { member: "api", key: "billing.url", sources: [] as string[] };
+    // No committed source defines it → define the key, in the member's configuration.
+    expect(evidenceRowAction({ ...row, refusal: "missing-key" })).toEqual({
+      kind: "act",
+      where: "configuration",
+      target: "billing.url",
+      text: `In api, ${NOT_RESOLVED_REMEDY["config-key-missing"].remedy}.`,
+    });
+    // A placeholder → replace the committed value, worded as the coverage tab words it.
+    expect(evidenceRowAction({ ...row, refusal: "placeholder-value" })).toEqual({
+      kind: "act",
+      where: "configuration",
+      target: "billing.url",
+      text: `In api, ${NOT_RESOLVED_REMEDY["config-placeholder-value"].remedy}.`,
+    });
+    // Not committed by the repository → nothing to fix there.
+    expect(evidenceRowAction({ ...row, refusal: "uncommitted" })).toEqual({ kind: "none" });
+    expect(SERVICE_MAP_TEXT.arrivesAtRuntime).toMatch(/^Nothing to fix in the repository/);
+    // A committed value → the file named in Defining sources.
+    expect(
+      evidenceRowAction({ ...row, refusal: null, sources: ["application.yml", "application-docker.yml"] }),
+    ).toMatchObject({ kind: "act", where: "configuration", target: "application.yml, application-docker.yml" });
+    // A refusal token newer than this build is never told to correct a value
+    // (its row shows none, and its sources are empty): it names the command
+    // that states its reason.
+    const later = evidenceRowAction({ ...row, refusal: "secret-ref" as unknown as null });
+    expect(later).toMatchObject({ kind: "act", where: "command", target: "logos workspace status" });
+  });
 });
+

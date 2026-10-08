@@ -5,11 +5,12 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { coverage, observe, thresholds } from "../copy/fixture.copy.ts";
+import { NOTHING_TO_DO } from "../copy/types.ts";
 
 import { Badge } from "./Badge.tsx";
 import statesStyles from "./States.module.css";
 import { Term } from "./Term.tsx";
-import { Widget } from "./Widget.tsx";
+import { ActionCell, Widget } from "./Widget.tsx";
 import styles from "./Widget.module.css";
 import { WidgetStack } from "./WidgetStack.tsx";
 import stackStyles from "./WidgetStack.module.css";
@@ -138,6 +139,24 @@ describe("Widget", () => {
     const { container } = render(<Widget title="T" copy={thresholds} state={{ breached: 0 }} />);
     const dfn = container.querySelector('[data-widget-copy="what"] dfn')!;
     expect(dfn).toHaveAttribute("data-term", "arm");
+  });
+});
+
+describe("ActionCell (a row's own action)", () => {
+  it("renders an act action's text, then where and its target", () => {
+    const { container } = render(
+      <ActionCell action={{ kind: "act", where: "configuration", target: "billing.url", text: "Define it." }} />,
+    );
+    expect(container.textContent).toBe("Define it.configuration billing.url");
+    expect(container.querySelector("code")?.textContent).toBe("billing.url");
+  });
+
+  it("renders a none action as the one Nothing-to-do sentence, or the catalogue's own", () => {
+    const { container, rerender } = render(<ActionCell action={{ kind: "none" }} />);
+    expect(container.textContent).toBe(NOTHING_TO_DO);
+    rerender(<ActionCell action={{ kind: "none" }} none="Nothing to fix in the repository." />);
+    expect(container.textContent).toBe("Nothing to fix in the repository.");
+    expect(container.querySelector("code")).toBeNull();
   });
 });
 
