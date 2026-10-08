@@ -397,7 +397,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       "Binding",
       "Bindings",
     ]);
-    expect(screen.queryByRole("combobox", { name: "Provenance" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance })).toBeNull();
     expect(expectOneWidgetStack(screen.getByRole("tabpanel")).map(widgetTitle)).toEqual(["Cross-service bindings"]);
   });
 
@@ -2415,15 +2415,6 @@ describe("WorkspaceView — the service map's widgets explain themselves, in one
     const twin = screen.getByRole("table", { name: /accessible twin of the build layer/ });
     const stack = mapPanel().querySelector("[data-widget-stack]");
     expect(twin.closest("section")?.parentElement).toBe(stack);
-  });
-
-  it("renders no Provenance column, filter or evidence widget on a literal-only workspace (S-419)", async () => {
-    stubApi({ providers: [BINDING] });
-    mount();
-    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
-    expect(expectOneWidgetStack(mapPanel()).map(widgetTitle)).toEqual(["Cross-service bindings"]);
-    expect(screen.queryByRole("columnheader", { name: /Provenance/ })).toBeNull();
-    expect(screen.queryByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance })).toBeNull();
   });
 });
 
