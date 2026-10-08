@@ -11,13 +11,13 @@
  * disclosure folded in), then one widget per quality dimension — all ten, in
  * canonical order — then the Signal trend (the non-gated pointer to Files & Risk
  * that sat between them is hidden through the hidden-widget register,
- * S-612/FR-UI-41). Every sentence is the `copy/health.copy.ts` catalogue's; this
- * file computes each widget's state. It keeps the view's
- * honest states (a gate and a metric grid with nothing to show name the step that
- * would produce it — `logos scan` on a populated graph, `logos index` on an empty
- * one, FR-EH-04/CR-130; a populated signal the graph no longer matches is
- * labelled rather than shown as a current verdict, in one band whose sentence
- * names which of three facts establishes that — the graph was de-indexed, or it
+ * S-612/FR-UI-41). Every widget sentence and figure text is the
+ * `copy/health.copy.ts` catalogue's; this file computes each widget's state. It
+ * keeps the view's honest states (a gate and a quality signal with nothing to
+ * show name the step that would produce it — `logos scan` on a populated graph,
+ * `logos index` on an empty one, FR-EH-04/CR-130; a populated signal the graph no
+ * longer matches is labelled rather than shown as a current verdict, in one
+ * structure whose sentence names which of three facts establishes that — the graph was de-indexed, or it
  * was indexed/synced after the snapshot, or the comparison could not be made at
  * all, which is the one arm that carries no date, FR-EH-04/CR-135/S-436; an ADR-21
  * metric drop-out is a muted `n/a`, never a zero; no snapshots is an honest empty
@@ -143,7 +143,6 @@ function Health({ data }: { data: HealthModel }) {
     </WidgetStack>
   );
 }
-
 
 /** The figure row of a populated reading: the figure, then — when the graph has
  *  moved on from it — the one not-current sentence both widgets render. */

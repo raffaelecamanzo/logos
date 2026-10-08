@@ -4,8 +4,9 @@
  * unit-testable functions: the canonical metric-row projection (with the ADR-21
  * applicability drop-outs kept as `null`, never a fabricated zero), the ten
  * dimension widgets joined to their worst offenders where the payload lists them
- * (S-615, FR-UI-43), the gate's pass floor, and the evolution-row formatting (signed deltas, abbreviated sha, empty-graph `n/a`). No
- * DOM, no React — every figure is a projection of a read-model field (NFR-RA-05).
+ * (S-615, FR-UI-43), the gate's pass floor and informational-pass reading, and
+ * the evolution-row formatting (signed deltas, abbreviated sha, empty-graph
+ * `n/a`). No DOM, no React — every figure is a projection of a read-model field (NFR-RA-05).
  *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
@@ -33,8 +34,8 @@ import { UNKNOWN_AGE_AHEAD_OF_NOW, parseSecs } from "../dashboard/dashboardModel
  * snapshot, and a snapshot is absent — or present but unscorable — for three
  * genuinely different reasons. A readout must name only the one its own condition
  * establishes ([FR-EH-04], CR-130), so the discriminant is derived once here rather
- * than re-guessed per card: the gate band and the quality grid gate on *different*
- * fields and must not disagree about the cause.
+ * than re-guessed per widget: the Gate and Quality signal widgets gate on
+ * *different* fields and must not disagree about the cause.
  *
  * - `unindexed` — the graph holds no file and no node. `logos index` is the step.
  * - `unscanned` — indexed, but `metric_snapshots` is empty, so no `scan` has ever
@@ -76,8 +77,8 @@ export function signalAbsence(status: StatusInfo, evolution: EvolutionReport): S
  * The figures are **labelled, not suppressed**: they are genuine history, and
  * hiding them would discard real information while adding a fourth cause to a
  * three-way absence classification just settled under review ([CR-135] §10).
- * Every arm below renders the *same* band — chip, figures, note — so no fourth
- * Health state is added either ([CR-135] §7): only the chip and the sentence
+ * Every arm below renders the *same* structure — chip, figures, note — so no
+ * fourth Health state is added either ([CR-135] §7): only the chip and the sentence
  * differ.
  *
  * - `de-indexed` — `status.indexed` is false: the graph these figures describe
@@ -157,8 +158,8 @@ const INDETERMINATE = {
  * `null` means "render exactly as before": every caller branches on it, so none
  * of the wording below can reach a project whose snapshot the graph has not
  * moved past. Derived once for the whole page, like `signalAbsence`, so the
- * gate band and the quality grid cannot disagree about whether what they show
- * is current.
+ * Gate, Quality signal and dimension widgets cannot disagree about whether what
+ * they show is current.
  *
  * **The discriminant is the timestamp pair, not the counts.** Comparing
  * `MetricSnapshot.node_count` against `StatusInfo.node_count` was proposed in
@@ -381,20 +382,25 @@ export function gateFigure(n: number): string {
 }
 
 /**
- * What a dimension widget says about its worst offenders (S-499, CR-162):
+ * What an offender-backed dimension widget says about its worst offenders
+ * (S-499, CR-162):
  *  - `not-applicable` — the dimension dropped out (ADR-21); no offender concept;
  *  - `not-recorded`   — the snapshot never recorded offenders (FR-QM-15), so its
  *    empty lists mean nothing and are never shown as a clean result (NFR-CC-04);
  *  - `none-flagged`   — recorded, and nothing crossed a threshold;
- *  - `listed`         — recorded, with entries to tabulate in persisted order;
- *  - `unlisted`       — the payload carries no offender list for this dimension
- *    at all (Modularity … Redundancy, FR-UI-43): a named absence, never `[]`.
+ *  - `listed`         — recorded, with entries to tabulate in persisted order.
  */
 export type OffenderState = "not-applicable" | "not-recorded" | "none-flagged" | "listed";
+
+/**
+ * Any dimension widget's offender state: an [`OffenderState`], or `unlisted` —
+ * the payload carries no offender list for this dimension at all (Modularity …
+ * Redundancy, FR-UI-43): a named absence, never `[]`.
+ */
 export type DimensionOffenderState = OffenderState | "unlisted";
 
 /**
- * Decide a drill-down's offender state. `recorded` is read FIRST and is the only
+ * Decide an offender-backed dimension's offender state. `recorded` is read FIRST and is the only
  * thing that can make an empty list mean "none flagged": an absent or `false` flag
  * is "not recorded" whatever the list holds, and a list's length is consulted only
  * once the snapshot is known to have recorded it. Never infer the state from

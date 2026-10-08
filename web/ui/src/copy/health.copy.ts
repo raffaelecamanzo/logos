@@ -4,8 +4,9 @@
  * Every sentence Health renders lives here: the Gate, Quality signal, ten
  * dimension and Signal trend widgets (`CopyEntry`s, held to the FR-UI-39 message
  * standard), and the figure, absence and disclosure text those widgets carry.
- * `HealthView` computes each widget's state and writes no prose of its own, so a
- * wording change edits this file alone. The dimension questions are the ones
+ * `HealthView` computes each widget's state and writes no widget sentence of its
+ * own (only the "n/a" / "not applicable" badges), so a wording change edits this
+ * file alone. The dimension questions are the ones
  * `docs/howto/metrics.md` asks; the threshold keys are the `[metric_thresholds]`
  * keys `docs/howto/configuration.md` documents.
  */
