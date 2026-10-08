@@ -9,9 +9,10 @@
  */
 
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { CrossServiceCoverage } from "../../api/types.ts";
+import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import {
@@ -412,5 +413,21 @@ describe("a failed read is stated, never papered over (NFR-RA-05)", () => {
       expect(screen.getByText(/could not be read/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/Not a workspace/)).toBeNull();
+  });
+});
+
+describe("the per-arm coverage board is hidden through the register (S-612, FR-UI-41)", () => {
+  it("renders the coverage boards without the per-arm board", async () => {
+    await mount();
+    expect(card(/^Coverage by intake$/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Coverage by relation arm$/ })).toBeNull();
+    expect(screen.queryByRole("table", { name: /by relation arm/i })).toBeNull();
+  });
+
+  it("renders the per-arm board again when its register entry is removed", async () => {
+    onTestFinished(removeHiddenWidgetEntry("coverage-by-relation-arm"));
+    await mount();
+    const board = card(/^Coverage by relation arm$/);
+    expect(within(board).getByRole("table", { name: /by relation arm/i })).toBeInTheDocument();
   });
 });

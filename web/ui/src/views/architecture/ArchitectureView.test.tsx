@@ -1,8 +1,10 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ArchitectureModel } from "../../api/types.ts";
+import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { ArchitectureView } from "./ArchitectureView.tsx";
+import { MATRIX_MODULE_THRESHOLD } from "./dsmModel.ts";
 
 afterEach(() => {
   cleanup();
@@ -62,6 +64,66 @@ describe("ArchitectureView over mocked /api/v1 (S-189, FR-UI-06)", () => {
     expect(screen.getByText("logos index")).toBeInTheDocument();
   });
 
+  it("renders the demoted dependency matrix disclosure", async () => {
+    stub(withCycle());
+    render(<ArchitectureView />);
+    expect(await screen.findByText(/Full dependency matrix · 2 modules/i)).toBeInTheDocument();
+  });
+
+  // S-612 (FR-UI-41): the CYCLES band and the cycle list are hidden through the
+  // register. The Dependency matrix stays, and its back-edge cells keep their ↺.
+  it("renders no CYCLES band and no cycle list, while the matrix keeps its cycle cells", async () => {
+    stub(withCycle());
+    render(<ArchitectureView />);
+    expect(await screen.findByText(/Full dependency matrix · 2 modules/i)).toBeInTheDocument();
+    expect(screen.queryByText("CYCLES")).toBeNull();
+    expect(screen.queryByText(/cycle \/ layering-violation edge/i)).toBeNull();
+    expect(screen.queryByRole("table", { name: "Cycles" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Cycles" })).toBeNull();
+    // The api → db back-edge cell is still outlined and glyphed in the matrix.
+    const backEdge = screen.getByTitle(/back-edge: 4 dependency\(ies\) against layer order/);
+    expect(backEdge).toHaveTextContent("↺");
+  });
+
+  it("leads with the Dependency matrix when the graph is acyclic too", async () => {
+    const acyclic = withCycle();
+    acyclic.dsm.matrix = [
+      [0, 0],
+      [3, 0],
+    ];
+    stub(acyclic);
+    render(<ArchitectureView />);
+    expect(await screen.findByText(/Full dependency matrix · 2 modules/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No cycles detected/i)).toBeNull();
+  });
+
+  it("no longer points the collapsed matrix's note at a cycle list", async () => {
+    // Past the threshold the disclosure stays collapsed and explains why. It used
+    // to call "the cycle list above" the actionable view — a list no longer drawn.
+    const n = MATRIX_MODULE_THRESHOLD + 1;
+    stub({
+      status: INDEXED,
+      dsm: {
+        granularity: "module",
+        rows: Array.from({ length: n }, (_, i) => ({ name: `mod${i}`, layer: null })),
+        matrix: Array.from({ length: n }, () => Array.from({ length: n }, () => 0)),
+        freshness: "fresh",
+        warnings: [],
+      },
+    });
+    render(<ArchitectureView />);
+    const note = await screen.findByText(/the matrix is unreadable at this size/i);
+    expect(note.textContent).not.toMatch(/cycle list/i);
+  });
+});
+
+describe("ArchitectureView with the cycles register entry removed (S-612, FR-UI-41)", () => {
+  let restore: () => void;
+  beforeEach(() => {
+    restore = removeHiddenWidgetEntry("architecture-cycles");
+  });
+  afterEach(() => restore());
+
   it("leads with a red cycles verdict and lists the back-edge", async () => {
     stub(withCycle());
     render(<ArchitectureView />);
@@ -83,12 +145,6 @@ describe("ArchitectureView over mocked /api/v1 (S-189, FR-UI-06)", () => {
     render(<ArchitectureView />);
     // The acyclic state is stated in both the verdict band and the cycles card.
     expect((await screen.findAllByText(/No cycles detected/i)).length).toBeGreaterThan(0);
-  });
-
-  it("renders the demoted dependency matrix disclosure", async () => {
-    stub(withCycle());
-    render(<ArchitectureView />);
-    expect(await screen.findByText(/Full dependency matrix · 2 modules/i)).toBeInTheDocument();
   });
 
   it("paginates the cycles table at 20 rows/page (S-195, FR-UI-11)", async () => {

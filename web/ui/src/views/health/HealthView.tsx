@@ -7,7 +7,8 @@
  * It preserves the server-rendered Health view's verdict-first layout
  * (web/src/views/health.rs, frontend-design §4.2): the gate verdict band leads,
  * then the per-metric quality grid + the folded structural drill-downs, then the
- * non-gated pointer to Files & Risk, then the signal-evolution trend — and its
+ * signal-evolution trend (the non-gated pointer to Files & Risk that sat between
+ * them is hidden through the hidden-widget register, S-612/FR-UI-41) — and its
  * honest states (a gate and a metric grid with nothing to show name the step that
  * would produce it — `logos scan` on a populated graph, `logos index` on an empty
  * one, FR-EH-04/CR-130; a populated signal the graph no longer matches is
@@ -47,6 +48,7 @@ import {
   ScoreBar,
   type Column,
 } from "../../components/index.ts";
+import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
   aggregateSignal,
   metricRows,
@@ -93,11 +95,13 @@ function Health({ data }: { data: HealthModel }) {
     <div className={styles.view}>
       <GateBand gate={data.gate} absence={absence} currency={currency} />
       <MetricsCard scan={data.scan} absence={absence} currency={currency} />
-      <Callout label="Non-gated tier" tone="muted">
-        <span>
-          Per-file commit/churn/risk detail now lives in <a href="/files">Files &amp; Risk</a>.
-        </span>
-      </Callout>
+      {!isWidgetHidden("non-gated-tier") && (
+        <Callout label="Non-gated tier" tone="muted">
+          <span>
+            Per-file commit/churn/risk detail now lives in <a href="/files">Files &amp; Risk</a>.
+          </span>
+        </Callout>
+      )}
       <EvolutionCard snapshots={data.evolution.snapshots} />
     </div>
   );

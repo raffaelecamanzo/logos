@@ -129,8 +129,9 @@ function DashboardContent({
   return (
     <>
       {/* The coverage boards, rendered from the SAME components as the Workspace
-          tab's coverage panel — headline, spec conformance, intake, arms — so the
-          two surfaces cannot disagree about a figure (S-428 AC1). */}
+          tab's coverage panel — headline, spec conformance, intake; the per-arm
+          board is hidden on both through the hidden-widget register (S-612) — so
+          the two surfaces cannot disagree about a figure (S-428 AC1). */}
       <CoveragePanel
         dashboard={buildCoverageDashboard(status.coverage)}
         degraded={status.degraded_rollup}

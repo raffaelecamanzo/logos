@@ -1,8 +1,12 @@
 /*
- * ArchitectureView (S-189, FR-UI-06, FR-UI-21) — the Architecture / Cycles (DSM)
- * tab migrated to React over `/api/v1`. Cycles-first (frontend-design §4.5): the
- * actionable back-edge list leads, then the full module heat-grid matrix is demoted
- * to a collapsible, threshold-gated disclosure. It consumes the shared `/api/v1`
+ * ArchitectureView (S-189, FR-UI-06, FR-UI-21) — the Architecture (DSM) tab
+ * migrated to React over `/api/v1`. Cycles-first (frontend-design §4.5): the
+ * back-edge list leads, then the full module heat-grid matrix is demoted to a
+ * collapsible, threshold-gated disclosure. The CYCLES band and the cycle list are
+ * hidden through the hidden-widget register (S-612, FR-UI-41), so the page leads
+ * with the matrix, whose back-edge cells stay outlined `↺`; `GET
+ * /api/v1/architecture`, `logos dsm` and MCP `dsm` still serve the back-edges, and
+ * removing the register entry restores both widgets. It consumes the shared `/api/v1`
  * data-access layer (the S-186 pattern): an initial async load through
  * `useApiResource`, honest loading/empty/error states through `AsyncResource`,
  * rendering exclusively through the S-193 design system. Every read is GET-only —
@@ -15,6 +19,7 @@ import type { ArchitectureModel, DsmReport } from "../../api/types.ts";
 import { Callout, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, EmptyState } from "../../components/index.ts";
 import type { Column } from "../../components/index.ts";
 import { navigate } from "../../router.tsx";
+import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
   backEdges,
   cellCount,
@@ -41,13 +46,15 @@ export function ArchitectureView() {
 }
 
 /** The cycles-first report: the verdict band, the leading cycle list, then the
- *  demoted heat-grid matrix. */
+ *  demoted heat-grid matrix. The first two render only when the hidden-widget
+ *  register does not hide them (S-612). */
 function ArchitectureReport({ report }: { report: DsmReport }) {
   const edges = backEdges(report);
+  const showCycles = !isWidgetHidden("architecture-cycles");
   return (
     <div className={styles.view}>
-      <CyclesVerdict count={edges.length} />
-      <CyclesCard report={report} edges={edges} />
+      {showCycles && <CyclesVerdict count={edges.length} />}
+      {showCycles && <CyclesCard report={report} edges={edges} />}
       <MatrixCard report={report} />
     </div>
   );
@@ -77,7 +84,8 @@ interface CycleRow {
   count: number;
 }
 
-/** The cycle list that LEADS the page (§4.5): each back-edge as a sortable
+/** The cycle list that LEADS the page (§4.5) when the hidden-widget register does
+ *  not hide it (S-612): each back-edge as a sortable
  *  `From → To` row with its dependency count. From/To are focus links into the
  *  Graph tab. An acyclic report says so honestly (NFR-CC-04). */
 function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] }) {
@@ -166,8 +174,8 @@ function MatrixCard({ report }: { report: DsmReport }) {
         {!open && (
           <p className={styles.note}>
             {n} modules — the matrix is unreadable at this size, so it stays
-            collapsed; the cycle list above is the actionable view. Function-level
-            dependency exploration is the Graph view's job.
+            collapsed. Function-level dependency exploration is the Graph
+            view's job.
           </p>
         )}
         <div className={styles.disclosureBody}>

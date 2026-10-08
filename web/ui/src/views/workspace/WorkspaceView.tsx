@@ -2,13 +2,16 @@
  * The Workspace tab (S-250, CR-061, FR-UI-29; frontend-design §4.16/§4.17) — the
  * app-level cross-service surface, in workspace mode only.
  *
- * Three panels over the S-249 `/api/v1/workspace/*` read-models:
+ * Three panels over the S-249 `/api/v1/workspace/*` read-models, of which the
+ * hidden-widget register (S-612, FR-UI-41) hides the third — so the tab renders
+ * two, and `GET /api/v1/workspace/impact`, `logos xservice impact` and MCP
+ * `xservice_impact` still serve the impact answer:
  *   - Service map — services as nodes, resolved cross-service bindings as edges,
  *     rendered through the UNCHANGED §4.4 ECharts canvas (`GraphCanvas`) with the
  *     same legend grammar. Clicking a service focuses its member (the shell
  *     selector switches, and every other view re-fetches scoped to it).
- *   - Cross-service coverage — the advisory 3-state bound/ambiguous/unbound board
- *     per relation arm, with unbound references grouped by reason.
+ *   - Cross-service coverage — the resolved-edge headline, spec conformance and
+ *     the by-intake board (the per-arm board is hidden through the register).
  *   - Cross-service impact — a symbol's impact in its own member(s) plus each
  *     far-side impact stitched across a binding.
  *
@@ -87,6 +90,7 @@ import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { GraphCanvas } from "../graph/GraphCanvas.tsx";
 import { ADMITTED_DASH } from "../graph/graphModel.ts";
 import { EdgeRow } from "../graph/Legend.tsx";
+import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
   ARM_LABEL,
   armLabel,
@@ -223,7 +227,9 @@ function WorkspaceContent({
               </>
             ),
           },
-          { id: "impact", label: "Cross-service impact", panel: <ImpactPanel /> },
+          ...(isWidgetHidden("cross-service-impact")
+            ? []
+            : [{ id: "impact", label: "Cross-service impact", panel: <ImpactPanel /> }]),
         ]}
       />
     </>

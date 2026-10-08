@@ -61,8 +61,9 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // S-191 — the Config policy editor (the last interactive tab, the SPA's only
   // mutating surface) over the unchanged intent-guarded config POSTs (ADR-31).
   "/config": ConfigView,
-  // S-250 — the app-level Workspace tab (service map / cross-service coverage /
-  // cross-service impact) over the S-249 `/api/v1/workspace/*` fan-out. Registered
+  // S-250 — the app-level Workspace tab (service map / cross-service coverage; its
+  // cross-service impact panel is hidden through the hidden-widget register, S-612)
+  // over the S-249 `/api/v1/workspace/*` fan-out. Registered
   // unconditionally so a hand-typed `/workspace` resolves; its NAV ITEM, though, is
   // rendered only in workspace mode (nav.ts), and in a single-root serve the view
   // states honestly that this is not a workspace (FR-UI-29).

@@ -5,7 +5,7 @@
  * restyled second copy of them.
  *
  * That is the whole reason this module exists. A hand-mirrored twin would show
- * the same four cards from two implementations free to diverge, and the figures
+ * the same cards from two implementations free to diverge, and the figures
  * on them are exactly the ones this product has already had to correct twice
  * (CR-100's fabricated `1.0`, CR-127's self-contradicting headline). One
  * implementation, two call sites: `WorkspaceView`'s coverage tab and the
@@ -40,6 +40,7 @@ import {
   type ArmCoverage,
   type CoverageDashboard,
 } from "./coverageModel.ts";
+import { isWidgetHidden } from "../hiddenWidgets.ts";
 import styles from "./Workspace.module.css";
 
 
@@ -436,21 +437,27 @@ export function CoveragePanel({
           different claims, and the reference workspace's `bound: 81` is 81 of the
           first and 0 of the second — which a bare headline reads as healthy.
 
-          The arm board below does not answer this and cannot: `route` carries both
-          populations, because an OpenAPI operation and an HTTP client call are the
-          same arm. So the split is its own board, adjacent to the headline it
-          decomposes. Counts are the server's, displayed verbatim. */}
+          The per-arm board (hidden through the hidden-widget register, S-612)
+          does not answer this and cannot: `route` carries both populations,
+          because an OpenAPI operation and an HTTP client call are the same arm. So
+          the split is its own board, adjacent to the headline it decomposes. Counts
+          are the server's, displayed verbatim. */}
       <IntakeCard dashboard={dashboard} />
 
-      <Card title="Coverage by relation arm">
-        <DataTable
-          caption="Cross-service coverage by relation arm"
-          columns={ARM_COLUMNS}
-          rows={dashboard.arms}
-          rowKey={(a) => a.relation}
-          pageSize={DEFAULT_TABLE_PAGE_SIZE}
-        />
-      </Card>
+      {/* S-612 (FR-UI-41): hidden through the register on both call sites. Its
+          data stays on `GET /api/v1/workspace/status`, `logos workspace status`
+          and MCP `workspace_status`. */}
+      {!isWidgetHidden("coverage-by-relation-arm") && (
+        <Card title="Coverage by relation arm">
+          <DataTable
+            caption="Cross-service coverage by relation arm"
+            columns={ARM_COLUMNS}
+            rows={dashboard.arms}
+            rowKey={(a) => a.relation}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+        </Card>
+      )}
     </div>
   );
 }
