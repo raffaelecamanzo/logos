@@ -81,3 +81,41 @@ describe("DataTable pagination (S-188, FR-UI-11)", () => {
     expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
   });
 });
+
+describe("DataTable header gloss (S-616, FR-UI-39)", () => {
+  const GLOSSED: Column<Row>[] = [
+    { key: "name", header: "Name", cell: (r) => r.name, sortValue: (r) => r.name },
+    { key: "score", header: "Co-change", gloss: "coChange", numeric: true, cell: (r) => r.score, sortValue: (r) => r.score },
+  ];
+
+  it("glosses the header through Term, beside — never inside — the sort button", async () => {
+    const user = userEvent.setup();
+    render(<DataTable caption="t" columns={GLOSSED} rows={ROWS.slice(0, 3)} rowKey={(r) => r.name} />);
+    const header = screen.getAllByRole("columnheader")[1];
+    const term = header.querySelector("dfn[data-term='coChange']");
+    expect(term).not.toBeNull();
+    expect(term).toHaveTextContent(/^Co-change/);
+    // A focusable <dfn> inside a <button> is invalid nesting, and a click on the
+    // term would sort: the term sits outside the button.
+    const sort = within(header).getByRole("button", { name: "Co-change" });
+    expect(sort.contains(term)).toBe(false);
+    // The button's copy of the header is for assistive technology only: seen
+    // once, as the term.
+    expect(within(sort).getByText("Co-change")).toHaveClass("sr-only");
+    // The column is named once, by its header — not "Co-change <definition>
+    // Co-change"; the definition stays the term's description.
+    expect(screen.getByRole("columnheader", { name: "Co-change" })).toBe(header);
+    await user.click(sort);
+    expect(header).toHaveAttribute("aria-sort", "ascending");
+  });
+
+  it("glosses an unsortable header too", () => {
+    const cols: Column<Row>[] = [{ key: "score", header: "Co-change", gloss: "coChange", cell: (r) => r.score }];
+    render(<DataTable caption="t" columns={cols} rows={ROWS.slice(0, 1)} rowKey={(r) => r.name} />);
+    const header = screen.getByRole("columnheader", { name: "Co-change" });
+    expect(header.querySelector("dfn[data-term='coChange']")).not.toBeNull();
+    // The header text renders once — as the term — not again beside it.
+    const tip = header.querySelector('[role="tooltip"]')!.textContent!;
+    expect(header.textContent!.replace(tip, "")).toBe("Co-change ");
+  });
+});

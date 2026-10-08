@@ -22,19 +22,19 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   command), evidence — and states an absence as a left-aligned sentence in the
   figure row rather than a centred empty state. `WidgetStack` spaces widgets one
   token apart, and `Term` glosses internal vocabulary (a `<dfn>` whose
-  explanation shows on hover and keyboard focus) from one glossary of the
-  fourteen terms FR-UI-39 names. A widget's words come from a typed catalogue
+  explanation shows on hover and keyboard focus) from one glossary: the
+  fourteen terms FR-UI-39 names, plus table-header terms. A widget's words come from a typed catalogue
   entry `{ what, why, action(state) }`, so a catalogue missing a part does not
   type-check, and the test helper `expectWidgetCopy` asserts the four parts on
-  a rendered widget. No view uses the frame yet: this release changes no page.
+  a rendered widget. Files & Risk and Statistics render through it (below).
 - **Browser tests in the full gate (S-611).** `web/ui` gains Playwright
   (Chromium only): `npm run test:e2e` drives a `logos serve --ui` built from the
   tree over a checked-in single-repository fixture and a two-member workspace
   fixture, and asserts layout in computed style — equal gaps between stacked
   widgets, left-aligned widget text, one font size for explanation and action.
-  Until views render through the frame, those layout checks run on a harness
-  page built from the same components and served from the same server; the app
-  shell itself is checked on both fixtures. `scripts/gate.sh full` runs it as a
+  The frame's own checks run on a harness page built from the same components
+  and served from the same server; Files & Risk and Statistics are checked on
+  the real pages, and the app shell on both fixtures. `scripts/gate.sh full` runs it as a
   new `ui-e2e` leg and prints its pass count; `gate.sh fast` never runs it. A
   missing browser, an empty run, a skipped spec or a run past its time limit is
   a failed leg (a timed-out run is killed with all its processes), and
@@ -56,6 +56,24 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   one register, `web/ui/src/views/hiddenWidgets.ts`, with its reason and the
   surfaces that still serve it; deleting an entry brings the widget back. The
   usage guide lists them under *Hidden widgets*.
+- **Files & Risk abbreviates long paths, and Files & Risk and Statistics explain
+  their figures (CR-203, S-616).** In "Files ranked by risk" and "Ownership
+  dispersion", a path longer than 40 characters reads as its first segment, an
+  ellipsis and its last two segments (`logos-core/…/resolve/binder.rs`). Two rows
+  that would read the same keep more segments until they differ. Hovering shows
+  the full path, keyboard focus shows it as a tip, a screen reader reads it, and
+  the File column sorts by it. Both widgets say what they rank and why, and
+  what to do: add tests to or split the top files; run `logos coverage ingest`
+  when Coverage reads n/a; run `logos hotspots` when nothing is ranked yet; name
+  an owner in `CODEOWNERS` when files have several authors. A single-author
+  history needs nothing. The top hotspot is now this widget's figure, not a
+  separate HOTSPOT callout. The Co-change and Defect headers explain themselves
+  on hover and focus. Every Statistics widget states that it is informational.
+  With no telemetry yet, the page says so in the Estimated value widget and
+  names `logos stats`. Tool attribution by class is now one table with a Class
+  column, ordered by class and then by calls, with "Answered" explained. The
+  read-model's own coverage notes stay verbatim, in the widget's explanation.
+  No HTTP, CLI or MCP answer changes.
 
 ### Fixed
 

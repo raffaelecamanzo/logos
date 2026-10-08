@@ -6,7 +6,8 @@
  *
  *   1. title       — the title left, at most one status badge right, one line;
  *   2. figure      — the key figure(s), or the statement of an absence;
- *   3. explanation — what the widget shows, and why it matters;
+ *   3. explanation — what the widget shows, and why it matters (then any
+ *                    `note`: payload text the catalogue cannot hold);
  *   4. action      — "What you can do", the action text, and the where chip;
  *   5. evidence    — the table, chart or list (the children).
  *
@@ -43,6 +44,12 @@ export type WidgetProps<S> = {
   badge?: ReactNode;
   /** The widget's catalogue entry. */
   copy: CopyEntry<S>;
+  /**
+   * Secondary detail for the explanation, after why: text the read-model
+   * supplies (its own caveats, rendered verbatim), which a catalogue cannot
+   * hold. Not catalogue copy, so not one of the `data-widget-copy` parts.
+   */
+  note?: ReactNode;
   /** The evidence: a table, chart or list. */
   children?: ReactNode;
   className?: string;
@@ -78,7 +85,7 @@ function isRendered(node: ReactNode): boolean {
 }
 
 export function Widget<S>(props: WidgetProps<S>) {
-  const { title, badge, copy, figure, absence, children, className } = props;
+  const { title, badge, copy, note, figure, absence, children, className } = props;
   const action = copy.action((props as { state: S }).state);
   const hasAbsence = isRendered(absence);
 
@@ -109,6 +116,11 @@ export function Widget<S>(props: WidgetProps<S>) {
           <p className={styles.body} data-widget-copy="why">
             <CopyTextView text={copy.why} />
           </p>
+          {isRendered(note) && (
+            <div className={styles.note} data-widget-note="">
+              {note}
+            </div>
+          )}
         </div>
 
         <div className={styles.action} data-widget-part="action" data-action-kind={action.kind}>

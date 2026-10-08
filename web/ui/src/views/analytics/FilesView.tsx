@@ -1,41 +1,42 @@
 /*
- * FilesView (S-188, FR-UI-11, FR-UI-21) — the Files & Risk tab migrated to React
- * over `/api/v1/files`. Verdict-first: the top hotspot (or an honest `n/a` when
- * the board is empty), then the merged per-file risk table — the ranked hotspot
- * board (the spine, so the default order is the composite hotspot score) joined
- * with the per-file temporal churn/age facts. The table is the re-homed shared
- * interactive data-table: client-side sort + pagination over the FULL dataset
- * (replacing the htmx mechanism), numeric columns right-aligned, an absent
- * churn/age rendered `n/a` — never a fabricated zero (NFR-CC-04). The `--untested`
- * filter is a React toggle that re-fetches. Every read is GET-only (ADR-28).
+ * FilesView (S-188, S-616, FR-UI-11, FR-UI-21, FR-UI-44) — the Files & Risk tab
+ * over `/api/v1/files`: two widgets in one stack, each saying what it shows, why
+ * it matters and what to do (CR-203 items 23–24; copy in `copy/files.copy.ts`).
+ *
+ * "Files ranked by risk" leads with the top hotspot in its figure row (or the
+ * named absence when the board is empty), then the merged per-file risk table —
+ * the ranked hotspot board (the spine, so the default order is the composite
+ * hotspot score) joined with the per-file temporal churn/age facts. The table is
+ * the shared interactive data-table: client-side sort + pagination over the FULL
+ * dataset, numeric columns right-aligned, an absent churn/age rendered `n/a` —
+ * never a fabricated zero (NFR-CC-04). The `--untested` filter is a React toggle
+ * that re-fetches. "Ownership dispersion" follows. Both tables abbreviate long
+ * paths through `PathCell`, the full path on hover and focus (FR-UI-44). Every
+ * read is GET-only (ADR-28).
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { AsyncResource, fetchFiles, useApiResource } from "../../api/index.ts";
-import type { FilesModel } from "../../api/types.ts";
+import type { FileTemporal, FilesModel } from "../../api/types.ts";
 import {
+  abbreviatePaths,
   Button,
-  Callout,
-  Card,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
-  EmptyState,
+  PathCell,
+  pathColumn,
+  Widget,
+  WidgetStack,
   type Column,
 } from "../../components/index.ts";
-import {
-  fileRiskRows,
-  hotspotsEmpty,
-  ownershipRows,
-  pctBp,
-  type FileRiskRow,
-} from "./analyticsModel.ts";
+import { filesAbsence, filesRankedByRisk, ownershipDispersion } from "../../copy/files.copy.ts";
+import { fileRiskRows, ownershipRows, pctBp, type FileRiskRow } from "./analyticsModel.ts";
 import { CoverageCellView, Na } from "./cells.tsx";
-import type { FileTemporal } from "../../api/types.ts";
 import styles from "./AnalyticsView.module.css";
 
+/** The risk table's columns after File (which `pathColumn` builds over the rows). */
 const FILE_COLUMNS: Column<FileRiskRow>[] = [
-  { key: "path", header: "File", mono: true, cell: (r) => r.path, sortValue: (r) => r.path },
   {
     key: "commits",
     header: "Commits",
@@ -62,6 +63,7 @@ const FILE_COLUMNS: Column<FileRiskRow>[] = [
   {
     key: "cochange",
     header: "Co-change",
+    gloss: "coChange",
     numeric: true,
     cell: (r) => r.coChange,
     sortValue: (r) => r.coChange,
@@ -69,6 +71,7 @@ const FILE_COLUMNS: Column<FileRiskRow>[] = [
   {
     key: "defect",
     header: "Defect",
+    gloss: "defect",
     numeric: true,
     cell: (r) => r.defect,
     sortValue: (r) => r.defect,
@@ -93,8 +96,8 @@ const FILE_COLUMNS: Column<FileRiskRow>[] = [
   },
 ];
 
+/** The ownership table's columns after File. */
 const OWNERSHIP_COLUMNS: Column<FileTemporal>[] = [
-  { key: "path", header: "File", mono: true, cell: (r) => r.path, sortValue: (r) => r.path },
   {
     key: "dispersion",
     header: "Dispersion",
@@ -148,101 +151,141 @@ function FilesContent({
   onToggleProductionScope: (v: boolean) => void;
 }) {
   const { hotspots, temporal } = model;
-  const top = hotspots.files[0];
-
-  const verdict = top ? (
-    <Callout label="HOTSPOT" tone="signal">
-      <span className="mono">{top.path}</span> <span className="muted">— score {top.score}</span>
-    </Callout>
-  ) : (
-    <Callout label="HOTSPOT" tone="muted">
-      <Na />
-    </Callout>
+  const rows = useMemo(() => fileRiskRows(hotspots, temporal), [hotspots, temporal]);
+  const ownership = useMemo(() => ownershipRows(temporal), [temporal]);
+  // One labelling for the risk table AND its figure row, so the top file reads
+  // the same in both and never takes a label another row shares.
+  const riskLabels = useMemo(() => abbreviatePaths(rows.map((r) => r.path)), [rows]);
+  const fileColumns = useMemo(
+    () => [pathColumn(rows, (r) => r.path, riskLabels), ...FILE_COLUMNS],
+    [rows, riskLabels],
+  );
+  const ownershipColumns = useMemo(
+    () => [pathColumn(ownership, (r) => r.path), ...OWNERSHIP_COLUMNS],
+    [ownership],
   );
 
-  if (hotspots.files.length === 0) {
-    const { message, command } = hotspotsEmpty(hotspots);
+  const toggles = (
+    <p className="muted">
+      {untested ? (
+        <>
+          <Button variant="ghost" size="sm" onClick={() => onToggle(false)}>
+            Show all files
+          </Button>{" "}
+          · <span className="muted">untested only</span>
+        </>
+      ) : (
+        <>
+          <span className="muted">all files</span> ·{" "}
+          <Button variant="ghost" size="sm" onClick={() => onToggle(true)}>
+            Untested only
+          </Button>
+        </>
+      )}
+      {" · "}
+      {productionScope ? (
+        <>
+          <span className="muted">production files only</span>{" "}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onToggleProductionScope(false)}
+          >
+            Show test files too
+          </Button>
+        </>
+      ) : (
+        <Button variant="ghost" size="sm" onClick={() => onToggleProductionScope(true)}>
+          Production files only
+        </Button>
+      )}
+    </p>
+  );
+  const filtered = hotspots.untested || hotspots.production_scope;
+
+  const top = hotspots.files[0];
+  if (!top) {
     return (
-      <div className={styles.view}>
-        {verdict}
-        <EmptyState message={message} command={command} />
-      </div>
+      <WidgetStack>
+        <Widget
+          title="Files ranked by risk"
+          copy={filesRankedByRisk}
+          state={{ ranked: 0, filtered, coverageMissing: hotspots.coverage_basis !== "coverage" }}
+          absence={filtered ? filesAbsence.filteredOut : (hotspots.notice ?? filesAbsence.unranked)}
+        >
+          {/* The filters stay reachable, or a filter that empties the board is a dead end. */}
+          {filtered && toggles}
+        </Widget>
+      </WidgetStack>
     );
   }
 
-  const rows = fileRiskRows(hotspots, temporal);
-  const ownership = ownershipRows(temporal);
+  // "Coverage reads n/a" because no report is ingested: the read-model then ranks
+  // on its static-reachability fallback. Not "every listed cell is n/a" — the
+  // untested filter over an ingested report leaves exactly such a list.
+  const coverageMissing = hotspots.coverage_basis !== "coverage";
 
   return (
-    <div className={styles.view}>
-      {verdict}
-      <Card title="Files ranked by risk">
-        <p className="muted">
-          {untested ? (
-            <>
-              <Button variant="ghost" size="sm" onClick={() => onToggle(false)}>
-                Show all files
-              </Button>{" "}
-              · <span className="muted">untested only</span>
-            </>
-          ) : (
-            <>
-              <span className="muted">all files</span> ·{" "}
-              <Button variant="ghost" size="sm" onClick={() => onToggle(true)}>
-                Untested only
-              </Button>
-            </>
-          )}
-          {" · "}
-          {productionScope ? (
-            <>
-              <span className="muted">production files only</span>{" "}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onToggleProductionScope(false)}
-              >
-                Show test files too
-              </Button>
-            </>
-          ) : (
-            <Button variant="ghost" size="sm" onClick={() => onToggleProductionScope(true)}>
-              Production files only
-            </Button>
-          )}
-        </p>
+    <WidgetStack>
+      <Widget
+        title="Files ranked by risk"
+        copy={filesRankedByRisk}
+        state={{ ranked: hotspots.ranked_files, filtered, coverageMissing }}
+        figure={
+          <>
+            <span>
+              {hotspots.ranked_files} <span className={styles.unit}>files ranked</span>
+            </span>
+            <span className={styles.unit}>
+              top: <PathCell path={top.path} label={riskLabels.get(top.path)} />, score {top.score}
+            </span>
+          </>
+        }
+      >
+        {toggles}
         <DataTable
           caption="Files ranked by risk"
-          columns={FILE_COLUMNS}
+          columns={fileColumns}
           rows={rows}
           rowKey={(r) => r.path}
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
         <p className="muted">
-          Defect column: {hotspots.defect_label} (commit-hygiene, not a defect measure). Ranked{" "}
-          {hotspots.ranked_files} files.
+          Defect column: {hotspots.defect_label} (commit-hygiene, not a defect measure).
         </p>
         {hotspots.coverage_label && (
           <p className="muted">
             Coverage basis: {hotspots.coverage_basis} — {hotspots.coverage_label}.
           </p>
         )}
-      </Card>
-      <Card title="Ownership dispersion">
-        {ownership.length === 0 ? (
-          <p className="muted">
-            Single-author history — ownership dispersion needs multiple committers.
-          </p>
-        ) : (
+      </Widget>
+      {ownership.length === 0 ? (
+        <Widget
+          title="Ownership dispersion"
+          copy={ownershipDispersion}
+          state={{ multiAuthor: false }}
+          absence={filesAbsence.singleAuthor}
+        />
+      ) : (
+        <Widget
+          title="Ownership dispersion"
+          copy={ownershipDispersion}
+          state={{ multiAuthor: true }}
+          figure={
+            <span>
+              {ownership.length} <span className={styles.unit}>of {temporal.files.length} files have more than one author</span>
+            </span>
+          }
+        >
           <DataTable
             caption="Ownership dispersion"
-            columns={OWNERSHIP_COLUMNS}
+            columns={ownershipColumns}
             rows={ownership}
             rowKey={(r) => r.path}
             pageSize={DEFAULT_TABLE_PAGE_SIZE}
           />
-        )}
-      </Card>
-    </div>
+        </Widget>
+      )}
+    </WidgetStack>
   );
 }

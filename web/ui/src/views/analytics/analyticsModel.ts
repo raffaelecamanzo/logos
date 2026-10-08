@@ -95,12 +95,3 @@ export function ownershipRows(temporal: TemporalReport): FileTemporal[] {
     (f) => f.ownership_dispersion_bp > 0 || f.change_entropy_bp > 0,
   );
 }
-
-/** The honest empty-state message + producing command for an empty hotspot board,
- *  preferring the read-model's own degraded/first-mine notice. */
-export function hotspotsEmpty(report: HotspotReport): { message: string; command: string } {
-  return {
-    message: report.notice ?? "No hotspots ranked yet — run",
-    command: "logos hotspots",
-  };
-}

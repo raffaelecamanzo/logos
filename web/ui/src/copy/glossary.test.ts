@@ -2,11 +2,14 @@
 // each term's detector matches the term and rejects its one-character near misses.
 import { describe, expect, it } from "vitest";
 
-import { findTermsInPlainText, GLOSSARY, GLOSSARY_TERMS } from "./glossary.ts";
+import { findTermsInPlainText, GLOSSARY, GLOSSARY_TERMS, VOCABULARY_TERMS } from "./glossary.ts";
 
 describe("glossary", () => {
-  it("lists exactly the FR-UI-39 vocabulary, each with a plain-words definition", () => {
-    expect(GLOSSARY_TERMS.map((t) => GLOSSARY[t].label)).toEqual([
+  it("enforces every FR-UI-39 term, and defines every entry in plain words", () => {
+    // A subset, not the exact set: a catalogue may also choose to enforce a
+    // term of its own (a pattern makes it enforced), so the pin is that none of
+    // the requirement's fourteen is ever left unenforced.
+    expect(VOCABULARY_TERMS.map((t) => GLOSSARY[t].label)).toEqual(expect.arrayContaining([
       "arm",
       "intake",
       "egress",
@@ -21,12 +24,22 @@ describe("glossary", () => {
       "baseline",
       "epsilon",
       "bound",
-    ]);
+    ]));
     for (const term of GLOSSARY_TERMS) {
       expect(GLOSSARY[term].definition.length, term).toBeGreaterThan(20);
       // A definition that used its own term would explain nothing.
       expect(findTermsInPlainText(GLOSSARY[term].definition), term).not.toContain(term);
     }
+  });
+
+  it("adds the column-header glosses (S-616) outside the vocabulary rule", () => {
+    // Glossed where a table uses them as headers; ordinary English in prose, so
+    // no detector: "the answered calls" in a catalogue sentence is not a violation.
+    for (const term of ["coChange", "defect", "answered"] as const) {
+      expect(GLOSSARY[term].definition.length, term).toBeGreaterThan(20);
+      expect(VOCABULARY_TERMS, term).not.toContain(term);
+    }
+    expect(findTermsInPlainText("a co-change, a defect fix and the answered calls")).toEqual([]);
   });
 
   it.each([

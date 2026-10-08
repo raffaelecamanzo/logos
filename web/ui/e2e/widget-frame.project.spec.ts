@@ -2,8 +2,9 @@
 // consecutive widgets, left-aligned widget text, one body size for explanation
 // and action — read as COMPUTED style from the real components and stylesheets.
 //
-// No view renders a Widget yet, so the page is the harness build (global-setup.ts)
-// served at the logos origin under the same self-only CSP the SPA gets.
+// The page is the harness build (global-setup.ts) — a fixed page of every frame
+// state, written before any view rendered a Widget — served at the logos origin
+// under the same self-only CSP the SPA gets. Real views have their own specs.
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";

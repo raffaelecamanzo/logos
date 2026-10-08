@@ -1,0 +1,49 @@
+/*
+ * PathCell (FR-UI-44). Tokens only; no inline style (self-only CSP). The full
+ * path of an abbreviated cell is visually hidden but read by assistive
+ * technology, and shows as a tip while the cell has keyboard focus (the mouse
+ * gets the `title`).
+ */
+.path {
+  position: relative;
+  white-space: nowrap;
+}
+
+.path:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Hidden the way `.sr-only` hides: still the cell's accessible name. */
+.full {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.path:focus .full {
+  left: 0;
+  top: 100%;
+  z-index: 10;
+  width: max-content;
+  max-width: 60ch;
+  height: auto;
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-1);
+  box-shadow: var(--elevation-2);
+  color: var(--text-1);
+}

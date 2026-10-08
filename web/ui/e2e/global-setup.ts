@@ -1,6 +1,6 @@
 // Builds the widget harness page (e2e/harness/) before any spec runs (S-611).
-// No view imports the widget frame yet, so the served SPA cannot render one; the
-// harness is a separate Vite build of the SAME components and stylesheets, which
+// The harness is a fixed page of every frame state, a separate Vite build of the
+// SAME components and stylesheets the served SPA uses, which
 // widget-frame.project.spec.ts serves at the logos origin under the self-only CSP.
 import { fileURLToPath } from "node:url";
 
