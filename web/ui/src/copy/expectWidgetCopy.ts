@@ -24,11 +24,16 @@ import type { GlossaryTerm } from "./glossary.ts";
 import { copyTextString, findUnglossedUses, type PlainPart } from "./text.ts";
 import { NOTHING_TO_DO, type CopyEntry } from "./types.ts";
 
+/** Whitespace as a browser renders it: runs collapsed, ends trimmed. */
+function collapse(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 /** Text a reader sees: tooltips (a Term's definition) excluded. */
 function readerText(el: Element): string {
   const clone = el.cloneNode(true) as Element;
   clone.querySelectorAll('[role="tooltip"]').forEach((tip) => tip.remove());
-  return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  return collapse(clone.textContent ?? "");
 }
 
 /**
@@ -100,12 +105,12 @@ export function expectWidgetCopy<S>(widget: Element, entry?: CopyEntry<S>, state
 
   if (entry === undefined) return;
   const action = entry.action(state as S);
-  expect(readerText(part(frame, "what")!), `${label}: what`).toBe(copyTextString(entry.what));
-  expect(readerText(part(frame, "why")!), `${label}: why`).toBe(copyTextString(entry.why));
+  expect(readerText(part(frame, "what")!), `${label}: what`).toBe(collapse(copyTextString(entry.what)));
+  expect(readerText(part(frame, "why")!), `${label}: why`).toBe(collapse(copyTextString(entry.why)));
   expect(kind, `${label}: action kind for this state`).toBe(action.kind);
   if (action.kind === "act") {
-    expect(readerText(part(frame, "action")!), `${label}: action`).toBe(copyTextString(action.text));
-    const expectedWhere = [action.where, action.target].filter(Boolean).join(" ");
+    expect(readerText(part(frame, "action")!), `${label}: action`).toBe(collapse(copyTextString(action.text)));
+    const expectedWhere = collapse([action.where, action.target].filter(Boolean).join(" "));
     expect(readerText(where!), `${label}: where`).toBe(expectedWhere);
   }
 }

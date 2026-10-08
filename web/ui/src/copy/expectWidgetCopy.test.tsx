@@ -77,6 +77,12 @@ describe("expectWidgetCopy", () => {
     expect(() => expectWidgetCopy(frame(html))).not.toThrow();
   });
 
+  it("compares copy as rendered, so a line break or double space in the catalogue is no mismatch", () => {
+    const entry = { ...observe, what: "Shows calls\n  per service. " };
+    const { container } = render(<Widget title="Observe" copy={entry} />);
+    expectWidgetCopy(container.firstElementChild!, entry);
+  });
+
   it("fails when the rendered copy is not the named entry's", () => {
     const { container } = render(<Widget title="Observe" copy={observe} />);
     const other = { ...observe, why: "A different reason." };
