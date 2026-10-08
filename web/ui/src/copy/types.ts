@@ -47,8 +47,9 @@ export interface CopyEntry {
 
 // ── A table row's own action (ActionCell) ────────────────────────────────────
 
-/** The four kinds of place a reader acts on, as a row action names them. */
-export type WhereKind = "source code" | "documentation" | "configuration" | "command";
+/** The kinds of place a row action names. (The widget action line also named
+ *  "documentation"; no row action does, so CR-206 dropped it with that line.) */
+export type WhereKind = "source code" | "configuration" | "command";
 
 /** What a reader can do about one table row (the Members and Binding evidence
  *  columns, rendered by `ActionCell`). */
