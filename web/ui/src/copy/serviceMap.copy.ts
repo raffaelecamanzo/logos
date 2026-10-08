@@ -166,7 +166,7 @@ export const SERVICE_MAP_TEXT = {
     "No configuration key is named for this coupling, so there is nothing here to evidence it either way — its Provenance breakdown above says what is known.",
   /** The one `none` an evidence row has: the value arrives at runtime. */
   arrivesAtRuntime:
-    "Nothing to fix in the repository: the value arrives at runtime, from the environment or a configuration server.",
+    "Nothing to fix in the repository: the value arrives at runtime, from an environment variable with no committed default.",
   /** The declared figure, from the widget's own tables. */
   declaredFigure: (links: number, documents: number, calls: number) =>
     `${links} declared ${plural(links, "contract", "contracts")}, from ${documents} ${plural(documents, "document", "documents")} · ${calls} ${plural(calls, "call", "calls")} matched to a named external`,

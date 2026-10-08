@@ -147,10 +147,11 @@ export const LINK_PROVENANCE_LABEL: Record<LinkProvenanceKind, string> = {
  *  which is the vocabulary's one author — only sentence-cased for a table cell.
  *  The three are not interchangeable and naming them loosely sends an operator
  *  to the wrong remedy (NFR-CC-04): `uncommitted` means the value arrives at
- *  runtime from something the repository does not commit — an environment
- *  variable with no committed default, a config server, a secret store — so
- *  there is no key to go and define; `missing-key` means the committed sources
- *  prove no value for the operand, which IS the "go and define it" case. */
+ *  runtime from an environment variable with no committed default (a
+ *  `System.getenv` / `process.env` read), so there is no key to go and define;
+ *  `missing-key` means the committed sources prove no value for the operand —
+ *  including a key held only by a config server, a secret store or a ConfigMap,
+ *  which `binding.rs` refuses the same way — which IS the "go and define it" case. */
 export const CONFIG_REFUSAL_LABEL: Record<ConfigValueRefusal, string> = {
   uncommitted: "Not committed by the repository",
   "placeholder-value": "The committed value is itself a placeholder",
