@@ -32,11 +32,14 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   tree over a checked-in single-repository fixture and a two-member workspace
   fixture, and asserts layout in computed style — equal gaps between stacked
   widgets, left-aligned widget text, one font size for explanation and action.
-  `scripts/gate.sh full` runs it as a new `ui-e2e` leg and prints its pass
-  count; `gate.sh fast` never runs it. A missing browser, an empty run or a run
-  past its time limit is a failed leg, and `scripts/verify-evidence.sh` now
-  requires the leg for a full-tier handoff. Install the browser once with
-  `npx playwright install chromium` in `web/ui`.
+  Until views render through the frame, those layout checks run on a harness
+  page built from the same components and served from the same server; the app
+  shell itself is checked on both fixtures. `scripts/gate.sh full` runs it as a
+  new `ui-e2e` leg and prints its pass count; `gate.sh fast` never runs it. A
+  missing browser, an empty run, a skipped spec or a run past its time limit is
+  a failed leg (a timed-out run is killed with all its processes), and
+  `scripts/verify-evidence.sh` now requires the leg for a full-tier handoff.
+  Install the browser once with `npx playwright install chromium` in `web/ui`.
 
 ## [1.14.0] — 2026-10-08
 
