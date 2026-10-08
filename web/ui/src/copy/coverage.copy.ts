@@ -14,7 +14,7 @@
 
 import type { UnboundReason } from "../api/types.ts";
 
-import { gloss, noAction, type CopyEntry, type CopyText, type WhereKind } from "./types.ts";
+import { gloss, noAction, plural, type CopyEntry, type CopyText, type WhereKind } from "./types.ts";
 
 // ── Resolved cross-service edges (item 4) ────────────────────────────────────
 
@@ -110,11 +110,11 @@ export const resolvedEdges: CopyEntry<ResolvedEdgesState> = {
     const apart =
       outside === 0
         ? ""
-        : ` A further ${outside} call ${outside === 1 ? "site calls" : "sites call"} a service outside this workspace and ${outside === 1 ? "is" : "are"} not counted above: ${NOT_RESOLVED_REMEDY["no-provider-in-workspace"].remedy}.`;
+        : ` A further ${outside} call ${plural(outside, "site calls", "sites call")} a service outside this workspace and ${plural(outside, "is", "are")} not counted above: ${NOT_RESOLVED_REMEDY["no-provider-in-workspace"].remedy}.`;
     return {
       kind: "act",
       where: remedyFor(reasons[0].reason).where,
-      text: `Fix why ${unresolved} call ${unresolved === 1 ? "site" : "sites"} did not resolve, largest reason first — ${items.join("; ")}.${apart}`,
+      text: `Fix why ${unresolved} call ${plural(unresolved, "site", "sites")} did not resolve, largest reason first — ${items.join("; ")}.${apart}`,
     };
   },
 };
@@ -198,8 +198,6 @@ export const buildDependencies: CopyEntry<{ unread: number }> = {
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
 
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
-
 export const COVERAGE_TEXT = {
   /** The headline figure: resolved sites of captured sites. */
   outboundResolved: (resolved: number, measured: number) =>
@@ -229,19 +227,19 @@ export const COVERAGE_TEXT = {
     `${matched} of ${measured} ${plural(measured, "reference", "references")} matched exactly one provider`,
   /** The four buckets behind the spec-conformance figure. */
   specBreakdown: (matched: number, ambiguous: number, unmatched: number, outside: number) =>
-    `${matched} matched · ${ambiguous} ambiguous · ${unmatched} unmatched · ${outside} call a service outside this workspace (reported apart, and left out of the ratio: a call to a service outside this workspace is not a broken link).`,
+    `${matched} matched · ${ambiguous} ambiguous · ${unmatched} unmatched · ${outside} ${plural(outside, "calls", "call")} a service outside this workspace (reported apart, and left out of the ratio: a call to a service outside this workspace is not a broken link).`,
   /** An absent ratio over references that all leave the workspace. */
   specNotMeasured: (outside: number) =>
-    `Not measured: all ${outside} cross-boundary references call a service outside this workspace, so the ratio has no denominator.`,
+    `Not measured: ${outside === 1 ? "the 1 cross-boundary reference calls" : `all ${outside} cross-boundary references call`} a service outside this workspace, so the ratio has no denominator.`,
   /** The intake findings, one per state of the captured-call half. */
   capturedUnresolved: (measured: number) =>
-    `No captured call site in this workspace resolves: every one of the ${measured} captured calls that could match here is ambiguous or unmatched. The matched count is entirely declared endpoints.`,
+    `No captured call site in this workspace resolves: ${measured === 1 ? "the 1 captured call" : `every one of the ${measured} captured calls`} that could match here is ambiguous or unmatched. The matched count is entirely declared endpoints.`,
   capturedOutside: (outside: number) =>
     `Every captured call in this workspace (${outside}) calls a service outside it — reported apart, and not a broken link. Nothing here failed to resolve.`,
   capturedAbsent:
     "No calls were captured in this workspace — honest absence, not a resolution failure. The matched count says nothing about outbound call sites either way.",
   capturedResolves: (resolved: number, measured: number) =>
-    `${resolved} of ${measured} captured call ${plural(measured, "site", "sites")} resolve.`,
+    `${resolved} of ${measured} captured call ${plural(measured, "site", "sites")} ${plural(resolved, "resolves", "resolve")}.`,
   /** The declared relation's figure, in plain words from its headline's counts
    *  (the server's composed line, which uses wire tokens, is the evidence). */
   declaredPairs: (pairs: number, externals: number) =>

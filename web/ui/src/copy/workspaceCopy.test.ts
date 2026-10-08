@@ -58,6 +58,18 @@ describe("workspace catalogue sentences", () => {
     expect(remedyFor("constructor")).toBe(UNLISTED_REMEDY);
   });
 
+  it("agrees verb and noun with a count of one and of many", () => {
+    expect(COVERAGE_TEXT.capturedResolves(1, 3)).toBe("1 of 3 captured call sites resolves.");
+    expect(COVERAGE_TEXT.capturedResolves(2, 3)).toBe("2 of 3 captured call sites resolve.");
+    expect(COVERAGE_TEXT.specBreakdown(0, 0, 0, 1)).toContain("· 1 calls a service outside this workspace");
+    expect(COVERAGE_TEXT.specBreakdown(0, 0, 0, 2)).toContain("· 2 call a service outside this workspace");
+    expect(COVERAGE_TEXT.specNotMeasured(1)).toMatch(/^Not measured: the 1 cross-boundary reference calls /);
+    expect(COVERAGE_TEXT.specNotMeasured(4)).toMatch(/^Not measured: all 4 cross-boundary references call /);
+    expect(COVERAGE_TEXT.capturedUnresolved(1)).toContain("the 1 captured call that could match");
+    expect(HEALTH_TEXT.unknownMembers(2)).toContain("so those rules were silently narrowed");
+    expect(HEALTH_TEXT.unknownMembers(1)).toContain("so that rule was silently narrowed");
+  });
+
   it("per-row member actions: re-index a degraded member, review deletions, else nothing", () => {
     expect(memberRowAction({ degraded: true, unusedAcross: null })).toMatchObject({
       kind: "act",

@@ -7,7 +7,7 @@
  * formats the numbers it is handed and computes none.
  */
 
-import { noAction, type CopyEntry } from "./types.ts";
+import { noAction, plural, type CopyEntry } from "./types.ts";
 
 // ── Workspace rules (item 5) ─────────────────────────────────────────────────
 
@@ -53,8 +53,6 @@ export const workspaceRules: CopyEntry<WorkspaceRulesState> = {
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
 
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
-
 export const HEALTH_TEXT = {
   /** The rules figure (CR-203 item 5): "r rules checked over b bindings · v findings". */
   rulesChecked: (rules: number, bindings: number, findings: number) =>
@@ -65,7 +63,7 @@ export const HEALTH_TEXT = {
   nothingToCheck: "Nothing was bound to check, so a clean result here says nothing about this workspace.",
   /** Rule references naming a member the workspace does not have. */
   unknownMembers: (n: number) =>
-    `${n} rule ${plural(n, "reference names", "references name")} a member this workspace does not have, so the rule was silently narrowed and can never match:`,
+    `${n} rule ${plural(n, "reference names", "references name")} a member this workspace does not have, so ${plural(n, "that rule was", "those rules were")} silently narrowed and can never match:`,
   /** The answer missed members that could not be opened. */
   incomplete: (n: number) =>
     `This answer is incomplete: ${n} ${plural(n, "member", "members")} could not be opened, so a rule quantified over their bindings was quantified over fewer than all of them:`,

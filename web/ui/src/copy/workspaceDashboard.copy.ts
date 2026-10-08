@@ -8,7 +8,7 @@
  * formats the numbers it is handed and computes none.
  */
 
-import { gloss, noAction, type CopyEntry, type WidgetAction } from "./types.ts";
+import { gloss, noAction, plural, type CopyEntry, type WidgetAction } from "./types.ts";
 
 // ── Cross-service reachability (item 2) ──────────────────────────────────────
 
@@ -75,15 +75,13 @@ export function memberRowAction(row: { degraded: boolean; unusedAcross: number |
     return {
       kind: "act",
       where: "source code",
-      text: `Review ${row.unusedAcross} ${row.unusedAcross === 1 ? "callable" : "callables"} for deletion.`,
+      text: `Review ${row.unusedAcross} ${plural(row.unusedAcross, "callable", "callables")} for deletion.`,
     };
   }
   return noAction;
 }
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
-
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 export const DASHBOARD_TEXT = {
   /** The reachability lead (CR-203 item 2): "at least" when coverage is partial. */
