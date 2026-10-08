@@ -1004,6 +1004,8 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     await traceSymbol();
     // A member that could not be read has UNKNOWN impact, not none (NFR-RA-05).
     expect(await screen.findByText(/Degraded: engine failed to start/)).toBeInTheDocument();
+    // S-617: a degraded seed is the same registered tool panel as a result table.
+    expectToolPanel(screen.getByText(/Degraded: engine failed to start/).closest("section")!, "impactResult");
     // The healthy member's impact is still shown.
     expect(screen.getByRole("cell", { name: "handler" })).toBeInTheDocument();
   });
