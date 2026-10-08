@@ -1020,6 +1020,18 @@ const WIDGET_STATES: [name: string, build: (d: number) => WorkspaceStatistics, R
     },
   ],
   [
+    // Calls recorded, but none on a day, by a tool or with an origin in the
+    // window: each charted widget states its own absence (review fix).
+    "calls recorded, but no daily, tool or origin breakdown",
+    (d) => aggregate(d, { activity_by_day: [], calls_by_tool: [], calls_by_origin: [] }),
+    {
+      "Estimated value": [{ recorded: true, failed: 0 }, "none"],
+      "Usage over time": [undefined, "none"],
+      "Top tools": [undefined, "none"],
+      "Dev vs main": [undefined, "none"],
+    },
+  ],
+  [
     "every member read, nothing recorded",
     readButEventless,
     { "Estimated value": [{ recorded: false, failed: 0 }, "act"] },
@@ -1063,4 +1075,13 @@ describe("Workspace Statistics widgets explain themselves (S-617, FR-UI-39/40)",
     expect(widget.querySelector('[data-widget-copy="where"]')?.textContent).toBe("command logos stats");
     expect(container.querySelector('[class*="empty"]')).toBeNull();
   });
+});
+
+it("states each charted widget's absence in its figure row, with the denominator still beside it (review fix)", async () => {
+  const { container } = await mount((d) => aggregate(d, { activity_by_day: [], calls_by_tool: [], calls_by_origin: [] }));
+  await screen.findByRole("heading", { name: "Dev vs main" });
+  const absences = [...container.querySelectorAll("[data-widget-absence]")].map((a) => a.textContent);
+  expect(absences).toEqual(["No activity in this window.", "No tool calls in this window.", "No attributed usage in this window."]);
+  // The population callout and the four widgets: five denominator notes.
+  expect(screen.getAllByText(/Summed over/i)).toHaveLength(5);
 });

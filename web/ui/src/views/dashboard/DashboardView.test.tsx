@@ -365,6 +365,32 @@ const STATES: {
     },
   },
   {
+    // The always-on structural fold-ins fire with no contract (S-354): a finding
+    // over zero checked rules acts on the finding, never on the onboarding.
+    name: "a fold-in finding with no rules contract",
+    model: () => {
+      const m = clone();
+      m.rules = {
+        passed: false,
+        checked_rules: 0,
+        rules_present: false,
+        violations: [{ rule: "graph-structural-integrity", rule_type: "constraint", severity: "error", file: "", node_id: null, message: "orphan shingle" }],
+        freshness: "fresh",
+        warnings: [],
+      };
+      return m;
+    },
+    expected: {
+      "Project Overview": [{ written: true }, "none"],
+      "Quality index": [{ recorded: true, passed: true }, "none"],
+      Languages: [{ indexed: true }, "none"],
+      Graph: [{ linesCounted: true }, "none"],
+      Activity: [{ recorded: true }, "none"],
+      "Rule findings": [{ findings: 1, checked: 0 }, "act"],
+      "Code coverage": [{ ingested: true }, "none"],
+    },
+  },
+  {
     name: "nothing recorded yet (indexed, but no scan, coverage, telemetry, overview or rules)",
     model: () => {
       const m = clone();
@@ -407,7 +433,7 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
   });
 
   it("states each absence in its widget's figure row, never as a centred empty state", async () => {
-    stub(STATES[2].model());
+    stub(STATES[3].model());
     const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
     expect(container.querySelectorAll("[data-widget-absence]")).toHaveLength(6);
@@ -416,7 +442,7 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
   });
 
   it("names the command that ends each absence in the where chip", async () => {
-    stub(STATES[2].model());
+    stub(STATES[3].model());
     render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
     for (const cmd of [
