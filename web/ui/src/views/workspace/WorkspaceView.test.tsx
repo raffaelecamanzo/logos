@@ -59,7 +59,16 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
     };
     onNodeClick: (id: string) => void;
   }) => (
-    <div data-testid="canvas">
+    <div
+      data-testid="canvas"
+      // The WHOLE set the canvas was handed, as one string (S-614): every node
+      // id and every edge's source → target and type, so "the canvas is
+      // unchanged" is asserted on identity, never on a count alone.
+      data-loaded-set={JSON.stringify({
+        nodes: Object.keys(loaded.nodes).sort(),
+        edges: loaded.edges.map((e) => `${e.source}->${e.target}:${e.edge_type}`).sort(),
+      })}
+    >
       <span data-testid="canvas-edges">{loaded.edges.length}</span>
       {/* The provenance channel, surfaced as DOM (S-419). The real canvas strokes
           it into a <canvas> bitmap, which has no DOM to assert against at all, so
@@ -2124,7 +2133,13 @@ describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)"
     stubThreeMembers({ providers: KIND_LINKS });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
-    const edges = screen.getByTestId("canvas-edges").textContent;
+    // The whole loaded set — three services and four lines — taken before any
+    // filter, and compared after every step below.
+    const loadedSet = () => JSON.parse(screen.getByTestId("canvas").getAttribute("data-loaded-set")!);
+    const before = loadedSet();
+    expect(before.nodes).toEqual(["service:api", "service:billing", "service:web"]);
+    expect(before.edges).toHaveLength(4);
+    const canvasUnchanged = () => expect(loadedSet()).toEqual(before);
     const bindings = () => mapWidget("Cross-service bindings");
     const evidence = () => mapWidget("Binding evidence");
 
@@ -2138,7 +2153,7 @@ describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)"
     expect(shownPairs()).toEqual(["api->billing", "billing->api", "web->billing"]);
     expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(3, 4));
     expect(evidenceLinks()).toEqual(["api → billing", "web → billing"]);
-    expect(screen.getByTestId("canvas-edges").textContent).toBe(edges);
+    canvasUnchanged();
     await userEvent.clear(text);
 
     // Binding kind: HTTP, gRPC, broker.
@@ -2155,16 +2170,18 @@ describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)"
     await userEvent.selectOptions(kind, "broker-topic");
     expect(shownPairs()).toEqual(["web->billing"]);
     expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(1, 4));
-    expect(screen.getByTestId("canvas-edges").textContent).toBe(edges);
+    canvasUnchanged();
     await userEvent.selectOptions(kind, "all");
 
     // Provenance: offered because the column exists.
     const provenance = within(bindings()).getByRole("combobox", { name: SERVICE_MAP_TEXT.filterProvenance });
     await userEvent.selectOptions(provenance, "config-unresolved");
     expect(shownPairs()).toEqual(["api->billing"]);
+    canvasUnchanged();
     expect(figureOf(evidence())).toBe(SERVICE_MAP_TEXT.evidenceShown(1, 2));
     await userEvent.selectOptions(provenance, "literal");
     expect(shownPairs()).toEqual(["api->web", "billing->api"]);
+    canvasUnchanged();
 
     // Together, down to nothing: the table says so instead of rendering empty.
     await userEvent.selectOptions(kind, "grpc-call");
@@ -2177,7 +2194,7 @@ describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)"
     await userEvent.selectOptions(provenance, "all");
     expect(shownPairs()).toEqual(["api->billing", "api->web", "billing->api", "web->billing"]);
     expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(4, 4));
-    expect(screen.getByTestId("canvas-edges").textContent).toBe(edges);
+    canvasUnchanged();
   });
 
   it("offers no provenance filter when no binding was admitted — the column does not exist", async () => {
