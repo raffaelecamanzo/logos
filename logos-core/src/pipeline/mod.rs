@@ -572,9 +572,7 @@ pub fn sync(
     let mut seen: HashSet<String> = HashSet::new();
     let mut files_failed: Vec<String> = Vec::new();
     let mut module_descriptors: Vec<String> = Vec::new();
-    // CR-210: the directories (root-relative, `""` for the root) whose
-    // `.gitignore`/`.ignore` this batch names — their stored files are re-gated
-    // after the loop.
+    // CR-210: the directories (`""` = root) of the ignore files this batch names.
     let mut ignore_dirs: Vec<String> = Vec::new();
 
     for path in paths {
@@ -594,9 +592,7 @@ pub fn sync(
         if rel == "go.mod" || rel.ends_with("/go.mod") {
             module_descriptors.push(rel.clone());
         }
-        // An ignore file is never indexed either, but its change can exclude
-        // stored files beneath it (CR-210): record its directory for the re-gate
-        // below. Recorded before the admission gate, which skips it as usual.
+        // Nor is an ignore file, but its directory is re-gated below (CR-210).
         if config::is_ignore_file(Path::new(&rel)) {
             ignore_dirs.push(rel.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.to_string()));
         }
@@ -672,28 +668,10 @@ pub fn sync(
         loaded.push(LoadedFile { rel, source, hash });
     }
 
-    // CR-210: a changed ignore file re-gates the stored files beneath its
-    // directory, so a file a new (nested) rule excludes leaves the graph on THIS
-    // batch — the watcher sees the `.gitignore` edit, not a write to every file
-    // it now ignores, and its pre-filter drops later writes to them. Admission
-    // only: a stored file still on disk that `admits_path` now rejects is a
-    // narrowing removal, exactly as in the per-path gate above; one still
-    // admitted is left alone (its content did not change, so no re-extract).
-    // This is evidence about files outside the batch, but only ever removes a
-    // file the current ignore files exclude, so it cannot purge a live one. A
-    // full walk needs none of it: its sweep below already converges the set.
-    if scope == SyncScope::Partial && !ignore_dirs.is_empty() {
-        let mut regated: Vec<&String> = stored
-            .keys()
-            .filter(|rel| !seen.contains(*rel))
-            .filter(|rel| ignore_dirs.iter().any(|dir| is_beneath(rel, dir)))
-            .filter(|rel| {
-                let abs = canon_root.join(rel.as_str());
-                abs.is_file() && !authority.admits_path(&abs)
-            })
-            .collect();
-        regated.sort(); // deterministic removal order (NFR-RA-06)
-        removals.extend(regated.into_iter().cloned());
+    // CR-210: a changed ignore file re-gates the stored files beneath it. A full
+    // walk needs none of it: its sweep below already converges the stored set.
+    if scope == SyncScope::Partial {
+        removals.extend(newly_ignored(&stored, &seen, &ignore_dirs, &canon_root, &authority));
     }
 
     // CR-052 / FR-SY-10 + CR-054 / FR-RC-06 (Channel B): on a FULL-WALK sync,
@@ -3270,6 +3248,47 @@ fn to_forward_slash(path: &Path) -> String {
 
 /// Resolve an input path (absolute or root-relative) to a project-relative key,
 /// rejecting anything that escapes the root ([NFR-SE-04]).
+/// The stored files beneath a changed `.gitignore`/`.ignore` that the ignore
+/// files now exclude ([CR-210]), sorted for a deterministic removal order
+/// ([NFR-RA-06]). `ignore_dirs` are the changed files' directories
+/// (root-relative, `""` for the root); a path already in `seen` was gated by
+/// the batch itself and is skipped.
+///
+/// This is why a file a new (nested) rule excludes leaves the graph on the
+/// batch carrying the rule: the watcher sees the `.gitignore` edit, not a write
+/// to every file it now ignores, and its pre-filter drops later writes to them.
+/// Admission only: a stored file still on disk that `admits_path` now rejects is
+/// a narrowing removal, exactly as in the per-path gate; one still admitted is
+/// left alone (its content did not change, so there is nothing to re-extract).
+/// It reaches outside the batch, but only ever names a file the current ignore
+/// files exclude, so it cannot purge a live one.
+///
+/// [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn newly_ignored(
+    stored: &HashMap<String, Option<String>>,
+    seen: &HashSet<String>,
+    ignore_dirs: &[String],
+    canon_root: &Path,
+    authority: &AdmissionAuthority,
+) -> Vec<String> {
+    if ignore_dirs.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = stored
+        .keys()
+        .filter(|rel| !seen.contains(*rel))
+        .filter(|rel| ignore_dirs.iter().any(|dir| is_beneath(rel, dir)))
+        .filter(|rel| {
+            let abs = canon_root.join(rel.as_str());
+            abs.is_file() && !authority.admits_path(&abs)
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
 /// Is the root-relative, forward-slashed `rel` inside directory `dir` (also
 /// root-relative; `""` is the root, which contains everything)?
 fn is_beneath(rel: &str, dir: &str) -> bool {
