@@ -692,18 +692,33 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
 function DeclaredRelationsCard({ dashboard }: { dashboard: CoverageDashboard }) {
   const { declaredContracts, boundExternal } = dashboard;
   if (!declaredContracts && !boundExternal) return null;
+  // The figure is in plain words from the headlines' counts; the server's
+  // composed lines carry wire tokens (`no-provider-in-workspace`,
+  // `egress_resolution`), so they are the evidence, verbatim (FR-UI-39).
   return (
     <Widget
       title="Declared contracts and named externals"
       copy={declaredRelations}
       figure={
         <div className={styles.figure}>
-          {declaredContracts && <p className={styles.statement}>{declaredContracts.summary}</p>}
-          {boundExternal && <p className={styles.statement}>{boundExternal.summary}</p>}
+          {declaredContracts && (
+            <p>{COVERAGE_TEXT.declaredPairs(declaredContracts.declared_contract_pairs, declaredContracts.named_externals)}</p>
+          )}
+          {boundExternal && (
+            <p className={styles.statement}>
+              {COVERAGE_TEXT.externalsMatched(boundExternal.bound_external, boundExternal.no_provider_rows)}
+            </p>
+          )}
         </div>
       }
     >
-      {boundExternal && <p className="muted">{COVERAGE_TEXT.externalStaysApart}</p>}
+      {declaredContracts && <p className="muted mono">{declaredContracts.summary}</p>}
+      {boundExternal && (
+        <>
+          <p className="muted mono">{boundExternal.summary}</p>
+          <p className="muted">{COVERAGE_TEXT.externalStaysApart}</p>
+        </>
+      )}
     </Widget>
   );
 }

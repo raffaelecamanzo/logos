@@ -1839,6 +1839,17 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
     expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
     expect(within(card).getByText(COVERAGE_TEXT.externalStaysApart)).toBeInTheDocument();
+    // The figure row is in plain words from the headlines' counts; the composed
+    // lines, which carry wire tokens, are the evidence (FR-UI-39).
+    const figure = card.querySelector('[data-widget-part="figure"]')!;
+    expect(figure.textContent).toBe(
+      COVERAGE_TEXT.declaredPairs(
+        DECLARED_CONTRACTS.headline.declared_contract_pairs,
+        DECLARED_CONTRACTS.headline.named_externals,
+      ) +
+        COVERAGE_TEXT.externalsMatched(BOUND_EXTERNAL.headline.bound_external, BOUND_EXTERNAL.headline.no_provider_rows),
+    );
+    expect(card.querySelector('[data-widget-part="evidence"]')?.textContent).toContain(BOUND_EXTERNAL.headline.summary);
   });
 
   it("the coverage tab states the declared headline alone when no member declares a named external", async () => {

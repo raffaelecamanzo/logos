@@ -37,7 +37,9 @@ export const GLOSSARY = {
   egress: {
     label: "egress",
     definition: "Outbound: calls that leave this service for another one.",
-    pattern: /\begress\b/i,
+    // Not followed by a letter, so a field name a server line carries
+    // ("egress_resolution") is caught too: `\b` treats `_` as part of the word.
+    pattern: /\begress(?![a-z])/i,
   },
   residue: {
     label: "residue",
