@@ -311,6 +311,12 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     expectWidgetCopy(widget("Usage over time"), usageOverTime);
     expectWidgetCopy(widget("Dev vs main"), devVsMain);
     expectWidgetCopy(widget("Tool attribution by class"), toolAttribution);
+    // An empty cross-tab is when "raw events only" explains the emptiness: the
+    // read-model's notes still render in the explanation.
+    const notes = [...widget("Tool attribution by class").querySelectorAll("[data-widget-note] p")].map(
+      (p) => p.textContent,
+    );
+    expect(notes.slice(1)).toEqual(coverage().notes);
     // The ranked bar caps at TOP_TOOLS_LIMIT and says so.
     expect(screen.getByText(/Showing the top 8 tools/i)).toBeInTheDocument();
   });
