@@ -436,6 +436,9 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
       render(<HealthView />);
       await screen.findByText("Signal evolution");
       for (const name of UNLISTED) {
+        // No list, so no offender badge: the title never claims a clean result
+        // ("none flagged") or a recording state (CR-162, NFR-CC-04).
+        expect(seen(part(widget(name), "title")), name).toBe(name);
         const evidence = part(widget(name), "evidence")!;
         expect(within(evidence).queryByRole("table"), name).toBeNull();
         expect(evidence.querySelector('[data-offender-state="unlisted"]'), name).not.toBeNull();
