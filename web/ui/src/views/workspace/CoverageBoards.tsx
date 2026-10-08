@@ -31,6 +31,7 @@ import {
   CopyTextView,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
+  FigureNote,
   ScoreBar,
   Term,
   Widget,
@@ -365,9 +366,9 @@ export function CoverageShortfall({
  *  (BR-51), so rendering it cannot show the count without the rate. */
 function EdgeLine({ line }: { line: string }) {
   return (
-    <p className={styles.note}>
+    <FigureNote block>
       <CopyTextView text={COVERAGE_TEXT.edgeLineLead} /> <span className="mono">{line}</span>
-    </p>
+    </FigureNote>
   );
 }
 
@@ -491,15 +492,15 @@ function SpecConformanceWidget({
               {COVERAGE_TEXT.specMatched(dashboard.bound, dashboard.specConformanceMeasured)}
             </span>
           </div>
-          <p className={styles.note}>
+          <FigureNote block>
             {COVERAGE_TEXT.specBreakdown(
               dashboard.bound,
               dashboard.ambiguous,
               dashboard.unbound,
               dashboard.noProviderInWorkspace,
             )}
-          </p>
-          {partial && <p className={styles.note}>{shortfall}</p>}
+          </FigureNote>
+          {partial && <FigureNote block>{shortfall}</FigureNote>}
         </div>
       }
     >

@@ -8,7 +8,8 @@
  */
 
 /* A figure row with more than one line: the figure, then a secondary line (the
-   scope, the raw value, or the not-current sentence). Left-aligned, stacked. */
+   scope, the raw value, or the not-current sentence — each a `FigureNote`, the
+   frame's one figure-row qualifier). Left-aligned, stacked. */
 .figureLines {
   display: flex;
   flex-direction: column;
@@ -16,22 +17,6 @@
   gap: var(--space-1);
   width: 100%;
   min-width: 0;
-}
-
-/* A secondary line in a figure row: it qualifies the figure beside it, so it is
-   body-sized and muted rather than competing with it (CR-135 §3.2). */
-.note,
-.scope {
-  margin: 0;
-  font-family: var(--font-sans);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-regular);
-  line-height: var(--leading-base);
-  color: var(--text-2);
-}
-
-.scope {
-  display: block;
 }
 
 /* A dimension's score: the bar, then the normalized value beside it. The bar

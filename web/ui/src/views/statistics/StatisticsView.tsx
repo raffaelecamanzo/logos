@@ -40,7 +40,7 @@ import {
 } from "../../api/statisticsClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type { StatsInfo } from "../../api/types.ts";
-import { DataTable, SelectField, Widget, WidgetStack } from "../../components/index.ts";
+import { DataTable, FigureNote, SelectField, Widget, WidgetStack } from "../../components/index.ts";
 import type { Column } from "../../components/index.ts";
 import {
   attributionNotesLead,
@@ -131,12 +131,12 @@ function ValueWidget({ stats }: { stats: StatsInfo }) {
       figure={
         <>
           <span>
-            {num(stats.tokens_saved_estimate)} <span className={styles.unit}>tokens</span>
+            {num(stats.tokens_saved_estimate)} <FigureNote>tokens</FigureNote>
           </span>
           <span>
-            {num(stats.reads_saved_estimate)} <span className={styles.unit}>ad-hoc file reads</span>
+            {num(stats.reads_saved_estimate)} <FigureNote>ad-hoc file reads</FigureNote>
           </span>
-          <span className={styles.unit}>estimated saved over the last {stats.window_days} days</span>
+          <FigureNote>estimated saved over the last {stats.window_days} days</FigureNote>
         </>
       }
     >
@@ -172,7 +172,7 @@ function ActivityWidget({ points, stats }: { points: ActivityPoint[]; stats: Sta
       copy={usageOverTime}
       figure={
         <span>
-          {num(stats.calls_total)} <span className={styles.unit}>calls over the last {stats.window_days} days</span>
+          {num(stats.calls_total)} <FigureNote>calls over the last {stats.window_days} days</FigureNote>
         </span>
       }
     >
@@ -224,7 +224,7 @@ function ToolsWidget({
       figure={
         top && (
           <span>
-            <span className="mono">{top.tool}</span> <span className={styles.unit}>most used, {num(top.calls)} calls</span>
+            <span className="mono">{top.tool}</span> <FigureNote>most used, {num(top.calls)} calls</FigureNote>
           </span>
         )
       }
@@ -292,10 +292,10 @@ function OriginWidget({ origins, stats }: { origins: OriginRow[]; stats: StatsIn
         <>
           {origins.map((o) => (
             <span key={o.origin}>
-              {num(o.calls)} <span className={styles.unit}>{o.origin}</span>
+              {num(o.calls)} <FigureNote>{o.origin}</FigureNote>
             </span>
           ))}
-          <span className={styles.unit}>of {num(stats.calls_total)} calls</span>
+          <FigureNote>of {num(stats.calls_total)} calls</FigureNote>
         </>
       }
     >

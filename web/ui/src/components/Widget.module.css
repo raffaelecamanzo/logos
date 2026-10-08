@@ -52,6 +52,16 @@
   color: var(--text-1);
 }
 
+/* Secondary detail in the figure row (`FigureNote`): body size and weight,
+   muted ink, whatever the figure's own size. One class for every view. */
+.figureNote {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-base);
+  color: var(--text-2);
+}
+
 .absence {
   margin: 0;
   font-size: var(--text-base);

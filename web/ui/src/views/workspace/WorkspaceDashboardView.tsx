@@ -52,6 +52,7 @@ import {
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
   ErrorPanel,
+  FigureNote,
   LoadingState,
   Term,
   Widget,
@@ -187,7 +188,7 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
       figure={
         <div className={styles.figure}>
           <p>{DASHBOARD_TEXT.keepThem(promotions.length, partial)}</p>
-          <p className={styles.note}>
+          <FigureNote block>
             {DASHBOARD_TEXT.keepThemBasis(
               rider.bridge_invocation_edges,
               rider.members_read,
@@ -195,12 +196,12 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
               partial,
             )}
             {promotions.length === 0 && <> {DASHBOARD_TEXT.keepThemNone}</>}
-          </p>
+          </FigureNote>
           {model.skipped_members.length > 0 && (
-            <p className={styles.note}>
+            <FigureNote block>
               {DASHBOARD_TEXT.skipped(model.skipped_members)}{" "}
               <span className="mono">{model.skipped_members.join(", ")}</span>.
-            </p>
+            </FigureNote>
           )}
         </div>
       }

@@ -99,6 +99,24 @@ export function CopyTextView({ text }: { text: CopyText }) {
 }
 
 /**
+ * Secondary detail in a figure row — a figure's unit or qualifier ("files
+ * ranked", "of lines covered"), a scope line, a not-current note. It is set at
+ * the body size in muted ink, whatever the figure's own size: muted tone, not a
+ * different size, marks the detail (FR-UI-40). The one figure-row qualifier
+ * every view uses, so the same role reads the same on every page. `block`
+ * renders it as its own line (a `<p>`); otherwise it runs inline beside the
+ * figure.
+ */
+export function FigureNote({ children, block = false }: { children: ReactNode; block?: boolean }) {
+  const Tag = block ? "p" : "span";
+  return (
+    <Tag className={styles.figureNote} data-figure-note="">
+      {children}
+    </Tag>
+  );
+}
+
+/**
  * One table row's own action, as a cell (S-613's Members column, S-614's
  * evidence column): the action text, then where and its target on a second
  * line. A `none` action reads `none` — by default the one "Nothing to do"
