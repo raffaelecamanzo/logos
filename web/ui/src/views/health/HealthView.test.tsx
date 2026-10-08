@@ -1002,6 +1002,10 @@ describe("not-current readings (CR-135, S-436)", () => {
     render(<HealthView />);
     expect((await screen.findAllByText(/no index or sync time is recorded/i)).length).toBe(2);
     expect(screen.getByText("UNVERIFIED")).toBeInTheDocument();
+    // The third stale variant passes the message standard on both widgets too.
+    const currency = { date: null, cause: "indeterminate", detail: "no index or sync time is recorded" } as const;
+    expectWidgetCopy(widget("Gate"), gateCopy, { kind: "stale", currency });
+    expectWidgetCopy(widget("Quality signal"), qualitySignalCopy, { kind: "stale", currency });
   });
 
   // The third indeterminate sentence, pinned where it is RENDERED, so its wording
