@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-10-08
+
 ### Added
 
 - **A shared widget frame and a browser layout check for the web UI (CR-203,
