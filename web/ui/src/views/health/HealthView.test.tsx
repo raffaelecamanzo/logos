@@ -818,6 +818,31 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(seen(part(widget("Gate"), "figure"))).not.toMatch(/Lowest-scoring dimension/);
   });
 
+  // CRA-02: only a CURRENT FAIL names its lowest-scoring dimension. Each stale
+  // arm, not only the de-index above, keeps the FAIL figure and drops the fact.
+  it.each([
+    ["moved past", (m: HealthModel) => {
+      m.evolution.snapshots[1].created_at = 1_758_240_000;
+      m.status.last_full_index_at = String(1_758_240_000 + 86_400);
+    }, /the graph has been indexed or synced since/],
+    ["indeterminate", (m: HealthModel) => {
+      m.status.last_full_index_at = null;
+      m.status.last_sync_at = null;
+    }, /no index or sync time is recorded/],
+  ] as const)("names no lowest-scoring dimension on a FAIL whose snapshot is %s (HF-1 review)", async (_name, stale, note) => {
+    const m = clone();
+    m.gate.passed = false;
+    m.gate.signal = 7700;
+    m.scan.metrics.depth = mv(0.2);
+    stale(m);
+    stub(m);
+    render(<HealthView />);
+    await screen.findAllByText(note);
+    const figure = seen(part(widget("Gate"), "figure"));
+    expect(figure).toMatch(/^FAIL · signal 7700 vs baseline 7800/);
+    expect(figure).not.toMatch(/Lowest-scoring dimension/);
+  });
+
   it("renders the undated fallback rather than a fabricated date when nothing dates the snapshot", async () => {
     const m = clone();
     m.status.indexed = false;
