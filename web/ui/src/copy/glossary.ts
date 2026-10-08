@@ -7,11 +7,13 @@
  * `expectWidgetCopy` both apply the rule through `findUnglossedUses` (text.ts),
  * so a term added here is enforced everywhere at once.
  *
- * A vocabulary entry carries the pattern that detects the term in plain text.
- * Most are a whole-word match; where one needs more care, a comment beside it
- * says why. An entry WITHOUT a pattern is a column-header gloss (S-616): a
- * label a table defines through `Term` — "Co-change", "Defect", "Answered" —
- * that is ordinary English in prose, so the vocabulary rule does not police it.
+ * An entry the vocabulary rule ENFORCES carries the pattern that detects the
+ * term in plain text — every FR-UI-39 internal term does, and so may any other
+ * term a catalogue author decides must always be glossed. Most are a whole-word
+ * match; where one needs more care, a comment beside it says why. An entry
+ * WITHOUT a pattern is offered, not enforced (S-616): a label a table glosses
+ * through `Term` — "Co-change", "Defect", "Answered" — that is ordinary English
+ * in prose, so the rule does not police it there.
  */
 
 export interface GlossaryEntry {
@@ -20,8 +22,9 @@ export interface GlossaryEntry {
   /** The plain-words explanation shown on hover and focus. */
   readonly definition: string;
   /**
-   * Detects the term in plain catalogue text: present exactly on the FR-UI-39
-   * internal vocabulary, which must be glossed at its first use in a widget.
+   * Detects the term in plain catalogue text. Present on every term the
+   * vocabulary rule enforces (glossed at its first use in a widget); absent on
+   * a gloss that is offered but not enforced.
    */
   readonly pattern?: RegExp;
 }
@@ -146,7 +149,7 @@ export function vocabularyPattern(term: GlossaryTerm): RegExp | undefined {
   return (GLOSSARY[term] as GlossaryEntry).pattern;
 }
 
-/** The FR-UI-39 internal vocabulary: the terms that carry a detector. */
+/** The enforced vocabulary: the terms that carry a detector (FR-UI-39's and any other). */
 export const VOCABULARY_TERMS = GLOSSARY_TERMS.filter((term) => vocabularyPattern(term) !== undefined);
 
 /**
