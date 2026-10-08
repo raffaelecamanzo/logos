@@ -872,7 +872,8 @@ const EVIDENCE_COLUMNS: Column<EvidenceGroup>[] = [
     cell: (r) =>
       r.value === null ? (
         <span className="muted">
-          {r.refusal === null ? "—" : CONFIG_REFUSAL_LABEL[r.refusal]}
+          {/* An unknown token is shown verbatim, never as an empty cell. */}
+          {r.refusal === null ? "—" : (CONFIG_REFUSAL_LABEL[r.refusal] ?? r.refusal)}
         </span>
       ) : (
         r.value

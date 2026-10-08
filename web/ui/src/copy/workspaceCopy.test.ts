@@ -160,6 +160,11 @@ describe("workspace catalogue sentences", () => {
     expect(
       evidenceRowAction({ ...row, refusal: null, sources: ["application.yml", "application-docker.yml"] }),
     ).toMatchObject({ kind: "act", where: "configuration", target: "application.yml, application-docker.yml" });
+    // A refusal token newer than this build is never told to correct a value
+    // (its row shows none, and its sources are empty): it names the command
+    // that states its reason.
+    const later = evidenceRowAction({ ...row, refusal: "secret-ref" as unknown as null });
+    expect(later).toMatchObject({ kind: "act", where: "command", target: "logos workspace status" });
   });
 });
 

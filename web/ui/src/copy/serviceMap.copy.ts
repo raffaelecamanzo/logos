@@ -56,29 +56,26 @@ export interface EvidenceRowFacts {
 /**
  * One evidence row's own action (the Binding evidence table's last column),
  * following its refusal (CR-203 item 7). The two refusals the repository can
- * fix reuse the coverage tab's remedies word for word. A value the repository
- * does not commit has nothing to fix in the repository: that is the one `none`,
- * and its sentence is `SERVICE_MAP_TEXT.arrivesAtRuntime`.
+ * fix reuse the coverage tab's remedies — sentence and where — so the two tabs
+ * cannot word one remedy two ways. A value the repository does not commit has
+ * nothing to fix in the repository: that is the one `none`, and its sentence is
+ * `SERVICE_MAP_TEXT.arrivesAtRuntime`.
+ *
+ * Exhaustive over the closed union, so a refusal added to `ConfigValueRefusal`
+ * without an action here is a `tsc -b` error. The wire is not runtime
+ * validated, so a token this build does not know still reaches the last arm:
+ * it is pointed at the command that states its reason, never told to correct a
+ * value the row does not show.
  */
 export function evidenceRowAction(row: EvidenceRowFacts): WidgetAction {
   switch (row.refusal) {
     case "missing-key":
-      return {
-        kind: "act",
-        where: "configuration",
-        target: row.key,
-        text: `In ${row.member}, ${NOT_RESOLVED_REMEDY["config-key-missing"].remedy}.`,
-      };
+      return remedyAction(row, NOT_RESOLVED_REMEDY["config-key-missing"]);
     case "placeholder-value":
-      return {
-        kind: "act",
-        where: "configuration",
-        target: row.key,
-        text: `In ${row.member}, ${NOT_RESOLVED_REMEDY["config-placeholder-value"].remedy}.`,
-      };
+      return remedyAction(row, NOT_RESOLVED_REMEDY["config-placeholder-value"]);
     case "uncommitted":
       return noAction;
-    default:
+    case null:
       // A committed value: right or wrong, its file is the one the row names.
       return {
         kind: "act",
@@ -86,7 +83,22 @@ export function evidenceRowAction(row: EvidenceRowFacts): WidgetAction {
         target: row.sources.join(", "),
         text: "If this value is wrong, correct it in the file named under Defining sources.",
       };
+    default: {
+      const unknown: never = row.refusal;
+      void unknown;
+      return {
+        kind: "act",
+        where: "command",
+        target: "logos workspace status",
+        text: "This refusal is newer than this page; read its reason in the workspace status.",
+      };
+    }
   }
+}
+
+/** A refusal's action from its coverage-tab remedy, scoped to the row's member. */
+function remedyAction(row: EvidenceRowFacts, remedy: (typeof NOT_RESOLVED_REMEDY)[keyof typeof NOT_RESOLVED_REMEDY]): WidgetAction {
+  return { kind: "act", where: remedy.where, target: row.key, text: `In ${row.member}, ${remedy.remedy}.` };
 }
 
 // ── Declared contracts (item 8) ──────────────────────────────────────────────

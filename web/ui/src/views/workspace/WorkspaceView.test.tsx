@@ -2253,6 +2253,21 @@ describe("WorkspaceView — Binding evidence states each fact once (S-614, FR-UI
     expectWidgetCopy(widget, bindingEvidence, { define: 1, replace: 1 });
   });
 
+  it("shows a refusal token this build does not know verbatim, and points at its reason — never 'correct the file'", async () => {
+    const later = {
+      ...REFUSED_BINDING,
+      from_value: { provenance: "config-unresolved", keys: ["k.later"], refusal: "secret-ref" },
+    } as unknown as BridgeEdge;
+    stubApi({ providers: [later] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const table = within(mapWidget("Binding evidence")).getByRole("table");
+    const cells = [...within(table).getAllByRole("row")[1].querySelectorAll("td")].map((c) => c.textContent);
+    expect(cells[2]).toBe("secret-ref");
+    expect(cells[cells.length - 1]).not.toMatch(/correct it in the file/);
+    expect(cells[cells.length - 1]).toMatch(/command logos workspace status$/);
+  });
+
   it("has nothing to do when every shown value is committed or arrives at runtime", async () => {
     stubApi({ providers: REFUSALS.slice(2) });
     mount();
