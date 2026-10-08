@@ -115,7 +115,7 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
     view. A `.logos/rules.toml` that declares no rule now reads as nothing
     checked on the Rule findings view too, never as a clean result.
   - **Coverage**, with no report ingested, states that in each widget and names
-    the ingest command; stale files name `logos coverage refresh`.
+    the ingest command; stale files name it too.
   - **Workspace Health**: *Promoted broker topics* is now **Broker topics**, and
     *Members answering*, *Members* and *Warm state* name `logos index` or
     `logos workspace status` for a member that did not open or index.

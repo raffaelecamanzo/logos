@@ -59,8 +59,11 @@ export const perFileCoverage: CopyEntry<PerFileState> = {
       return {
         kind: "act",
         where: "command",
-        target: "logos coverage refresh",
-        text: "Re-run your tests and ingest the new report, so the stale files are measured again.",
+        // Not `logos coverage refresh`: it exits 3 unless [coverage_ingest]
+        // refresh_cmd is configured (docs/howto/commands.md), so it is named
+        // only as the shortcut it is.
+        target: "logos coverage ingest <report>",
+        text: "Re-run your tests and ingest the new report, so the stale files are measured again; with a refresh_cmd configured, logos coverage refresh does both.",
       };
     }
     return noAction;
