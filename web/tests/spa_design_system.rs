@@ -876,7 +876,8 @@ fn centred_measure_detector_admits_every_spelling_and_rejects_its_near_misses() 
 }
 
 /// The retired-grammar guard's replacement (S-308, [FR-UI-33], CR-092): the
-/// conversation renders inside the view's ONE shared `Card`, filling its track, and
+/// conversation renders inside the view's ONE shared `Card` (since S-617 the
+/// `chatConversation` `Widget`, which composes it), filling its track, and
 /// no rule centres a body-content measure. It supersedes S-300's
 /// `chat_roles_share_one_centered_readable_measure`, which locked the centred
 /// `--chat-measure` column this story retires, and keeps every assertion of it that
@@ -904,20 +905,26 @@ fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
     }
     assert!(!css.contains("--chat-measure"), "the retired `--chat-measure` token is gone");
 
-    // (2) The conversation is inside the view's ONE card. Exactly one `<Card>` in the
-    // view file, and it encloses the whole thread — the transcript viewport, the
-    // messages and the composer. One, not "at least one": a second card is a card
-    // per turn (or per notice), which is the CR-089 chrome the flat turn removed.
+    // (2) The conversation is inside the view's ONE card. Since S-617 (CR-203) that
+    // card is the `chatConversation` tool panel — a `Widget`, which composes the
+    // shared `Card` — so the view file renders no raw `<Card>` and exactly one
+    // `<Widget>`, and that one encloses the whole thread: the transcript viewport,
+    // the messages and the composer. One, not "at least one": a second card is a
+    // card per turn (or per notice), which is the CR-089 chrome the flat turn removed.
     let view = strip_tsx_comments(&read("src/views/chat/ChatView.tsx"));
-    let cards = opening_tags(&view, "Card");
+    assert!(
+        opening_tags(&view, "Card").is_empty(),
+        "ChatView renders no raw `Card`: its one card is the conversation `Widget` (S-617)",
+    );
+    let cards = opening_tags(&view, "Widget");
     assert_eq!(
         cards.len(),
         1,
-        "ChatView renders exactly one shared `Card` — the view's conversation container, \
-         never a turn's (FR-UI-33, FR-UI-31)",
+        "ChatView renders exactly one card — the conversation `Widget`, never a turn's \
+         (FR-UI-33, FR-UI-31)",
     );
     let open = cards[0];
-    let close = open + view[open..].find("</Card>").expect("the view's `<Card>` is closed");
+    let close = open + view[open..].find("</Widget>").expect("the view's `<Widget>` is closed");
     let inside = &view[open..close];
     for part in ["<ThreadPrimitive.Root", "<ThreadPrimitive.Viewport", "<ThreadPrimitive.Messages", "<Composer"] {
         assert!(

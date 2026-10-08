@@ -100,6 +100,37 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   are found (the Architecture dependency matrix and `logos dsm`, Files & Risk
   and `logos hotspots`, `logos node`). "Brain method", "god container" and
   "near-clone" join the glossary. `GET /api/v1/health` is unchanged.
+- **Every remaining web widget says what it shows, why it matters and what to
+  do, and every view keeps one layout (CR-203, S-617).** The member Dashboard,
+  Coverage, Rule findings, Architecture, Workspace Health's other four widgets
+  and Workspace Statistics render through the shared widget frame, with their
+  words in catalogues (`web/ui/src/copy/dashboard.copy.ts`,
+  `coverageView.copy.ts`, `ruleFindings.copy.ts`, `architecture.copy.ts`,
+  `workspaceHealth.copy.ts`, `workspaceStatistics.copy.ts`):
+  - The **Dashboard** is one column of widgets instead of equal-width pairs. A
+    missing figure is stated in its widget with the command that produces it
+    (`logos scan`, `logos coverage ingest <report>`, `logos index`,
+    `logos stats`, `logos wiki write overview/project-overview`).
+  - **Rule findings** is one set of words on the Dashboard and the Rule findings
+    view. A `.logos/rules.toml` that declares no rule now reads as nothing
+    checked on the Rule findings view too, never as a clean result.
+  - **Coverage**, with no report ingested, states that in each widget and names
+    the ingest command; stale files name `logos coverage refresh`.
+  - **Workspace Health**: *Promoted broker topics* is now **Broker topics**, and
+    *Members answering*, *Members* and *Warm state* name `logos index` or
+    `logos workspace status` for a member that did not open or index.
+  - **Workspace Statistics** states an empty window in the Estimated value
+    widget. Where a member's telemetry store could not be read, it names that
+    store (`.logos/telemetry.db`) as the place to look, never `logos stats`.
+  - Search boxes, query forms, editors, the chat and wiki pages are **tool
+    panels**: the same frame, a title and one line saying what each is for, each
+    listed with its reason in `web/ui/src/copy/toolPanels.ts`.
+  Three checks keep the claim "every widget" true: a source scan of every view
+  finds no `Card` rendered directly and every widget naming a catalogue entry or
+  a registered tool panel; a test looks up every `logos …` command a catalogue
+  names in `docs/howto/commands.md`; and the browser layout check now runs on
+  every view of both sidebars. `docs/howto/usage.md` describes how to read a
+  widget. No HTTP, CLI or MCP answer changes.
 - **The Workspace Dashboard, the Cross-service coverage tab and Workspace rules
   say what each widget shows, why it matters and what to do, in one layout
   (CR-203, S-613).** Eight widgets now render through the shared widget frame

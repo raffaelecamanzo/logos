@@ -54,8 +54,8 @@ describe("the check itself (falsifiable)", () => {
     expect(check("Run logos workspace status, then logos coverage ingest <report>.")).toEqual([true, true]);
   });
 
-  it("reads string literals only: a command in a comment, or the file logos.workspace.toml, is not one", () => {
-    const src = `// logos frobnicate\nexport const x = "Edit logos.workspace.toml; Use Logos from your agent.";\n`;
+  it("reads string literals only: a comment, the file logos.workspace.toml and the logos-wiki skill name no command", () => {
+    const src = `// logos frobnicate\nexport const x = "Edit logos.workspace.toml; Use Logos from your agent; the logos-wiki skill does it.";\n`;
     expect(commandsIn("/src/copy/x.copy.ts", src)).toEqual([]);
   });
 });
