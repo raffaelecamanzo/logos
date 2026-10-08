@@ -35,4 +35,15 @@ describe("the hidden-widget register (S-612, FR-UI-41)", () => {
     expect(isWidgetHidden("non-gated-tier")).toBe(true);
     expect(HIDDEN_WIDGETS.map((w) => w.id)[2]).toBe("non-gated-tier");
   });
+
+  it("restores the declared order whichever removal is restored first", () => {
+    // vitest runs `afterEach` before `onTestFinished`, so a test that removes one
+    // entry inside a block that removed another restores them first-in-first-out.
+    const declared = HIDDEN_WIDGETS.map((w) => w.id);
+    const restoreImpact = removeHiddenWidgetEntry("cross-service-impact");
+    const restoreArms = removeHiddenWidgetEntry("coverage-by-relation-arm");
+    restoreImpact();
+    restoreArms();
+    expect(HIDDEN_WIDGETS.map((w) => w.id)).toEqual(declared);
+  });
 });
