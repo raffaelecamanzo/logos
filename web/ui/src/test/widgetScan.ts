@@ -251,3 +251,54 @@ export function scanViewSources(
   const views = [...new Set(widgets.map((w) => w.file))].sort();
   return { widgets, views, problems, panelsUsed };
 }
+
+/**
+ * A source with every comment blanked to spaces, newlines kept, so offsets and
+ * line numbers still read against the original (CR-207 AC-4). The comments come
+ * from the parser's own ranges: a `/*` inside a string, a template literal or a
+ * line comment is text, not a comment opener. (A regular expression read it as
+ * one, and blanked real code up to the next `*\/` — forty lines of the sidebar.)
+ * A JSX text run is not trivia, so it is never searched for a comment, and a
+ * JSDoc block is blanked as its host's leading comment.
+ */
+export function blankComments(file: string, text: string): string {
+  const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+  const comments: [number, number][] = [];
+  const note = (pos: number, end: number) => {
+    comments.push([pos, end]);
+  };
+  const visit = (node: ts.Node) => {
+    if (ts.isJSDoc(node) || node.kind === ts.SyntaxKind.JsxText) return;
+    ts.forEachLeadingCommentRange(text, node.getFullStart(), note);
+    ts.forEachTrailingCommentRange(text, node.getEnd(), note);
+    for (const child of node.getChildren(sf)) visit(child);
+  };
+  visit(sf);
+  // Offsets are UTF-16 units, as `slice` counts them.
+  let out = text;
+  for (const [pos, end] of comments) {
+    out = out.slice(0, pos) + out.slice(pos, end).replace(/[^\n]/g, " ") + out.slice(end);
+  }
+  return out;
+}
+
+/**
+ * Where each source still writes one of `texts` outside a comment, as sorted,
+ * distinct `file:line` (the line the text starts on). Whitespace inside a text
+ * matches any run of whitespace, line breaks included, so JSX text a formatter
+ * wrapped is still found. An HTML entity spelling (`&mdash;`) is not: the
+ * rendered-DOM checks (`expectWidgetCopy`, the Playwright layout check) cover it.
+ */
+export function textSites(files: Record<string, string>, texts: readonly string[]): string[] {
+  const patterns = texts.map(
+    (t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ +/g, "\\s+"), "g"),
+  );
+  const sites = Object.entries(files).flatMap(([file, src]) => {
+    const blanked = blankComments(file, src);
+    return patterns.flatMap((re) =>
+      [...blanked.matchAll(re)].map((m) => `${file}:${blanked.slice(0, m.index).split("\n").length}`),
+    );
+  });
+  return [...new Set(sites)].sort();
+}
