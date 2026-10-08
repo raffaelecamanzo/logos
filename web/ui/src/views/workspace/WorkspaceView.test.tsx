@@ -2161,12 +2161,16 @@ describe("WorkspaceView — the service map's bindings filter (S-614, FR-UI-42)"
     expect(within(kind).getAllByRole("option").map((o) => o.textContent)).toEqual(["All kinds", "HTTP", "gRPC", "Broker"]);
     await userEvent.selectOptions(kind, "route");
     expect(shownPairs()).toEqual(["api->web", "billing->api"]);
-    // Neither HTTP link has evidence: the widget says none of its 2 is shown.
+    // Neither HTTP link has evidence: the widget says none of its 2 is shown,
+    // and — the refused key being filtered out — has nothing to ask.
     expect(figureOf(evidence())).toBe(SERVICE_MAP_TEXT.evidenceShown(0, 2));
     expect(evidenceLinks()).toEqual([]);
+    expect(actionKind(evidence())).toBe("none");
     await userEvent.selectOptions(kind, "grpc-call");
     expect(shownPairs()).toEqual(["api->billing"]);
     expect(evidenceLinks()).toEqual(["api → billing"]);
+    // The refused key is shown again, so the widget asks for it again.
+    expect(actionKind(evidence())).toBe("act");
     await userEvent.selectOptions(kind, "broker-topic");
     expect(shownPairs()).toEqual(["web->billing"]);
     expect(figureOf(bindings())).toBe(SERVICE_MAP_TEXT.bindingsShown(1, 4));
