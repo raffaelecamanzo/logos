@@ -2984,3 +2984,25 @@ fn a_pre_cr209_depth_of_exactly_two_reads_unrecorded() {
     old.depth.clear();
     assert_eq!(super::unrecorded_lists(&metrics, &old), ["depth"]);
 }
+
+/// A directory cycle of exactly three directories is named in full, with no
+/// "+0 more": the count starts at the fourth.
+#[test]
+fn a_three_directory_layer_is_named_in_full() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("a/a.rs")),
+        node(2, "b", NodeKind::Function, Some("b/b.rs")),
+        node(3, "c", NodeKind::Function, Some("c/c.rs")),
+        node(4, "z", NodeKind::Function, Some("z/z.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+    ];
+    assert_eq!(
+        rows(&offenders(&nodes, &edges, &[]).depth),
+        [("{a, b, c}", "{a, b, c} → z (2 layers)")]
+    );
+}
