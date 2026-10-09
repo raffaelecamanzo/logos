@@ -890,6 +890,7 @@ pub fn worst_offenders(
     // (`is_dead = NULL`) is never listed as dead.
     let mut redundancy: Vec<(NodeId, Option<i64>, bool, bool)> = production
         .iter()
+        .filter(|f| is_redundant(f))
         .map(|f| {
             (
                 f.id,
@@ -898,7 +899,6 @@ pub fn worst_offenders(
                 f.is_duplicate == Some(true),
             )
         })
-        .filter(|&(_, _, dead, duplicate)| dead || duplicate)
         .collect();
     redundancy.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let redundancy = redundancy
@@ -1626,6 +1626,15 @@ fn equality(functions: &[&FunctionMetricRow]) -> MetricValue {
     }
 }
 
+/// Whether a function counts as redundant: dead **or** duplicate, on a
+/// `Some(true)` verdict only — a `NULL` verdict (a language with no
+/// reachability verdict) is never redundant. The one predicate [`redundancy`]
+/// counts and the Redundancy offender list ([`worst_offenders`]) lists, so the
+/// list names exactly what the dimension scores.
+fn is_redundant(f: &FunctionMetricRow) -> bool {
+    f.is_dead == Some(true) || f.is_duplicate == Some(true)
+}
+
 /// Redundancy — `1 − redundant/total` over function/method nodes
 /// ([FR-QM-05]).
 ///
@@ -1641,10 +1650,7 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
             normalized: 1.0,
         };
     }
-    let redundant = functions
-        .iter()
-        .filter(|f| f.is_dead == Some(true) || f.is_duplicate == Some(true))
-        .count();
+    let redundant = functions.iter().filter(|f| is_redundant(f)).count();
     let ratio = redundant as f64 / total as f64;
     MetricValue {
         raw: ratio,
