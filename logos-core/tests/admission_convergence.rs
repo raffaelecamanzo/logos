@@ -271,6 +271,33 @@ fn partial_sync_of_a_new_nested_rule_removes_the_stored_file_it_excludes() {
     );
 }
 
+#[test]
+fn partial_sync_of_a_deleted_negation_file_removes_the_file_it_re_excluded() {
+    // Deleting an ignore file can NARROW admission too: `a/.ignore`'s `!x.rs`
+    // re-included what the root `.gitignore` excludes, so deleting it excludes
+    // `a/x.rs` again. The batch names only the (now absent) ignore file, and its
+    // directory must still be re-gated.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/main.rs", "pub fn main_fn() {}\n");
+    write(root, ".gitignore", "x.rs\n");
+    write(root, "a/.ignore", "!x.rs\n");
+    write(root, "a/x.rs", "pub fn x_fn() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    assert!(has_nodes_for_file(rt, "a/x.rs"), "the negation re-includes a/x.rs at index");
+
+    fs::remove_file(root.join("a/.ignore")).expect("delete the negation file");
+    let result = engine.sync(&[abs(root, "a/.ignore")]);
+    assert!(
+        !has_nodes_for_file(rt, "a/x.rs"),
+        "deleting the negation excludes a/x.rs on this batch: {result:?}"
+    );
+    assert!(has_nodes_for_file(rt, "src/main.rs"), "the rest stays indexed");
+}
+
 // ── FR-RC-06: full-walk reconcile purges a now-gitignored on-disk file ────────
 
 #[test]
