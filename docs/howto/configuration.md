@@ -539,7 +539,7 @@ Besides `exclude` and `ignored_dirs`, discovery honours your ignore files:
   `.gitignore` keeps out everything under `out/`, whatever `out/.gitignore` says.
   An `.ignore` rule outranks a `.gitignore` rule at any depth.
 - **One answer everywhere.** `logos index`, `scan`, every `sync`, the git hooks
-  and the `serve` watcher admit the same files. Before 1.15.3 the watcher and
+  and the `serve` watcher admit the same files. Up to 1.15.2 the watcher and
   partial syncs read only the root's ignore files. A file ignored by a nested
   `.gitignore` (a front-end subproject's `dist/`, a test harness's bundle) was
   indexed when written while `serve` ran, and it counted in rule findings and
