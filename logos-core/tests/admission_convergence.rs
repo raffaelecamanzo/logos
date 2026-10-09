@@ -298,6 +298,30 @@ fn partial_sync_of_a_deleted_negation_file_removes_the_file_it_re_excluded() {
     assert!(has_nodes_for_file(rt, "src/main.rs"), "the rest stays indexed");
 }
 
+#[test]
+fn the_ignore_file_re_gate_never_purges_an_unnamed_file_gone_from_disk() {
+    // The Partial contract: the re-gate removes only on-disk files the ignore
+    // files now exclude. A stored file deleted from disk but named in no batch
+    // waits for its own event or a reconcile; the re-gate must not purge it.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/lib.rs", "pub fn alpha() {}\n");
+    write(root, "src/util.rs", "pub fn run() {}\n");
+    write(root, "src/gone.rs", "pub fn gone() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+
+    fs::remove_file(root.join("src/gone.rs")).expect("delete, with no sync naming it");
+    write(root, "src/.gitignore", "util.rs\n");
+    let result = engine.sync(&[abs(root, "src/.gitignore")]);
+
+    assert_eq!(result.files_removed, 1, "only the newly ignored file: {result:?}");
+    assert!(!has_nodes_for_file(rt, "src/util.rs"));
+    assert!(has_nodes_for_file(rt, "src/gone.rs"), "an unnamed, un-ignored file is left alone");
+}
+
 // ── FR-RC-06: full-walk reconcile purges a now-gitignored on-disk file ────────
 
 #[test]
