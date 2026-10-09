@@ -16,44 +16,122 @@
 //! # Parity with the walk
 //! Built from the **same [`Config`]** the walk uses, with the same matcher flags
 //! ([`discover`](super::discovery)): gitignore honoured even outside a git repo,
-//! no global gitignore, and no ignore files read above the root. On a tree with
-//! only root-level ignore files, [`AdmissionAuthority::admits_path`] returns the
-//! walk's per-file verdict exactly (proven by the parity unit test).
+//! no global gitignore, and no ignore files read above the root. On the project
+//! tree itself, nested ignore files included, [`AdmissionAuthority::admits_path`]
+//! returns the walk's per-file verdict exactly (proven by the parity unit tests,
+//! including a generated nested-ignore property test). The one exception is a
+//! documentation file reached through a sanctioned directory-symlink: the
+//! carve-out below skips the ignore files for it, while the walk's sub-walk
+//! honours any ignore files inside the symlink's target tree.
 //!
-//! # v1 limitation ([ADR-48])
-//! The gitignore matcher is **root-anchored**: it reads `<root>/.gitignore`,
-//! `<root>/.ignore`, and `<root>/.git/info/exclude`, but **not** nested
-//! `.gitignore` files in subdirectories. This is sufficient for the root-level
-//! scratch the CR targets (`.worktrees`, `.playwright-mcp`); exact nested parity
-//! is a tracked follow-up. A per-path check against a nested `.gitignore` rule
-//! therefore admits where the full walk would exclude — pinned by
-//! [`tests::nested_gitignore_is_not_read_v1_limitation`].
+//! # Nested ignore files ([CR-210])
+//! Every `.gitignore` and `.ignore` from the root down to a path's parent
+//! directory applies, plus `<root>/.git/info/exclude`, with the walk's own
+//! precedence (the `ignore` crate's): within each kind of file the deepest
+//! directory with a matching rule wins, so a deeper file overrides a shallower
+//! one and a `!negation` re-includes; across kinds `.ignore` outranks
+//! `.gitignore`, which outranks `.git/info/exclude`. A path is excluded when it
+//! or any ancestor directory is, exactly as the walk prunes an ignored directory
+//! without descending (git cannot re-include a file under an excluded directory).
+//!
+//! Each directory's matchers are compiled **once** and cached, so a watcher batch
+//! or a sync over many files reads each ignore file at most once. A long-lived
+//! authority (the watcher's) learns of an ignore-file edit through
+//! [`AdmissionAuthority::invalidate`], which drops that directory's matchers so
+//! the next query re-reads them — a mid-session edit takes effect without
+//! restarting `serve`.
 //!
 //! [FR-SY-11]: ../../../docs/specs/requirements/FR-SY-11.md
 //! [FR-IX-02]: ../../../docs/specs/requirements/FR-IX-02.md
+//! [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
 //! [ADR-48]: ../../../docs/specs/architecture/decisions/ADR-48.md
 //! [`index`]: ../../../docs/specs/requirements/FR-IX-01.md
 //! [`sync`]: ../../../docs/specs/requirements/FR-SY-01.md
 //! [filesystem-watcher]: ../../../docs/specs/architecture/integrations/filesystem-watcher.md
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use globset::GlobSet;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::Match;
 
 use super::error::ConfigError;
 use super::globs;
 use super::settings::Config;
 
+/// The per-directory ignore file names the walk reads (`ignore(true)`,
+/// `git_ignore(true)` in [`discover`](super::discovery)).
+const IGNORE_FILE_NAMES: [&str; 2] = [".gitignore", ".ignore"];
+
+/// Is `path` a per-directory ignore file — a `.gitignore` or `.ignore` whose
+/// edit can change what [`AdmissionAuthority::admits_path`] admits beneath its
+/// directory ([CR-210])? A name test only: the file need not exist (a deletion
+/// changes admission too).
+///
+/// [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
+#[must_use]
+pub fn is_ignore_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| IGNORE_FILE_NAMES.contains(&name))
+}
+
+/// One directory's own ignore sources, each compiled once and kept apart so
+/// [`AdmissionAuthority`] can apply the walk's precedence across kinds.
+#[derive(Debug)]
+struct DirIgnores {
+    /// `<dir>/.ignore` — outranks a `.gitignore` match at any depth.
+    ignore: Gitignore,
+    /// `<dir>/.gitignore`.
+    git_ignore: Gitignore,
+    /// `<root>/.git/info/exclude` for the root; empty for every other directory
+    /// (a nested `.git` is a boundary the walk prunes, so no other exists).
+    git_exclude: Gitignore,
+}
+
+impl DirIgnores {
+    /// Read and compile `dir`'s ignore files with the walk's flags. Missing files
+    /// are not an error (the walk simply finds none) and a malformed line is
+    /// skipped (`add` keeps the good lines); a total compile failure degrades to
+    /// an empty matcher rather than poisoning admission.
+    fn read(dir: &Path, is_root: bool) -> Self {
+        let compile = |file: PathBuf| {
+            let mut builder = GitignoreBuilder::new(dir);
+            let _ = builder.add(file);
+            builder.build().unwrap_or_else(|_| Gitignore::empty())
+        };
+        Self {
+            ignore: compile(dir.join(".ignore")),
+            git_ignore: compile(dir.join(".gitignore")),
+            git_exclude: if is_root {
+                compile(dir.join(".git").join("info").join("exclude"))
+            } else {
+                Gitignore::empty()
+            },
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ignore.is_empty() && self.git_ignore.is_empty() && self.git_exclude.is_empty()
+    }
+}
+
+/// The per-directory matcher cache, keyed by absolute directory path. Shared
+/// (`Arc`) by every clone of one authority, so an invalidation reaches all of
+/// them.
+type IgnoreCache = Arc<RwLock<HashMap<PathBuf, Arc<DirIgnores>>>>;
+
 /// A reusable, `Config`-derived predicate mirroring the full walk's admission
 /// ([FR-SY-11], [ADR-48]).
 ///
 /// Build once (per `sync`, or `Arc`-cached in the watcher — the boundary walk-up
-/// is a few `stat`s and the gitignore matcher compiles once), then query many
-/// paths with [`admits_path`](Self::admits_path). It composes with `admits_file`
-/// at the call site to decide final indexability.
+/// is a few `stat`s and each directory's ignore matchers compile once, on first
+/// use), then query many paths with [`admits_path`](Self::admits_path). It
+/// composes with `admits_file` at the call site to decide final indexability.
 #[derive(Debug, Clone)]
 pub struct AdmissionAuthority {
     /// The canonicalised project root — the anchor for relativisation, the
@@ -67,9 +145,10 @@ pub struct AdmissionAuthority {
     ignored_dirs: HashSet<String>,
     /// Files strictly larger than this (bytes) are rejected ([FR-CF-04]).
     max_file_size: u64,
-    /// Root-anchored gitignore matcher (`.gitignore` ∪ `.ignore` ∪
-    /// `.git/info/exclude`). See the module-level v1 limitation.
-    gitignore: Gitignore,
+    /// Each directory's compiled `.ignore`/`.gitignore` (and the root's
+    /// `.git/info/exclude`), built on first use and dropped by
+    /// [`invalidate`](Self::invalidate) ([CR-210]).
+    ignores: IgnoreCache,
     /// The sanctioned external docs root resolved from `.swe-skills`, or `None`
     /// when absent/misconfigured ([FR-IX-10]). Mirrors the walk's carve-out so a
     /// git-ignored sanctioned doc reached through a directory-symlink is admitted
@@ -86,7 +165,8 @@ impl AdmissionAuthority {
     ///
     /// Canonicalises `root` once (the containment anchor), compiles the
     /// include/exclude globs through the same [`globs::compile`] the walk uses,
-    /// and builds the root-anchored gitignore matcher with the walk's flags.
+    /// and starts an empty per-directory ignore cache (each directory's ignore
+    /// files are read on first use, with the walk's flags).
     ///
     /// # Errors
     /// - [`ConfigError::InvalidRoot`] if `root` is missing or not a directory.
@@ -105,7 +185,6 @@ impl AdmissionAuthority {
         let exclude = globs::compile(&config.exclude)?;
         let ignored_dirs: HashSet<String> =
             config.semantics.ignored_dirs.iter().cloned().collect();
-        let gitignore = build_root_gitignore(&root);
         // Resolve the sanctioned docs root and doc globs from the SAME config the
         // walk uses, so the carve-out below stays in parity with `discover`
         // ([FR-IX-10]/[CR-071], [FR-SY-11]).
@@ -118,7 +197,7 @@ impl AdmissionAuthority {
             exclude,
             ignored_dirs,
             max_file_size: config.max_file_size,
-            gitignore,
+            ignores: IgnoreCache::default(),
             sanctioned_docs_root,
             doc_globs,
         })
@@ -152,17 +231,8 @@ impl AdmissionAuthority {
         let mut ancestor = self.root.clone();
         for name in &components[..components.len().saturating_sub(1)] {
             ancestor.push(name);
-            // Nested `.git` boundary — a linked worktree (`.git` gitlink file), a
-            // vendored repo, or a submodule (`.git` directory). Mirrors the walk's
-            // `entry.path().join(".git").exists()` prune.
-            if ancestor.join(".git").exists() {
+            if self.prunes_dir(&ancestor, name) {
                 return false;
-            }
-            // `ignored_dirs` name prune (matched anywhere in the tree).
-            if let Some(name) = name.to_str() {
-                if self.ignored_dirs.contains(name) {
-                    return false;
-                }
             }
         }
 
@@ -190,17 +260,12 @@ impl AdmissionAuthority {
         // walk yields" invariant.
         let carved = self.admits_via_sanctioned_doc_symlink(rel_path);
 
-        // Gitignore matcher — check the path and every parent so a gitignored
-        // *directory* rule (`build/`) excludes its descendants, replicating the
-        // walk's subtree prune without descending. Root-anchored (v1 limitation).
+        // Ignore files at every depth ([CR-210]) — the path and every ancestor
+        // directory, so an ignored *directory* (`build/`) excludes its
+        // descendants, replicating the walk's subtree prune without descending.
         // Skipped for a carved sanctioned doc (the walk follows it past git-ignore).
         let abs = self.root.join(rel_path);
-        if !carved
-            && self
-                .gitignore
-                .matched_path_or_any_parents(&abs, false)
-                .is_ignore()
-        {
+        if !carved && self.ignored(rel_path, false) {
             return false;
         }
 
@@ -222,6 +287,126 @@ impl AdmissionAuthority {
         }
 
         true
+    }
+
+    /// Drop the cached matchers that a change at `changed` may have made stale,
+    /// so the next [`admits_path`](Self::admits_path) re-reads them ([CR-210]).
+    ///
+    /// - A `.gitignore` or `.ignore` (created, edited or deleted) drops its
+    ///   directory's matchers.
+    /// - `<root>/.git/info/exclude` drops the root's.
+    /// - A cached directory itself (removed, or replaced by a rename) drops its
+    ///   matchers, since its ignore files may have changed with no event naming
+    ///   them.
+    ///
+    /// Each case drops the **whole subtree** beneath that directory too. That keeps
+    /// the cache's invariant — a cached directory's ancestors are all cached, since
+    /// every query walks down from the root — which the third case relies on:
+    /// a directory event finds stale descendants only through the directory's own
+    /// key. Dropping just the one key would orphan them, and a directory replaced
+    /// after its ignore file changed would keep a descendant's old matchers.
+    ///
+    /// Any other path, or one outside the root, is a no-op. `changed` may be
+    /// absolute (under the canonicalised root) or root-relative, as for
+    /// [`admits_path`](Self::admits_path).
+    pub fn invalidate(&self, changed: &Path) {
+        let Some(rel) = self.relativize(changed) else {
+            return;
+        };
+        let abs = self.root.join(&rel);
+        let stale: &Path = if is_ignore_file(&rel) {
+            abs.parent().unwrap_or(&self.root)
+        } else if rel == Path::new(".git/info/exclude") {
+            &self.root
+        } else {
+            &abs
+        };
+        let mut cache = self.ignores.write().unwrap_or_else(PoisonError::into_inner);
+        if cache.contains_key(stale) {
+            cache.retain(|dir, _| !dir.starts_with(stale));
+        }
+    }
+
+    /// Would the full walk descend into directory `dir`? The root always; any
+    /// other directory unless it, or an ancestor, is a nested-`.git` boundary, an
+    /// `ignored_dirs` name, or excluded by an ignore file. Outside the root,
+    /// `false`.
+    ///
+    /// The walk reads a directory's ignore files only once it has entered the
+    /// directory, so the watcher asks this before routing an ignore-file change
+    /// to `sync` ([CR-210]): an ignore file the walk never reads cannot change
+    /// what is admitted.
+    #[must_use]
+    pub fn walks_into(&self, dir: &Path) -> bool {
+        let Some(rel) = self.relativize(dir) else {
+            return dir == self.root || dir.as_os_str().is_empty();
+        };
+        let mut ancestor = self.root.clone();
+        for name in rel.components().map(Component::as_os_str) {
+            ancestor.push(name);
+            if self.prunes_dir(&ancestor, name) {
+                return false;
+            }
+        }
+        !self.ignored(&rel, true)
+    }
+
+    /// Whether the walk prunes directory `dir` (named `name`, below the root) by
+    /// name or boundary, whatever the ignore files say.
+    fn prunes_dir(&self, dir: &Path, name: &OsStr) -> bool {
+        // Nested `.git` boundary — a linked worktree (`.git` gitlink file), a
+        // vendored repo, or a submodule (`.git` directory). Mirrors the walk's
+        // `entry.path().join(".git").exists()` prune.
+        if dir.join(".git").exists() {
+            return true;
+        }
+        // `ignored_dirs` name prune (matched anywhere in the tree).
+        name.to_str().is_some_and(|name| self.ignored_dirs.contains(name))
+    }
+
+    /// Whether the ignore files exclude `rel` (root-relative, `Normal`
+    /// components only): `rel` itself, or any ancestor directory of it.
+    /// `leaf_is_dir` says whether `rel` itself is a directory (it decides
+    /// whether a `dir/`-only rule can match it).
+    ///
+    /// Mirrors the walk ([`discover`](super::discover)): each component is judged
+    /// against the matchers of the directories from the root down to that
+    /// component's **parent** — a directory's own ignore files apply to what is
+    /// inside it, not to itself — and an ignored directory ends the descent.
+    fn ignored(&self, rel: &Path, leaf_is_dir: bool) -> bool {
+        let components: Vec<&OsStr> = rel.components().map(Component::as_os_str).collect();
+        // The non-empty matchers of the directories entered so far, root first.
+        let mut stack: Vec<Arc<DirIgnores>> = Vec::new();
+        let mut dir = self.root.clone();
+        for (depth, name) in components.iter().enumerate() {
+            let ignores = self.dir_ignores(&dir);
+            if !ignores.is_empty() {
+                stack.push(ignores);
+            }
+            dir.push(name);
+            let is_dir = leaf_is_dir || depth + 1 < components.len();
+            if matched(&stack, &dir, is_dir).is_ignore() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `dir`'s compiled ignore matchers — from the cache, or read now and cached.
+    fn dir_ignores(&self, dir: &Path) -> Arc<DirIgnores> {
+        if let Some(hit) = self
+            .ignores
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(dir)
+        {
+            return Arc::clone(hit);
+        }
+        // Read outside the lock: two threads missing at once both read the same
+        // files and the first insert wins — identical content, so either is right.
+        let built = Arc::new(DirIgnores::read(dir, dir == self.root));
+        let mut cache = self.ignores.write().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(cache.entry(dir.to_path_buf()).or_insert(built))
     }
 
     /// Whether `rel` is a documentation file reached through a **sanctioned,
@@ -304,30 +489,28 @@ impl AdmissionAuthority {
     }
 }
 
-/// Build the root-anchored gitignore matcher with the walk's flags.
+/// The walk's verdict for `path` under the ignore matchers in `stack` (root
+/// first, deepest last).
 ///
 /// The [`discover`](super::discovery) walk uses `git_ignore(true)`,
 /// `git_exclude(true)`, `ignore(true)`, `git_global(false)`, and
-/// `parents(false)`. We reproduce that per-path by adding exactly the three
-/// **root-level** ignore sources to one [`GitignoreBuilder`] rooted at `root`
-/// (and nothing global, and nothing above the root):
-///
-/// - `.git/info/exclude` — lowest precedence,
-/// - `.gitignore`,
-/// - `.ignore` — highest precedence (added last so its patterns win a conflict,
-///   matching the `ignore` crate's precedence order).
-///
-/// Missing files are not an error (the walk simply finds none); a total compile
-/// failure degrades to an empty matcher (best-effort, matching the walk's
-/// per-line tolerance) rather than poisoning admission.
-fn build_root_gitignore(root: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(root);
-    // Add in ascending precedence; the last matching glob wins, so `.ignore`
-    // (added last) outranks `.gitignore`, which outranks `.git/info/exclude`.
-    builder.add(root.join(".git").join("info").join("exclude"));
-    builder.add(root.join(".gitignore"));
-    builder.add(root.join(".ignore"));
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
+/// `parents(false)`; this reproduces the `ignore` crate's combination of those
+/// sources: within each kind the **deepest** directory with a matching rule
+/// decides (so a deeper file overrides a shallower one, and a `!negation`
+/// whitelists), and across kinds `.ignore` outranks `.gitignore`, which
+/// outranks `.git/info/exclude`. Nothing global, and nothing above the root.
+fn matched(stack: &[Arc<DirIgnores>], path: &Path, is_dir: bool) -> Match<()> {
+    let deepest = |kind: fn(&DirIgnores) -> &Gitignore| {
+        stack
+            .iter()
+            .rev()
+            .map(|dir| kind(dir).matched(path, is_dir))
+            .find(|m| !m.is_none())
+            .map_or(Match::None, |m| m.map(|_| ()))
+    };
+    deepest(|d| &d.ignore)
+        .or(deepest(|d| &d.git_ignore))
+        .or(deepest(|d| &d.git_exclude))
 }
 
 #[cfg(test)]
@@ -709,31 +892,311 @@ mod tests {
         assert!(!walk.contains(&root.join(".worktrees/s/copy.rs")));
     }
 
+    /// The walk-parity verdict for every regular file in the tree, as a list of
+    /// disagreements (empty when `admits_path` and [`discover`] agree on all).
+    fn disagreements(root: &Path, config: &Config, authority: &AdmissionAuthority) -> Vec<String> {
+        let walk: BTreeSet<PathBuf> = discover(root, config).unwrap().files.into_iter().collect();
+        walk_all_regular_files(root)
+            .into_iter()
+            .filter(|p| authority.admits_path(p) != walk.contains(p))
+            .map(|p| format!("{} (walk admits: {})", p.display(), walk.contains(&p)))
+            .collect()
+    }
+
     #[test]
-    fn nested_gitignore_is_not_read_v1_limitation() {
-        // v1 LIMITATION ([ADR-48]): the root-anchored matcher does NOT read a
-        // *nested* `.gitignore`. The full walk (per-directory ignore state) WOULD
-        // honour `sub/.gitignore`; the authority does not — so here `admits_path`
-        // ADMITS a file the walk EXCLUDES. This test pins that documented
-        // divergence so a future per-directory matcher (the tracked follow-up)
-        // flips it deliberately, not by accident.
+    fn a_nested_gitignore_excludes_the_files_beneath_its_directory() {
+        // CR-210: the full walk honours `sub/.gitignore`, and so does the
+        // authority. The rule is rooted at `sub/`, so a same-named file at the
+        // root is the near miss that must stay admitted.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         write(&root.join("sub/.gitignore"), "hidden.rs\n");
         let nested_ignored = root.join("sub/hidden.rs");
         write(&nested_ignored, "fn h() {}\n");
+        let deeper_ignored = root.join("sub/deep/hidden.rs");
+        write(&deeper_ignored, "fn d() {}\n");
+        let root_namesake = root.join("hidden.rs");
+        write(&root_namesake, "fn r() {}\n");
+        let sibling = root.join("sub/shown.rs");
+        write(&sibling, "fn s() {}\n");
 
         let config = test_config();
         let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
 
-        assert!(
-            !walk_admits(&root, &config, &nested_ignored),
-            "the full walk honours the nested `.gitignore` and excludes the file",
-        );
-        assert!(
-            authority.admits_path(&nested_ignored),
-            "v1 limitation: the root-anchored authority admits it (nested `.gitignore` unread)",
-        );
+        assert!(!authority.admits_path(&nested_ignored), "the nested `.gitignore` excludes sub/hidden.rs");
+        assert!(!authority.admits_path(&deeper_ignored), "…and the same name deeper under sub/");
+        assert!(authority.admits_path(&root_namesake), "a rule in sub/.gitignore does not reach the root");
+        assert!(authority.admits_path(&sibling), "a sibling the rule does not name is admitted");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_nested_dot_ignore_and_a_nested_directory_rule_exclude_a_subtree() {
+        // `.ignore` is read at every depth too, and a directory rule in a nested
+        // file prunes that directory's whole subtree — but only under its own dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("web/.ignore"), "dist/\n");
+        let bundled = root.join("web/dist/assets/index.js");
+        write(&bundled, "var a = 1;\n");
+        let top_dist = root.join("dist-src/app.js");
+        write(&top_dist, "var b = 2;\n");
+        let other_dist = root.join("api/dist/out.js");
+        write(&other_dist, "var c = 3;\n");
+
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        assert!(!authority.admits_path(&bundled), "web/.ignore's `dist/` prunes web/dist/**");
+        assert!(authority.admits_path(&top_dist), "`dist/` does not match `dist-src/`");
+        assert!(authority.admits_path(&other_dist), "web/.ignore does not reach api/dist/");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_deeper_negation_re_includes_what_a_shallower_rule_excludes() {
+        // Git precedence: the deepest matching rule wins, so `!keep.gen.rs` two
+        // levels down re-includes a file the root `*.gen.rs` excludes — while the
+        // same name one level up, outside the negating directory, stays excluded.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join(".gitignore"), "*.gen.rs\n");
+        write(&root.join("a/b/.gitignore"), "!keep.gen.rs\n");
+        let re_included = root.join("a/b/keep.gen.rs");
+        write(&re_included, "fn k() {}\n");
+        let still_out = root.join("a/keep.gen.rs");
+        write(&still_out, "fn o() {}\n");
+        let other = root.join("a/b/other.gen.rs");
+        write(&other, "fn x() {}\n");
+
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        assert!(authority.admits_path(&re_included), "the deeper negation re-includes a/b/keep.gen.rs");
+        assert!(!authority.admits_path(&still_out), "a/keep.gen.rs is outside the negating directory");
+        assert!(!authority.admits_path(&other), "the negation names only keep.gen.rs");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_negation_cannot_re_include_a_file_under_an_excluded_directory() {
+        // Git cannot re-include a file whose parent directory is excluded: the
+        // walk never enters `out/`, so `out/.gitignore`'s negation is never read.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join(".gitignore"), "out/\n");
+        write(&root.join("out/.gitignore"), "!wanted.rs\n");
+        let wanted = root.join("out/wanted.rs");
+        write(&wanted, "fn w() {}\n");
+
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        assert!(!authority.admits_path(&wanted), "a negation inside an excluded directory is inert");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_dot_ignore_outranks_a_deeper_gitignore() {
+        // The walk's precedence is per kind first: any `.ignore` match beats any
+        // `.gitignore` match, whatever their depths. So a root `.ignore` negation
+        // re-admits what a nested `.gitignore` excludes — not "deepest file wins".
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join(".ignore"), "!special.rs\n");
+        write(&root.join("a/.gitignore"), "special.rs\nplain.rs\n");
+        let special = root.join("a/special.rs");
+        write(&special, "fn s() {}\n");
+        let plain = root.join("a/plain.rs");
+        write(&plain, "fn p() {}\n");
+
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        assert!(authority.admits_path(&special), "the root `.ignore` negation outranks a/.gitignore");
+        assert!(!authority.admits_path(&plain), "a/.gitignore still excludes what `.ignore` does not name");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn full_walk_and_admits_path_agree_on_generated_nested_ignore_trees() {
+        // CR-210 AC-1, property-style: for many generated trees with ignore rules
+        // at three depths — the root, `a/` and `a/c/`, the deepest always holding
+        // a negation — the set the full walk discovers equals the set
+        // `admits_path` accepts, file for file. A fixed-seed generator keeps every
+        // failure reproducible; the case number is in the message.
+        const CASES: u64 = 120;
+        // Patterns a generated ignore file draws from: names, globs, directory
+        // rules, anchored rules and negations of each.
+        const PATTERNS: [&str; 16] = [
+            "x.rs", "!x.rs", "*.rs", "!*.rs", "keep.rs", "!keep.rs", "c/", "!c/", "/y.rs", "!y.rs",
+            "d", "*", "!*", "gen*", "!gen.rs", "**/x.rs",
+        ];
+        const NEGATIONS: [&str; 5] = ["!x.rs", "!*.rs", "!keep.rs", "!y.rs", "!gen.rs"];
+        const DIRS: [&str; 6] = ["", "a", "b", "a/c", "a/d", "a/c/e"];
+        const FILES: [&str; 5] = ["x.rs", "y.rs", "keep.rs", "gen.rs", "z.txt"];
+
+        // A small LCG (Knuth's MMIX constants): deterministic, no dependency.
+        let mut state: u64 = 0x5eed_c210;
+        let mut next = move |bound: usize| -> usize {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % bound
+        };
+
+        let config = test_config();
+        let mut files_checked = 0usize;
+        for case in 0..CASES {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap();
+            for dir in DIRS {
+                for file in FILES {
+                    if next(3) != 0 {
+                        write(&root.join(dir).join(file), "x\n");
+                    }
+                }
+            }
+            for (depth, dir) in ["", "a", "a/c"].into_iter().enumerate() {
+                let mut lines: Vec<&str> = (0..1 + next(3)).map(|_| PATTERNS[next(PATTERNS.len())]).collect();
+                if depth == 2 {
+                    lines.push(NEGATIONS[next(NEGATIONS.len())]);
+                }
+                let name = if next(4) == 0 { ".ignore" } else { ".gitignore" };
+                write(&root.join(dir).join(name), &format!("{}\n", lines.join("\n")));
+            }
+
+            let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+            let disagree = disagreements(&root, &config, &authority);
+            let ignores: Vec<String> = ["", "a", "a/c"]
+                .iter()
+                .flat_map(|d| [".gitignore", ".ignore"].map(|n| root.join(d).join(n)))
+                .filter(|p| p.exists())
+                .map(|p| format!("{}: {:?}", p.display(), fs::read_to_string(&p).unwrap()))
+                .collect();
+            assert!(disagree.is_empty(), "case {case}: {disagree:#?}\nignore files: {ignores:#?}");
+            files_checked += walk_all_regular_files(&root).len();
+        }
+        assert!(files_checked > (CASES as usize) * 10, "the generator built real trees: {files_checked}");
+    }
+
+    #[test]
+    fn a_directory_s_matchers_are_read_once_and_re_read_after_invalidate() {
+        // Cached per directory: an ignore file written after the first query is
+        // not seen until its directory is invalidated — then it applies at once,
+        // with no new authority (the watcher's mid-session `.gitignore` edit).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let file = root.join("sub/late.rs");
+        write(&file, "fn l() {}\n");
+
+        let authority = AdmissionAuthority::from_config(&root, &test_config()).unwrap();
+        assert!(authority.admits_path(&file), "no ignore rule yet");
+
+        write(&root.join("sub/.gitignore"), "late.rs\n");
+        assert!(authority.admits_path(&file), "sub/'s matchers are cached, not re-read per query");
+
+        // An unrelated path invalidates nothing.
+        authority.invalidate(&root.join("sub/late.rs"));
+        authority.invalidate(&root.join("elsewhere/.gitignore"));
+        assert!(authority.admits_path(&file), "only sub/'s ignore file drops sub/'s matchers");
+
+        authority.invalidate(&root.join("sub/.gitignore"));
+        assert!(!authority.admits_path(&file), "after invalidate the new rule applies");
+
+        // A clone shares the cache, so it sees the same invalidations.
+        let clone = authority.clone();
+        fs::remove_file(root.join("sub/.gitignore")).unwrap();
+        authority.invalidate(Path::new("sub/.gitignore")); // root-relative works too
+        assert!(clone.admits_path(&file), "deleting the rule re-admits, through the shared cache");
+    }
+
+    #[test]
+    fn invalidating_a_directory_drops_its_subtree_and_info_exclude_drops_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let deep = root.join("pkg/inner/mod.rs");
+        write(&deep, "fn m() {}\n");
+        let top = root.join("top.rs");
+        write(&top, "fn t() {}\n");
+        let authority = AdmissionAuthority::from_config(&root, &test_config()).unwrap();
+        assert!(authority.admits_path(&deep) && authority.admits_path(&top));
+
+        // A directory replaced wholesale (a rename into place) carries ignore files
+        // no event names: invalidating the directory drops every level beneath it.
+        write(&root.join("pkg/inner/.gitignore"), "mod.rs\n");
+        authority.invalidate(&root.join("pkg"));
+        assert!(!authority.admits_path(&deep), "pkg/inner's matchers were dropped with pkg's");
+
+        write(&root.join(".git/info/exclude"), "top.rs\n");
+        assert!(authority.admits_path(&top), "the root's matchers are cached");
+        authority.invalidate(&root.join(".git/info/exclude"));
+        assert!(!authority.admits_path(&top), "an info/exclude change drops the root's matchers");
+    }
+
+    #[test]
+    fn a_directory_replaced_after_its_ignore_file_changed_drops_its_descendants() {
+        // Review regression (S-633): an ignore-file change used to drop only its
+        // own directory's key, so a LATER event naming that directory (replaced by
+        // a rename) found no key and left a descendant's stale matchers behind —
+        // rejecting a file the walk admits until the watcher restarted.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("a/b/.gitignore"), "x.rs\n");
+        let file = root.join("a/b/x.rs");
+        write(&file, "fn x() {}\n");
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+        assert!(!authority.admits_path(&file), "a/b/.gitignore excludes it (caches a, a/b)");
+
+        write(&root.join("a/.gitignore"), "# edited\n");
+        authority.invalidate(&root.join("a/.gitignore"));
+
+        // `a/` is replaced wholesale by a tree whose `a/b` has no ignore file; the
+        // OS names only the directories.
+        write(&root.join("staged/b/x.rs"), "fn x() {}\n");
+        fs::remove_dir_all(root.join("a")).unwrap();
+        fs::rename(root.join("staged"), root.join("a")).unwrap();
+        authority.invalidate(&root.join("staged"));
+        authority.invalidate(&root.join("a"));
+
+        assert!(authority.admits_path(&file), "no rule names a/b/x.rs any more");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn walks_into_answers_whether_the_walk_enters_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join(".gitignore"), "gen/\n");
+        write(&root.join("web/.gitignore"), "cache/\n");
+        write(&root.join(".worktrees/s/.git"), "gitdir: /elsewhere\n");
+        for dir in ["src/deep", "gen/sub", "web/cache", "target/debug", ".worktrees/s/src"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let authority = AdmissionAuthority::from_config(&root, &test_config()).unwrap();
+
+        assert!(authority.walks_into(&root), "the root is always walked");
+        assert!(authority.walks_into(&root.join("src/deep")));
+        assert!(authority.walks_into(Path::new("web")), "root-relative works");
+        // A dir-only rule matches the directory itself; a nested rule its child.
+        assert!(!authority.walks_into(&root.join("gen")));
+        assert!(!authority.walks_into(&root.join("gen/sub")), "beneath an ignored dir");
+        assert!(!authority.walks_into(&root.join("web/cache")), "a nested `.gitignore` rule");
+        assert!(!authority.walks_into(&root.join("target/debug")), "an `ignored_dirs` name");
+        assert!(!authority.walks_into(&root.join(".worktrees/s")), "a nested `.git` boundary");
+        assert!(!authority.walks_into(&root.join(".worktrees/s/src")));
+        assert!(!authority.walks_into(Path::new("/elsewhere")), "outside the root");
+    }
+
+    #[test]
+    fn is_ignore_file_names_exactly_the_two_per_directory_ignore_files() {
+        assert!(is_ignore_file(Path::new("a/b/.gitignore")));
+        assert!(is_ignore_file(Path::new(".ignore")));
+        // Near misses: a suffix, a prefix, a directory component, info/exclude.
+        assert!(!is_ignore_file(Path::new("a/x.gitignore")));
+        assert!(!is_ignore_file(Path::new("a/.gitignore.bak")));
+        assert!(!is_ignore_file(Path::new(".gitignore/inner.rs")));
+        assert!(!is_ignore_file(Path::new(".git/info/exclude")));
+        assert!(!is_ignore_file(Path::new(".rgignore")));
     }
 
     /// Build a project whose git-ignored `docs/specs` is a directory-symlink into

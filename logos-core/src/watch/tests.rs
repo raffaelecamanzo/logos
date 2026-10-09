@@ -348,6 +348,139 @@ fn classify_pre_filters_gitignored_and_boundary_paths_but_lets_deletions_through
     );
 }
 
+/// CR-210: the pre-filter honours a nested ignore file, and an ignore file in a
+/// directory the walk enters is routed to `sync` — even one that ignores itself
+/// (a generated directory's `*`), which the authority alone would drop, losing
+/// the re-gate that removes the files it now excludes. One the walk never reads
+/// is dropped.
+#[test]
+fn classify_drops_nested_ignored_paths_and_routes_walked_ignore_files_to_sync() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("web/harness-dist")).unwrap();
+    std::fs::write(root.join("web/.gitignore"), "report.rs\n").unwrap();
+    std::fs::write(root.join("web/report.rs"), "fn r() {}\n").unwrap();
+    std::fs::write(root.join("web/app.rs"), "fn a() {}\n").unwrap();
+    // The self-ignoring shape build tools write into their output directory.
+    std::fs::write(root.join("web/harness-dist/.gitignore"), "*\n").unwrap();
+    std::fs::write(root.join("web/harness-dist/bundle.rs"), "fn b() {}\n").unwrap();
+    std::fs::create_dir_all(root.join(".worktrees/s")).unwrap();
+    std::fs::write(root.join(".worktrees/s/.git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(root.join(".worktrees/s/.gitignore"), "x\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "logs/\n").unwrap();
+    std::fs::create_dir_all(root.join("logs/old")).unwrap();
+    std::fs::write(root.join("logs/old/.gitignore"), "!keep\n").unwrap();
+    std::fs::create_dir_all(root.join("web/report.rs.d")).unwrap();
+    std::fs::write(root.join("web/report.rs.d/.gitignore"), "x\n").unwrap();
+
+    let config = crate::config::Config {
+        exclude: vec![],
+        ..crate::config::Config::default()
+    };
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    // A trimmed name set, so the authority's gates — not the name filter —
+    // decide each verdict below.
+    let ig: HashSet<String> = [".logos", ".git"].iter().map(|s| (*s).to_string()).collect();
+    let m = builtin_matcher();
+    let classify_at = |rel: &str| classify(&root, &root.join(rel), &ig, &m, Some(&authority));
+
+    assert_eq!(classify_at("web/report.rs"), Admission::Ignored, "a nested-ignored path is dropped");
+    assert_eq!(classify_at("web/harness-dist/bundle.rs"), Admission::Ignored, "`*` drops the bundle");
+    assert_eq!(classify_at("web/app.rs"), Admission::Source, "the admitted sibling passes");
+    assert!(!authority.admits_path(&root.join("web/harness-dist/.gitignore")), "the `*` file ignores itself");
+    assert_eq!(
+        classify_at("web/harness-dist/.gitignore"),
+        Admission::Source,
+        "a self-ignoring ignore file still reaches sync"
+    );
+    assert_eq!(classify_at("web/.gitignore"), Admission::Source);
+    // An ignore file the walk never reads — under a nested-`.git` boundary (a dev
+    // worktree's checkout) or an ignored directory — cannot change admission.
+    assert_eq!(classify_at(".worktrees/s/.gitignore"), Admission::Ignored, "boundary");
+    assert_eq!(classify_at("web/report.rs.d/.gitignore"), Admission::Source, "near miss");
+    assert_eq!(classify_at("logs/old/.gitignore"), Admission::Ignored, "ignored directory");
+    // The routing exception is the ignore-file name only, not anything inside the
+    // ignored tree, and never the feedback-loop dirs.
+    assert_eq!(classify_at(".git/info/exclude"), Admission::Ignored);
+    assert_eq!(classify_at(".logos/.gitignore"), Admission::Ignored);
+}
+
+/// CR-210: a batch carrying a new `.gitignore` invalidates the watcher's cached
+/// matchers BEFORE it classifies the batch's other paths — so a build writing
+/// `stage/.gitignore` and `stage/gen.rs` together never feeds `gen.rs` to
+/// `sync`, though the long-lived authority had already cached `stage/` as
+/// rule-free.
+#[test]
+fn a_batch_with_a_new_ignore_file_applies_it_to_the_batch_s_own_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("stage")).unwrap();
+    std::fs::write(root.join("stage/gen.rs"), "fn g() {}\n").unwrap();
+    std::fs::write(root.join("stage/kept.rs"), "fn k() {}\n").unwrap();
+    let config = crate::config::Config {
+        exclude: vec![],
+        ..crate::config::Config::default()
+    };
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    assert!(authority.admits_path(&root.join("stage/gen.rs")), "cache `stage/` before the rule exists");
+
+    std::fs::write(root.join("stage/.gitignore"), "gen.rs\n").unwrap();
+    let mut h = Harness::new();
+    h.root = root.clone();
+    h.authority = Some(authority);
+    // The ignore file comes LAST in the batch: invalidation must not depend on order.
+    let gen = root.join("stage/gen.rs");
+    let kept = root.join("stage/kept.rs");
+    let ignore_file = root.join("stage/.gitignore");
+    let paths = [gen.to_str().unwrap(), kept.to_str().unwrap(), ignore_file.to_str().unwrap()];
+    on_debounced(&h.sink(), Ok(debounced_events(&paths)));
+
+    let sources = h.sources.lock().unwrap();
+    assert!(!sources.contains(&gen), "the new rule applies to the same batch: {sources:?}");
+    assert!(sources.contains(&kept), "the unnamed sibling is still fed to sync");
+    assert!(sources.contains(&ignore_file), "the ignore file reaches sync for the re-gate");
+}
+
+/// CR-210: a rename carries two paths, and the pre-pass invalidates both. When
+/// the rule file is renamed AWAY (`stage/.gitignore` → `stage/old-rules.txt`),
+/// only the rename's `from` path names it — miss it and the watcher keeps the
+/// rule cached, dropping the now-admitted file on every later batch.
+#[test]
+fn renaming_an_ignore_file_away_invalidates_the_rule_it_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("stage")).unwrap();
+    std::fs::write(root.join("stage/gen.rs"), "fn g() {}\n").unwrap();
+    std::fs::write(root.join("stage/.gitignore"), "gen.rs\n").unwrap();
+    let config = crate::config::Config {
+        exclude: vec![],
+        ..crate::config::Config::default()
+    };
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    assert!(!authority.admits_path(&root.join("stage/gen.rs")), "the rule is cached");
+
+    std::fs::rename(root.join("stage/.gitignore"), root.join("stage/old-rules.txt")).unwrap();
+    let mut h = Harness::new();
+    h.root = root.clone();
+    h.authority = Some(authority);
+    let rename = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
+        notify::event::RenameMode::Both,
+    )))
+    .add_path(root.join("stage/.gitignore"))
+    .add_path(root.join("stage/old-rules.txt"));
+    on_debounced(
+        &h.sink(),
+        Ok(vec![notify_debouncer_full::DebouncedEvent::new(rename, Instant::now())]),
+    );
+
+    let gen = root.join("stage/gen.rs");
+    on_debounced(&h.sink(), Ok(debounced_events(&[gen.to_str().unwrap()])));
+    assert!(
+        h.sources.lock().unwrap().contains(&gen),
+        "gen.rs reaches sync once its rule is renamed away"
+    );
+}
+
 // ── Drop-and-coalesce slot semantics (AQ-01) + artifact routing (FR-CV-10) ───
 
 /// A debounced batch whose paths all filter away (internal/ignored churn)
@@ -666,10 +799,15 @@ fn registration_prewalk_seed_file_set_matches_the_full_walk_index() {
     std::fs::write(root.join("docs/planning/notes.rs"), "fn n() {}\n").unwrap();
     std::fs::write(root.join("big.rs"), "x".repeat(100)).unwrap();
     std::fs::write(root.join("small.rs"), "y\n").unwrap();
+    // A nested `.gitignore` (CR-210): its file and directory rules apply under
+    // `src/` only.
+    std::fs::write(root.join("src/.gitignore"), "local.rs\ncache/\n").unwrap();
+    std::fs::write(root.join("src/local.rs"), "fn l() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("src/cache")).unwrap();
+    std::fs::write(root.join("src/cache/c.rs"), "fn c() {}\n").unwrap();
 
     // A config exercising include(**), an exclude glob, the size cap, and a
-    // trimmed `ignored_dirs` (root-level ignore sources only — the v1 authority
-    // limitation excludes nested `.gitignore`, so the fixture uses none).
+    // trimmed `ignored_dirs`.
     let mut config = crate::config::Config {
         exclude: vec!["docs/planning/**".to_string()],
         max_file_size: 50, // above the small source files (~14 B), below big.rs (100 B)
@@ -711,6 +849,8 @@ fn registration_prewalk_seed_file_set_matches_the_full_walk_index() {
     assert!(!index_files.contains(&root.join("nested/copy.rs")));
     assert!(!index_files.contains(&root.join("docs/planning/notes.rs")));
     assert!(!index_files.contains(&root.join("big.rs")));
+    assert!(!index_files.contains(&root.join("src/local.rs")));
+    assert!(!index_files.contains(&root.join("src/cache/c.rs")));
 }
 
 /// The name prune is skipped for the watched ROOT itself: a project whose own

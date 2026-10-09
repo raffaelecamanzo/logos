@@ -50,7 +50,7 @@ mod wiki;
 mod workspace_tier;
 mod writeback;
 
-pub use admission::AdmissionAuthority;
+pub use admission::{is_ignore_file, AdmissionAuthority};
 pub use chat::{
     resolve_chat, ChatConfig, ChatModelOverrides, ChatOrigin, ChatProvider, ChatResolution,
     ChatRole, DEFAULT_CHAT_BASE_URL, DEFAULT_MAX_REPLANS, DEFAULT_MAX_SUBAGENT_TOOL_CALLS,

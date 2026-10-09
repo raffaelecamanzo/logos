@@ -295,9 +295,11 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     // and nested-`.git` boundaries (dev-session worktrees under `.worktrees/**`,
     // browser scratch under `.playwright-mcp/**`) — before they ever reach the
     // pending set. This is a **best-effort pre-filter**: it is built once at
-    // watcher start (so a mid-session `.gitignore` edit is not reflected until the
-    // watcher restarts), and `Engine::sync` rebuilds the authority per batch and
-    // is the load-bearing gate that actually enforces admission ([ADR-48]). If the
+    // watcher start and caches each directory's ignore matchers, which
+    // [`on_debounced`] invalidates when a `.gitignore`/`.ignore` changes, so a
+    // mid-session ignore edit at any depth applies to the next batch ([CR-210]).
+    // `Engine::sync` rebuilds the authority per batch and is the load-bearing
+    // gate that actually enforces admission ([ADR-48]). If the
     // authority cannot be built here (e.g. a bad include/exclude glob), degrade to
     // no pre-filter and lean entirely on `sync` — the watcher is never a
     // correctness dependency ([FR-SY-06], [ADR-11]).
@@ -438,14 +440,23 @@ struct DebounceSink<'a> {
 ///    (the bounded hole [ADR-38] sanctions).
 /// 3. **Indexer-ignored dirs** — otherwise the normal `target/node_modules/…`
 ///    filter applies ([`is_ignored`]).
-/// 4. **Walk-level admission** (CR-054 / FR-SY-11) — a best-effort pre-filter that
+/// 4. **Ignore files** ([CR-210]) — a `.gitignore`/`.ignore` in a directory the
+///    full walk enters is a [`Source`](Admission::Source) path, even one that
+///    ignores itself (a generated directory's `*`): `sync` never indexes it, but
+///    its change makes `sync` re-gate the stored files beneath its directory, so
+///    a newly ignored file leaves the graph on this batch rather than on the next
+///    full reconcile. One in a directory the walk never enters (under a
+///    nested-`.git` boundary or an ignored directory) cannot change admission,
+///    and falls through to step 5, which drops it.
+/// 5. **Walk-level admission** (CR-054 / FR-SY-11) — a best-effort pre-filter that
 ///    drops a gitignored or nested-`.git`-boundary path the name-based filters
 ///    miss, so a dev-session worktree (`.worktrees/**`) or browser scratch
 ///    (`.playwright-mcp/**`) never feeds a sync. Guarded on existence so a
 ///    deletion still reaches `sync`'s removal arm; `sync` is the load-bearing
 ///    gate ([ADR-48]).
-/// 5. Everything else is an indexed [`Source`](Admission::Source) path.
+/// 6. Everything else is an indexed [`Source`](Admission::Source) path.
 ///
+/// [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
 /// [FR-CV-10]: ../../../docs/specs/requirements/FR-CV-10.md
 /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
 /// [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
@@ -479,7 +490,20 @@ fn classify(
     if is_ignored(root, path, ignored_dirs) {
         return Admission::Ignored;
     }
-    // (4) The walk-level admission pre-filter (CR-054 / FR-SY-11): drop a path the
+    // (4) An ignore-file change reaches `sync`, which re-gates the stored files
+    // beneath it (CR-210) — checked before the authority, which would drop a
+    // `.gitignore` that ignores itself. Only where the walk reads it: a dev
+    // worktree's checkout writes ignore files the primary must not sync over.
+    if crate::config::is_ignore_file(relative) {
+        let read_by_walk = match (authority, path.parent()) {
+            (Some(authority), Some(dir)) => authority.walks_into(dir),
+            _ => true,
+        };
+        if read_by_walk {
+            return Admission::Source;
+        }
+    }
+    // (5) The walk-level admission pre-filter (CR-054 / FR-SY-11): drop a path the
     // full walk would exclude but the name-based filters above miss — a gitignored
     // file or a nested-`.git`-boundary path (a dev-session worktree copy, a
     // vendored repo). Guarded on existence: `admits_path` cannot stat a path that
@@ -493,7 +517,7 @@ fn classify(
             return Admission::Ignored;
         }
     }
-    // (5) An indexed source path.
+    // (6) An indexed source path.
     Admission::Source
 }
 
@@ -515,6 +539,16 @@ fn on_debounced(sink: &DebounceSink, result: DebounceEventResult) {
         }
     };
     sink.counters.batches_delivered.fetch_add(1, Ordering::AcqRel);
+
+    // CR-210: drop the cached ignore matchers this batch made stale BEFORE any
+    // path is classified, so a `.gitignore` written alongside the files it
+    // ignores (a build writing `dist/.gitignore` and `dist/app.js` together)
+    // already applies to them.
+    if let Some(authority) = sink.authority.as_ref() {
+        for path in events.iter().flat_map(|event| event.paths.iter()) {
+            authority.invalidate(path);
+        }
+    }
 
     let mut sources_accepted = 0u64;
     let mut artifacts_accepted = 0u64;

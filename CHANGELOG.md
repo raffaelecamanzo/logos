@@ -34,6 +34,23 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   release names the four lists it lacks in `worst_offenders.unrecorded`, and
   Health shows them as "not recorded" until the next `logos scan`.
 
+### Fixed
+
+- **The watcher and incremental sync honour nested `.gitignore` and `.ignore`
+  files (CR-210, S-633).** `logos index` and `scan` always did; the `serve`
+  watcher, git hooks and `logos sync <paths>` read only the root's ignore
+  files. So a file ignored only by a nested `.gitignore` was indexed when it
+  was written while `serve` ran. It then counted in rule findings and metrics
+  until the next full reconcile, and came back on its next write. The
+  incremental path now reads the same ignore files as the walk, with git's
+  precedence: a deeper rule overrides a shallower one, and a `!negation`
+  re-includes. Each directory's ignore files are read once and cached. An edit
+  to one applies to the next watcher batch with no restart, and removes
+  already-indexed files the new rule excludes in that same batch.
+  `logos doctor` now reports a stored file that a nested ignore excludes as
+  admission drift. The global gitignore (`core.excludesFile`) is still not
+  read, on either path.
+
 ## [1.15.2] — 2026-10-09
 
 ### Changed

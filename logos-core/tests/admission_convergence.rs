@@ -14,7 +14,11 @@
 //! - on a tree with a gitignored subdir and a nested worktree, an
 //!   index → incremental `sync`/`scan` loop converges byte-identically to a
 //!   fresh `index` and `verify` reports `ok`
-//!   ([NFR-RA-06](../../docs/specs/requirements/NFR-RA-06.md)).
+//!   ([NFR-RA-06](../../docs/specs/requirements/NFR-RA-06.md));
+//! - a nested `.gitignore` gates the partial path as it gates the walk, and a
+//!   partial sync naming a changed ignore file removes the stored files it now
+//!   excludes, with no full reconcile
+//!   ([CR-210](../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md)).
 //!
 //! Gated on `lang-rust`: integration tests share the crate's feature set and a
 //! `--no-default-features` build excludes the Rust grammar these fixtures need.
@@ -194,6 +198,149 @@ fn partial_sync_of_a_gitignored_or_boundary_path_creates_no_nodes() {
         !has_nodes_for_file(rt, "nested_repo/copy.rs"),
         "a partial sync of a nested-`.git`-boundary path creates no nodes (FR-SY-11)"
     );
+}
+
+// ── CR-210: nested ignore files on the partial path ──────────────────────────
+
+#[test]
+fn partial_sync_of_a_nested_ignored_path_creates_no_nodes() {
+    // The CR-210 leak: `web/e2e/.harness-dist/` ignored only by `web/.gitignore`.
+    // The walk always excluded it; a partial sync (the watcher's spelling) used to
+    // index it. Now the per-path gate rejects it too.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/main.rs", "pub fn main_fn() {}\n");
+    write(root, "web/.gitignore", "e2e/.harness-dist/\n");
+    write(root, "web/e2e/.harness-dist/bundle.rs", "pub fn bundled() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    assert!(!has_nodes_for_file(rt, "web/e2e/.harness-dist/bundle.rs"), "index excludes it");
+
+    write(root, "web/e2e/.harness-dist/bundle.rs", "pub fn bundled_again() {}\n");
+    write(root, "web/app.rs", "pub fn app() {}\n");
+    engine.sync(&[abs(root, "web/e2e/.harness-dist/bundle.rs"), abs(root, "web/app.rs")]);
+
+    assert!(has_nodes_for_file(rt, "web/app.rs"), "the admitted sibling is indexed");
+    assert!(
+        !has_nodes_for_file(rt, "web/e2e/.harness-dist/bundle.rs"),
+        "a partial sync of a nested-ignored path creates no nodes (CR-210)"
+    );
+}
+
+#[test]
+fn partial_sync_of_a_new_nested_rule_removes_the_stored_file_it_excludes() {
+    // CR-210 AC-3: adding a nested rule for an indexed file removes it on the next
+    // incremental batch — the batch that carries the `.gitignore` edit, which is
+    // the only path the watcher sees change — with no reconcile and no restart.
+    // Its inbound edge returns to the ledger, as on every removal path.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write_cross_file_fixture(root);
+    write(root, "src/sibling.rs", "pub fn sibling() {}\n");
+    write(root, "other/util.rs", "pub fn other_util() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed before the rule");
+    assert!(!has_unresolved_target(rt, "run"), "the cross-file call is resolved first");
+
+    // The rule names `util.rs` — the near miss `other/util.rs` is outside `src/`.
+    write(root, "src/.gitignore", "util.rs\n");
+    let result = engine.sync(&[abs(root, "src/.gitignore")]);
+
+    assert!(
+        !has_nodes_for_file(rt, "src/util.rs"),
+        "the stored file a new nested rule excludes leaves the graph on this batch: {result:?}"
+    );
+    assert_eq!(result.files_removed, 1, "exactly the one excluded file is removed: {result:?}");
+    assert!(has_unresolved_target(rt, "run"), "its inbound edge returns to unresolved_refs");
+    assert!(has_nodes_for_file(rt, "src/lib.rs"), "the caller stays indexed");
+    assert!(has_nodes_for_file(rt, "src/sibling.rs"), "an unnamed sibling stays indexed");
+    assert!(has_nodes_for_file(rt, "other/util.rs"), "the rule does not reach outside src/");
+
+    // The re-gate is keyed on the batch naming an ignore file: a root rule that
+    // excludes `other/`, written but not in the batch, reaches nothing yet.
+    write(root, ".gitignore", "other/\n");
+    let unrelated = engine.sync(&[abs(root, "src/sibling.rs")]);
+    assert!(
+        has_nodes_for_file(rt, "other/util.rs"),
+        "a batch naming no ignore file re-gates nothing outside itself: {unrelated:?}"
+    );
+}
+
+#[test]
+fn partial_sync_of_a_deleted_negation_file_removes_the_file_it_re_excluded() {
+    // Deleting an ignore file can NARROW admission too: `a/.ignore`'s `!x.rs`
+    // re-included what the root `.gitignore` excludes, so deleting it excludes
+    // `a/x.rs` again. The batch names only the (now absent) ignore file, and its
+    // directory must still be re-gated.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/main.rs", "pub fn main_fn() {}\n");
+    write(root, ".gitignore", "x.rs\n");
+    write(root, "a/.ignore", "!x.rs\n");
+    write(root, "a/x.rs", "pub fn x_fn() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    assert!(has_nodes_for_file(rt, "a/x.rs"), "the negation re-includes a/x.rs at index");
+
+    fs::remove_file(root.join("a/.ignore")).expect("delete the negation file");
+    let result = engine.sync(&[abs(root, "a/.ignore")]);
+    assert!(
+        !has_nodes_for_file(rt, "a/x.rs"),
+        "deleting the negation excludes a/x.rs on this batch: {result:?}"
+    );
+    assert!(has_nodes_for_file(rt, "src/main.rs"), "the rest stays indexed");
+}
+
+#[test]
+fn the_ignore_file_re_gate_never_purges_an_unnamed_file_gone_from_disk() {
+    // The Partial contract: the re-gate removes only on-disk files the ignore
+    // files now exclude. A stored file deleted from disk but named in no batch
+    // waits for its own event or a reconcile; the re-gate must not purge it.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/lib.rs", "pub fn alpha() {}\n");
+    write(root, "src/util.rs", "pub fn run() {}\n");
+    write(root, "src/gone.rs", "pub fn gone() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+
+    fs::remove_file(root.join("src/gone.rs")).expect("delete, with no sync naming it");
+    write(root, "src/.gitignore", "util.rs\n");
+    let result = engine.sync(&[abs(root, "src/.gitignore")]);
+
+    assert_eq!(result.files_removed, 1, "only the newly ignored file: {result:?}");
+    assert!(!has_nodes_for_file(rt, "src/util.rs"));
+    assert!(has_nodes_for_file(rt, "src/gone.rs"), "an unnamed, un-ignored file is left alone");
+}
+
+#[test]
+fn a_batch_with_a_new_rule_and_the_file_it_excludes_removes_it_once() {
+    // The realistic watcher batch: the rule and a write to the file it excludes
+    // arrive together. The per-path gate removes the file; the re-gate must not
+    // remove it a second time.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/lib.rs", "pub fn alpha() {}\n");
+    write(root, "src/util.rs", "pub fn run() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+
+    write(root, "src/.gitignore", "util.rs\n");
+    let result = engine.sync(&[abs(root, "src/.gitignore"), abs(root, "src/util.rs")]);
+
+    assert!(!has_nodes_for_file(rt, "src/util.rs"));
+    assert_eq!(result.files_removed, 1, "one excluded file, one removal: {result:?}");
 }
 
 // ── FR-RC-06: full-walk reconcile purges a now-gitignored on-disk file ────────
