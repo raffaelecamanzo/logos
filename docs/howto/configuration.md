@@ -544,11 +544,14 @@ Besides `exclude` and `ignored_dirs`, discovery honours your ignore files:
   `.gitignore` (a front-end subproject's `dist/`, a test harness's bundle) was
   indexed when written while `serve` ran, and it counted in rule findings and
   metrics until the next full reconcile.
-- **Edits apply live.** With `serve` running, a change to an ignore file at any
-  depth applies to the next watcher batch, with no restart. If the new rule
-  excludes files that are already indexed under that directory, they leave the
-  graph in that batch. Files written under an ignored directory are never
-  indexed.
+- **Edits apply live.** With `serve` running, a change to a `.gitignore` or
+  `.ignore` at any depth applies to the next watcher batch, with no restart. If
+  the new rule excludes files that are already indexed under that directory,
+  they leave the graph in that batch. Files written under an ignored directory
+  are never indexed. A `.git/info/exclude` edit also applies to the next write,
+  but files it excludes that are already indexed leave the graph only at the
+  next full reconcile (`logos scan` or `logos index`): the watcher never syncs a
+  path inside `.git/`.
 - **Removing a rule** re-admits the files it excluded when each is next written,
   or at the next full reconcile (`logos scan` or `logos index`).
 - **`logos doctor`** reports an indexed file that an ignore file now excludes as
