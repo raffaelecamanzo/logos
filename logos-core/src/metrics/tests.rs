@@ -2946,3 +2946,24 @@ fn acyclicity_counts_members_apart_from_directories() {
         [("a1", "3 symbols across 2 directories: a, b")]
     );
 }
+
+/// Equality lists production functions only ([FR-QM-08]): a test function's
+/// complexity is neither listed nor counted in the mean the list compares
+/// against — with it counted, `f2` (CC 6) would fall below a mean of 13.
+///
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+#[test]
+fn equality_excludes_test_functions_from_the_list_and_the_mean() {
+    let nodes: Vec<NodeRow> = (1..=4)
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/f.rs")))
+        .collect();
+    let functions = [
+        func(1, Some(1), None, None),
+        func(2, Some(6), None, None),
+        func(3, Some(1), None, None),
+        func(4, Some(44), None, None), // a test function
+    ];
+    let test_ids: HashSet<NodeId> = [NodeId(4)].into_iter().collect();
+    let w = offenders_of(&nodes, &[], &functions, &test_ids, super::Thresholds::default(), 10);
+    assert_eq!(rows(&w.equality), [("f2", "complexity 6")]);
+}
