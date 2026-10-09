@@ -302,8 +302,15 @@ impl AdmissionAuthority {
     ///   directory's matchers.
     /// - `<root>/.git/info/exclude` drops the root's.
     /// - A cached directory itself (removed, or replaced by a rename) drops its
-    ///   matchers and those of every directory beneath it, since its ignore files
-    ///   may have changed with no event naming them.
+    ///   matchers, since its ignore files may have changed with no event naming
+    ///   them.
+    ///
+    /// Each case drops the **whole subtree** beneath that directory too. That keeps
+    /// the cache's invariant — a cached directory's ancestors are all cached, since
+    /// every query walks down from the root — which the third case relies on:
+    /// a directory event finds stale descendants only through the directory's own
+    /// key. Dropping just the one key would orphan them, and a directory replaced
+    /// after its ignore file changed would keep a descendant's old matchers.
     ///
     /// Any other path, or one outside the root, is a no-op. `changed` may be
     /// absolute (under the canonicalised root) or root-relative, as for
@@ -313,15 +320,16 @@ impl AdmissionAuthority {
             return;
         };
         let abs = self.root.join(&rel);
-        let mut cache = self.ignores.write().unwrap_or_else(PoisonError::into_inner);
-        if is_ignore_file(&rel) {
-            if let Some(dir) = abs.parent() {
-                cache.remove(dir);
-            }
+        let stale: &Path = if is_ignore_file(&rel) {
+            abs.parent().unwrap_or(&self.root)
         } else if rel == Path::new(".git/info/exclude") {
-            cache.remove(&self.root);
-        } else if cache.contains_key(&abs) {
-            cache.retain(|dir, _| !dir.starts_with(&abs));
+            &self.root
+        } else {
+            &abs
+        };
+        let mut cache = self.ignores.write().unwrap_or_else(PoisonError::into_inner);
+        if cache.contains_key(stale) {
+            cache.retain(|dir, _| !dir.starts_with(stale));
         }
     }
 
@@ -1089,6 +1097,36 @@ mod tests {
         assert!(authority.admits_path(&top), "the root's matchers are cached");
         authority.invalidate(&root.join(".git/info/exclude"));
         assert!(!authority.admits_path(&top), "an info/exclude change drops the root's matchers");
+    }
+
+    #[test]
+    fn a_directory_replaced_after_its_ignore_file_changed_drops_its_descendants() {
+        // Review regression (S-633): an ignore-file change used to drop only its
+        // own directory's key, so a LATER event naming that directory (replaced by
+        // a rename) found no key and left a descendant's stale matchers behind —
+        // rejecting a file the walk admits until the watcher restarted.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("a/b/.gitignore"), "x.rs\n");
+        let file = root.join("a/b/x.rs");
+        write(&file, "fn x() {}\n");
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+        assert!(!authority.admits_path(&file), "a/b/.gitignore excludes it (caches a, a/b)");
+
+        write(&root.join("a/.gitignore"), "# edited\n");
+        authority.invalidate(&root.join("a/.gitignore"));
+
+        // `a/` is replaced wholesale by a tree whose `a/b` has no ignore file; the
+        // OS names only the directories.
+        write(&root.join("staged/b/x.rs"), "fn x() {}\n");
+        fs::remove_dir_all(root.join("a")).unwrap();
+        fs::rename(root.join("staged"), root.join("a")).unwrap();
+        authority.invalidate(&root.join("staged"));
+        authority.invalidate(&root.join("a"));
+
+        assert!(authority.admits_path(&file), "no rule names a/b/x.rs any more");
+        assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
     }
 
     #[test]
