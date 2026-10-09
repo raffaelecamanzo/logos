@@ -322,6 +322,27 @@ fn the_ignore_file_re_gate_never_purges_an_unnamed_file_gone_from_disk() {
     assert!(has_nodes_for_file(rt, "src/gone.rs"), "an unnamed, un-ignored file is left alone");
 }
 
+#[test]
+fn a_batch_with_a_new_rule_and_the_file_it_excludes_removes_it_once() {
+    // The realistic watcher batch: the rule and a write to the file it excludes
+    // arrive together. The per-path gate removes the file; the re-gate must not
+    // remove it a second time.
+    let tmp = TempDir::new().expect("temp root");
+    let root = &tmp.path().canonicalize().expect("canonicalize root");
+    write(root, "src/lib.rs", "pub fn alpha() {}\n");
+    write(root, "src/util.rs", "pub fn run() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+
+    write(root, "src/.gitignore", "util.rs\n");
+    let result = engine.sync(&[abs(root, "src/.gitignore"), abs(root, "src/util.rs")]);
+
+    assert!(!has_nodes_for_file(rt, "src/util.rs"));
+    assert_eq!(result.files_removed, 1, "one excluded file, one removal: {result:?}");
+}
+
 // ── FR-RC-06: full-walk reconcile purges a now-gitignored on-disk file ────────
 
 #[test]
