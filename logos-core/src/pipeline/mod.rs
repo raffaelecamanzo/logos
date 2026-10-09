@@ -3246,8 +3246,6 @@ fn to_forward_slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Resolve an input path (absolute or root-relative) to a project-relative key,
-/// rejecting anything that escapes the root ([NFR-SE-04]).
 /// The stored files beneath a changed `.gitignore`/`.ignore` that the ignore
 /// files now exclude ([CR-210]), sorted for a deterministic removal order
 /// ([NFR-RA-06]). `ignore_dirs` are the changed files' directories
@@ -3295,6 +3293,8 @@ fn is_beneath(rel: &str, dir: &str) -> bool {
     dir.is_empty() || rel.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Resolve an input path (absolute or root-relative) to a project-relative key,
+/// rejecting anything that escapes the root ([NFR-SE-04]).
 fn relativize(canon_root: &Path, path: &Path) -> Option<String> {
     let rel: &Path = if path.is_absolute() {
         path.strip_prefix(canon_root).ok()?
