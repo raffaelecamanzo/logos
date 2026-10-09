@@ -5,7 +5,9 @@
 //! table is assembled by [`compiled`] from cargo-feature-gated rows: the
 //! default build links the Rust grammar (`lang-rust`); further languages append
 //! one gated row each as their grammar crates land, touching no other core
-//! source ([NFR-MA-01]).
+//! source ([NFR-MA-01]). A row is declared with `entry!` and `query!`, which
+//! build the label, relative path and `include_str!` source of each asset from
+//! one language-directory literal and one query name ([CR-211]).
 //!
 //! Storing the grammar as a [`LanguageFn`] (not a `tree_sitter::Language`) is
 //! the mechanism that resolves the duplicate-symbol hazard ([NFR-PC-05],
@@ -14,6 +16,7 @@
 //! `tree_sitter_<lang>` symbol, so linking N grammars never duplicates runtime
 //! symbols.
 //!
+//! [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
 //! [FR-PL-01]: ../../../docs/specs/requirements/FR-PL-01.md
 //! [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 //! [NFR-PC-05]: ../../../docs/specs/requirements/NFR-PC-05.md
@@ -21,6 +24,55 @@
 //! [AR-04]: ../../../docs/specs/architecture.md
 
 use tree_sitter_language::LanguageFn;
+
+/// Declares one [`EmbeddedQuery`] from its language directory and its name.
+///
+/// `query!("rust", "symbols")` is the `queries/symbols.scm` asset of
+/// `plugins/rust/`: the relative path, the `rust/queries/symbols.scm` label and
+/// the `include_str!` source are all built from those two literals with
+/// `concat!`, so the three cannot disagree ([CR-211]).
+///
+/// [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
+// Every use is behind a `lang-*` feature, and `query!` is used only by a grammar
+// that ships `.scm` queries: a build with no such grammar (`--no-default-features`,
+// or only structural ones like `lang-markdown`) has no call site. The macro is
+// still the one declaration of the shape.
+#[allow(unused_macros)]
+macro_rules! query {
+    ($lang:literal, $name:literal) => {
+        EmbeddedQuery {
+            relative_path: concat!("queries/", $name, ".scm"),
+            label: concat!($lang, "/queries/", $name, ".scm"),
+            source: include_str!(concat!("../../plugins/", $lang, "/queries/", $name, ".scm")),
+        }
+    };
+}
+
+/// Declares one [`GrammarEntry`]: the `plugins/<lang>/plugin.toml` descriptor
+/// (label and `include_str!` from the one directory literal), the grammar's
+/// `LanguageFn`, and the `query!` rows named in the optional list — none when
+/// the grammar is structural (documentation / artifact) and ships no `.scm`
+/// ([CR-211]).
+///
+/// [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
+// Every use is behind a `lang-*` feature, and `query!` is used only by a grammar
+// that ships `.scm` queries: a build with no such grammar (`--no-default-features`,
+// or only structural ones like `lang-markdown`) has no call site. The macro is
+// still the one declaration of the shape.
+#[allow(unused_macros)]
+macro_rules! entry {
+    ($lang:literal, $language:expr) => {
+        entry!($lang, $language, [])
+    };
+    ($lang:literal, $language:expr, [$($name:literal),* $(,)?]) => {
+        GrammarEntry {
+            manifest_label: concat!($lang, "/plugin.toml"),
+            manifest_toml: include_str!(concat!("../../plugins/", $lang, "/plugin.toml")),
+            language: $language,
+            embedded_queries: &[$(query!($lang, $name)),*],
+        }
+    };
+}
 
 /// One embedded `.scm` query asset shipped with a grammar.
 #[derive(Debug, Clone, Copy)]
@@ -216,12 +268,7 @@ pub fn code_language_names() -> &'static std::collections::BTreeSet<String> {
 /// [CR-010]: ../../../docs/requests/CR-010-config-artifact-graph-layer.md
 #[cfg(feature = "lang-yaml")]
 fn yaml_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "yaml/plugin.toml",
-        manifest_toml: include_str!("../../plugins/yaml/plugin.toml"),
-        language: tree_sitter_yaml::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("yaml", tree_sitter_yaml::LANGUAGE)
 }
 
 /// The Dockerfile *artifact* grammar entry (S-064, [CR-010], [ADR-25]).
@@ -234,12 +281,7 @@ fn yaml_entry() -> GrammarEntry {
 /// [NFR-PC-05] duplicate-symbol hazard).
 #[cfg(feature = "lang-dockerfile")]
 fn dockerfile_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "dockerfile/plugin.toml",
-        manifest_toml: include_str!("../../plugins/dockerfile/plugin.toml"),
-        language: arborium_dockerfile::language(),
-        embedded_queries: &[],
-    }
+    entry!("dockerfile", arborium_dockerfile::language())
 }
 
 /// The JSON data-format artifact grammar entry (S-063, [CR-010]).
@@ -250,12 +292,7 @@ fn dockerfile_entry() -> GrammarEntry {
 /// [CR-010]: ../../../docs/requests/CR-010-config-artifact-graph-layer.md
 #[cfg(feature = "lang-json")]
 fn json_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "json/plugin.toml",
-        manifest_toml: include_str!("../../plugins/json/plugin.toml"),
-        language: tree_sitter_json::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("json", tree_sitter_json::LANGUAGE)
 }
 
 /// The Makefile *artifact* grammar entry (S-064, [CR-010], [ADR-25]).
@@ -265,12 +302,7 @@ fn json_entry() -> GrammarEntry {
 /// highest-risk grammar; its preflight passed at ABI 14.
 #[cfg(feature = "lang-make")]
 fn makefile_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "makefile/plugin.toml",
-        manifest_toml: include_str!("../../plugins/makefile/plugin.toml"),
-        language: tree_sitter_make::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("makefile", tree_sitter_make::LANGUAGE)
 }
 
 /// The TOML data-format artifact grammar entry (S-063, [CR-010]).
@@ -283,12 +315,7 @@ fn makefile_entry() -> GrammarEntry {
 /// [CR-010]: ../../../docs/requests/CR-010-config-artifact-graph-layer.md
 #[cfg(feature = "lang-toml")]
 fn toml_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "toml/plugin.toml",
-        manifest_toml: include_str!("../../plugins/toml/plugin.toml"),
-        language: tree_sitter_toml_ng::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("toml", tree_sitter_toml_ng::LANGUAGE)
 }
 
 /// The Shell *artifact* grammar entry (S-064, [CR-010], [ADR-25]).
@@ -299,81 +326,42 @@ fn toml_entry() -> GrammarEntry {
 /// so a shell-heavy repo moves no metric. Grammar: `tree-sitter-bash`.
 #[cfg(feature = "lang-shell")]
 fn shell_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "shell/plugin.toml",
-        manifest_toml: include_str!("../../plugins/shell/plugin.toml"),
-        language: tree_sitter_bash::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("shell", tree_sitter_bash::LANGUAGE)
 }
 
 /// The Python grammar entry ([FR-PL-01], S-015).
 #[cfg(feature = "lang-python")]
 fn python_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "python/plugin.toml",
-        manifest_toml: include_str!("../../plugins/python/plugin.toml"),
-        language: tree_sitter_python::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "python/queries/symbols.scm",
-                source: include_str!("../../plugins/python/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "python/queries/references.scm",
-                source: include_str!("../../plugins/python/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "python/queries/frameworks.scm",
-                source: include_str!("../../plugins/python/queries/frameworks.scm"),
-            },
+    entry!(
+        "python",
+        tree_sitter_python::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound HTTP client-call arm (S-344, [FR-WS-08], [CR-108]):
             // `requests`/`httpx` free functions and the session/client
             // receiver form.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "python/queries/invocations.scm",
-                source: include_str!("../../plugins/python/queries/invocations.scm"),
-            },
-        ],
-    }
+            "invocations",
+        ]
+    )
 }
 
 /// The TypeScript grammar entry (`.ts`/`.js`, [FR-PL-01], S-015).
 #[cfg(feature = "lang-typescript")]
 fn typescript_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "typescript/plugin.toml",
-        manifest_toml: include_str!("../../plugins/typescript/plugin.toml"),
-        language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "typescript/queries/symbols.scm",
-                source: include_str!("../../plugins/typescript/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "typescript/queries/references.scm",
-                source: include_str!("../../plugins/typescript/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "typescript/queries/frameworks.scm",
-                source: include_str!("../../plugins/typescript/queries/frameworks.scm"),
-            },
+    entry!(
+        "typescript",
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound HTTP client-call arm (S-343, [FR-WS-08]): the
             // consumer side that makes this language's routes bindable.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "typescript/queries/invocations.scm",
-                source: include_str!("../../plugins/typescript/queries/invocations.scm"),
-            },
-        ],
-    }
+            "invocations",
+        ]
+    )
 }
 
 /// The TSX grammar entry (`.tsx`/`.jsx`, [FR-PL-01], S-015). Shares the
@@ -381,131 +369,68 @@ fn typescript_entry() -> GrammarEntry {
 /// distinct TSX `Language` and ships its own queries (JSX node kinds).
 #[cfg(feature = "lang-typescript")]
 fn tsx_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "tsx/plugin.toml",
-        manifest_toml: include_str!("../../plugins/tsx/plugin.toml"),
-        language: tree_sitter_typescript::LANGUAGE_TSX,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "tsx/queries/symbols.scm",
-                source: include_str!("../../plugins/tsx/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "tsx/queries/references.scm",
-                source: include_str!("../../plugins/tsx/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "tsx/queries/frameworks.scm",
-                source: include_str!("../../plugins/tsx/queries/frameworks.scm"),
-            },
+    entry!(
+        "tsx",
+        tree_sitter_typescript::LANGUAGE_TSX,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound HTTP client-call arm (S-343, [FR-WS-08]): the
             // consumer side that makes this language's routes bindable.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "tsx/queries/invocations.scm",
-                source: include_str!("../../plugins/tsx/queries/invocations.scm"),
-            },
-        ],
-    }
+            "invocations",
+        ]
+    )
 }
 
 /// The Go grammar entry ([FR-PL-01], S-015).
 #[cfg(feature = "lang-go")]
 fn go_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "go/plugin.toml",
-        manifest_toml: include_str!("../../plugins/go/plugin.toml"),
-        language: tree_sitter_go::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "go/queries/symbols.scm",
-                source: include_str!("../../plugins/go/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "go/queries/references.scm",
-                source: include_str!("../../plugins/go/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "go/queries/frameworks.scm",
-                source: include_str!("../../plugins/go/queries/frameworks.scm"),
-            },
+    entry!(
+        "go",
+        tree_sitter_go::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound `net/http` client-call arm (S-345, [FR-WS-08],
             // [CR-108]): the consumer side of the route key `frameworks`
             // promotes on the provider side.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "go/queries/invocations.scm",
-                source: include_str!("../../plugins/go/queries/invocations.scm"),
-            },
+            "invocations",
             // The receiver-gated Kafka Streams topology form (S-408,
             // [CR-131] §3.2 A1). Go's whole broker arm — deliberately not the
             // Rust file's bare-verb patterns. Its CAPTURE half is fixture-pinned;
             // its OVER-capture half is measured, at 0 broker rows over the
             // reference estate's 262 real `.go` files. The query header says why
             // the two halves must not be reported as one number.
-            EmbeddedQuery {
-                relative_path: "queries/brokers.scm",
-                label: "go/queries/brokers.scm",
-                source: include_str!("../../plugins/go/queries/brokers.scm"),
-            },
-        ],
-    }
+            "brokers",
+        ]
+    )
 }
 
 /// The Java grammar entry ([FR-PL-01], S-015).
 #[cfg(feature = "lang-java")]
 fn java_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "java/plugin.toml",
-        manifest_toml: include_str!("../../plugins/java/plugin.toml"),
-        language: tree_sitter_java::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "java/queries/symbols.scm",
-                source: include_str!("../../plugins/java/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "java/queries/references.scm",
-                source: include_str!("../../plugins/java/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "java/queries/frameworks.scm",
-                source: include_str!("../../plugins/java/queries/frameworks.scm"),
-            },
+    entry!(
+        "java",
+        tree_sitter_java::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound HTTP client-call arm (S-341, [CR-108], [FR-WS-08]):
             // RestClient/WebClient fluent chains, the `java.net.http.HttpClient`
             // builder, and the plain receiver-method idiom.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "java/queries/invocations.scm",
-                source: include_str!("../../plugins/java/queries/invocations.scm"),
-            },
+            "invocations",
             // The message-broker publish/subscribe invocation arm (S-254,
             // [FR-WS-10]): a per-language `.scm` is the entire capture surface.
-            EmbeddedQuery {
-                relative_path: "queries/brokers.scm",
-                label: "java/queries/brokers.scm",
-                source: include_str!("../../plugins/java/queries/brokers.scm"),
-            },
+            "brokers",
             // The configuration-binding arm (S-381, [CR-121], [FR-WS-19]): the
             // `@ConfigurationProperties` class, its key prefix and the
             // properties it declares.
-            EmbeddedQuery {
-                relative_path: "queries/properties.scm",
-                label: "java/queries/properties.scm",
-                source: include_str!("../../plugins/java/queries/properties.scm"),
-            },
-        ],
-    }
+            "properties",
+        ]
+    )
 }
 
 /// The C grammar entry (S-056, [CR-009], the honesty fixture).
@@ -520,23 +445,7 @@ fn java_entry() -> GrammarEntry {
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 #[cfg(feature = "lang-c")]
 fn c_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "c/plugin.toml",
-        manifest_toml: include_str!("../../plugins/c/plugin.toml"),
-        language: tree_sitter_c::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "c/queries/symbols.scm",
-                source: include_str!("../../plugins/c/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "c/queries/references.scm",
-                source: include_str!("../../plugins/c/queries/references.scm"),
-            },
-        ],
-    }
+    entry!("c", tree_sitter_c::LANGUAGE, ["symbols", "references",])
 }
 
 /// The Kotlin grammar entry (S-055, [CR-009]).
@@ -552,31 +461,14 @@ fn c_entry() -> GrammarEntry {
 /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
 #[cfg(feature = "lang-kotlin")]
 fn kotlin_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "kotlin/plugin.toml",
-        manifest_toml: include_str!("../../plugins/kotlin/plugin.toml"),
-        language: tree_sitter_kotlin_ng::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "kotlin/queries/symbols.scm",
-                source: include_str!("../../plugins/kotlin/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "kotlin/queries/references.scm",
-                source: include_str!("../../plugins/kotlin/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "kotlin/queries/frameworks.scm",
-                source: include_str!("../../plugins/kotlin/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "kotlin/queries/invocations.scm",
-                source: include_str!("../../plugins/kotlin/queries/invocations.scm"),
-            },
+    entry!(
+        "kotlin",
+        tree_sitter_kotlin_ng::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
+            "invocations",
             // The configuration-binding arm (S-381, [CR-121], [FR-WS-19]) — the
             // second language on the binding substrate. THIS ROW is the whole of
             // what it cost `logos-core`: an asset registration, no interpreter,
@@ -588,13 +480,9 @@ fn kotlin_entry() -> GrammarEntry {
             // once already (S-364, over CR-108's AC7): the Measurable Target
             // concedes a grammar-registry binding and never claimed zero-touch
             // for registering a query against an existing grammar entry.
-            EmbeddedQuery {
-                relative_path: "queries/properties.scm",
-                label: "kotlin/queries/properties.scm",
-                source: include_str!("../../plugins/kotlin/queries/properties.scm"),
-            },
-        ],
-    }
+            "properties",
+        ]
+    )
 }
 
 /// The C# grammar entry (S-057, [CR-009]).
@@ -607,36 +495,19 @@ fn kotlin_entry() -> GrammarEntry {
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
 #[cfg(feature = "lang-c-sharp")]
 fn c_sharp_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "c-sharp/plugin.toml",
-        manifest_toml: include_str!("../../plugins/c-sharp/plugin.toml"),
-        language: tree_sitter_c_sharp::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "c-sharp/queries/symbols.scm",
-                source: include_str!("../../plugins/c-sharp/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "c-sharp/queries/references.scm",
-                source: include_str!("../../plugins/c-sharp/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "c-sharp/queries/frameworks.scm",
-                source: include_str!("../../plugins/c-sharp/queries/frameworks.scm"),
-            },
+    entry!(
+        "c-sharp",
+        tree_sitter_c_sharp::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound `HttpClient` client-call arm (S-346, [FR-WS-08],
             // [CR-108]): the consumer side of the route key `frameworks`
             // promotes on the provider side.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "c-sharp/queries/invocations.scm",
-                source: include_str!("../../plugins/c-sharp/queries/invocations.scm"),
-            },
-        ],
-    }
+            "invocations",
+        ]
+    )
 }
 
 /// The C++ grammar entry (S-058, [CR-009]).
@@ -654,58 +525,25 @@ fn c_sharp_entry() -> GrammarEntry {
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[cfg(feature = "lang-cpp")]
 fn cpp_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "cpp/plugin.toml",
-        manifest_toml: include_str!("../../plugins/cpp/plugin.toml"),
-        language: tree_sitter_cpp::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "cpp/queries/symbols.scm",
-                source: include_str!("../../plugins/cpp/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "cpp/queries/references.scm",
-                source: include_str!("../../plugins/cpp/queries/references.scm"),
-            },
-        ],
-    }
+    entry!("cpp", tree_sitter_cpp::LANGUAGE, ["symbols", "references",])
 }
 
 /// The Ruby grammar entry (S-059, [CR-009], [FR-PL-07]).
 #[cfg(feature = "lang-ruby")]
 fn ruby_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "ruby/plugin.toml",
-        manifest_toml: include_str!("../../plugins/ruby/plugin.toml"),
-        language: tree_sitter_ruby::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "ruby/queries/symbols.scm",
-                source: include_str!("../../plugins/ruby/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "ruby/queries/references.scm",
-                source: include_str!("../../plugins/ruby/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "ruby/queries/frameworks.scm",
-                source: include_str!("../../plugins/ruby/queries/frameworks.scm"),
-            },
+    entry!(
+        "ruby",
+        tree_sitter_ruby::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
             // The outbound Net::HTTP / Faraday client-call arm (S-347,
             // [FR-WS-08], [CR-108]): the consumer side of the route key
             // `frameworks` promotes on the provider side.
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "ruby/queries/invocations.scm",
-                source: include_str!("../../plugins/ruby/queries/invocations.scm"),
-            },
-        ],
-    }
+            "invocations",
+        ]
+    )
 }
 
 /// The PHP grammar entry (S-060, [CR-009], [FR-PL-01]).
@@ -721,33 +559,11 @@ fn ruby_entry() -> GrammarEntry {
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
 #[cfg(feature = "lang-php")]
 fn php_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "php/plugin.toml",
-        manifest_toml: include_str!("../../plugins/php/plugin.toml"),
-        language: tree_sitter_php::LANGUAGE_PHP,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "php/queries/symbols.scm",
-                source: include_str!("../../plugins/php/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "php/queries/references.scm",
-                source: include_str!("../../plugins/php/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "php/queries/frameworks.scm",
-                source: include_str!("../../plugins/php/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "php/queries/invocations.scm",
-                source: include_str!("../../plugins/php/queries/invocations.scm"),
-            },
-        ],
-    }
+    entry!(
+        "php",
+        tree_sitter_php::LANGUAGE_PHP,
+        ["symbols", "references", "frameworks", "invocations",]
+    )
 }
 
 /// The Scala grammar entry (S-061, [CR-009], [FR-PL-07]).
@@ -762,23 +578,11 @@ fn php_entry() -> GrammarEntry {
 /// dominant-framework detector in this increment — an honest absence).
 #[cfg(feature = "lang-scala")]
 fn scala_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "scala/plugin.toml",
-        manifest_toml: include_str!("../../plugins/scala/plugin.toml"),
-        language: tree_sitter_scala::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "scala/queries/symbols.scm",
-                source: include_str!("../../plugins/scala/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "scala/queries/references.scm",
-                source: include_str!("../../plugins/scala/queries/references.scm"),
-            },
-        ],
-    }
+    entry!(
+        "scala",
+        tree_sitter_scala::LANGUAGE,
+        ["symbols", "references",]
+    )
 }
 
 /// The markdown documentation grammar entry (S-033, [CR-003], [ADR-19]).
@@ -794,12 +598,7 @@ fn scala_entry() -> GrammarEntry {
 /// [ADR-19]: ../../../docs/specs/architecture/decisions/ADR-19.md
 #[cfg(feature = "lang-markdown")]
 fn markdown_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "markdown/plugin.toml",
-        manifest_toml: include_str!("../../plugins/markdown/plugin.toml"),
-        language: tree_sitter_md::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("markdown", tree_sitter_md::LANGUAGE)
 }
 
 /// The Protobuf schema grammar entry (S-065, [CR-010], [ADR-25]).
@@ -818,12 +617,7 @@ fn markdown_entry() -> GrammarEntry {
 /// [ADR-25]: ../../../docs/specs/architecture/decisions/ADR-25.md
 #[cfg(feature = "lang-protobuf")]
 fn protobuf_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "protobuf/plugin.toml",
-        manifest_toml: include_str!("../../plugins/protobuf/plugin.toml"),
-        language: tree_sitter_proto::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("protobuf", tree_sitter_proto::LANGUAGE)
 }
 
 /// The Terraform/HCL artifact grammar entry (S-066, [CR-010], [ADR-25]).
@@ -837,12 +631,7 @@ fn protobuf_entry() -> GrammarEntry {
 /// [ADR-25]: ../../../docs/specs/architecture/decisions/ADR-25.md
 #[cfg(feature = "lang-terraform")]
 fn terraform_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "terraform/plugin.toml",
-        manifest_toml: include_str!("../../plugins/terraform/plugin.toml"),
-        language: tree_sitter_hcl::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("terraform", tree_sitter_hcl::LANGUAGE)
 }
 
 /// The GraphQL schema grammar entry (S-065, [CR-010], [ADR-25]).
@@ -861,12 +650,7 @@ fn terraform_entry() -> GrammarEntry {
 /// [FR-CG-06]: ../../../docs/specs/requirements/FR-CG-06.md
 #[cfg(feature = "lang-graphql")]
 fn graphql_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "graphql/plugin.toml",
-        manifest_toml: include_str!("../../plugins/graphql/plugin.toml"),
-        language: tree_sitter_graphql::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("graphql", tree_sitter_graphql::LANGUAGE)
 }
 
 /// The SQL artifact grammar entry (S-066, [CR-010], [ADR-25]), flagged
@@ -884,52 +668,552 @@ fn graphql_entry() -> GrammarEntry {
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[cfg(feature = "lang-sql")]
 fn sql_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "sql/plugin.toml",
-        manifest_toml: include_str!("../../plugins/sql/plugin.toml"),
-        language: tree_sitter_sequel::LANGUAGE,
-        embedded_queries: &[],
-    }
+    entry!("sql", tree_sitter_sequel::LANGUAGE)
 }
 
 /// The Rust grammar entry ([FR-PL-01]).
 #[cfg(feature = "lang-rust")]
 fn rust_entry() -> GrammarEntry {
-    GrammarEntry {
-        manifest_label: "rust/plugin.toml",
-        manifest_toml: include_str!("../../plugins/rust/plugin.toml"),
-        language: tree_sitter_rust::LANGUAGE,
-        embedded_queries: &[
-            EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: "rust/queries/symbols.scm",
-                source: include_str!("../../plugins/rust/queries/symbols.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/references.scm",
-                label: "rust/queries/references.scm",
-                source: include_str!("../../plugins/rust/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/frameworks.scm",
-                label: "rust/queries/frameworks.scm",
-                source: include_str!("../../plugins/rust/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/invocations.scm",
-                label: "rust/queries/invocations.scm",
-                source: include_str!("../../plugins/rust/queries/invocations.scm"),
-            },
+    entry!(
+        "rust",
+        tree_sitter_rust::LANGUAGE,
+        [
+            "symbols",
+            "references",
+            "frameworks",
+            "invocations",
             // The message-broker publish/subscribe invocation arm (S-291,
             // [FR-WS-10]): a per-language `.scm` is the entire capture surface.
             // Rust ships it alongside `reachability = true`, closing the
             // capability-matrix gap ([CR-081], [FR-WS-12] AC1).
-            EmbeddedQuery {
-                relative_path: "queries/brokers.scm",
-                label: "rust/queries/brokers.scm",
-                source: include_str!("../../plugins/rust/queries/brokers.scm"),
-            },
-        ],
-    }
+            "brokers",
+        ]
+    )
 }
 
+#[cfg(test)]
+mod tests {
+    //! Pins [`compiled`] to its byte content, so the macros that declare the
+    //! table ([CR-211]) cannot change a label, a path, an asset or the order.
+    //!
+    //! [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
+
+    use super::*;
+
+    /// One expected row: the manifest and every query as `(path, label, byte
+    /// length, FNV-1a 64 of the source)`. The hash is FNV-1a (specified, unlike
+    /// `DefaultHasher`), so the pin does not drift with the toolchain.
+    struct Row {
+        /// Whether this row's `lang-*` feature is compiled into this build.
+        feature: bool,
+        manifest: (&'static str, usize, u64),
+        queries: &'static [(&'static str, &'static str, usize, u64)],
+    }
+
+    fn fnv1a(text: &str) -> u64 {
+        text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// The first code grammars (query-carrying rows) of `compiled()`, in
+    /// declaration order, for the full `lang-all` roster; rows whose feature is
+    /// off are filtered out by the test. The table is split over this and the two
+    /// functions below only to keep each under the `max_fn_lines` architecture
+    /// rule.
+    fn expected_code_first() -> Vec<Row> {
+        vec![
+            Row {
+                feature: cfg!(feature = "lang-rust"),
+                manifest: ("rust/plugin.toml", 10743, 0x75c6271b31b59fa9),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "rust/queries/symbols.scm",
+                        8134,
+                        0x536601068697c442,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "rust/queries/references.scm",
+                        11761,
+                        0x004f860f6b1f54c6,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "rust/queries/frameworks.scm",
+                        2487,
+                        0x64cc81a77baa5ad7,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "rust/queries/invocations.scm",
+                        19344,
+                        0xaa78a87e61aece2c,
+                    ),
+                    (
+                        "queries/brokers.scm",
+                        "rust/queries/brokers.scm",
+                        12999,
+                        0x591536b77328dd73,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-python"),
+                manifest: ("python/plugin.toml", 6154, 0xf8811a0062e2a0bf),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "python/queries/symbols.scm",
+                        5781,
+                        0x43bbfe75770584d0,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "python/queries/references.scm",
+                        6514,
+                        0x88711c3203ae5098,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "python/queries/frameworks.scm",
+                        8705,
+                        0x0861e98411a247b2,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "python/queries/invocations.scm",
+                        8235,
+                        0x520b44ad31174e4a,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-typescript"),
+                manifest: ("typescript/plugin.toml", 6033, 0x2b0a8f05d13aebce),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "typescript/queries/symbols.scm",
+                        4334,
+                        0xe0100e6b86947a44,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "typescript/queries/references.scm",
+                        5135,
+                        0x2dfd30409cdb5eec,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "typescript/queries/frameworks.scm",
+                        3419,
+                        0xd3840e469f367696,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "typescript/queries/invocations.scm",
+                        7405,
+                        0x089e8311da95e6b0,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-typescript"),
+                manifest: ("tsx/plugin.toml", 4970, 0x44b952aed393d0d5),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "tsx/queries/symbols.scm",
+                        4313,
+                        0x59c4a5774eb77072,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "tsx/queries/references.scm",
+                        5385,
+                        0xd84a3a8a6bfc5a2b,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "tsx/queries/frameworks.scm",
+                        3405,
+                        0xd136b44c359a0530,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "tsx/queries/invocations.scm",
+                        7399,
+                        0x0b82a0e876891fea,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-go"),
+                manifest: ("go/plugin.toml", 5634, 0x897e062307e504df),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "go/queries/symbols.scm",
+                        4012,
+                        0x8959f36cfa3f5540,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "go/queries/references.scm",
+                        3906,
+                        0xb0603177705c1d2c,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "go/queries/frameworks.scm",
+                        1644,
+                        0xd070e52fb3c6a054,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "go/queries/invocations.scm",
+                        15021,
+                        0xe9a6a9e4760fdbd9,
+                    ),
+                    (
+                        "queries/brokers.scm",
+                        "go/queries/brokers.scm",
+                        8256,
+                        0x9e2060e44083c47d,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-java"),
+                manifest: ("java/plugin.toml", 10265, 0x2a081daa4fe2642b),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "java/queries/symbols.scm",
+                        3061,
+                        0xd2e3af6f3ca3f830,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "java/queries/references.scm",
+                        11390,
+                        0x5cc2f49c507f30ea,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "java/queries/frameworks.scm",
+                        21430,
+                        0x3a9ed21dfa313290,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "java/queries/invocations.scm",
+                        32074,
+                        0xa88f45b35591f683,
+                    ),
+                    (
+                        "queries/brokers.scm",
+                        "java/queries/brokers.scm",
+                        28966,
+                        0x1bcd6bbebe2d9d53,
+                    ),
+                    (
+                        "queries/properties.scm",
+                        "java/queries/properties.scm",
+                        9419,
+                        0x211576acec806b2b,
+                    ),
+                ],
+            },
+        ]
+    }
+
+    /// The remaining code grammars (query-carrying rows), after
+    /// [`expected_code_first`].
+    fn expected_code_rest() -> Vec<Row> {
+        vec![
+            Row {
+                feature: cfg!(feature = "lang-c"),
+                manifest: ("c/plugin.toml", 3486, 0xe08a7b0e8cf9b3ae),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "c/queries/symbols.scm",
+                        4322,
+                        0xf2b7e98cb849a9d6,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "c/queries/references.scm",
+                        1147,
+                        0x759a30fe84202ef7,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-kotlin"),
+                manifest: ("kotlin/plugin.toml", 11780, 0x2344974eda8b1145),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "kotlin/queries/symbols.scm",
+                        5445,
+                        0x3f656076b5781204,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "kotlin/queries/references.scm",
+                        8082,
+                        0xa68ef19461008f1c,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "kotlin/queries/frameworks.scm",
+                        18666,
+                        0x186405a809ad43cc,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "kotlin/queries/invocations.scm",
+                        23346,
+                        0x415d94584879ff9e,
+                    ),
+                    (
+                        "queries/properties.scm",
+                        "kotlin/queries/properties.scm",
+                        6183,
+                        0x6efef4607b409eca,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-c-sharp"),
+                manifest: ("c-sharp/plugin.toml", 9500, 0x045c0a95b989be36),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "c-sharp/queries/symbols.scm",
+                        3269,
+                        0x60af034d61675963,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "c-sharp/queries/references.scm",
+                        7569,
+                        0x316d9e9cb22e1c3a,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "c-sharp/queries/frameworks.scm",
+                        1378,
+                        0x8f43797db8e09a4b,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "c-sharp/queries/invocations.scm",
+                        10265,
+                        0xb463d6744cac16ec,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-cpp"),
+                manifest: ("cpp/plugin.toml", 4274, 0xb979cfc3e48b2c87),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "cpp/queries/symbols.scm",
+                        7136,
+                        0x4307e3e695c06048,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "cpp/queries/references.scm",
+                        4566,
+                        0xc16992938c69add3,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-ruby"),
+                manifest: ("ruby/plugin.toml", 5404, 0x0e2423b98884f23b),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "ruby/queries/symbols.scm",
+                        2885,
+                        0x2adb5e37cd35671b,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "ruby/queries/references.scm",
+                        7465,
+                        0x661ea66aedb840cf,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "ruby/queries/frameworks.scm",
+                        1865,
+                        0x714c857c769f6c11,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "ruby/queries/invocations.scm",
+                        9149,
+                        0x82f0520da4ac95a7,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-php"),
+                manifest: ("php/plugin.toml", 6446, 0x4cbd56222bb1566e),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "php/queries/symbols.scm",
+                        3417,
+                        0x42d85e53eae99587,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "php/queries/references.scm",
+                        7103,
+                        0x6a6b43107a598435,
+                    ),
+                    (
+                        "queries/frameworks.scm",
+                        "php/queries/frameworks.scm",
+                        1790,
+                        0xaaa6fec47a6f5a1b,
+                    ),
+                    (
+                        "queries/invocations.scm",
+                        "php/queries/invocations.scm",
+                        9935,
+                        0x4f4c4c87873fe722,
+                    ),
+                ],
+            },
+            Row {
+                feature: cfg!(feature = "lang-scala"),
+                manifest: ("scala/plugin.toml", 5658, 0xf443858e00b869e4),
+                queries: &[
+                    (
+                        "queries/symbols.scm",
+                        "scala/queries/symbols.scm",
+                        4437,
+                        0x61b8318965c105dd,
+                    ),
+                    (
+                        "queries/references.scm",
+                        "scala/queries/references.scm",
+                        5441,
+                        0x464eaf86327ec71b,
+                    ),
+                ],
+            },
+        ]
+    }
+
+    /// The documentation, data-format, build-format, schema and infra grammars
+    /// (no queries) of `compiled()`, in declaration order, after the code rows.
+    fn expected_structural() -> Vec<Row> {
+        vec![
+            Row {
+                feature: cfg!(feature = "lang-markdown"),
+                manifest: ("markdown/plugin.toml", 2636, 0x221a1f670cc6402d),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-yaml"),
+                manifest: ("yaml/plugin.toml", 2686, 0xf4e095550ebb3643),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-json"),
+                manifest: ("json/plugin.toml", 1826, 0x87b608286a0bfe75),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-toml"),
+                manifest: ("toml/plugin.toml", 2005, 0x618e5b616b9a375f),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-dockerfile"),
+                manifest: ("dockerfile/plugin.toml", 2386, 0xc13030747a92973d),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-make"),
+                manifest: ("makefile/plugin.toml", 1808, 0x90de25c0cc1b9c48),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-shell"),
+                manifest: ("shell/plugin.toml", 1699, 0xa113b9773bdb2cc9),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-protobuf"),
+                manifest: ("protobuf/plugin.toml", 2674, 0x19b9d9b4f458e557),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-graphql"),
+                manifest: ("graphql/plugin.toml", 2838, 0x669d1b39dd8c99f4),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-terraform"),
+                manifest: ("terraform/plugin.toml", 2689, 0x92267414d9f19962),
+                queries: &[],
+            },
+            Row {
+                feature: cfg!(feature = "lang-sql"),
+                manifest: ("sql/plugin.toml", 2216, 0x1e818770e6d819cb),
+                queries: &[],
+            },
+        ]
+    }
+
+    /// Every grammar row in `compiled()` declaration order.
+    fn expected() -> Vec<Row> {
+        let mut rows = expected_code_first();
+        rows.extend(expected_code_rest());
+        rows.extend(expected_structural());
+        rows
+    }
+
+    #[test]
+    fn compiled_entries_are_byte_identical_to_the_pinned_table() {
+        let want: Vec<Row> = expected().into_iter().filter(|row| row.feature).collect();
+        let got = compiled();
+        assert_eq!(
+            got.iter().map(|e| e.manifest_label).collect::<Vec<_>>(),
+            want.iter().map(|r| r.manifest.0).collect::<Vec<_>>(),
+            "entry labels or order drifted"
+        );
+        for (entry, row) in got.iter().zip(&want) {
+            let (label, len, hash) = row.manifest;
+            assert_eq!(entry.manifest_toml.len(), len, "{label}: manifest length");
+            assert_eq!(fnv1a(entry.manifest_toml), hash, "{label}: manifest bytes");
+            assert_eq!(
+                entry
+                    .embedded_queries
+                    .iter()
+                    .map(|q| (q.relative_path, q.label))
+                    .collect::<Vec<_>>(),
+                row.queries.iter().map(|q| (q.0, q.1)).collect::<Vec<_>>(),
+                "{label}: query paths, labels or order drifted"
+            );
+            for (query, &(_, qlabel, qlen, qhash)) in entry.embedded_queries.iter().zip(row.queries)
+            {
+                assert_eq!(query.source.len(), qlen, "{qlabel}: source length");
+                assert_eq!(fnv1a(query.source), qhash, "{qlabel}: source bytes");
+            }
+        }
+    }
+}
