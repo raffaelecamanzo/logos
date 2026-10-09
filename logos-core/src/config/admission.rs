@@ -16,10 +16,13 @@
 //! # Parity with the walk
 //! Built from the **same [`Config`]** the walk uses, with the same matcher flags
 //! ([`discover`](super::discovery)): gitignore honoured even outside a git repo,
-//! no global gitignore, and no ignore files read above the root. For any tree,
-//! [`AdmissionAuthority::admits_path`] returns the walk's per-file verdict
-//! exactly (proven by the parity unit tests, including a generated
-//! nested-ignore property test).
+//! no global gitignore, and no ignore files read above the root. On the project
+//! tree itself, nested ignore files included, [`AdmissionAuthority::admits_path`]
+//! returns the walk's per-file verdict exactly (proven by the parity unit tests,
+//! including a generated nested-ignore property test). The one exception is a
+//! documentation file reached through a sanctioned directory-symlink: the
+//! carve-out below skips the ignore files for it, while the walk's sub-walk
+//! honours any ignore files inside the symlink's target tree.
 //!
 //! # Nested ignore files ([CR-210])
 //! Every `.gitignore` and `.ignore` from the root down to a path's parent
