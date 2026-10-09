@@ -322,7 +322,7 @@ pub fn compute(
     // Production scope (FR-QM-08): the metric graph drops is_test vertices and
     // their incident edges (Modularity/Acyclicity/Depth see only production),
     // exactly as it already drops derived Layer/Boundary policy vertices.
-    let (graph, dirs) = metric_graph(view, nodes, test_ids);
+    let MetricGraph { graph, dirs, .. } = metric_graph(view, nodes, test_ids);
 
     // Equality and Redundancy count production functions only — test rows are
     // excluded from both numerators and denominators (FR-QM-08, BR-18). The
@@ -505,6 +505,7 @@ pub fn snapshot(
         thresholds,
     );
     let offenders = worst_offenders(
+        view,
         &inputs.nodes,
         &inputs.edges,
         &inputs.functions,
@@ -678,23 +679,29 @@ pub fn god_containers(
     ContainerIndex::build(nodes, edges, functions, test_ids).god_containers(&thresholds)
 }
 
-/// The per-dimension worst-offender lists for the five CR-005 structural
-/// dimensions ([FR-QM-09]..[FR-QM-13]) — pure, no I/O (CR-005 §3.2 review-phase
-/// visibility).
+/// The per-dimension worst-offender lists for nine dimensions — the five CR-005
+/// structural dimensions ([FR-QM-09]..[FR-QM-13], CR-005 §3.2 review-phase
+/// visibility) and Acyclicity, Depth, Equality and Redundancy ([CR-209]) — pure,
+/// no I/O.
 ///
 /// Each list is **production-scoped** (test functions/containers excluded, so it
 /// agrees with the dimension it explains, [FR-QM-08]), ordered by offending
-/// severity then node id, and capped at `cap` ([NFR-RA-06] determinism, bounded
-/// output). The lists are report detail only — they never enter the aggregate or
-/// the gate (exactly as `doc_gaps` is advisory). `functions` carries
-/// the per-function facts; `nodes` supplies the name/file/line each offender
-/// reports (the metric rows omit them).
+/// severity then a stable tie-break, and capped at `cap` ([NFR-RA-06]
+/// determinism, bounded output). The lists are report detail only — they never
+/// enter the aggregate or the gate (exactly as `doc_gaps` is advisory).
+/// `functions` carries the per-function facts; `nodes` supplies the
+/// name/file/line each offender reports (the metric rows omit them); `view` is
+/// the dependency view [`compute`] scores, whose production metric graph
+/// Acyclicity and Depth explain.
+///
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
 ///
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
 /// [FR-QM-09]: ../../../docs/specs/requirements/FR-QM-09.md
 /// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 pub fn worst_offenders(
+    view: &GraphView,
     nodes: &[NodeRow],
     edges: &[EdgeRow],
     functions: &[FunctionMetricRow],
@@ -810,6 +817,103 @@ pub fn worst_offenders(
         })
         .collect();
 
+    // The CR-209 lists. Acyclicity and Depth explain the production metric
+    // graph `compute` scores, rebuilt here from the same view and node set.
+    let metric = metric_graph(view, nodes, test_ids);
+
+    // Acyclicity (FR-QM-02): each cycle `acyclicity` counts, most members first,
+    // then its lowest member id — which also names the row.
+    let sccs = tarjan_scc(&metric.graph);
+    let mut cycles: Vec<(usize, NodeId, BTreeSet<&str>)> = cross_module_cycles(&sccs, &metric.dirs)
+        .filter_map(|scc| {
+            let named_by = scc.iter().filter_map(|v| metric.ids[v.index()]).min()?;
+            let dirs = scc.iter().map(|v| metric.dirs[v.index()].as_str()).collect();
+            Some((scc.len(), named_by, dirs))
+        })
+        .collect();
+    cycles.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let acyclicity = cycles
+        .into_iter()
+        .take(cap)
+        .filter_map(|(size, id, dirs)| {
+            // The count is stated, so the directories past the named few are
+            // an ellipsis rather than a second count.
+            let more = if dirs.len() > NAMED_DIRECTORIES { ", …" } else { "" };
+            offender(
+                id,
+                format!(
+                    "{size} symbols across {} directories: {}{more}",
+                    dirs.len(),
+                    named_directories(&dirs)
+                ),
+            )
+        })
+        .collect();
+
+    // Depth (FR-QM-03): the chain heads of the module-rollup condensation; a
+    // chain names directories, not a symbol, so it has no file or line.
+    let depth = depth_chains(&metric.graph, &metric.dirs, cap)
+        .into_iter()
+        .map(|(head, detail)| Offender {
+            name: head,
+            file: String::new(),
+            line: None,
+            detail,
+        })
+        .collect();
+
+    // Equality (FR-QM-04): the functions above the mean complexity — the ones
+    // that raise the Gini — highest first, then id asc. Compared as
+    // `cc · n > Σcc`, exact; an even spread lists none, as it scores 1.
+    let measured: Vec<(NodeId, i64)> = production
+        .iter()
+        .filter_map(|f| f.cyclomatic_complexity.map(|cc| (f.id, cc)))
+        .collect();
+    let (count, total) = (
+        measured.len() as i64,
+        measured.iter().map(|&(_, cc)| cc).sum::<i64>(),
+    );
+    let mut equality: Vec<(NodeId, i64)> = measured
+        .into_iter()
+        .filter(|&(_, cc)| cc * count > total)
+        .collect();
+    equality.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let equality = equality
+        .into_iter()
+        .take(cap)
+        .filter_map(|(id, cc)| offender(id, format!("complexity {cc}")))
+        .collect();
+
+    // Redundancy (FR-QM-05): the dead or duplicate functions `redundancy`
+    // counts, most lines first (an unrecorded count last), then id asc. Only a
+    // `Some(true)` verdict counts, so a language without a reachability verdict
+    // (`is_dead = NULL`) is never listed as dead.
+    let mut redundancy: Vec<(NodeId, Option<i64>, bool, bool)> = production
+        .iter()
+        .filter(|f| is_redundant(f))
+        .map(|f| {
+            (
+                f.id,
+                f.line_count,
+                f.is_dead == Some(true),
+                f.is_duplicate == Some(true),
+            )
+        })
+        .collect();
+    redundancy.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let redundancy = redundancy
+        .into_iter()
+        .take(cap)
+        .filter_map(|(id, _, dead, duplicate)| {
+            let detail = match (dead, duplicate) {
+                (true, true) => "dead, duplicate",
+                (true, false) => "dead",
+                _ => "duplicate",
+            };
+            offender(id, detail.to_string())
+        })
+        .collect();
+
     WorstOffenders {
         // Computed here, so these are the lists — possibly all empty — and not
         // the "not recorded" default (FR-QM-15).
@@ -819,7 +923,47 @@ pub fn worst_offenders(
         cohesion,
         focus,
         uniqueness,
+        acyclicity,
+        depth,
+        equality,
+        redundancy,
+        unrecorded: Vec::new(),
     }
+}
+
+/// The [CR-209] lists a recorded snapshot holds no row for although its own
+/// scores say the list is not empty — so the snapshot was written before the
+/// list existed, and a reader must show it as not recorded rather than as
+/// "none flagged" ([NFR-CC-04]). `offenders_recorded` admits only `1`, so the
+/// store cannot mark these snapshots itself without a migration.
+///
+/// Exact, never a guess, because each list is empty precisely when its
+/// dimension scores clean ([`worst_offenders`]): no cross-directory cycle
+/// (Acyclicity 0), no chain of two layers (Depth ≤ 1), no function above the
+/// mean complexity (an even spread, whose Gini computes to exactly 0.0: both
+/// terms are the same correctly-rounded `(n+1)/n`), no dead or duplicate
+/// function (Redundancy 0). A snapshot this version writes therefore never
+/// reports a list here.
+///
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn unrecorded_lists(
+    metrics: &MetricSnapshot,
+    offenders: &WorstOffenders,
+) -> Vec<&'static str> {
+    if !offenders.recorded {
+        return Vec::new(); // every list is already "not recorded"
+    }
+    [
+        ("acyclicity", &offenders.acyclicity, metrics.acyclicity.raw > 0.0),
+        ("depth", &offenders.depth, metrics.depth.raw >= 2.0),
+        ("equality", &offenders.equality, metrics.equality.raw > 0.0),
+        ("redundancy", &offenders.redundancy, metrics.redundancy.raw > 0.0),
+    ]
+    .into_iter()
+    .filter(|(_, list, scored)| list.is_empty() && *scored)
+    .map(|(dimension, _, _)| dimension)
+    .collect()
 }
 
 /// One near-clone group's production members and its duplicated mass — the unit
@@ -965,8 +1109,23 @@ impl OwnedSnapshotFields {
     }
 }
 
+/// The production metric graph [`compute`] scores and [`worst_offenders`]
+/// explains, with two per-vertex facts indexed by vertex index: the directory
+/// community and the node id.
+struct MetricGraph {
+    graph: DiGraph<(), ()>,
+    /// Each vertex's directory community ([`directory_of`], or [`UNBOUND_DIR`]).
+    dirs: Vec<String>,
+    /// Each vertex's node id — what an offender row is named by ([CR-209]).
+    /// `None` only for a rollup view's aggregate vertex, which the metrics'
+    /// symbol-level view never holds.
+    ///
+    /// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+    ids: Vec<Option<NodeId>>,
+}
+
 /// Build the metric graph: the hydrated view minus derived governance
-/// artifacts and test code, plus each vertex's directory community.
+/// artifacts and test code, plus each vertex's directory community and node id.
 ///
 /// Filters `Layer`/`Boundary` policy vertices and `ForbiddenDependency`
 /// edges — annotation-materialised flags, not dependencies — and the
@@ -983,7 +1142,7 @@ fn metric_graph(
     view: &GraphView,
     nodes: &[NodeRow],
     test_ids: &HashSet<NodeId>,
-) -> (DiGraph<(), ()>, Vec<String>) {
+) -> MetricGraph {
     let file_of: HashMap<NodeId, &str> = nodes
         .iter()
         .filter_map(|n| n.file_path.as_deref().map(|p| (n.id, p)))
@@ -992,6 +1151,7 @@ fn metric_graph(
     let source = view.graph();
     let mut graph = DiGraph::<(), ()>::with_capacity(source.node_count(), source.edge_count());
     let mut dirs: Vec<String> = Vec::with_capacity(source.node_count());
+    let mut ids: Vec<Option<NodeId>> = Vec::with_capacity(source.node_count());
     let mut kept: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(source.node_count());
 
     for index in source.node_indices() {
@@ -1031,6 +1191,7 @@ fn metric_graph(
             .map_or(UNBOUND_DIR.to_string(), |path| directory_of(path));
         kept.insert(index, graph.add_node(()));
         dirs.push(dir);
+        ids.push(vertex.node_id);
     }
 
     for edge in source.edge_references() {
@@ -1043,7 +1204,7 @@ fn metric_graph(
         graph.add_edge(src, dst, ());
     }
 
-    (graph, dirs)
+    MetricGraph { graph, dirs, ids }
 }
 
 /// The directory component of a project-relative path; `""` for a root-level
@@ -1135,20 +1296,30 @@ fn modularity(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
 /// [CR-022]: ../../../docs/requests/CR-022-acyclicity-self-recursion-exclusion.md
 /// [CR-087]: ../../../docs/requests/CR-087-acyclicity-cross-module-cycle-boundary.md
 fn acyclicity(sccs: &[Vec<NodeIndex>], dirs: &[String]) -> MetricValue {
-    let cycles = sccs
-        .iter()
-        .filter(|scc| scc.len() > 1)
-        .filter(|scc| {
-            // Spans >1 directory ⇔ some member's directory differs from the
-            // first member's. Order-independent, allocation-free, deterministic.
-            let first = dirs[scc[0].index()].as_str();
-            scc.iter().any(|&vertex| dirs[vertex.index()].as_str() != first)
-        })
-        .count() as u64;
+    let cycles = cross_module_cycles(sccs, dirs).count() as u64;
     MetricValue {
         raw: cycles as f64,
         normalized: 1.0 / (1.0 + cycles as f64),
     }
+}
+
+/// The SCCs [`acyclicity`] counts as cycles: more than one member, spanning more
+/// than one directory ([ADR-61]). The one filter both the count and the
+/// Acyclicity offender list ([`worst_offenders`], [CR-209]) read, so the list
+/// names exactly the cycles the dimension scores.
+///
+/// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+fn cross_module_cycles<'a>(
+    sccs: &'a [Vec<NodeIndex>],
+    dirs: &'a [String],
+) -> impl Iterator<Item = &'a Vec<NodeIndex>> {
+    sccs.iter().filter(|scc| scc.len() > 1).filter(|scc| {
+        // Spans >1 directory ⇔ some member's directory differs from the first
+        // member's. Order-independent, allocation-free, deterministic.
+        let first = dirs[scc[0].index()].as_str();
+        scc.iter().any(|&vertex| dirs[vertex.index()].as_str() != first)
+    })
 }
 
 /// Depth — longest path (in vertices) over the SCC condensation of the
@@ -1177,8 +1348,8 @@ fn acyclicity(sccs: &[Vec<NodeIndex>], dirs: &[String]) -> MetricValue {
 /// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
 fn depth(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
     let modules = module_rollup(graph, dirs);
-    let sccs = tarjan_scc(&modules);
-    let depth = longest_condensed_path(&modules, &sccs);
+    let sccs = tarjan_scc(&modules.graph);
+    let depth = longest_condensed_path(&modules.graph, &sccs);
     MetricValue {
         raw: depth as f64,
         normalized: 1.0 / (1.0 + depth as f64 / 8.0),
@@ -1197,18 +1368,22 @@ fn depth(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
 /// the same partition [`modularity`] reads — so Depth and Modularity share one
 /// rollup by construction. Module vertices are created in first-appearance order
 /// over the deterministic vertex order, so the rebuilt graph is reproducible
-/// ([NFR-RA-06]).
+/// ([NFR-RA-06]). Each module vertex keeps its directory, which is what a Depth
+/// offender row spells ([CR-209]).
 ///
 /// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
 /// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-fn module_rollup(graph: &DiGraph<(), ()>, dirs: &[String]) -> DiGraph<(), ()> {
+fn module_rollup<'a>(graph: &DiGraph<(), ()>, dirs: &'a [String]) -> ModuleGraph<'a> {
     let mut module_of: HashMap<&str, NodeIndex> = HashMap::with_capacity(dirs.len());
     let mut modules = DiGraph::<(), ()>::new();
+    let mut module_dirs: Vec<&str> = Vec::new();
     for dir in dirs {
-        module_of
-            .entry(dir.as_str())
-            .or_insert_with(|| modules.add_node(()));
+        module_of.entry(dir.as_str()).or_insert_with(|| {
+            module_dirs.push(dir.as_str());
+            modules.add_node(())
+        });
     }
 
     let mut seen: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
@@ -1223,7 +1398,17 @@ fn module_rollup(graph: &DiGraph<(), ()>, dirs: &[String]) -> DiGraph<(), ()> {
             modules.add_edge(src, dst, ());
         }
     }
-    modules
+    ModuleGraph {
+        graph: modules,
+        dirs: module_dirs,
+    }
+}
+
+/// The module (directory) graph [`module_rollup`] builds, with each module
+/// vertex's directory indexed by vertex index.
+struct ModuleGraph<'a> {
+    graph: DiGraph<(), ()>,
+    dirs: Vec<&'a str>,
 }
 
 /// Longest path (in condensed vertices) over the SCC condensation of `graph`,
@@ -1237,6 +1422,29 @@ fn module_rollup(graph: &DiGraph<(), ()>, dirs: &[String]) -> DiGraph<(), ()> {
 /// [FR-QM-03]: ../../../docs/specs/requirements/FR-QM-03.md
 /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
 fn longest_condensed_path(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> u64 {
+    condense(graph, sccs)
+        .longest
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+}
+
+/// The SCC condensation of a graph and its longest-path DP — the one
+/// computation both the Depth value ([`longest_condensed_path`]) and the Depth
+/// offender chains ([`depth_chains`]) read, so a listed chain is never longer
+/// or shorter than the depth the dimension scores.
+struct Condensation {
+    /// Each component's condensed successors (deduplicated, deterministic).
+    successors: Vec<BTreeSet<usize>>,
+    /// The longest path, in condensed vertices, that starts at each component.
+    longest: Vec<u64>,
+}
+
+/// Condense `graph` by its [`tarjan_scc`] component set `sccs` and run the
+/// longest-path DP over it (see [`longest_condensed_path`] for why one forward
+/// sweep suffices).
+fn condense(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> Condensation {
     let mut scc_of = vec![0_usize; graph.node_count()];
     for (component, members) in sccs.iter().enumerate() {
         for &vertex in members {
@@ -1264,7 +1472,117 @@ fn longest_condensed_path(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> u
             .unwrap_or(0);
         longest[component] = 1 + best;
     }
-    longest.iter().copied().max().unwrap_or(0)
+    Condensation {
+        successors,
+        longest,
+    }
+}
+
+/// The Depth offender rows ([CR-209]): every chain of two or more layers in the
+/// module-rollup condensation [`depth`] measures, one per **chain head** (a
+/// layer nothing else depends on, so no listed chain is the tail of another),
+/// as `(head, "dir1 → dir2 → … (L directories)")`.
+///
+/// Each head spells its longest chain, so the first row is the chain the Depth
+/// value counts. Ranked by length descending, then head label ascending; at a
+/// fork the chain follows the longer continuation, then the lower label. A
+/// label is unique per layer, so both orders are total ([NFR-RA-06]). A layer
+/// that is a directory cycle reads `{a, b}` and the count names layers rather
+/// than directories ([`layer_label`]).
+///
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String], cap: usize) -> Vec<(String, String)> {
+    let modules = module_rollup(graph, dirs);
+    let sccs = tarjan_scc(&modules.graph);
+    let Condensation {
+        successors,
+        longest,
+    } = condense(&modules.graph, &sccs);
+    let labels: Vec<String> = sccs
+        .iter()
+        .map(|members| {
+            let dirs: BTreeSet<&str> = members.iter().map(|v| modules.dirs[v.index()]).collect();
+            layer_label(&dirs)
+        })
+        .collect();
+
+    let mut is_head = vec![true; sccs.len()];
+    for &successor in successors.iter().flatten() {
+        is_head[successor] = false;
+    }
+    let mut heads: Vec<usize> = (0..sccs.len())
+        .filter(|&c| is_head[c] && longest[c] >= 2)
+        .collect();
+    let rank = |a: &usize, b: &usize| {
+        longest[*b]
+            .cmp(&longest[*a])
+            .then(labels[*a].cmp(&labels[*b]))
+    };
+    heads.sort_by(rank);
+
+    heads
+        .into_iter()
+        .take(cap)
+        .map(|head| {
+            let (mut chain, mut at) = (vec![head], head);
+            while let Some(&next) = successors[at].iter().min_by(|a, b| rank(a, b)) {
+                chain.push(next);
+                at = next;
+            }
+            let unit = if chain.iter().all(|&c| sccs[c].len() == 1) {
+                "directories"
+            } else {
+                "layers"
+            };
+            let spelled: Vec<&str> = chain.iter().map(|&c| labels[c].as_str()).collect();
+            let detail = format!("{} ({} {unit})", spelled.join(" → "), chain.len());
+            (labels[head].clone(), detail)
+        })
+        .collect()
+}
+
+/// How many directories an offender row names before it counts the rest: a
+/// directory cycle on a real repository spans dozens, which would make a row
+/// hundreds of characters long ([CR-209] §7).
+///
+/// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+const NAMED_DIRECTORIES: usize = 3;
+
+/// A condensed layer as an offender row spells it: its one directory, or a
+/// directory cycle's directories in braces — sorted, the first
+/// [`NAMED_DIRECTORIES`] named and the rest counted (`{a, b, c +4 more}`). The
+/// first name is unique to its layer, so the label is too.
+fn layer_label(dirs: &BTreeSet<&str>) -> String {
+    match dirs.len() {
+        1 => named_directories(dirs),
+        n if n <= NAMED_DIRECTORIES => format!("{{{}}}", named_directories(dirs)),
+        n => format!(
+            "{{{} +{} more}}",
+            named_directories(dirs),
+            n - NAMED_DIRECTORIES
+        ),
+    }
+}
+
+/// The first [`NAMED_DIRECTORIES`] of `dirs`, in order, comma-joined.
+fn named_directories(dirs: &BTreeSet<&str>) -> String {
+    let names: Vec<&str> = dirs
+        .iter()
+        .take(NAMED_DIRECTORIES)
+        .map(|dir| directory_label(dir))
+        .collect();
+    names.join(", ")
+}
+
+/// A directory as an offender row names it: the project root reads `.` rather
+/// than an empty name.
+fn directory_label(dir: &str) -> &str {
+    if dir.is_empty() {
+        "."
+    } else {
+        dir
+    }
 }
 
 /// Equality — `1 − Gini` of per-function cyclomatic complexity ([FR-QM-04]).
@@ -1308,6 +1626,15 @@ fn equality(functions: &[&FunctionMetricRow]) -> MetricValue {
     }
 }
 
+/// Whether a function counts as redundant: dead **or** duplicate, on a
+/// `Some(true)` verdict only — a `NULL` verdict (a language with no
+/// reachability verdict) is never redundant. The one predicate [`redundancy`]
+/// counts and the Redundancy offender list ([`worst_offenders`]) lists, so the
+/// list names exactly what the dimension scores.
+fn is_redundant(f: &FunctionMetricRow) -> bool {
+    f.is_dead == Some(true) || f.is_duplicate == Some(true)
+}
+
 /// Redundancy — `1 − redundant/total` over function/method nodes
 /// ([FR-QM-05]).
 ///
@@ -1323,10 +1650,7 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
             normalized: 1.0,
         };
     }
-    let redundant = functions
-        .iter()
-        .filter(|f| f.is_dead == Some(true) || f.is_duplicate == Some(true))
-        .count();
+    let redundant = functions.iter().filter(|f| is_redundant(f)).count();
     let ratio = redundant as f64 / total as f64;
     MetricValue {
         raw: ratio,

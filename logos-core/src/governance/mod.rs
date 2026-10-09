@@ -1978,14 +1978,23 @@ pub(crate) struct PersistedSnapshot {
 /// no compute, no persist. Reconstructs the [`MetricSnapshot`] breakdown from the
 /// last `metric_snapshots` row, preserving the Cohesion/Focus applicability
 /// drop-out as `None` (the [NFR-CC-04] n/a sentinel), never a fabricated zero,
-/// and carries the offender lists persisted with that same row ([FR-QM-15]).
+/// and carries the offender lists persisted with that same row ([FR-QM-15]) —
+/// naming in `unrecorded` any CR-209 list the row predates
+/// ([`unrecorded_lists`](crate::metrics::unrecorded_lists)).
 ///
 /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
 pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<PersistedSnapshot>> {
     let row = quality_runtime(engine)?.submit_read(|store| store.latest_metric_snapshot())?;
-    Ok(row.map(|mut row| PersistedSnapshot {
-        worst_offenders: std::mem::take(&mut row.worst_offenders),
-        metrics: metric_snapshot_from_row(row),
+    Ok(row.map(|mut row| {
+        let mut worst_offenders = std::mem::take(&mut row.worst_offenders);
+        let metrics = metric_snapshot_from_row(row);
+        // A snapshot written before CR-209 holds no row for the four lists it
+        // added; name each one its own score says is not empty (NFR-CC-04).
+        worst_offenders.unrecorded = crate::metrics::unrecorded_lists(&metrics, &worst_offenders);
+        PersistedSnapshot {
+            metrics,
+            worst_offenders,
+        }
     }))
 }
 

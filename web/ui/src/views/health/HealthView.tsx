@@ -369,12 +369,11 @@ function MetricsTable({ rows }: { rows: MetricRow[] }) {
 /**
  * One dimension's widget (FR-UI-43, CR-203 items 14–19): its plain question, its
  * score with the normalized and raw values, the not-applicable reason when it drops
- * out. The five offender-backed dimensions keep S-499's
- * three honest states, decided by `dim.offenderState` (never by list length) —
- * "not recorded" (never shown as clean, CR-162), a recorded-empty "none flagged",
- * or the worst-offender table in persisted order. The other five carry no list in
- * the payload: each states that, and points to where its units are found — never
- * an empty table (NFR-CC-04).
+ * out. The nine offender-backed dimensions (five since S-499, four more since
+ * CR-209) keep three honest states, decided by `dim.offenderState` (never by list
+ * length) — "not recorded" (never shown as clean, CR-162), a recorded-empty "none
+ * flagged", or the worst-offender table in persisted order. Modularity carries no
+ * list in the payload: it states that, never an empty table (NFR-CC-04).
  */
 function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: SnapshotCurrency | null }) {
   const copy = DIMENSION_COPY[dim.key];
@@ -420,8 +419,8 @@ function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: Sn
 }
 
 /** A dimension widget's evidence: the offender table, the statement of a state
- *  with no table, or — for a dimension the payload lists nothing for — the named
- *  absence and the pointer to its units. */
+ *  with no table, or — for the dimension the payload lists nothing for — the
+ *  named absence. */
 function DimensionEvidence({ dim }: { dim: DimensionDetail }) {
   switch (dim.offenderState) {
     case "not-applicable":
@@ -436,25 +435,11 @@ function DimensionEvidence({ dim }: { dim: DimensionDetail }) {
         </p>
       );
     case "unlisted": {
-      const pointer = DIMENSION_COPY[dim.key].unlisted;
-      if (pointer === undefined) return null;
+      const absence = DIMENSION_COPY[dim.key].unlisted;
+      if (absence === undefined) return null;
       return (
         <p className={styles.statement} data-offender-state="unlisted">
-          {pointer.statement}
-          {pointer.view !== undefined && (
-            <>
-              {" "}
-              <a href={pointer.view.href}>{pointer.view.label}</a>
-            </>
-          )}
-          {pointer.view !== undefined && pointer.command !== undefined && " and"}
-          {pointer.command !== undefined && (
-            <>
-              {" "}
-              <code>{pointer.command}</code>
-            </>
-          )}
-          {(pointer.view !== undefined || pointer.command !== undefined) && "."}
+          {absence}
         </p>
       );
     }

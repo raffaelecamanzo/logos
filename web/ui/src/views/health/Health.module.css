@@ -39,7 +39,7 @@
 }
 
 /* An evidence statement in place of a table: a recorded-empty or not-recorded
-   offender list, or the named absence of a list plus its pointer. */
+   offender list, or the named absence of a list. */
 .statement {
   margin: 0;
   font-size: var(--text-base);

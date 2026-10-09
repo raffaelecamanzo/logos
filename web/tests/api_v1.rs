@@ -1621,9 +1621,24 @@ async fn health_payload_distinguishes_recorded_recorded_empty_and_not_recorded()
     assert_eq!(first["file"], "src/lib.rs");
     assert_eq!(first["detail"], "nesting depth 6");
 
+    // CR-209: the four further lists ride the same payload, same row shape.
+    assert_eq!(recorded["equality"][0]["name"], "beta_depth_six");
+    assert_eq!(recorded["equality"][0]["detail"], "complexity 7");
+    assert!(recorded.get("unrecorded").is_none(), "elided on a snapshot this version wrote");
+
     assert_eq!(recorded_empty["recorded"], true, "a clean scan is recorded-empty");
     assert_eq!(not_recorded["recorded"], false, "a never-scanned store is not recorded");
-    for dimension in ["nesting", "conciseness", "cohesion", "focus", "uniqueness"] {
+    for dimension in [
+        "nesting",
+        "conciseness",
+        "cohesion",
+        "focus",
+        "uniqueness",
+        "acyclicity",
+        "depth",
+        "equality",
+        "redundancy",
+    ] {
         assert_eq!(recorded_empty[dimension], serde_json::json!([]), "{dimension} recorded-empty");
         assert_eq!(not_recorded[dimension], serde_json::json!([]), "{dimension} not recorded");
     }

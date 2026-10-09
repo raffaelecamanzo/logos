@@ -52,6 +52,7 @@ function populated(recorded: boolean) {
         recorded,
         nesting: recorded ? [{ name: "deep_fn", file: "src/lib.rs", line: 12, detail: "nesting depth 6" }] : [],
         conciseness: [], cohesion: [], focus: [], uniqueness: [],
+        acyclicity: [], depth: [], equality: [], redundancy: [],
       },
       warnings: [],
     },
@@ -101,10 +102,11 @@ for (const recorded of [true, false]) {
     if (recorded) {
       await expect(page.getByRole("table", { name: "Worst offenders" })).toHaveCount(1);
     } else {
-      await expect(stack.locator('[data-offender-state="not-recorded"]')).toHaveCount(4);
+      // Nine lists (CR-209), less Cohesion, which is n/a in this fixture.
+      await expect(stack.locator('[data-offender-state="not-recorded"]')).toHaveCount(8);
     }
-    // The five dimensions with no list state that, and none renders a table.
-    await expect(stack.locator('[data-offender-state="unlisted"]')).toHaveCount(5);
+    // Modularity, the one dimension with no list, states that and renders no table.
+    await expect(stack.locator('[data-offender-state="unlisted"]')).toHaveCount(1);
     const m = await expectWidgetStackLayout(stack);
     expect(m.gaps).toHaveLength(12);
     expect(violations).toEqual([]);

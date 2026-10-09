@@ -84,6 +84,20 @@ fn run(
     run_scoped(nodes, edges, functions, &[])
 }
 
+/// The worst-offender lists over a node/edge snapshot, through the same real
+/// `ExcludeContains` view [`run`] scores.
+fn offenders_of(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    functions: &[FunctionMetricRow],
+    test_ids: &HashSet<NodeId>,
+    thresholds: super::Thresholds,
+    cap: usize,
+) -> crate::models::quality::WorstOffenders {
+    let view = build_view(Granularity::ExcludeContains, nodes, edges);
+    super::worst_offenders(&view, nodes, edges, functions, test_ids, thresholds, cap)
+}
+
 /// Compute with an explicit `is_test` node set excluded from the production
 /// scope ([FR-QM-08]).
 ///
@@ -1360,7 +1374,7 @@ fn a_mapstruct_mapper_scores_lcom4_over_its_bodied_methods_and_is_not_god() {
     );
     assert!(god.is_empty(), "the budget's god set agrees with Focus: {god:?}");
 
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &edges,
         &functions,
@@ -1406,7 +1420,7 @@ fn a_bodyless_hook_still_links_the_bodied_methods_that_call_it() {
         1.0,
         "run and other share the hook they both call: one component"
     );
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &edges,
         &functions,
@@ -1553,7 +1567,7 @@ fn uniqueness_offenders_rank_clone_groups_by_mass() {
     add(60, 60, Some(13));
     add(61, 60, None);
 
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &[],
         &functions,
@@ -1586,7 +1600,7 @@ fn uniqueness_offenders_rank_clone_groups_by_mass() {
     );
 
     // The cap truncates the ranked list, so the heaviest group survives it.
-    let capped = super::worst_offenders(
+    let capped = offenders_of(
         &nodes,
         &[],
         &functions,
@@ -1620,7 +1634,7 @@ fn uniqueness_offenders_count_production_members_only() {
         func_struct(11, None, Some(20), None, Some(10)),
     ];
     let test_ids: HashSet<NodeId> = [NodeId(3)].into_iter().collect();
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &[],
         &functions,
@@ -2030,7 +2044,7 @@ fn worst_offenders_rank_cap_and_scope_function_dimensions() {
     functions.push(func_struct(99, None, None, Some(99), None));
 
     let test_ids: HashSet<NodeId> = [NodeId(99)].into_iter().collect();
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &[],
         &functions,
@@ -2065,7 +2079,7 @@ fn worst_offenders_group_clones_and_describe_brain_methods() {
         func_struct(2, None, None, None, Some(1)), // clone group 1
         func_struct(3, Some(20), Some(150), Some(4), None), // a brain method
     ];
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &[],
         &functions,
@@ -2101,7 +2115,7 @@ fn worst_offenders_report_container_dimensions() {
         edge(1, 2, EdgeKind::Contains),
         edge(1, 3, EdgeKind::Contains),
     ];
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &nodes,
         &edges,
         &[],
@@ -2134,7 +2148,7 @@ fn worst_offenders_cap_applies_to_clone_and_container_dimensions() {
     let clone_fns: Vec<FunctionMetricRow> = (1..=12)
         .map(|id| func_struct(id, None, None, None, Some(id)))
         .collect();
-    let w = super::worst_offenders(
+    let w = offenders_of(
         &clone_nodes,
         &[],
         &clone_fns,
@@ -2157,7 +2171,7 @@ fn worst_offenders_cap_applies_to_clone_and_container_dimensions() {
             )
         })
         .collect();
-    let w2 = super::worst_offenders(
+    let w2 = offenders_of(
         &god_nodes,
         &[],
         &[],
@@ -2455,5 +2469,613 @@ fn a_zero_on_the_other_originals_short_circuits_at_any_m() {
     assert_eq!(
         super::aggregate(&dropped, &new_dims),
         geometric_signal(&[0.9, 0.9, 0.9, 0.9, 1.0, 1.0, 1.0])
+    );
+}
+
+// ── CR-209: four more worst-offender lists ───────────────────────────────────
+
+/// A fixture that triggers every list: the five CR-005 lists (deep functions, a
+/// brain method, a clone group, a fragmented class, a god class) and the four
+/// CR-209 lists (a `core` ↔ `api` cycle, an `api` → `util` → `edge` chain, uneven
+/// complexity, and dead and duplicate functions).
+fn every_list_fixture() -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let nodes = vec![
+        node_span(1, "deep_a", NodeKind::Function, Some("core/a.rs"), 1, 40),
+        node_span(2, "deep_b", NodeKind::Function, Some("core/b.rs"), 1, 30),
+        node_span(3, "brainy", NodeKind::Function, Some("api/x.rs"), 5, 160),
+        node_span(4, "clone_x", NodeKind::Function, Some("api/y.rs"), 1, 30),
+        node_span(5, "clone_y", NodeKind::Function, Some("util/z.rs"), 1, 30),
+        node_span(6, "leaf", NodeKind::Function, Some("edge/l.rs"), 1, 3),
+        node(10, "Fragmented", NodeKind::Class, Some("core/c.rs")),
+        node(11, "m1", NodeKind::Method, Some("core/c.rs")),
+        node(12, "m2", NodeKind::Method, Some("core/c.rs")),
+        node_span(20, "Huge", NodeKind::Class, Some("util/h.rs"), 1, 600),
+    ];
+    let edges = vec![
+        edge(1, 3, EdgeKind::Calls), // core → api
+        edge(3, 1, EdgeKind::Calls), // api → core: the cycle
+        edge(3, 4, EdgeKind::Calls),
+        edge(4, 5, EdgeKind::Calls), // api → util
+        edge(5, 6, EdgeKind::Calls), // util → edge
+        edge(10, 11, EdgeKind::Contains),
+        edge(10, 12, EdgeKind::Contains),
+    ];
+    let functions = vec![
+        FunctionMetricRow {
+            is_dead: Some(true),
+            ..func_struct(1, Some(6), Some(40), Some(6), None)
+        },
+        func_struct(2, Some(2), Some(30), Some(5), None),
+        func_struct(3, Some(20), Some(150), Some(4), None),
+        FunctionMetricRow {
+            is_duplicate: Some(true),
+            ..func_struct(4, Some(3), Some(30), Some(1), Some(4))
+        },
+        FunctionMetricRow {
+            is_dead: Some(true),
+            is_duplicate: Some(true),
+            ..func_struct(5, Some(3), Some(30), Some(1), Some(4))
+        },
+        func_struct(6, Some(1), Some(3), Some(0), None),
+        method_body(11, Some(true)),
+        method_body(12, Some(true)),
+    ];
+    (nodes, edges, functions)
+}
+
+/// The five CR-005 lists, serialized — the byte-identity probe of CR-209 AC-5.
+fn five_lists_json(w: &crate::models::quality::WorstOffenders) -> String {
+    let five: Vec<_> = w.lists().into_iter().take(5).collect();
+    serde_json::to_string(&five).expect("offenders serialize")
+}
+
+/// CR-209 AC-5: adding the four lists leaves the five CR-005 lists
+/// byte-identical. The golden below was captured by running this fixture
+/// through `worst_offenders` **before** CR-209 changed it.
+#[test]
+fn the_five_cr005_lists_are_byte_identical_to_before_cr209() {
+    const BEFORE_CR209: &str = r#"[["nesting",[{"name":"deep_a","file":"core/a.rs","line":1,"detail":"nesting depth 6"},{"name":"deep_b","file":"core/b.rs","line":1,"detail":"nesting depth 5"},{"name":"brainy","file":"api/x.rs","line":5,"detail":"nesting depth 4"}]],["conciseness",[{"name":"brainy","file":"api/x.rs","line":5,"detail":"CC 20 · LOC 150 · nesting 4"}]],["cohesion",[{"name":"Fragmented","file":"core/c.rs","line":null,"detail":"LCOM4 2"}]],["focus",[{"name":"Huge","file":"util/h.rs","line":1,"detail":"0 methods · span 600"}]],["uniqueness",[{"name":"clone_x","file":"api/y.rs","line":1,"detail":"clone group #4 · 2 members × 30 lines"},{"name":"clone_y","file":"util/z.rs","line":1,"detail":"clone group #4 · 2 members × 30 lines"}]]]"#;
+    let (nodes, edges, functions) = every_list_fixture();
+    let w = offenders_of(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        10,
+    );
+    assert_eq!(five_lists_json(&w), BEFORE_CR209);
+    // …while the fixture does trigger all four new lists beside them.
+    for (dimension, list) in w.lists().into_iter().skip(5) {
+        assert!(!list.is_empty(), "{dimension} lists the fixture's offenders");
+    }
+}
+
+/// A function row with a line count and the two Redundancy verdicts.
+fn func_lines(
+    id: i64,
+    lines: Option<i64>,
+    dead: Option<bool>,
+    dup: Option<bool>,
+) -> FunctionMetricRow {
+    FunctionMetricRow {
+        line_count: lines,
+        ..func(id, Some(1), dead, dup)
+    }
+}
+
+/// The offender lists over `nodes`/`edges`/`functions`, uncapped beyond 10 and
+/// with no test scope.
+fn offenders(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    functions: &[FunctionMetricRow],
+) -> crate::models::quality::WorstOffenders {
+    offenders_of(nodes, edges, functions, &HashSet::new(), super::Thresholds::default(), 10)
+}
+
+/// `(name, detail)` of each row — what a list's order and wording are pinned by.
+fn rows(list: &[crate::models::quality::Offender]) -> Vec<(&str, &str)> {
+    list.iter().map(|o| (o.name.as_str(), o.detail.as_str())).collect()
+}
+
+/// CR-209 AC-1: a two-directory cycle is listed with its size and directories,
+/// named by its lowest-id member; an acyclic graph lists none.
+#[test]
+fn acyclicity_lists_a_two_directory_cycle_and_none_when_acyclic() {
+    let nodes = [
+        node_span(7, "parse", NodeKind::Function, Some("alpha/p.rs"), 12, 30),
+        node(3, "emit", NodeKind::Function, Some("beta/e.rs")),
+    ];
+    let cyclic = [edge(7, 3, EdgeKind::Calls), edge(3, 7, EdgeKind::Calls)];
+    let w = offenders(&nodes, &cyclic, &[]);
+    assert_eq!(w.acyclicity.len(), 1);
+    let row = &w.acyclicity[0];
+    assert_eq!(
+        (row.name.as_str(), row.file.as_str(), row.line, row.detail.as_str()),
+        ("emit", "beta/e.rs", None, "2 symbols across 2 directories: alpha, beta"),
+        "named by the lowest-id member (3), with its file and line"
+    );
+
+    let acyclic = [edge(7, 3, EdgeKind::Calls)];
+    assert!(offenders(&nodes, &acyclic, &[]).acyclicity.is_empty());
+}
+
+/// The list names exactly the cycles Acyclicity counts: an SCC inside one
+/// directory and a self-loop are not listed. Larger cycles come first; equal
+/// sizes fall back to the lowest member id. The project root reads `.`.
+#[test]
+fn acyclicity_ranks_by_size_then_lowest_member_and_skips_what_it_does_not_count() {
+    let nodes = [
+        // A three-member cycle across the root, `a` and `b` (ids 20..22).
+        node(20, "r", NodeKind::Function, Some("root.rs")),
+        node(21, "a", NodeKind::Function, Some("a/a.rs")),
+        node(22, "b", NodeKind::Function, Some("b/b.rs")),
+        // Two two-member cycles, named by ids 5 and 9.
+        node(9, "c1", NodeKind::Function, Some("c/c.rs")),
+        node(10, "d1", NodeKind::Function, Some("d/d.rs")),
+        node(5, "e1", NodeKind::Function, Some("e/e.rs")),
+        node(11, "f1", NodeKind::Function, Some("f/f.rs")),
+        // An SCC confined to `g`, and a self-loop.
+        node(30, "g1", NodeKind::Function, Some("g/1.rs")),
+        node(31, "g2", NodeKind::Function, Some("g/2.rs")),
+        node(40, "self", NodeKind::Function, Some("h/h.rs")),
+    ];
+    let edges = [
+        edge(20, 21, EdgeKind::Calls),
+        edge(21, 22, EdgeKind::Calls),
+        edge(22, 20, EdgeKind::Calls),
+        edge(9, 10, EdgeKind::Calls),
+        edge(10, 9, EdgeKind::Calls),
+        edge(5, 11, EdgeKind::Calls),
+        edge(11, 5, EdgeKind::Calls),
+        edge(30, 31, EdgeKind::Calls),
+        edge(31, 30, EdgeKind::Calls),
+        edge(40, 40, EdgeKind::Calls),
+    ];
+    let w = offenders(&nodes, &edges, &[]);
+    assert_eq!(
+        rows(&w.acyclicity),
+        [
+            ("r", "3 symbols across 3 directories: ., a, b"),
+            ("e1", "2 symbols across 2 directories: e, f"),
+            ("c1", "2 symbols across 2 directories: c, d"),
+        ]
+    );
+    assert_eq!(
+        run(&nodes, &edges, &[]).acyclicity.raw,
+        w.acyclicity.len() as f64,
+        "the list names exactly the cycles the dimension counts"
+    );
+}
+
+/// CR-209 AC-2: on a 5-directory chain the first Depth row spells that chain in
+/// order, named by its head. A second head with a shorter chain follows; the
+/// chain's own suffixes are not listed. A single directory lists none.
+#[test]
+fn depth_spells_the_longest_chain_first_then_the_next_chain_heads() {
+    let dirs = ["d1", "d2", "d3", "d4", "d5"];
+    let mut nodes: Vec<NodeRow> = (1..=5)
+        .map(|id| {
+            let file = format!("{}/f.rs", dirs[id as usize - 1]);
+            node(id, "f", NodeKind::Function, Some(&file))
+        })
+        .collect();
+    nodes.push(node(6, "side", NodeKind::Function, Some("side/s.rs")));
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+        edge(4, 5, EdgeKind::Calls),
+        edge(6, 4, EdgeKind::Calls), // side → d4 → d5: a 3-layer chain
+    ];
+    let w = offenders(&nodes, &edges, &[]);
+    assert_eq!(
+        rows(&w.depth),
+        [
+            ("d1", "d1 → d2 → d3 → d4 → d5 (5 directories)"),
+            ("side", "side → d4 → d5 (3 directories)"),
+        ]
+    );
+    assert!(w.depth.iter().all(|o| o.file.is_empty() && o.line.is_none()));
+    assert_eq!(run(&nodes, &edges, &[]).depth.raw, 5.0, "the first row is the chain Depth counts");
+
+    let one_dir: Vec<NodeRow> = (1..=5)
+        .map(|id| node(id, "f", NodeKind::Function, Some("src/f.rs")))
+        .collect();
+    assert!(offenders(&one_dir, &edges[..4], &[]).depth.is_empty(), "depth 1 lists none");
+}
+
+/// Equal chains rank by head label; at a fork the chain follows the longer
+/// continuation, then the lower label. A directory cycle is one layer, spelled
+/// in braces, and the count then names layers.
+#[test]
+fn depth_breaks_ties_by_label_and_spells_a_directory_cycle_as_one_layer() {
+    let nodes = [
+        node(1, "f", NodeKind::Function, Some("zeta/f.rs")),
+        node(2, "f", NodeKind::Function, Some("alpha/f.rs")),
+        node(3, "f", NodeKind::Function, Some("mid/f.rs")),
+        node(4, "f", NodeKind::Function, Some("x/f.rs")),
+        node(5, "f", NodeKind::Function, Some("w/f.rs")),
+    ];
+    let forked = [
+        edge(1, 3, EdgeKind::Calls), // zeta → mid
+        edge(2, 3, EdgeKind::Calls), // alpha → mid
+        edge(3, 4, EdgeKind::Calls), // mid → x
+        edge(3, 5, EdgeKind::Calls), // mid → w: same length as x, lower label
+    ];
+    assert_eq!(
+        rows(&offenders(&nodes, &forked, &[]).depth),
+        [
+            ("alpha", "alpha → mid → w (3 directories)"),
+            ("zeta", "zeta → mid → w (3 directories)"),
+        ]
+    );
+
+    let with_cycle = [
+        edge(1, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls), // zeta ↔ mid: one layer
+        edge(3, 4, EdgeKind::Calls),
+    ];
+    assert_eq!(
+        rows(&offenders(&nodes, &with_cycle, &[]).depth),
+        [("{mid, zeta}", "{mid, zeta} → x (2 layers)")]
+    );
+}
+
+/// CR-209 AC-3: Equality lists the top 10 functions above the mean complexity,
+/// highest first, equal complexities by node id; an even spread lists none.
+#[test]
+fn equality_lists_the_top_ten_above_the_mean_with_an_id_tie_break() {
+    let nodes: Vec<NodeRow> = (1..=40)
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/f.rs")))
+        .collect();
+    // ids 1..=12 are complex (ids 1..=6 at 9, 7..=12 at 30 from id 12 down),
+    // the rest trivial at 1.
+    let functions: Vec<FunctionMetricRow> = (1..=40)
+        .map(|id| {
+            let cc = match id {
+                1..=6 => 9,
+                7..=12 => 30 + (12 - id),
+                _ => 1,
+            };
+            func(id, Some(cc), None, None)
+        })
+        .collect();
+    let w = offenders(&nodes, &[], &functions);
+    assert_eq!(
+        rows(&w.equality),
+        [
+            ("f7", "complexity 35"),
+            ("f8", "complexity 34"),
+            ("f9", "complexity 33"),
+            ("f10", "complexity 32"),
+            ("f11", "complexity 31"),
+            ("f12", "complexity 30"),
+            ("f1", "complexity 9"),
+            ("f2", "complexity 9"),
+            ("f3", "complexity 9"),
+            ("f4", "complexity 9"),
+        ],
+        "capped at 10; equal complexities by node id"
+    );
+
+    let even: Vec<FunctionMetricRow> = (1..=40).map(|id| func(id, Some(7), None, None)).collect();
+    assert!(offenders(&nodes, &[], &even).equality.is_empty());
+    assert_eq!(run(&nodes, &[], &even).equality.normalized, 1.0);
+}
+
+/// CR-209 AC-3: Redundancy lists dead or duplicate production functions, most
+/// lines first, then node id, an unrecorded line count last. A `NULL` dead
+/// verdict — a language with no reachability verdict — is never listed as
+/// dead, and a test function is never listed.
+#[test]
+fn redundancy_lists_dead_or_duplicate_functions_by_lines_then_id() {
+    let nodes: Vec<NodeRow> = (1..=8)
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/f.rs")))
+        .collect();
+    let functions = [
+        func_lines(1, Some(10), Some(true), Some(false)),
+        func_lines(2, Some(40), Some(false), Some(true)),
+        func_lines(3, Some(40), Some(true), Some(true)),
+        func_lines(4, None, Some(true), None),
+        func_lines(5, Some(99), None, None), // no reachability verdict: not dead
+        func_lines(6, Some(80), Some(false), Some(false)),
+        func_lines(7, Some(120), Some(true), Some(false)), // a test function
+        func_lines(8, Some(10), Some(true), Some(false)),
+    ];
+    let test_ids: HashSet<NodeId> = [NodeId(7)].into_iter().collect();
+    let w = offenders_of(&nodes, &[], &functions, &test_ids, super::Thresholds::default(), 10);
+    assert_eq!(
+        rows(&w.redundancy),
+        [
+            ("f2", "duplicate"),
+            ("f3", "dead, duplicate"),
+            ("f1", "dead"),
+            ("f8", "dead"),
+            ("f4", "dead"),
+        ]
+    );
+
+    let clean = [
+        func_lines(1, Some(10), Some(false), Some(false)),
+        func_lines(5, Some(9), None, None),
+    ];
+    assert!(offenders(&nodes, &[], &clean).redundancy.is_empty());
+}
+
+/// The four lists honour the cap like the five.
+#[test]
+fn the_four_cr209_lists_are_capped() {
+    // 6 two-directory cycles, 12 chain heads into one sink, 12 complex and 12
+    // dead functions.
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut functions = Vec::new();
+    for i in 0..12_i64 {
+        let (a, b) = (100 + 2 * i, 101 + 2 * i);
+        nodes.push(node(a, "a", NodeKind::Function, Some(&format!("p{i}/a.rs"))));
+        nodes.push(node(b, "b", NodeKind::Function, Some(&format!("q{i}/b.rs"))));
+        edges.push(edge(a, b, EdgeKind::Calls));
+        if i < 6 {
+            edges.push(edge(b, a, EdgeKind::Calls));
+        }
+        functions.push(func(a, Some(50), Some(true), None));
+        functions.push(func(b, Some(1), None, None));
+    }
+    let w = offenders_of(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        3,
+    );
+    for (dimension, list) in w.lists().into_iter().skip(5) {
+        assert_eq!(list.len(), 3, "{dimension} is capped at 3");
+    }
+}
+
+/// A snapshot this version writes never names a list as unrecorded: each of the
+/// four lists is empty exactly when its dimension scores clean — including an
+/// even complexity spread, whose Gini must compute to exactly 0.0.
+#[test]
+fn a_fresh_snapshot_never_reports_an_unrecorded_list() {
+    let (nodes, edges, functions) = every_list_fixture();
+    let even: Vec<FunctionMetricRow> = (1..=997)
+        .map(|id| func(id, Some(7), Some(false), Some(false)))
+        .collect();
+    let uneven: Vec<FunctionMetricRow> = (1..=997)
+        .map(|id| func(id, Some(1 + id % 13), Some(false), Some(false)))
+        .collect();
+    let single = [func(1, Some(40), Some(false), Some(false))];
+    // Every function row has its node, as in a store.
+    let named: Vec<NodeRow> = (1..=997)
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/f.rs")))
+        .collect();
+    for (nodes, edges, functions) in [
+        (&nodes[..], &edges[..], &functions[..]),
+        (&named[..], &[][..], &even[..]),
+        (&named[..], &[][..], &uneven[..]),
+        (&named[..], &[][..], &single[..]),
+        (&nodes[..], &[][..], &[][..]),
+    ] {
+        let metrics = run(nodes, edges, functions);
+        let w = offenders(nodes, edges, functions);
+        assert_eq!(super::unrecorded_lists(&metrics, &w), Vec::<&str>::new());
+    }
+}
+
+/// A snapshot recorded before CR-209 has no row for the four lists: each one
+/// whose score says it is not empty is named, so it reads "not recorded" rather
+/// than "none flagged"; one whose score is clean is truthfully empty.
+#[test]
+fn a_pre_cr209_snapshot_names_the_lists_its_scores_contradict() {
+    let (nodes, edges, functions) = every_list_fixture();
+    let metrics = run(&nodes, &edges, &functions);
+    let mut old = offenders(&nodes, &edges, &functions);
+    for dimension in ["acyclicity", "depth", "equality", "redundancy"] {
+        old.list_mut(dimension).expect("a CR-209 list").clear();
+    }
+    assert_eq!(
+        super::unrecorded_lists(&metrics, &old),
+        ["acyclicity", "depth", "equality", "redundancy"]
+    );
+
+    let clean = run(&nodes, &[], &[]);
+    assert_eq!(super::unrecorded_lists(&clean, &old), Vec::<&str>::new());
+
+    old.recorded = false;
+    assert_eq!(
+        super::unrecorded_lists(&metrics, &old),
+        Vec::<&str>::new(),
+        "an unrecorded snapshot is already not recorded as a whole"
+    );
+}
+
+/// A row names at most three directories: a Depth layer that is a larger
+/// directory cycle counts the rest, and an Acyclicity row spanning more than
+/// three directories ends in an ellipsis beside its stated count.
+#[test]
+fn a_row_names_three_directories_and_counts_the_rest() {
+    let nodes: Vec<NodeRow> = ["d", "a", "c", "b", "e"]
+        .iter()
+        .zip(1..)
+        .map(|(dir, id)| {
+            let file = format!("{dir}/f.rs");
+            node(id, &format!("f{id}"), NodeKind::Function, Some(&file))
+        })
+        .chain([node(6, "sink", NodeKind::Function, Some("z/s.rs"))])
+        .collect();
+    // One five-directory cycle 1 → 2 → 3 → 4 → 5 → 1, feeding `z`.
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+        edge(4, 5, EdgeKind::Calls),
+        edge(5, 1, EdgeKind::Calls),
+        edge(5, 6, EdgeKind::Calls),
+    ];
+    let w = offenders(&nodes, &edges, &[]);
+    assert_eq!(
+        rows(&w.acyclicity),
+        [("f1", "5 symbols across 5 directories: a, b, c, …")]
+    );
+    assert_eq!(
+        rows(&w.depth),
+        [("{a, b, c +2 more}", "{a, b, c +2 more} → z (2 layers)")]
+    );
+}
+
+/// "N symbols" counts the cycle's members, not its directories: two members in
+/// one directory and one in another are three symbols across two directories.
+#[test]
+fn acyclicity_counts_members_apart_from_directories() {
+    let nodes = [
+        node(1, "a1", NodeKind::Function, Some("a/1.rs")),
+        node(2, "a2", NodeKind::Function, Some("a/2.rs")),
+        node(3, "b", NodeKind::Function, Some("b/b.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls),
+    ];
+    assert_eq!(
+        rows(&offenders(&nodes, &edges, &[]).acyclicity),
+        [("a1", "3 symbols across 2 directories: a, b")]
+    );
+}
+
+/// Equality lists production functions only ([FR-QM-08]): a test function's
+/// complexity is neither listed nor counted in the mean the list compares
+/// against — with it counted, `f2` (CC 6) would fall below a mean of 13.
+///
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+#[test]
+fn equality_excludes_test_functions_from_the_list_and_the_mean() {
+    let nodes: Vec<NodeRow> = (1..=4)
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/f.rs")))
+        .collect();
+    let functions = [
+        func(1, Some(1), None, None),
+        func(2, Some(6), None, None),
+        func(3, Some(1), None, None),
+        func(4, Some(44), None, None), // a test function
+    ];
+    let test_ids: HashSet<NodeId> = [NodeId(4)].into_iter().collect();
+    let w = offenders_of(&nodes, &[], &functions, &test_ids, super::Thresholds::default(), 10);
+    assert_eq!(rows(&w.equality), [("f2", "complexity 6")]);
+}
+
+/// The Depth boundary: a depth of exactly 2 is one listed chain, so a pre-CR-209
+/// snapshot scoring 2 with no Depth row names Depth as unrecorded.
+#[test]
+fn a_pre_cr209_depth_of_exactly_two_reads_unrecorded() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("a/a.rs")),
+        node(2, "b", NodeKind::Function, Some("b/b.rs")),
+    ];
+    let edges = [edge(1, 2, EdgeKind::Calls)];
+    let metrics = run(&nodes, &edges, &[]);
+    assert_eq!(metrics.depth.raw, 2.0);
+    let mut old = offenders(&nodes, &edges, &[]);
+    assert_eq!(old.depth.len(), 1, "depth 2 lists its one chain");
+    old.depth.clear();
+    assert_eq!(super::unrecorded_lists(&metrics, &old), ["depth"]);
+}
+
+/// A directory cycle of exactly three directories is named in full, with no
+/// "+0 more": the count starts at the fourth.
+#[test]
+fn a_three_directory_layer_is_named_in_full() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("a/a.rs")),
+        node(2, "b", NodeKind::Function, Some("b/b.rs")),
+        node(3, "c", NodeKind::Function, Some("c/c.rs")),
+        node(4, "z", NodeKind::Function, Some("z/z.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+    ];
+    assert_eq!(
+        rows(&offenders(&nodes, &edges, &[]).depth),
+        [("{a, b, c}", "{a, b, c} → z (2 layers)")]
+    );
+}
+
+/// The cap keeps the top rows by rank, never the first ones found: each fixture
+/// presents its strongest candidates last, so truncating before sorting would
+/// keep the weakest.
+#[test]
+fn the_cap_keeps_the_top_ranked_rows_of_each_cr209_list() {
+    let cap = 3;
+    let capped = |nodes: &[NodeRow], edges: &[EdgeRow], functions: &[FunctionMetricRow]| {
+        let thresholds = super::Thresholds::default();
+        offenders_of(nodes, edges, functions, &HashSet::new(), thresholds, cap)
+    };
+
+    // Acyclicity: four two-member cycles, then a three- and a four-member one.
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut ring = |members: &[i64], tag: &str| {
+        for (i, &id) in members.iter().enumerate() {
+            let file = format!("{tag}{i}/f.rs");
+            nodes.push(node(id, &format!("{tag}{i}"), NodeKind::Function, Some(&file)));
+            edges.push(edge(id, members[(i + 1) % members.len()], EdgeKind::Calls));
+        }
+    };
+    for (k, base) in [10_i64, 12, 14, 16].into_iter().enumerate() {
+        ring(&[base, base + 1], &format!("p{k}_"));
+    }
+    ring(&[30, 31, 32], "t");
+    ring(&[40, 41, 42, 43], "q");
+    let w = capped(&nodes, &edges, &[]);
+    assert_eq!(
+        w.acyclicity.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        ["q0", "t0", "p0_0"],
+        "largest cycles first, then the lowest member"
+    );
+
+    // Redundancy: five dead functions, longest last.
+    let dead_nodes: Vec<NodeRow> = (50..55)
+        .map(|id| node(id, &format!("d{id}"), NodeKind::Function, Some("src/d.rs")))
+        .collect();
+    let dead: Vec<FunctionMetricRow> = (50..55)
+        .map(|id| func_lines(id, Some((id - 49) * 10), Some(true), Some(false)))
+        .collect();
+    let w = capped(&dead_nodes, &[], &dead);
+    assert_eq!(
+        w.redundancy.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        ["d54", "d53", "d52"],
+        "the longest dead functions"
+    );
+
+    // Depth: four chain heads, h1..h4, whose chains are 2..5 directories long.
+    let mut chain_nodes = Vec::new();
+    let mut chain_edges = Vec::new();
+    let mut id = 100;
+    for head in 1..=4_i64 {
+        let ids: Vec<i64> = (0..=head).map(|step| id + step).collect();
+        for (step, &n) in ids.iter().enumerate() {
+            let file = match step {
+                0 => format!("h{head}/f.rs"),
+                _ => format!("h{head}_{step}/f.rs"),
+            };
+            chain_nodes.push(node(n, "f", NodeKind::Function, Some(&file)));
+        }
+        for pair in ids.windows(2) {
+            chain_edges.push(edge(pair[0], pair[1], EdgeKind::Calls));
+        }
+        id += 10;
+    }
+    let w = capped(&chain_nodes, &chain_edges, &[]);
+    assert_eq!(
+        w.depth.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        ["h4", "h3", "h2"],
+        "the longest chains"
     );
 }

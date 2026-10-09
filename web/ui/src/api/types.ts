@@ -542,6 +542,18 @@ export interface WorstOffenders {
   cohesion: Offender[];
   focus: Offender[];
   uniqueness: Offender[];
+  /** CR-209: each cross-directory cycle, largest first. */
+  acyclicity: Offender[];
+  /** CR-209: the longest directory chain, then the next-longest chain heads. */
+  depth: Offender[];
+  /** CR-209: the functions above the mean cyclomatic complexity, highest first. */
+  equality: Offender[];
+  /** CR-209: dead or duplicate production functions, longest first. */
+  redundancy: Offender[];
+  /** The dimensions whose list this `recorded` snapshot did not record: it was
+   *  written before CR-209 added the list, and its score says the list would not
+   *  be empty. Absent when there are none. */
+  unrecorded?: string[];
 }
 
 /** The last persisted scan read-model (mirrors `ScanResult`). */

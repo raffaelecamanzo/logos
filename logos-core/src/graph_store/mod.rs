@@ -4376,7 +4376,7 @@ impl SqliteGraphStore {
 /// ([FR-QM-15]), each list in rank order — the order it was computed in. A row
 /// whose dimension is outside
 /// [`WorstOffenders::DIMENSIONS`] is skipped: migration 26 leaves the column
-/// open for further lists ([CR-164]), and none of them belongs to these five.
+/// open for further lists ([CR-164]), and none of them belongs to these nine.
 ///
 /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
 /// [CR-164]: ../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md

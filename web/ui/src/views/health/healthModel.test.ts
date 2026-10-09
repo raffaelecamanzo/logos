@@ -59,7 +59,18 @@ function scan(over: Partial<ScanResult> = {}): ScanResult {
     signal: 8000,
     freshness: "",
     metrics: snapshot(),
-    worst_offenders: { recorded: true, nesting: [], conciseness: [], cohesion: [], focus: [], uniqueness: [] },
+    worst_offenders: {
+      recorded: true,
+      nesting: [],
+      conciseness: [],
+      cohesion: [],
+      focus: [],
+      uniqueness: [],
+      acyclicity: [],
+      depth: [],
+      equality: [],
+      redundancy: [],
+    },
     warnings: [],
     ...over,
   };
@@ -212,7 +223,11 @@ describe("isInformationalPass (FR-GV-05, FR-GV-10)", () => {
 });
 
 describe("dimensionDetails (FR-UI-43)", () => {
-  const OFFENDER_BACKED = ["Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness"];
+  // Canonical metric order: the four CR-209 lists sit among the originals.
+  const OFFENDER_BACKED = [
+    "Acyclicity", "Depth", "Equality", "Redundancy",
+    "Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness",
+  ];
   const byName = (dims: DimensionDetail[], name: string) => dims.find((d) => d.name === name)!;
 
   it("enumerates all ten dimensions from the Quality signal table's own list, in its order", () => {
@@ -220,19 +235,22 @@ describe("dimensionDetails (FR-UI-43)", () => {
     expect(dimensionDetails(s).map((d) => d.key)).toEqual(metricRows(s.metrics).map((r) => r.key));
     expect(dimensionDetails(s)).toHaveLength(10);
   });
-  it("joins the five offender-backed dimensions to their worst offenders", () => {
+  it("joins the nine offender-backed dimensions to their worst offenders", () => {
     const s = scan();
     s.worst_offenders.nesting = [{ name: "deep_fn", file: "src/a.rs", line: 42, detail: "nesting depth 6" }];
+    s.worst_offenders.depth = [{ name: "api", file: "", line: null, detail: "api → core (2 directories)" }];
     const dims = dimensionDetails(s);
     expect(byName(dims, "Nesting").offenders).toHaveLength(1);
     expect(byName(dims, "Nesting").offenders[0].name).toBe("deep_fn");
+    expect(byName(dims, "Depth").offenders[0].detail).toBe("api → core (2 directories)");
+    expect(byName(dims, "Depth").offenderState).toBe("listed");
   });
-  it("marks the other five as unlisted — a named absence, never an empty list read as clean", () => {
+  it("marks only Modularity as unlisted — a named absence, never an empty list read as clean", () => {
     for (const recorded of [true, false]) {
       const s = scan();
       s.worst_offenders.recorded = recorded;
       const unlisted = dimensionDetails(s).filter((d) => d.offenderState === "unlisted").map((d) => d.name);
-      expect(unlisted).toEqual(["Modularity", "Acyclicity", "Depth", "Equality", "Redundancy"]);
+      expect(unlisted).toEqual(["Modularity"]);
     }
   });
   it("keeps an n/a dimension's value null", () => {
@@ -256,20 +274,29 @@ describe("dimensionDetails (FR-UI-43)", () => {
     it("recorded with entries lists the offenders; the other recorded dimensions are none-flagged", () => {
       const s = scan();
       s.worst_offenders.nesting = [entry];
-      expect(backed(s)).toEqual(["listed", "none-flagged", "none-flagged", "none-flagged", "none-flagged"]);
+      expect(backed(s)).toEqual([...Array(4).fill("none-flagged"), "listed", ...Array(4).fill("none-flagged")]);
     });
     it("not recorded is never none-flagged — every dimension, whatever the lists hold", () => {
       const s = scan();
       s.worst_offenders.recorded = false;
-      expect(backed(s)).toEqual(Array(5).fill("not-recorded"));
+      expect(backed(s)).toEqual(Array(9).fill("not-recorded"));
       // Even a (contradictory) non-empty list under recorded:false is not presented as recorded.
       s.worst_offenders.nesting = [entry];
-      expect(backed(s)[0]).toBe("not-recorded");
+      expect(byName(dimensionDetails(s), "Nesting").offenderState).toBe("not-recorded");
     });
     it("a payload without the flag is treated as not recorded, never as a clean result", () => {
       const s = scan();
       delete (s.worst_offenders as Partial<typeof s.worst_offenders>).recorded;
-      expect(backed(s)).toEqual(Array(5).fill("not-recorded"));
+      expect(backed(s)).toEqual(Array(9).fill("not-recorded"));
+    });
+    it("a list the snapshot predates (CR-209 `unrecorded`) is not recorded; the rest keep their state", () => {
+      const s = scan();
+      s.worst_offenders.unrecorded = ["acyclicity", "equality"];
+      s.worst_offenders.nesting = [entry];
+      expect(backed(s)).toEqual([
+        "not-recorded", "none-flagged", "not-recorded", "none-flagged",
+        "listed", "none-flagged", "none-flagged", "none-flagged", "none-flagged",
+      ]);
     });
     it("an n/a dimension keeps its n/a state regardless of the recorded flag", () => {
       for (const recorded of [true, false]) {
@@ -291,13 +318,18 @@ describe("dimensionDetails (FR-UI-43)", () => {
         "gamma_depth_five",
         "alpha_depth_four",
       ]);
-      expect(OFFENDER_BACKED.slice(1).map((n) => byName(dims, n).offenderState)).toEqual(Array(4).fill("none-flagged"));
+      // CR-209: beta is the one function above the fixture's mean complexity.
+      const equality = byName(dims, "Equality");
+      expect(equality.offenderState).toBe("listed");
+      expect(equality.offenders.map((o) => [o.name, o.detail])).toEqual([["beta_depth_six", "complexity 7"]]);
+      const rest = OFFENDER_BACKED.filter((n) => n !== "Nesting" && n !== "Equality");
+      expect(rest.map((n) => byName(dims, n).offenderState)).toEqual(Array(7).fill("none-flagged"));
     });
     it("a clean scan is recorded-empty and a never-scanned store is not recorded", () => {
       const states = (w: ScanResult["worst_offenders"]) =>
         OFFENDER_BACKED.map((n) => byName(dimensionDetails(scan({ worst_offenders: w })), n).offenderState);
-      expect(states(realOffenders.recordedEmpty)).toEqual(Array(5).fill("none-flagged"));
-      expect(states(realOffenders.notRecorded)).toEqual(Array(5).fill("not-recorded"));
+      expect(states(realOffenders.recordedEmpty)).toEqual(Array(9).fill("none-flagged"));
+      expect(states(realOffenders.notRecorded)).toEqual(Array(9).fill("not-recorded"));
     });
   });
 });

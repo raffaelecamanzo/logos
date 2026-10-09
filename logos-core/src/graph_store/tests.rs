@@ -3241,6 +3241,19 @@ fn snapshot_offenders_round_trip_in_rank_order_through_the_latest_read() {
         cohesion: vec![offender("Split", "src/s.rs", Some(4), "LCOM4 3")],
         focus: vec![offender("God", "src/g.rs", Some(5), "23 methods · span 540")],
         uniqueness: vec![offender("unbound", "", None, "clone group #7")],
+        acyclicity: vec![offender(
+            "parse",
+            "a/p.rs",
+            Some(6),
+            "2 symbols across 2 directories: a, b",
+        )],
+        depth: vec![
+            offender("z", "", None, "z → a (2 directories)"),
+            offender("b", "", None, "b → a (2 directories)"),
+        ],
+        equality: vec![offender("hot", "src/h.rs", Some(8), "complexity 31")],
+        redundancy: vec![offender("gone", "src/g.rs", Some(2), "dead, duplicate")],
+        unrecorded: Vec::new(),
     };
     let id = store
         .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &lists))

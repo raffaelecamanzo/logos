@@ -394,8 +394,8 @@ export type OffenderState = "not-applicable" | "not-recorded" | "none-flagged" |
 
 /**
  * Any dimension widget's offender state: an [`OffenderState`], or `unlisted` —
- * the payload carries no offender list for this dimension at all (Modularity …
- * Redundancy, FR-UI-43): a named absence, never `[]`.
+ * the payload carries no offender list for this dimension at all (Modularity,
+ * FR-UI-43): a named absence, never `[]`.
  */
 export type DimensionOffenderState = OffenderState | "unlisted";
 
@@ -408,17 +408,31 @@ export type DimensionOffenderState = OffenderState | "unlisted";
  */
 export function offenderState(
   value: MetricValue | null,
-  worst: Pick<WorstOffenders, "recorded">,
+  worst: Pick<WorstOffenders, "recorded" | "unrecorded">,
+  key: OffenderListKey,
   offenders: Offender[],
 ): OffenderState {
   if (value === null) return "not-applicable";
-  if (worst.recorded !== true) return "not-recorded";
+  // A snapshot recorded before CR-209 holds no list for the four dimensions it
+  // added; the server names each one it cannot vouch for (`unrecorded`).
+  if (worst.recorded !== true || worst.unrecorded?.includes(key) === true) return "not-recorded";
   return offenders.length === 0 ? "none-flagged" : "listed";
 }
 
-/** The five dimensions whose worst offenders the payload carries (`WorstOffenders`,
- *  `DIMENSIONS` in logos-core/src/models/quality.rs). */
-const OFFENDER_LISTS = ["nesting", "conciseness", "cohesion", "focus", "uniqueness"] as const;
+/** The nine dimensions whose worst offenders the payload carries (`WorstOffenders`,
+ *  `DIMENSIONS` in logos-core/src/models/quality.rs). Modularity scores the
+ *  directory layout as a whole, so it has no list. */
+const OFFENDER_LISTS = [
+  "nesting",
+  "conciseness",
+  "cohesion",
+  "focus",
+  "uniqueness",
+  "acyclicity",
+  "depth",
+  "equality",
+  "redundancy",
+] as const;
 type OffenderListKey = (typeof OFFENDER_LISTS)[number];
 
 function hasOffenderList(key: DimensionKey): key is OffenderListKey {
@@ -444,7 +458,7 @@ export function dimensionDetails(scan: ScanResult): DimensionDetail[] {
   return metricRows(scan.metrics).map((row) => {
     if (!hasOffenderList(row.key)) return { ...row, offenders: [], offenderState: "unlisted" };
     const offenders = w[row.key];
-    return { ...row, offenders, offenderState: offenderState(row.value, w, offenders) };
+    return { ...row, offenders, offenderState: offenderState(row.value, w, row.key, offenders) };
   });
 }
 
