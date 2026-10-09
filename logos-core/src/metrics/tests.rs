@@ -2926,3 +2926,23 @@ fn a_row_names_three_directories_and_counts_the_rest() {
         [("{a, b, c +2 more}", "{a, b, c +2 more} → z (2 layers)")]
     );
 }
+
+/// "N symbols" counts the cycle's members, not its directories: two members in
+/// one directory and one in another are three symbols across two directories.
+#[test]
+fn acyclicity_counts_members_apart_from_directories() {
+    let nodes = [
+        node(1, "a1", NodeKind::Function, Some("a/1.rs")),
+        node(2, "a2", NodeKind::Function, Some("a/2.rs")),
+        node(3, "b", NodeKind::Function, Some("b/b.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls),
+    ];
+    assert_eq!(
+        rows(&offenders(&nodes, &edges, &[]).acyclicity),
+        [("a1", "3 symbols across 2 directories: a, b")]
+    );
+}
