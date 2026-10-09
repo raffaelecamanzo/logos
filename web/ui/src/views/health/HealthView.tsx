@@ -419,8 +419,8 @@ function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: Sn
 }
 
 /** A dimension widget's evidence: the offender table, the statement of a state
- *  with no table, or — for a dimension the payload lists nothing for — the named
- *  absence and the pointer to its units. */
+ *  with no table, or — for the dimension the payload lists nothing for — the
+ *  named absence. */
 function DimensionEvidence({ dim }: { dim: DimensionDetail }) {
   switch (dim.offenderState) {
     case "not-applicable":
@@ -435,25 +435,11 @@ function DimensionEvidence({ dim }: { dim: DimensionDetail }) {
         </p>
       );
     case "unlisted": {
-      const pointer = DIMENSION_COPY[dim.key].unlisted;
-      if (pointer === undefined) return null;
+      const absence = DIMENSION_COPY[dim.key].unlisted;
+      if (absence === undefined) return null;
       return (
         <p className={styles.statement} data-offender-state="unlisted">
-          {pointer.statement}
-          {pointer.view !== undefined && (
-            <>
-              {" "}
-              <a href={pointer.view.href}>{pointer.view.label}</a>
-            </>
-          )}
-          {pointer.view !== undefined && pointer.command !== undefined && " and"}
-          {pointer.command !== undefined && (
-            <>
-              {" "}
-              <code>{pointer.command}</code>
-            </>
-          )}
-          {(pointer.view !== undefined || pointer.command !== undefined) && "."}
+          {absence}
         </p>
       );
     }

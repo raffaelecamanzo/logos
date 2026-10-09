@@ -132,24 +132,15 @@ export const THRESHOLDS_DISCLOSURE: { readonly summary: string; readonly body: C
 
 // ── The ten dimensions (items 14–19) ─────────────────────────────────────────
 
-/** Where a dimension's units are found when the payload carries no list of them. */
-export interface UnitPointer {
-  /** The named absence: no list is recorded, and why or where to look. */
-  readonly statement: string;
-  /** A view that shows the units. */
-  readonly view?: { readonly label: string; readonly href: string };
-  /** A command that shows the units. */
-  readonly command?: string;
-}
-
 /** A dimension's catalogue entry: the message standard, plus its figure text and,
  *  for the dimension with no offender list (Modularity), the named absence. */
 export interface DimensionCopy extends CopyEntry {
   /** The raw value with its unit, as the figure row states it. */
   readonly raw: (raw: number) => CopyText;
-  /** Present exactly for the dimension whose units the payload does not list:
-   *  Modularity, which scores the directory layout as a whole (CR-209). */
-  readonly unlisted?: UnitPointer;
+  /** The named absence, present exactly for the dimension whose units the payload
+   *  does not list: Modularity, which scores the directory layout as a whole
+   *  (CR-209). */
+  readonly unlisted?: string;
 }
 
 /** A share of a population, to one decimal place. A share that is not zero never
@@ -165,10 +156,8 @@ export const modularity: DimensionCopy = {
   what: "Do directories form real modules? This scores how many dependencies stay inside the directory they start in.",
   why: "Directories that are real modules can be read, changed and owned one at a time.",
   raw: (raw) => `Q ${raw.toFixed(2)} (Newman's modularity, from −0.5 to 1)`,
-  unlisted: {
-    statement:
-      "No list of units: Modularity scores the directory layout as a whole, so no single unit is responsible for it.",
-  },
+  unlisted:
+    "No list of units: Modularity scores the directory layout as a whole, so no single unit is responsible for it.",
 };
 
 export const acyclicity: DimensionCopy = {
