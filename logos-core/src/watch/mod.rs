@@ -440,11 +440,14 @@ struct DebounceSink<'a> {
 ///    (the bounded hole [ADR-38] sanctions).
 /// 3. **Indexer-ignored dirs** — otherwise the normal `target/node_modules/…`
 ///    filter applies ([`is_ignored`]).
-/// 4. **Ignore files** ([CR-210]) — a `.gitignore`/`.ignore` is always a
-///    [`Source`](Admission::Source) path, even one that ignores itself (a
-///    generated directory's `*`): `sync` never indexes it, but its change makes
-///    `sync` re-gate the stored files beneath its directory, so a newly ignored
-///    file leaves the graph on this batch rather than on the next full reconcile.
+/// 4. **Ignore files** ([CR-210]) — a `.gitignore`/`.ignore` in a directory the
+///    full walk enters is a [`Source`](Admission::Source) path, even one that
+///    ignores itself (a generated directory's `*`): `sync` never indexes it, but
+///    its change makes `sync` re-gate the stored files beneath its directory, so
+///    a newly ignored file leaves the graph on this batch rather than on the next
+///    full reconcile. One in a directory the walk never enters (under a
+///    nested-`.git` boundary or an ignored directory) cannot change admission,
+///    and falls through to step 5, which drops it.
 /// 5. **Walk-level admission** (CR-054 / FR-SY-11) — a best-effort pre-filter that
 ///    drops a gitignored or nested-`.git`-boundary path the name-based filters
 ///    miss, so a dev-session worktree (`.worktrees/**`) or browser scratch
@@ -487,11 +490,18 @@ fn classify(
     if is_ignored(root, path, ignored_dirs) {
         return Admission::Ignored;
     }
-    // (4) An ignore-file change always reaches `sync`, which re-gates the stored
-    // files beneath it (CR-210) — checked before the authority, which would drop
-    // a `.gitignore` that ignores itself.
+    // (4) An ignore-file change reaches `sync`, which re-gates the stored files
+    // beneath it (CR-210) — checked before the authority, which would drop a
+    // `.gitignore` that ignores itself. Only where the walk reads it: a dev
+    // worktree's checkout writes ignore files the primary must not sync over.
     if crate::config::is_ignore_file(relative) {
-        return Admission::Source;
+        let read_by_walk = match (authority, path.parent()) {
+            (Some(authority), Some(dir)) => authority.walks_into(dir),
+            _ => true,
+        };
+        if read_by_walk {
+            return Admission::Source;
+        }
     }
     // (5) The walk-level admission pre-filter (CR-054 / FR-SY-11): drop a path the
     // full walk would exclude but the name-based filters above miss — a gitignored

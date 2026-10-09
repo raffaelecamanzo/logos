@@ -228,17 +228,8 @@ impl AdmissionAuthority {
         let mut ancestor = self.root.clone();
         for name in &components[..components.len().saturating_sub(1)] {
             ancestor.push(name);
-            // Nested `.git` boundary — a linked worktree (`.git` gitlink file), a
-            // vendored repo, or a submodule (`.git` directory). Mirrors the walk's
-            // `entry.path().join(".git").exists()` prune.
-            if ancestor.join(".git").exists() {
+            if self.prunes_dir(&ancestor, name) {
                 return false;
-            }
-            // `ignored_dirs` name prune (matched anywhere in the tree).
-            if let Some(name) = name.to_str() {
-                if self.ignored_dirs.contains(name) {
-                    return false;
-                }
             }
         }
 
@@ -271,7 +262,7 @@ impl AdmissionAuthority {
         // descendants, replicating the walk's subtree prune without descending.
         // Skipped for a carved sanctioned doc (the walk follows it past git-ignore).
         let abs = self.root.join(rel_path);
-        if !carved && self.ignored(rel_path) {
+        if !carved && self.ignored(rel_path, false) {
             return false;
         }
 
@@ -333,14 +324,53 @@ impl AdmissionAuthority {
         }
     }
 
+    /// Would the full walk descend into directory `dir`? The root always; any
+    /// other directory unless it, or an ancestor, is a nested-`.git` boundary, an
+    /// `ignored_dirs` name, or excluded by an ignore file. Outside the root,
+    /// `false`.
+    ///
+    /// The walk reads a directory's ignore files only once it has entered the
+    /// directory, so the watcher asks this before routing an ignore-file change
+    /// to `sync` ([CR-210]): an ignore file the walk never reads cannot change
+    /// what is admitted.
+    #[must_use]
+    pub fn walks_into(&self, dir: &Path) -> bool {
+        let Some(rel) = self.relativize(dir) else {
+            return dir == self.root || dir.as_os_str().is_empty();
+        };
+        let mut ancestor = self.root.clone();
+        for name in rel.components().map(Component::as_os_str) {
+            ancestor.push(name);
+            if self.prunes_dir(&ancestor, name) {
+                return false;
+            }
+        }
+        !self.ignored(&rel, true)
+    }
+
+    /// Whether the walk prunes directory `dir` (named `name`, below the root) by
+    /// name or boundary, whatever the ignore files say.
+    fn prunes_dir(&self, dir: &Path, name: &OsStr) -> bool {
+        // Nested `.git` boundary — a linked worktree (`.git` gitlink file), a
+        // vendored repo, or a submodule (`.git` directory). Mirrors the walk's
+        // `entry.path().join(".git").exists()` prune.
+        if dir.join(".git").exists() {
+            return true;
+        }
+        // `ignored_dirs` name prune (matched anywhere in the tree).
+        name.to_str().is_some_and(|name| self.ignored_dirs.contains(name))
+    }
+
     /// Whether the ignore files exclude `rel` (root-relative, `Normal`
     /// components only): `rel` itself, or any ancestor directory of it.
+    /// `leaf_is_dir` says whether `rel` itself is a directory (it decides
+    /// whether a `dir/`-only rule can match it).
     ///
     /// Mirrors the walk ([`discover`](super::discover)): each component is judged
     /// against the matchers of the directories from the root down to that
     /// component's **parent** — a directory's own ignore files apply to what is
     /// inside it, not to itself — and an ignored directory ends the descent.
-    fn ignored(&self, rel: &Path) -> bool {
+    fn ignored(&self, rel: &Path, leaf_is_dir: bool) -> bool {
         let components: Vec<&OsStr> = rel.components().map(Component::as_os_str).collect();
         // The non-empty matchers of the directories entered so far, root first.
         let mut stack: Vec<Arc<DirIgnores>> = Vec::new();
@@ -351,7 +381,7 @@ impl AdmissionAuthority {
                 stack.push(ignores);
             }
             dir.push(name);
-            let is_dir = depth + 1 < components.len();
+            let is_dir = leaf_is_dir || depth + 1 < components.len();
             if matched(&stack, &dir, is_dir).is_ignore() {
                 return true;
             }
@@ -1127,6 +1157,31 @@ mod tests {
 
         assert!(authority.admits_path(&file), "no rule names a/b/x.rs any more");
         assert_eq!(disagreements(&root, &config, &authority), Vec::<String>::new());
+    }
+
+    #[test]
+    fn walks_into_answers_whether_the_walk_enters_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join(".gitignore"), "gen/\n");
+        write(&root.join("web/.gitignore"), "cache/\n");
+        write(&root.join(".worktrees/s/.git"), "gitdir: /elsewhere\n");
+        for dir in ["src/deep", "gen/sub", "web/cache", "target/debug", ".worktrees/s/src"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let authority = AdmissionAuthority::from_config(&root, &test_config()).unwrap();
+
+        assert!(authority.walks_into(&root), "the root is always walked");
+        assert!(authority.walks_into(&root.join("src/deep")));
+        assert!(authority.walks_into(Path::new("web")), "root-relative works");
+        // A dir-only rule matches the directory itself; a nested rule its child.
+        assert!(!authority.walks_into(&root.join("gen")));
+        assert!(!authority.walks_into(&root.join("gen/sub")), "beneath an ignored dir");
+        assert!(!authority.walks_into(&root.join("web/cache")), "a nested `.gitignore` rule");
+        assert!(!authority.walks_into(&root.join("target/debug")), "an `ignored_dirs` name");
+        assert!(!authority.walks_into(&root.join(".worktrees/s")), "a nested `.git` boundary");
+        assert!(!authority.walks_into(&root.join(".worktrees/s/src")));
+        assert!(!authority.walks_into(Path::new("/elsewhere")), "outside the root");
     }
 
     #[test]

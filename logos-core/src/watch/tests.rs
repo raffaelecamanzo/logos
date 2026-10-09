@@ -348,43 +348,57 @@ fn classify_pre_filters_gitignored_and_boundary_paths_but_lets_deletions_through
     );
 }
 
-/// CR-210: the pre-filter honours a nested ignore file, and an ignore file is
-/// always routed to `sync` — even one that ignores itself (a generated
-/// directory's `*`), which the authority alone would drop, losing the re-gate
-/// that removes the files it now excludes.
+/// CR-210: the pre-filter honours a nested ignore file, and an ignore file in a
+/// directory the walk enters is routed to `sync` — even one that ignores itself
+/// (a generated directory's `*`), which the authority alone would drop, losing
+/// the re-gate that removes the files it now excludes. One the walk never reads
+/// is dropped.
 #[test]
-fn classify_drops_nested_ignored_paths_but_always_routes_ignore_files_to_sync() {
+fn classify_drops_nested_ignored_paths_and_routes_walked_ignore_files_to_sync() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
-    std::fs::create_dir_all(root.join("web/dist")).unwrap();
+    std::fs::create_dir_all(root.join("web/harness-dist")).unwrap();
     std::fs::write(root.join("web/.gitignore"), "report.rs\n").unwrap();
     std::fs::write(root.join("web/report.rs"), "fn r() {}\n").unwrap();
     std::fs::write(root.join("web/app.rs"), "fn a() {}\n").unwrap();
     // The self-ignoring shape build tools write into their output directory.
-    std::fs::write(root.join("web/dist/.gitignore"), "*\n").unwrap();
-    std::fs::write(root.join("web/dist/bundle.rs"), "fn b() {}\n").unwrap();
+    std::fs::write(root.join("web/harness-dist/.gitignore"), "*\n").unwrap();
+    std::fs::write(root.join("web/harness-dist/bundle.rs"), "fn b() {}\n").unwrap();
+    std::fs::create_dir_all(root.join(".worktrees/s")).unwrap();
+    std::fs::write(root.join(".worktrees/s/.git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(root.join(".worktrees/s/.gitignore"), "x\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "logs/\n").unwrap();
+    std::fs::create_dir_all(root.join("logs/old")).unwrap();
+    std::fs::write(root.join("logs/old/.gitignore"), "!keep\n").unwrap();
+    std::fs::create_dir_all(root.join("web/report.rs.d")).unwrap();
+    std::fs::write(root.join("web/report.rs.d/.gitignore"), "x\n").unwrap();
 
     let config = crate::config::Config {
         exclude: vec![],
         ..crate::config::Config::default()
     };
     let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
-    // A trimmed name set: the default `ignored_set()` prunes `dist` by name,
-    // which would hide the self-ignoring `.gitignore` from the authority.
+    // A trimmed name set, so the authority's gates — not the name filter —
+    // decide each verdict below.
     let ig: HashSet<String> = [".logos", ".git"].iter().map(|s| (*s).to_string()).collect();
     let m = builtin_matcher();
     let classify_at = |rel: &str| classify(&root, &root.join(rel), &ig, &m, Some(&authority));
 
     assert_eq!(classify_at("web/report.rs"), Admission::Ignored, "a nested-ignored path is dropped");
-    assert_eq!(classify_at("web/dist/bundle.rs"), Admission::Ignored, "`*` drops the bundle");
+    assert_eq!(classify_at("web/harness-dist/bundle.rs"), Admission::Ignored, "`*` drops the bundle");
     assert_eq!(classify_at("web/app.rs"), Admission::Source, "the admitted sibling passes");
-    assert!(!authority.admits_path(&root.join("web/dist/.gitignore")), "the `*` file ignores itself");
+    assert!(!authority.admits_path(&root.join("web/harness-dist/.gitignore")), "the `*` file ignores itself");
     assert_eq!(
-        classify_at("web/dist/.gitignore"),
+        classify_at("web/harness-dist/.gitignore"),
         Admission::Source,
         "a self-ignoring ignore file still reaches sync"
     );
     assert_eq!(classify_at("web/.gitignore"), Admission::Source);
+    // An ignore file the walk never reads — under a nested-`.git` boundary (a dev
+    // worktree's checkout) or an ignored directory — cannot change admission.
+    assert_eq!(classify_at(".worktrees/s/.gitignore"), Admission::Ignored, "boundary");
+    assert_eq!(classify_at("web/report.rs.d/.gitignore"), Admission::Source, "near miss");
+    assert_eq!(classify_at("logs/old/.gitignore"), Admission::Ignored, "ignored directory");
     // The routing exception is the ignore-file name only, not anything inside the
     // ignored tree, and never the feedback-loop dirs.
     assert_eq!(classify_at(".git/info/exclude"), Admission::Ignored);
