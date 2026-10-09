@@ -3006,3 +3006,76 @@ fn a_three_directory_layer_is_named_in_full() {
         [("{a, b, c}", "{a, b, c} → z (2 layers)")]
     );
 }
+
+/// The cap keeps the top rows by rank, never the first ones found: each fixture
+/// presents its strongest candidates last, so truncating before sorting would
+/// keep the weakest.
+#[test]
+fn the_cap_keeps_the_top_ranked_rows_of_each_cr209_list() {
+    let cap = 3;
+    let capped = |nodes: &[NodeRow], edges: &[EdgeRow], functions: &[FunctionMetricRow]| {
+        let thresholds = super::Thresholds::default();
+        offenders_of(nodes, edges, functions, &HashSet::new(), thresholds, cap)
+    };
+
+    // Acyclicity: four two-member cycles, then a three- and a four-member one.
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut ring = |members: &[i64], tag: &str| {
+        for (i, &id) in members.iter().enumerate() {
+            let file = format!("{tag}{i}/f.rs");
+            nodes.push(node(id, &format!("{tag}{i}"), NodeKind::Function, Some(&file)));
+            edges.push(edge(id, members[(i + 1) % members.len()], EdgeKind::Calls));
+        }
+    };
+    for (k, base) in [10_i64, 12, 14, 16].into_iter().enumerate() {
+        ring(&[base, base + 1], &format!("p{k}_"));
+    }
+    ring(&[30, 31, 32], "t");
+    ring(&[40, 41, 42, 43], "q");
+    let w = capped(&nodes, &edges, &[]);
+    assert_eq!(
+        w.acyclicity.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        ["q0", "t0", "p0_0"],
+        "largest cycles first, then the lowest member"
+    );
+
+    // Redundancy: five dead functions, longest last.
+    let dead_nodes: Vec<NodeRow> = (50..55)
+        .map(|id| node(id, &format!("d{id}"), NodeKind::Function, Some("src/d.rs")))
+        .collect();
+    let dead: Vec<FunctionMetricRow> = (50..55)
+        .map(|id| func_lines(id, Some((id - 49) * 10), Some(true), Some(false)))
+        .collect();
+    let w = capped(&dead_nodes, &[], &dead);
+    assert_eq!(
+        w.redundancy.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        ["d54", "d53", "d52"],
+        "the longest dead functions"
+    );
+
+    // Depth: four chain heads, h1..h4, whose chains are 2..5 directories long.
+    let mut chain_nodes = Vec::new();
+    let mut chain_edges = Vec::new();
+    let mut id = 100;
+    for head in 1..=4_i64 {
+        let ids: Vec<i64> = (0..=head).map(|step| id + step).collect();
+        for (step, &n) in ids.iter().enumerate() {
+            let file = match step {
+                0 => format!("h{head}/f.rs"),
+                _ => format!("h{head}_{step}/f.rs"),
+            };
+            chain_nodes.push(node(n, "f", NodeKind::Function, Some(&file)));
+        }
+        for pair in ids.windows(2) {
+            chain_edges.push(edge(pair[0], pair[1], EdgeKind::Calls));
+        }
+        id += 10;
+    }
+    let w = capped(&chain_nodes, &chain_edges, &[]);
+    assert_eq!(
+        w.depth.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        ["h4", "h3", "h2"],
+        "the longest chains"
+    );
+}
