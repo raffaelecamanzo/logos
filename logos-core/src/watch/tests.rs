@@ -441,6 +441,46 @@ fn a_batch_with_a_new_ignore_file_applies_it_to_the_batch_s_own_paths() {
     assert!(sources.contains(&ignore_file), "the ignore file reaches sync for the re-gate");
 }
 
+/// CR-210: a rename carries two paths, and the pre-pass invalidates both. When
+/// the rule file is renamed AWAY (`stage/.gitignore` → `stage/old-rules.txt`),
+/// only the rename's `from` path names it — miss it and the watcher keeps the
+/// rule cached, dropping the now-admitted file on every later batch.
+#[test]
+fn renaming_an_ignore_file_away_invalidates_the_rule_it_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("stage")).unwrap();
+    std::fs::write(root.join("stage/gen.rs"), "fn g() {}\n").unwrap();
+    std::fs::write(root.join("stage/.gitignore"), "gen.rs\n").unwrap();
+    let config = crate::config::Config {
+        exclude: vec![],
+        ..crate::config::Config::default()
+    };
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    assert!(!authority.admits_path(&root.join("stage/gen.rs")), "the rule is cached");
+
+    std::fs::rename(root.join("stage/.gitignore"), root.join("stage/old-rules.txt")).unwrap();
+    let mut h = Harness::new();
+    h.root = root.clone();
+    h.authority = Some(authority);
+    let rename = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
+        notify::event::RenameMode::Both,
+    )))
+    .add_path(root.join("stage/.gitignore"))
+    .add_path(root.join("stage/old-rules.txt"));
+    on_debounced(
+        &h.sink(),
+        Ok(vec![notify_debouncer_full::DebouncedEvent::new(rename, Instant::now())]),
+    );
+
+    let gen = root.join("stage/gen.rs");
+    on_debounced(&h.sink(), Ok(debounced_events(&[gen.to_str().unwrap()])));
+    assert!(
+        h.sources.lock().unwrap().contains(&gen),
+        "gen.rs reaches sync once its rule is renamed away"
+    );
+}
+
 // ── Drop-and-coalesce slot semantics (AQ-01) + artifact routing (FR-CV-10) ───
 
 /// A debounced batch whose paths all filter away (internal/ignored churn)
