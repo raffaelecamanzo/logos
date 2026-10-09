@@ -2967,3 +2967,20 @@ fn equality_excludes_test_functions_from_the_list_and_the_mean() {
     let w = offenders_of(&nodes, &[], &functions, &test_ids, super::Thresholds::default(), 10);
     assert_eq!(rows(&w.equality), [("f2", "complexity 6")]);
 }
+
+/// The Depth boundary: a depth of exactly 2 is one listed chain, so a pre-CR-209
+/// snapshot scoring 2 with no Depth row names Depth as unrecorded.
+#[test]
+fn a_pre_cr209_depth_of_exactly_two_reads_unrecorded() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("a/a.rs")),
+        node(2, "b", NodeKind::Function, Some("b/b.rs")),
+    ];
+    let edges = [edge(1, 2, EdgeKind::Calls)];
+    let metrics = run(&nodes, &edges, &[]);
+    assert_eq!(metrics.depth.raw, 2.0);
+    let mut old = offenders(&nodes, &edges, &[]);
+    assert_eq!(old.depth.len(), 1, "depth 2 lists its one chain");
+    old.depth.clear();
+    assert_eq!(super::unrecorded_lists(&metrics, &old), ["depth"]);
+}
