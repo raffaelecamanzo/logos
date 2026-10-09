@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.15.3] — 2026-10-09
+
 ### Added
 
 - **Health names the worst items of Acyclicity, Depth, Equality and Redundancy
