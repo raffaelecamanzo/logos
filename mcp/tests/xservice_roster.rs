@@ -25,7 +25,7 @@ mod roster;
 /// reads the static router, so no index is needed.
 fn single_tools() -> Vec<rmcp::model::Tool> {
     let tmp = tempfile::tempdir().expect("tempdir");
-    LogosMcp::new(Engine::open(tmp.path())).list_tools()
+    LogosMcp::new(Engine::open(tmp.path()), &logos_ext::ExtensionHost::new()).list_tools()
 }
 
 /// The federated server over an (empty, never-warmed) member registry — Lazy
@@ -41,7 +41,7 @@ fn federated_tools() -> Vec<rmcp::model::Tool> {
         warm_concurrency: None,
         member_kinds: Default::default(),
     };
-    LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy)).list_tools()
+    LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy), &logos_ext::ExtensionHost::new()).list_tools()
 }
 
 /// Serialise a tool to its full JSON wire form (name + description + schema) —

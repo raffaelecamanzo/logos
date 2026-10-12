@@ -89,6 +89,7 @@ use logos_core::Engine;
 
 use super::plan::{PlanStep, StepRole};
 use super::planner::member_roster;
+use super::preset::{with_clause, Preset};
 use super::step::{StepContext, StepError, StepExecutor, StepObservation};
 
 /// How many **consecutive** tool errors (a tool that ran and failed, or an
@@ -482,9 +483,16 @@ impl StepRunner {
                     }
                     None => step.instruction.clone(),
                 };
+                // A clause the orchestrator set for this turn (the first turn's
+                // `TITLE:` trailer, [FR-UI-48]) follows the role's own preamble, so
+                // whichever preamble the roster runs composes with it.
+                let preamble = match ctx.preamble_clause() {
+                    Some(clause) => format!("{preamble}\n\n{clause}"),
+                    None => preamble.to_string(),
+                };
                 run_synthesizer(
                     model,
-                    preamble,
+                    &preamble,
                     &instruction,
                     self.temperature,
                     self.max_tokens,
@@ -516,6 +524,7 @@ pub struct SubagentRoster<M> {
     sandbox: Arc<Sandbox>,
     models: RoleModels<M>,
     runner: StepRunner,
+    preset: Preset,
 }
 
 impl<M> SubagentRoster<M>
@@ -535,6 +544,7 @@ where
             sandbox,
             models,
             runner: StepRunner::default(),
+            preset: Preset::Default,
         }
     }
 
@@ -563,18 +573,39 @@ where
         definitions(self.toolset_for(role)).await
     }
 
+    /// Run every turn under `preset` ([S-625], [FR-UI-49]): its clause follows the
+    /// planner and Synthesizer preambles; every other role's preamble, every
+    /// toolset and the budget tree are untouched. Built per turn because the
+    /// preset is the turn's.
+    ///
+    /// [S-625]: ../../../docs/planning/journal.md#s-625-a-chat-turn-runs-under-a-prompt-only-preset-chosen-in-the-composer
+    /// [FR-UI-49]: ../../../docs/specs/requirements/FR-UI-49.md
+    pub fn with_preset(mut self, preset: Preset) -> Self {
+        self.preset = preset;
+        self
+    }
+
     /// The system preamble `role` runs under — empty for the Workspace-Analyst,
-    /// which this roster does not carry.
+    /// which this roster does not carry. The Synthesizer's carries the preset's
+    /// clause ([`Self::with_preset`]).
     pub fn preamble(&self, role: StepRole) -> String {
-        preamble_for(role).unwrap_or_default().to_string()
+        let base = preamble_for(role).unwrap_or_default().to_string();
+        match role {
+            StepRole::Synthesizer => with_clause(base, self.preset.synthesizer_clause()),
+            _ => base,
+        }
     }
 
     /// The planner preamble that matches this roster: the default one, which
-    /// names exactly the four roles it carries. Owned here, as the workspace
-    /// roster owns its own ([`WorkspaceRoster::planner_preamble`]), so a planner
-    /// is never told about a role or tool its roster does not carry.
+    /// names exactly the four roles it carries, followed by the preset's clause.
+    /// Owned here, as the workspace roster owns its own
+    /// ([`WorkspaceRoster::planner_preamble`]), so a planner is never told about a
+    /// role or tool its roster does not carry.
     pub fn planner_preamble(&self) -> String {
-        super::planner::DEFAULT_PLANNER_PREAMBLE.to_string()
+        with_clause(
+            super::planner::DEFAULT_PLANNER_PREAMBLE.to_string(),
+            self.preset.planner_clause(),
+        )
     }
 
     /// Set the sampling temperature applied to every subagent request
@@ -658,6 +689,7 @@ pub struct WorkspaceRoster<M> {
     models: RoleModels<M>,
     workspace_analyst: M,
     runner: StepRunner,
+    preset: Preset,
 }
 
 impl<M> WorkspaceRoster<M>
@@ -679,6 +711,7 @@ where
             models,
             workspace_analyst,
             runner: StepRunner::default(),
+            preset: Preset::Default,
         }
     }
 
@@ -713,9 +746,17 @@ where
         definitions(self.toolset_for(role)).await
     }
 
+    /// Run every turn under `preset`, as [`SubagentRoster::with_preset`] does: its
+    /// clause follows this roster's own planner and Synthesizer preambles.
+    pub fn with_preset(mut self, preset: Preset) -> Self {
+        self.preset = preset;
+        self
+    }
+
     /// The system preamble `role` runs under. The Synthesizer's names every
     /// member with its declared kind and carries the [BR-59] ranking clause
-    /// ([`workspace_synthesizer_preamble`]).
+    /// ([`workspace_synthesizer_preamble`]), then the preset's clause
+    /// ([`Self::with_preset`]).
     ///
     /// [BR-59]: ../../../docs/specs/software-spec.md#327-workspace-federation
     pub fn preamble(&self, role: StepRole) -> String {
@@ -724,15 +765,22 @@ where
             StepRole::GraphNavigator => WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE.to_string(),
             StepRole::GovernanceAnalyst => WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE.to_string(),
             StepRole::SourceReader => WORKSPACE_SOURCE_READER_PREAMBLE.to_string(),
-            StepRole::Synthesizer => workspace_synthesizer_preamble(self.federation()),
+            StepRole::Synthesizer => with_clause(
+                workspace_synthesizer_preamble(self.federation()),
+                self.preset.synthesizer_clause(),
+            ),
         }
     }
 
     /// The planner preamble that matches this roster: the workspace one, naming
     /// every member with its declared kind and each role's registered tools
-    /// ([`workspace_planner_preamble`](super::planner::workspace_planner_preamble)).
+    /// ([`workspace_planner_preamble`](super::planner::workspace_planner_preamble)),
+    /// followed by the preset's clause.
     pub fn planner_preamble(&self) -> String {
-        super::planner::workspace_planner_preamble(self.federation())
+        with_clause(
+            super::planner::workspace_planner_preamble(self.federation()),
+            self.preset.planner_clause(),
+        )
     }
 
     /// The resolved workspace — the manifest's member set and kinds, held by the

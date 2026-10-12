@@ -23,6 +23,7 @@
  */
 
 import { AsyncResource, fetchOverview, useApiResource } from "../../api/index.ts";
+import { mountedDashboardCards, useExtensions, type DashboardCardProps } from "../../extensions/registry.ts";
 import type {
   CoverageStatus,
   GateResult,
@@ -32,7 +33,6 @@ import type {
   RulesReport,
   StatsInfo,
   StatusInfo,
-  WikiPage,
 } from "../../api/types.ts";
 import { Badge, Callout, EmptyState, FigureNote, ScoreBar, Widget, WidgetStack } from "../../components/index.ts";
 import {
@@ -78,14 +78,20 @@ export function DashboardView() {
   );
 }
 
-/** The verdict-first Dashboard over a loaded, indexed overview read-model. */
+/** The verdict-first Dashboard over a loaded, indexed overview read-model. The
+ *  mounted extensions' cards (S-644) sit in one slot directly after the freshness
+ *  statement — where the Project Overview card stood while it was built in. */
 function Dashboard({ data }: { data: OverviewModel }) {
+  // Subscribe, so the cards appear when the boot read of the active set settles.
+  useExtensions();
   return (
     <WidgetStack>
       <Callout label="Index" tone="signal">
         <span>{freshnessStatement(data.status, nowUnix())}</span>
       </Callout>
-      <ProjectOverviewCard page={data.overview_page} />
+      {mountedDashboardCards().map(({ card, Component }) => (
+        <Component key={card.id} card={card} overview={data} />
+      ))}
       <QualityCard gate={data.gate} />
       <LanguagesCard composition={data.composition} languages={data.languages} />
       <GraphCard status={data.status} />
@@ -361,8 +367,14 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
  *  The page is agent-authored prose the binary never writes itself (ADR-57), and
  *  `wiki status` is a pure read that only *lists* the work — running it leaves the
  *  page just as absent. So the absence names the write that ends it (FR-EH-04,
- *  CR-130, CR-206), which is also the command `wiki status` hands out for this slug. */
-function ProjectOverviewCard({ page }: { page: WikiPage | null }) {
+ *  CR-130, CR-206), which is also the command `wiki status` hands out for this slug.
+ *
+ *  The `wiki` extension's card since S-644: registered by `views/wiki/extension.tsx`
+ *  and rendered in the Dashboard's extension slot, over the `overview_page` field the
+ *  extension adds to the bundle. It stays in this file (registered, not owned — the
+ *  S-643 shape for chat's panels) beside the cards it is styled with. */
+function ProjectOverviewCard({ overview }: DashboardCardProps) {
+  const page = overview.overview_page ?? null;
   if (page === null) {
     return (
       <Widget
@@ -384,3 +396,5 @@ function ProjectOverviewCard({ page }: { page: WikiPage | null }) {
     </Widget>
   );
 }
+
+export { ProjectOverviewCard };

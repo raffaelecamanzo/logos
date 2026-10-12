@@ -20,7 +20,8 @@
 //!
 //! # Surface contract (consumed by the `cli` crate, S-016)
 //! `logos serve --mcp [--project <root>]` calls [`serve_stdio`] with the
-//! resolved project root and exits with its result.
+//! resolved project root and the composed extension host, and exits with its
+//! result.
 
 mod server;
 
@@ -29,10 +30,14 @@ pub use server::{LogosMcp, INSTRUCTIONS};
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use logos_ext::ExtensionHost;
 use rmcp::ServiceExt;
 
 /// Serve MCP over stdio, rooted at `root`, until the host disconnects
-/// (FR-MC-01, FR-WT-04).
+/// (FR-MC-01, FR-WT-04), with `host`'s active extension tools beside the core
+/// roster ([FR-DS-04]).
+///
+/// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
 ///
 /// Blocks the calling thread for the whole session. Returning — on stdin EOF
 /// or cancellation — tears down the engine (writer actor, pools, caches), so
@@ -41,7 +46,7 @@ use rmcp::ServiceExt;
 /// # Errors
 /// Returns an error if the engine cannot start (store open/migrate failure),
 /// the I/O runtime cannot build, or the serve loop fails irrecoverably.
-pub fn serve_stdio(root: impl AsRef<Path>) -> Result<()> {
+pub fn serve_stdio(root: impl AsRef<Path>, host: &ExtensionHost) -> Result<()> {
     init_stderr_tracing();
     let engine = logos_core::Engine::start(root.as_ref())
         .map(std::sync::Arc::new)
@@ -61,7 +66,7 @@ pub fn serve_stdio(root: impl AsRef<Path>) -> Result<()> {
         .enable_time()
         .build()
         .context("building the MCP I/O runtime")?;
-    runtime.block_on(serve_stdio_on(engine))
+    runtime.block_on(serve_stdio_on(engine, host))
 }
 
 /// Run the MCP stdio serve loop on the **caller's** runtime over a shared
@@ -76,8 +81,11 @@ pub fn serve_stdio(root: impl AsRef<Path>) -> Result<()> {
 /// Returns an error if the initialize handshake fails for a reason other than a
 /// pre-handshake disconnect (which winds down cleanly, exit 0), or the serve
 /// loop fails irrecoverably.
-pub async fn serve_stdio_on(engine: std::sync::Arc<logos_core::Engine>) -> Result<()> {
-    let service = match LogosMcp::new(engine).serve(rmcp::transport::stdio()).await {
+pub async fn serve_stdio_on(
+    engine: std::sync::Arc<logos_core::Engine>,
+    host: &ExtensionHost,
+) -> Result<()> {
+    let service = match LogosMcp::new(engine, host).serve(rmcp::transport::stdio()).await {
         Ok(service) => service,
         // A host that closes stdin before (or during) the initialize handshake
         // is a disconnect, not a fault: wind down cleanly with exit 0, same as

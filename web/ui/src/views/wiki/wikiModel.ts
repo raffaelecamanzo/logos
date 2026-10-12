@@ -2,7 +2,7 @@
  * Pure Wiki presentation helpers (S-189, FR-UI-06) — the sub-route parsing, the
  * "On this page" TOC extraction, and the freshness-banner phrasing — kept DOM-free
  * so they are unit-testable. The TOC reads the `toc-<slug>` heading ids the
- * server-side renderer already injects (`web/src/markdown.rs`), so the rail and the
+ * server-side renderer already injects (`logos-wiki/src/web/markdown.rs`), so the rail and the
  * body anchors line up with no client re-anchoring.
  */
 

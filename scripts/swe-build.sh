@@ -6,6 +6,13 @@
 # `release(X.Y.Z)`, install to ~/.logos-bin/X.Y.Z, PATH-promote it, and smoke the
 # INSTALLED binary. Never tags or pushes — releasing stays with the user.
 #
+# Publishing is a separate, later step: `scripts/publish-public.sh --version X.Y.Z`
+# turns the release(X.Y.Z) tree into one commit over origin/main, gated by
+# scripts/check-public-terms.sh, and with --push tags it vX.Y.Z and pushes both.
+# The tag push starts .github/workflows/release.yml, which checks out the tag and
+# builds with `dist --tag=vX.Y.Z`: the version this script writes to Cargo.toml
+# must match the tag, or the workflow refuses it. See docs/howto/ci-integration.md.
+#
 # Usage: swe-build.sh [--dry-run] [--bump patch|minor]
 set -euo pipefail
 DRY=0 BUMP=patch

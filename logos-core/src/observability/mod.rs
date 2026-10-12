@@ -50,6 +50,7 @@ use tracing_subscriber::Layer;
 
 pub use layer::TelemetryGuard;
 pub(crate) use tool::{CallOutcome, EventClass, Outcome, Tool};
+pub use tool::{register_extension_tools, ExtensionTool, ToolClass};
 
 /// The reserved target tagging events for the telemetry layer ([FR-OB-03]).
 /// Everything else on the stream is human-log material for the stderr layer.
@@ -134,10 +135,14 @@ pub enum Surface {
     /// indistinguishable from a graph query the user issued through the SPA.
     ///
     /// This is the one surface whose every event is self-referential *by
-    /// construction* (see [`Surface::event_class`]): the app header re-reads
-    /// the graph-state readout on **every** client-side navigation, so what it
-    /// emits is a request the user's own navigation caused incidentally and
-    /// never a question the user asked ([BR-42]). The test the classification
+    /// construction* (see [`Surface::event_class`]). Two web handlers name it,
+    /// a closed set: the app header re-reads the graph-state readout
+    /// (`status`) on **every** client-side navigation, and the chat resolves
+    /// the backticked spans of every finalized answer against the graph
+    /// (`code_refs`, up to 24 traced `node` / `graph_elements` calls per
+    /// answer). Both are requests the app made on its own account — the user's
+    /// navigation or the chat's own answer caused them incidentally — and never
+    /// a question the user asked ([BR-42]). The test the classification
     /// applies is *whose question a request answers*, not which view issued it
     /// — which is why the answer lives at the adapter that knows, and not in
     /// the engine chokepoint that cannot ([FR-OB-09]).
@@ -285,7 +290,8 @@ impl Surface {
     /// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
     pub(crate) const fn event_class(self) -> Option<EventClass> {
         match self {
-            // Shell chrome: the subject is Logos's own state, and nobody asked.
+            // Shell chrome: the app's own reads (its header readout, the chat's
+            // code-refs lookup), and nobody asked.
             Surface::Shell => Some(EventClass::ReadModelRequest),
 
             // Everything else carries both kinds; the tool decides. The wiki
@@ -607,11 +613,10 @@ pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
 /// [FR-OB-01]: ../../../docs/specs/requirements/FR-OB-01.md
 /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 fn traced_inner<T>(
-    tool: Tool,
+    tool: &'static str,
     f: impl FnOnce() -> Result<T>,
     classify: impl FnOnce(&Result<T>) -> Option<Outcome>,
 ) -> (Result<T>, u64) {
-    let tool = tool.as_str();
     let span = tracing::info_span!("logos", tool);
     let _enter = span.enter();
     let start = Instant::now();
@@ -638,7 +643,34 @@ fn traced_inner<T>(
 /// Every Engine chokepoint method and pipeline pass funnels through here —
 /// sinks differ, call sites don't ([ADR-13]).
 pub(crate) fn traced<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    traced_inner(tool, f, |_| None).0
+    traced_inner(tool.as_str(), f, |_| None).0
+}
+
+/// [`traced`] for an **extension's** chokepoint ([FR-DS-04], [ADR-74]): the same
+/// single span+event body, under the [`ExtensionTool`] the extension declared
+/// rather than a core [`Tool`]. An extension's CLI and MCP twins call the same
+/// chokepoint, so both report under one name, as the core's twins do.
+///
+/// The event is written whether or not the tool is registered; registration
+/// ([`register_extension_tools`]) is what lets the stats read-model classify it.
+///
+/// # Errors
+/// Whatever `f` returns; the event records `ok = false` for it.
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+pub fn traced_extension<T>(tool: ExtensionTool, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    traced_inner(tool.name(), f, |_| None).0
+}
+
+/// [`traced_extension`] for an extension chokepoint that cannot fail — the
+/// extension door's twin of [`traced_infallible`]. Records `ok = true` always.
+pub fn traced_extension_infallible<T>(tool: ExtensionTool, f: impl FnOnce() -> T) -> T {
+    match traced_extension(tool, || Ok(f())) {
+        Ok(value) => value,
+        // The closure above always returns Ok.
+        Err(_) => unreachable!("traced_extension_infallible closure cannot fail"),
+    }
 }
 
 /// [`traced`] for a call whose result knows what it answered ([FR-OB-14]):
@@ -667,7 +699,7 @@ pub(crate) fn traced_with<T>(
     f: impl FnOnce() -> Result<T>,
     classify: impl FnOnce(&T) -> Outcome,
 ) -> Result<T> {
-    traced_inner(tool, f, |result| {
+    traced_inner(tool.as_str(), f, |result| {
         Some(match result {
             Ok(value) => classify(value),
             Err(_) => Outcome::Failed,
@@ -689,7 +721,7 @@ pub(crate) fn traced_timed<T>(
     tool: Tool,
     f: impl FnOnce() -> Result<T>,
 ) -> (Result<T>, u64) {
-    traced_inner(tool, f, |_| None)
+    traced_inner(tool.as_str(), f, |_| None)
 }
 
 /// [`traced`] for chokepoint calls that cannot fail (their result type has
@@ -709,7 +741,7 @@ pub(crate) fn traced_infallible<T>(tool: Tool, f: impl FnOnce() -> T) -> T {
 ///
 /// [FR-OB-06]: ../../../docs/specs/requirements/FR-OB-06.md
 pub(crate) fn traced_infallible_timed<T>(tool: Tool, f: impl FnOnce() -> T) -> (T, u64) {
-    let (result, duration_ms) = traced_inner(tool, || Ok(f()), |_| None);
+    let (result, duration_ms) = traced_inner(tool.as_str(), || Ok(f()), |_| None);
     match result {
         Ok(value) => (value, duration_ms),
         // The closure above always returns Ok.

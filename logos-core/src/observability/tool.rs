@@ -9,8 +9,8 @@
 //! the failure mode [CR-091] was filed to fix, so it must not be reintroduced
 //! one layer down.
 //!
-//! [`Tool`] is therefore a closed enum and it is the **only** thing the emission
-//! helpers accept. Two build-time properties follow:
+//! [`Tool`] is therefore a closed enum and it is the **only** thing the core's
+//! emission helpers accept. Two build-time properties follow:
 //!
 //! 1. A new engine chokepoint cannot emit telemetry without adding a variant —
 //!    `traced*` accepts nothing else, so there is no `&str` door left open on
@@ -24,6 +24,19 @@
 //!    single source of tool names — but there the compiler does not enforce it,
 //!    and a future third raw site would not be caught. Prefer `traced*`; if you
 //!    genuinely cannot, name a `Tool` and say why here.
+//!
+//!    The one other door is an **extension's** ([`super::traced_extension`],
+//!    FR-DS-04): it accepts only an [`ExtensionTool`], whose wire name is checked
+//!    when the value is built — the core's name shape, and never a name this
+//!    registry owns — so an extension can neither carry a malformed name into a
+//!    report nor have its calls counted as a core tool's. A `const` declaration
+//!    that breaks either rule does not compile.
+//!
+//!    [`Tool`], [`traced`](super::traced) and
+//!    [`traced_infallible`](super::traced_infallible) are `pub(crate)`: no
+//!    crate outside the core emits under a core name. The `wiki` extension
+//!    (`logos-wiki`, S-644), which emitted through them while it was being
+//!    extracted, declares its names as [`ExtensionTool`]s like any extension.
 //! 2. [`Tool::event_class`] is an **exhaustive match with no wildcard arm**, so
 //!    a new variant fails the build until it is classified. `unclassified_tool_
 //!    fails_the_build` (in [`super::tests`]) additionally scans this file's
@@ -115,8 +128,14 @@ pub(crate) enum EventClass {
 ///
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+///
+/// Public because an extension's telemetry tool declares its class
+/// ([`ExtensionTool`], [FR-DS-04]); the core's own tools are still classified
+/// only by [`Tool::tool_class`].
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ToolClass {
+pub enum ToolClass {
     /// Answers a structural question about the indexed code — the calls that
     /// substitute for an agent reading files, which is the whole token-saving
     /// thesis (AS-02). This is the class the reads-saved weights are non-zero on.
@@ -136,7 +155,7 @@ pub(crate) enum ToolClass {
 
 impl ToolClass {
     /// The wire label carried on the read-model.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             ToolClass::Navigation => "navigation",
             ToolClass::QualityGate => "quality-gate",
@@ -170,9 +189,10 @@ macro_rules! registered_tools {
     ($( $(#[$attr:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
         /// One registered tool — the `tool` column of a telemetry event.
         ///
-        /// The single argument type the emission helpers accept, so every
-        /// telemetry-producing call site is a member of this set by
-        /// construction. See the module docs for the extension procedure.
+        /// The single argument type the core's emission helpers accept, so every
+        /// core telemetry-producing call site is a member of this set by
+        /// construction (an extension's door takes an [`ExtensionTool`], never a
+        /// name of this set). See the module docs for the extension procedure.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
         pub(crate) enum Tool {
             $( $(#[$attr])* $variant, )+
@@ -271,21 +291,12 @@ registered_tools! {
     WorktreeSeed => "worktree_seed",
     NavProloguePurge => "nav_prologue_purge",
 
-    // ── Wiki (FR-WK-*) ──────────────────────────────────────────────────────
-    WikiWrite => "wiki_write",
-    WikiRead => "wiki_read",
-    WikiDelete => "wiki_delete",
-    WikiPrunedLog => "wiki_pruned_log",
-    WikiSearch => "wiki_search",
-    WikiStatus => "wiki_status",
-    WikiGenerate => "wiki_generate",
-    WikiNative => "wiki_native",
-    WikiDocCategoryPresent => "wiki_doc_category_present",
-    WikiSrsMode => "wiki_srs_mode",
-    WikiGuidePages => "wiki_guide_pages",
-    WikiReconcile => "wiki_reconcile",
-    WikiMaterialize => "wiki_materialize",
-    WikiSkillEmit => "wiki_skill_emit",
+    // ── The quality-report hook (FR-IN-07) ──────────────────────────────────
+    // The session-start hook install is a core command (`logos hook --emit`,
+    // S-638) though its wire name keeps the `wiki_` spelling: telemetry history is
+    // keyed on it, and both CLI spellings report under this one name. The wiki's
+    // own tools are the `wiki` extension's `ExtensionTool`s since S-644, under the
+    // same wire names and classes they had here.
     WikiQualityReportHookEmit => "wiki_quality_report_hook_emit",
 
     // ── Configuration (FR-CF-*) ─────────────────────────────────────────────
@@ -400,21 +411,7 @@ impl Tool {
             | Tool::WatchCoverageIngest
             | Tool::WorktreeSeed
             | Tool::NavProloguePurge
-            // Wiki — documentation *of the code*, written and read from it.
-            | Tool::WikiWrite
-            | Tool::WikiRead
-            | Tool::WikiDelete
-            | Tool::WikiPrunedLog
-            | Tool::WikiSearch
-            | Tool::WikiStatus
-            | Tool::WikiGenerate
-            | Tool::WikiNative
-            | Tool::WikiDocCategoryPresent
-            | Tool::WikiSrsMode
-            | Tool::WikiGuidePages
-            | Tool::WikiReconcile
-            | Tool::WikiMaterialize
-            | Tool::WikiSkillEmit
+            // The quality-report hook install — a command the user ran.
             | Tool::WikiQualityReportHookEmit
             // Configuration — a deliberate action on the project's policy, and
             // the read that renders it; the user asked for both.
@@ -464,14 +461,7 @@ impl Tool {
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected
-            | Tool::GraphElements
-            // The two *reads* over the wiki. They sit in the wiki block because
-            // that is where the store lives, but their subject is the codebase
-            // and they substitute for opening source — the navigation criterion.
-            // The rest of the wiki block writes or rebuilds the store, and is
-            // engine-internal below.
-            | Tool::WikiRead
-            | Tool::WikiSearch => ToolClass::Navigation,
+            | Tool::GraphElements => ToolClass::Navigation,
 
             // ── Quality gate: a verdict about the repository ────────────────
             Tool::Scan
@@ -522,18 +512,7 @@ impl Tool {
             | Tool::CoverageIngest
             | Tool::CoverageIngestAuto
             | Tool::CoverageRefresh
-            // The wiki store's writes, generation and maintenance.
-            | Tool::WikiWrite
-            | Tool::WikiDelete
-            | Tool::WikiPrunedLog
-            | Tool::WikiGenerate
-            | Tool::WikiNative
-            | Tool::WikiDocCategoryPresent
-            | Tool::WikiSrsMode
-            | Tool::WikiGuidePages
-            | Tool::WikiReconcile
-            | Tool::WikiMaterialize
-            | Tool::WikiSkillEmit
+            // The quality-report hook install writes Logos's own integration files.
             | Tool::WikiQualityReportHookEmit
             // Mutations of the project's own policy store.
             | Tool::ConfigWrite
@@ -550,9 +529,7 @@ impl Tool {
             | Tool::Status
             // Which grammar plugins compiled in — a capability readout.
             | Tool::Languages
-            // The wiki store's own freshness/anchor state, and the rendered
-            // configuration; neither asks anything about the code.
-            | Tool::WikiStatus
+            // The rendered configuration; it asks nothing about the code.
             | Tool::ConfigRead => ToolClass::ReadModel,
         }
     }
@@ -571,9 +548,161 @@ impl Tool {
 }
 
 /// The [`ToolClass`] label for a wire name read back from the store, or
-/// [`UNREGISTERED_CLASS`] when the registry does not know it.
+/// [`UNREGISTERED_CLASS`] when neither the registry nor a registered extension
+/// ([`register_extension_tools`]) knows it.
 pub(crate) fn class_of_wire(name: &str) -> &'static str {
-    Tool::from_wire(name).map_or(UNREGISTERED_CLASS, |t| t.tool_class().as_str())
+    Tool::from_wire(name)
+        .map(Tool::tool_class)
+        .or_else(|| extension_class(name))
+        .map_or(UNREGISTERED_CLASS, ToolClass::as_str)
+}
+
+// ── Extension telemetry tools ([FR-DS-04], [ADR-74]) ─────────────────────────
+//
+// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+
+/// A telemetry tool an **extension** declares ([FR-DS-04], [ADR-74]): the wire
+/// name its calls write to `events.tool`, and the [`ToolClass`] the stats
+/// read-model reports it under.
+///
+/// The one door besides [`Tool`] into the emission seam, and it is typed for the
+/// same reason [`Tool`] is: [`traced_extension`](super::traced_extension) accepts
+/// nothing else. Its name can never be a core tool's ([`ExtensionTool::new`]), so
+/// an extension's calls are never counted as one; they are classified once the
+/// extension is registered ([`register_extension_tools`]) and reported as
+/// `unregistered` otherwise. An extension tool is
+/// always an [`EventClass::EngineQuery`] event — counted as usage — because the
+/// self-referential exclusion is derived from the core's closed registry
+/// ([`self_referential_tools`]) and never interpolates an extension's name into
+/// SQL.
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionTool {
+    name: &'static str,
+    class: ToolClass,
+}
+
+impl ExtensionTool {
+    /// Declare an extension's telemetry tool.
+    ///
+    /// # Panics
+    /// When `name` is not `[a-z][a-z0-9_]*`, the shape every core wire name has,
+    /// or when it is a core tool's name — an extension's calls must never be
+    /// counted as a core tool's. Declared in a `const` item, as extensions do,
+    /// either is a compile error.
+    pub const fn new(name: &'static str, class: ToolClass) -> Self {
+        assert!(is_wire_name(name), "an extension telemetry name must match [a-z][a-z0-9_]*");
+        assert!(!is_core_wire_name(name), "an extension telemetry name may not be a core tool's name");
+        Self { name, class }
+    }
+
+    /// The wire name written to `events.tool`.
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// The class the stats read-model reports this tool under.
+    pub const fn class(self) -> ToolClass {
+        self.class
+    }
+}
+
+/// Is `name` a wire name: `[a-z][a-z0-9_]*`?
+const fn is_wire_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Is `name` the wire name of a core [`Tool`]?
+const fn is_core_wire_name(name: &str) -> bool {
+    let mut i = 0;
+    while i < Tool::ALL.len() {
+        if bytes_equal(Tool::ALL[i].as_str().as_bytes(), name.as_bytes()) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Byte-wise equality, for the `const` checks above.
+const fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The extension tools registered in this process, in registration order.
+static EXTENSION_TOOLS: std::sync::RwLock<Vec<ExtensionTool>> = std::sync::RwLock::new(Vec::new());
+
+/// Register the telemetry tools of the active extensions with this process, so
+/// the stats read-model classifies their events ([FR-DS-04]). Called once, by
+/// the composition root, with the extension host's active set.
+///
+/// Idempotent: re-registering a tool with the same class is a no-op. Nothing is
+/// registered unless every tool is acceptable.
+///
+/// # Errors
+/// A name already registered under a different class. (A core tool's name never
+/// gets this far: [`ExtensionTool::new`] refuses it.)
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+pub fn register_extension_tools(tools: &[ExtensionTool]) -> anyhow::Result<()> {
+    let mut registered = EXTENSION_TOOLS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for tool in tools {
+        let clash = registered
+            .iter()
+            .chain(tools)
+            .find(|t| t.name == tool.name && t.class != tool.class);
+        if let Some(earlier) = clash {
+            anyhow::bail!(
+                "extension telemetry tool `{}` is declared as both {} and {}",
+                tool.name,
+                earlier.class.as_str(),
+                tool.class.as_str()
+            );
+        }
+    }
+    for tool in tools {
+        if !registered.contains(tool) {
+            registered.push(*tool);
+        }
+    }
+    Ok(())
+}
+
+/// The class of a registered extension tool, or `None`.
+fn extension_class(name: &str) -> Option<ToolClass> {
+    EXTENSION_TOOLS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.class)
 }
 
 /// The wire names of every self-referential tool, in registration order.

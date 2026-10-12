@@ -54,8 +54,8 @@ pub mod memory;
 pub mod orchestrator;
 
 pub use db::{
-    db_path, latest_version, title_from_first_message, ChatMessage, ChatRole, ChatStore,
-    ChatThread, ToolTrace, THREAD_TITLE_MAX,
+    db_path, latest_version, normalize_thread_title, title_from_first_message, ChatMessage,
+    ChatRole, ChatStore, ChatThread, ToolTrace, THREAD_TITLE_MAX,
 };
 pub use memory::{
     prior_turns, thread_window, MemoryGrounding, MemoryStore, ScratchpadEntry, ScratchpadSink,
@@ -63,11 +63,11 @@ pub use memory::{
 pub use orchestrator::{
     member_roster, workspace_planner_preamble, workspace_synthesizer_preamble, BudgetBound,
     BudgetTree, CapturingSink, ConversationWindow, EventSink, FanOut, Orchestrator,
-    OrchestratorError, OrchestratorEvent, PlanStep, Planner, PlannerDecision, PriorTurn,
+    OrchestratorError, OrchestratorEvent, PlanStep, Planner, PlannerDecision, Preset, PriorTurn,
     RoleModels, StepContext, StepError, StepExecutor, StepObservation, StepRole,
     SubagentRoster, SynthesizerGrounding, TurnOutcome, WorkspaceRoster,
     GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE, SOURCE_READER_PREAMBLE,
     SYNTHESIZER_PREAMBLE, WORKSPACE_ANALYST_PREAMBLE, WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE,
     WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE, WORKSPACE_RANKING_CLAUSE,
-    WORKSPACE_SOURCE_READER_PREAMBLE,
+    WORKSPACE_SOURCE_READER_PREAMBLE, TITLE_MAX_WORDS, TITLE_TRAILER_CLAUSE,
 };

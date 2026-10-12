@@ -74,6 +74,22 @@ pub enum OrchestratorEvent {
         /// The next chunk of answer text, to append to what has streamed so far.
         delta: String,
     },
+    /// The Synthesizer named the conversation this turn opened ([FR-UI-48]): the
+    /// well-formed `TITLE:` trailer of its first answer, already stripped from the
+    /// answer. Emitted at most once per turn, after the
+    /// [`FinalAnswer`](OrchestratorEvent::FinalAnswer) ([FR-UI-19] as modified by
+    /// CR-204), and only on the turn that opened `thread_id` — a later turn never
+    /// retitles. An additive event: the [FR-UI-19] contract's other events are
+    /// unchanged. The chat surface streams it to the client only once it has
+    /// stored the title.
+    ///
+    /// [FR-UI-48]: ../../../docs/specs/requirements/FR-UI-48.md
+    ThreadTitle {
+        /// The conversation the title names.
+        thread_id: i64,
+        /// The title, at most six words.
+        title: String,
+    },
     /// The planner produced the final grounded answer; the turn is complete.
     FinalAnswer {
         /// The answer returned to the user.

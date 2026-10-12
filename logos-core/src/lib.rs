@@ -143,19 +143,13 @@ pub mod resolve;
 /// in-process concurrency layer the long-lived [`Engine`] owns (ADR-02, ADR-03,
 /// ADR-04).
 pub mod runtime;
+pub mod sqlite;
 /// The debounced filesystem watcher (S-022): `notify` + `notify-debouncer-full`
 /// hosted under `serve --mcp`, coalescing edit storms into one batched
 /// incremental sync per debounce window with drop-and-coalesce backpressure
 /// (the AQ-01 resolution) — non-load-bearing for correctness; reconcile is the
 /// backstop (FR-SY-06, ADR-11).
 pub mod watch;
-/// The agent-generated source wiki store (S-052, CR-008, ADR-24): the separate
-/// `.logos/wiki.db` on its own forward-only migration track (survives `index`,
-/// never `ATTACH`-ed, never gated — BR-29), the slug-upsert write path with
-/// write-time anchor hashes + HEAD and a mandatory generator label, read-time
-/// per-anchor freshness against the working tree, and the orphan lifecycle
-/// (flag missing anchors; auto-delete + log when all are gone) (FR-WK-01..07).
-pub mod wiki;
 /// Worktree-aware root resolution and seed-from-main discovery (S-021,
 /// ADR-15): `.logos/` resolves to the working-tree root via `git rev-parse
 /// --show-toplevel` (FR-WT-01), and a DB-less linked worktree locates the

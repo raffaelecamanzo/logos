@@ -487,9 +487,10 @@ fn a_deleted_conversation_contributes_nothing() {
     assert_eq!(window.render(), "");
 }
 
-/// [S-483] AC-3: a regenerated turn replaces its predecessor. Regenerate re-runs the
-/// user message, so the store holds `U1, A1, U1, A1′`; only the latest answer is in
-/// the window, and the user message is not duplicated.
+/// [S-483] AC-3: a regenerated turn replaces its predecessor. A Regenerate from before
+/// S-624 (which now cuts the store first) re-ran the user message by appending, so
+/// such a thread holds `U1, A1, U1, A1′`; only the latest answer is in the window,
+/// and the user message is not duplicated.
 #[test]
 fn a_regenerated_turn_replaces_its_predecessor_in_the_window() {
     let dir = TempDir::new().unwrap();

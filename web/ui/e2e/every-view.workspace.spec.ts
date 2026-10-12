@@ -3,13 +3,14 @@
 // workspace sidebar adds, read in a real browser over the two-member fixture.
 // The member views are the project spec's (`every-view.project.spec.ts`).
 //
-// "Every" is the sidebar's own list (`WORKSPACE_NAV_ITEMS` in src/nav.ts): the
-// first test fails until a new workspace view has a case here.
+// "Every" is the sidebar's own list (`WORKSPACE_NAV_ITEMS` in src/nav.ts) plus the
+// app-level views the served build's active extensions add (`GET /api/v1/extensions`,
+// S-642): the first test fails until a new workspace view has a case here.
 import { expect, test, type Page } from "@playwright/test";
 
 import { WORKSPACE_NAV_ITEMS } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
-import { configuredChat, layoutCase, type ViewCase } from "./views.ts";
+import { configuredChat, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
 const CASES: Record<string, ViewCase> = {
   "/workspace-dashboard": { ready: "Members" },
@@ -26,8 +27,12 @@ const CASES: Record<string, ViewCase> = {
   "/workspace-config": { ready: "Workspace chat policy and credential" },
 };
 
-test("a layout case exists for every view the workspace sidebar adds", () => {
-  expect(Object.keys(CASES).sort()).toEqual(WORKSPACE_NAV_ITEMS.map((item) => item.path).sort());
+test("a layout case exists for every view the workspace sidebar adds", async ({ request }) => {
+  const composed = [
+    ...WORKSPACE_NAV_ITEMS.map((item) => item.path),
+    ...(await extensionNavPaths(request, "app")),
+  ];
+  expect(Object.keys(CASES).sort()).toEqual(composed.sort());
 });
 
 for (const [path, view] of Object.entries(CASES)) {

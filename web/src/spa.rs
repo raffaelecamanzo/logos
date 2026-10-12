@@ -1,4 +1,5 @@
-//! The embedded SPA bundle (CR-049, FR-UI-22, ADR-43).
+//! The SPA bundle and the provider the router serves it from (CR-049, FR-UI-22,
+//! ADR-43, FR-UI-51, ADR-74).
 //!
 //! The Vite + React project under `web/ui/` builds to `web/ui/dist/` (hashed
 //! JS/CSS, `index.html`, fonts) — a **build-time-only** toolchain (Node/npm/Vite
@@ -7,6 +8,15 @@
 //! `rust-embed`, the directory-embedding successor to the retired hand-maintained
 //! `include_bytes!` asset table — it handles the hashed filenames a
 //! Vite build emits without a per-file registry edit.
+//!
+//! # An injected provider (S-641, CR-213)
+//! The router does not name [`Spa`]: it serves whatever [`SpaAssets`] it was
+//! composed with, and [`EmbeddedSpa`] — the bundle above, byte-for-byte — is the
+//! default every existing entry point uses. A binary that composes an extension
+//! with its own SPA bundle embeds that bundle (its own `RustEmbed` type) and hands
+//! the router a provider over it; the shell, asset and history-fallback paths, the
+//! consistency guard and the intent-token injection below are the same ones the
+//! default bundle goes through.
 //!
 //! # Carve-out invariants preserved (ADR-43, NFR-SE-01)
 //! - **Offline.** `rust-embed` is a pure compile-time embedder — no socket/HTTP
@@ -22,11 +32,11 @@
 //!   the hashed bundle.
 //!
 //! # The sole asset path (CR-049, FR-UI-22, ADR-43, S-192)
-//! Since the decommission this embedded bundle is the **only** asset source: the
-//! server-rendered views and their legacy `include_bytes!` table were removed, so
-//! the SPA's hashed `/assets/*` files (and root-level assets like `theme-init.js`)
-//! resolve solely through the history fallback into [`asset`], served byte-verbatim
-//! with no runtime socket or egress.
+//! Since the decommission the bundle behind the provider is the **only** asset
+//! source: the server-rendered views and their legacy `include_bytes!` table were
+//! removed, so the SPA's hashed `/assets/*` files (and root-level assets like
+//! `theme-init.js`) resolve solely through the history fallback into [`asset`],
+//! served byte-verbatim with no runtime socket or egress.
 
 use std::borrow::Cow;
 
@@ -37,6 +47,44 @@ use rust_embed::RustEmbed;
 #[derive(RustEmbed)]
 #[folder = "ui/dist/"]
 pub struct Spa;
+
+/// Where the router gets the SPA's files from: a bundle keyed by `dist/`-relative
+/// path (`index.html`, `assets/index-<hash>.js`, …), whose bytes are served
+/// verbatim.
+///
+/// The default is [`EmbeddedSpa`]. An implementation over another `RustEmbed`
+/// type is the whole of what a binary needs to ship its own bundle:
+///
+/// ```ignore
+/// struct PrivateSpa;
+/// impl SpaAssets for PrivateSpa {
+///     fn get(&self, path: &str) -> Option<Cow<'static, [u8]>> {
+///         PrivateBundle::get(path).map(|file| file.data)
+///     }
+/// }
+/// ```
+///
+/// A provider must hold an `index.html` (the shell [`served_shell`] injects the
+/// intent token into); the consistency guard ([`missing_shell_assets`]) judges
+/// whatever provider it is given. The router asks for request paths only through
+/// [`asset`], which refuses a path that is not a plain key (`..`, `.`, empty
+/// segments, backslash, NUL) — a provider need not defend against traversal for
+/// requests, but must not build one out of a key it is given elsewhere.
+pub trait SpaAssets: Send + Sync {
+    /// The bytes of the file at `path` (relative to the bundle root, no leading
+    /// `/`), or `None` when the bundle holds no such file.
+    fn get(&self, path: &str) -> Option<Cow<'static, [u8]>>;
+}
+
+/// The bundle embedded in this binary ([`Spa`]) — the default provider.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmbeddedSpa;
+
+impl SpaAssets for EmbeddedSpa {
+    fn get(&self, path: &str) -> Option<Cow<'static, [u8]>> {
+        Spa::get(path).map(|file| file.data)
+    }
+}
 
 /// The content type for an embedded SPA file, by extension — each text type with
 /// an explicit charset so browsers never sniff. Unknown extensions fall back to
@@ -62,29 +110,54 @@ pub fn content_type(path: &str) -> &'static str {
     }
 }
 
-/// Look up an embedded SPA file by its `dist/`-relative path, returning its
-/// content type and bytes, or `None` when absent. The bytes are byte-verbatim
-/// from the binary — no filesystem read at runtime, no egress.
-pub fn asset(path: &str) -> Option<(&'static str, Cow<'static, [u8]>)> {
-    Spa::get(path).map(|file| (content_type(path), file.data))
+/// Look up a file of `assets` by its bundle-relative path, returning its content
+/// type and bytes, or `None` when absent. The bytes are byte-verbatim from the
+/// provider — for the embedded bundle, from the binary: no filesystem read at
+/// runtime, no egress.
+///
+/// A `path` that is not a plain bundle key — an empty segment, a `.` or `..`
+/// segment, a backslash or a NUL — is `None` **without asking the provider**: the
+/// path is the request's, so a provider that maps keys onto a filesystem (a
+/// dev-mode bundle read from disk) must never be handed `../secret`.
+pub fn asset(
+    assets: &dyn SpaAssets,
+    path: &str,
+) -> Option<(&'static str, Cow<'static, [u8]>)> {
+    if !is_bundle_key(path) {
+        return None;
+    }
+    assets.get(path).map(|data| (content_type(path), data))
 }
 
-/// The embedded served-shell document (`dist/index.html`) — the SPA entrypoint
-/// the [web-surface] serves at `/`. Always present: a committed placeholder
-/// guarantees it. Prefer [`served_shell`], which injects the per-session intent
-/// token before serving; this raw accessor backs the bundle fitness tests.
+/// Is `path` a plain bundle key: non-empty `/`-separated segments, none of them
+/// `.` or `..`, with no backslash and no NUL? Every file a Vite build emits is.
+fn is_bundle_key(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(['\\', '\0'])
+        && path.split('/').all(|segment| !matches!(segment, "" | "." | ".."))
+}
+
+/// The embedded bundle's shell document (`dist/index.html`) — the SPA entrypoint
+/// the [web-surface] serves at `/` by default. Always present: a committed
+/// placeholder guarantees it. Prefer [`served_shell`], which injects the
+/// per-session intent token before serving; this raw accessor of the *default*
+/// bundle backs the bundle fitness tests.
 ///
 /// [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
 pub fn index_html() -> Option<Cow<'static, [u8]>> {
-    Spa::get("index.html").map(|file| file.data)
+    EmbeddedSpa.get(SHELL)
 }
 
-/// The served SPA shell (S-185, CR-049, FR-UI-22): the embedded [`index_html`]
+/// The shell document's key in a bundle.
+const SHELL: &str = "index.html";
+
+/// The served SPA shell (S-185, CR-049, FR-UI-22): `assets`' `index.html`
 /// with the per-session intent token ([`IntentToken`](crate::IntentToken))
 /// injected as a `<meta name="logos-intent">` tag the SPA reads once at startup
 /// and echoes in the `x-logos-intent` header on every mutating request
-/// ([NFR-SE-06], [ADR-31]). Returns `None` only if the bundle is somehow not
-/// embedded — a committed placeholder makes that unreachable in practice.
+/// ([NFR-SE-06], [ADR-31]). Returns `None` only if the bundle holds no shell —
+/// for the embedded bundle a committed placeholder makes that unreachable in
+/// practice.
 ///
 /// The token is HTML-escaped at the boundary ([`crate::components::escape`]) —
 /// defense in depth, though it is 64 hex chars by construction. The tag is inert
@@ -96,8 +169,8 @@ pub fn index_html() -> Option<Cow<'static, [u8]>> {
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 /// [ADR-31]: ../../../docs/specs/architecture/decisions/ADR-31.md
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
-pub fn served_shell(intent: &str) -> Option<String> {
-    let bytes = index_html()?;
+pub fn served_shell(assets: &dyn SpaAssets, intent: &str) -> Option<String> {
+    let bytes = assets.get(SHELL)?;
     let html = String::from_utf8_lossy(&bytes);
     let tag = format!(
         "<meta name=\"logos-intent\" content=\"{}\">",
@@ -157,7 +230,7 @@ fn missing_refs(html: &str, is_present: impl Fn(&str) -> bool) -> Vec<String> {
         .collect()
 }
 
-/// The hashed entrypoints the embedded shell references but does **not** embed —
+/// The hashed entrypoints `assets`' shell references but `assets` does **not** hold —
 /// the signature of a binary built without a matching `npm run build` (e.g. the
 /// frozen-hash placeholder shipped beside a differently-hashed real build, or the
 /// placeholder embedded alone). Empty when the bundle is internally consistent.
@@ -166,11 +239,11 @@ fn missing_refs(html: &str, is_present: impl Fn(&str) -> bool) -> Vec<String> {
 /// binary serves the shell `200` while the browser's `/assets/index-<hash>.js`
 /// fetch `404`s, leaving a blank page with no explanation. The serve-time guard in
 /// [`crate::render_shell`] turns a non-empty result into a loud diagnostic instead.
-pub fn missing_shell_assets() -> Vec<String> {
-    match index_html() {
+pub fn missing_shell_assets(assets: &dyn SpaAssets) -> Vec<String> {
+    match assets.get(SHELL) {
         Some(bytes) => {
             let html = String::from_utf8_lossy(&bytes);
-            missing_refs(&html, |key| Spa::get(key).is_some())
+            missing_refs(&html, |key| assets.get(key).is_some())
         }
         None => Vec::new(),
     }
@@ -184,7 +257,7 @@ fn shell_is_dead(html: &str) -> bool {
     shell_asset_refs(html).is_empty()
 }
 
-/// Whether the embedded shell is the **committed placeholder** rather than a real
+/// Whether `assets`' shell is the **committed placeholder** rather than a real
 /// Vite build — i.e. it references no hashed `/assets/*` entrypoint (see
 /// [`shell_is_dead`]). Distinct from [`missing_shell_assets`], which catches a
 /// *mismatched* real build (shell references assets the binary lacks): the
@@ -195,8 +268,8 @@ fn shell_is_dead(html: &str) -> bool {
 /// seen once someone opens the dashboard — which let a release binary ship the
 /// placeholder unnoticed. [`crate::serve_web`] calls this at startup to turn a
 /// silently-dead UI into a loud stderr warning the operator cannot miss.
-pub fn is_placeholder_shell() -> bool {
-    match index_html() {
+pub fn is_placeholder_shell(assets: &dyn SpaAssets) -> bool {
+    match assets.get(SHELL) {
         Some(bytes) => shell_is_dead(&String::from_utf8_lossy(&bytes)),
         None => true,
     }
@@ -241,7 +314,7 @@ mod tests {
 
     #[test]
     fn index_html_is_served_as_html() {
-        let (mime, bytes) = asset("index.html").expect("index.html embedded");
+        let (mime, bytes) = asset(&EmbeddedSpa, "index.html").expect("index.html embedded");
         assert_eq!(mime, "text/html; charset=utf-8");
         assert!(!bytes.is_empty(), "index.html is non-empty");
     }
@@ -259,15 +332,53 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_is_not_a_plain_key_never_reaches_the_provider() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        /// Serves anything it is asked for, and counts the asks.
+        struct Anything(AtomicUsize);
+        impl SpaAssets for Anything {
+            fn get(&self, _path: &str) -> Option<Cow<'static, [u8]>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Some(Cow::Borrowed(b"served"))
+            }
+        }
+        let provider = Anything(AtomicUsize::new(0));
+        // `..` inside a segment, and dots in a name, are not traversal.
+        for plain in [
+            "theme-init.js",
+            "assets/index-abc123.js",
+            "assets/fonts/inter-400.woff2",
+            "assets/a..b.js",
+            "v1.2/.hidden.js",
+        ] {
+            assert!(asset(&provider, plain).is_some(), "{plain} is a plain key");
+        }
+        let asked = provider.0.load(Ordering::SeqCst);
+        for hostile in [
+            "../secret.txt",
+            "assets/../../etc/passwd",
+            "assets/./index.js",
+            "assets//index.js",
+            "assets/",
+            "",
+            "assets\\..\\secret",
+            "assets/a\0.js",
+        ] {
+            assert!(asset(&provider, hostile).is_none(), "{hostile:?} must be refused");
+        }
+        assert_eq!(provider.0.load(Ordering::SeqCst), asked, "the provider was never asked");
+    }
+
+    #[test]
     fn a_missing_asset_is_none() {
-        assert!(asset("assets/does-not-exist-xyz.js").is_none());
+        assert!(asset(&EmbeddedSpa, "assets/does-not-exist-xyz.js").is_none());
     }
 
     #[test]
     fn served_shell_injects_the_intent_meta_tag() {
         // The per-session token is delivered to the SPA via a `<meta>` tag in the
         // served shell (NFR-SE-06, ADR-31) — the SPA reads it once at startup.
-        let html = served_shell("deadbeefcafef00d").expect("shell is embedded");
+        let html = served_shell(&EmbeddedSpa, "deadbeefcafef00d").expect("shell is embedded");
         assert!(
             html.contains("<meta name=\"logos-intent\" content=\"deadbeefcafef00d\">"),
             "the served shell carries the intent token as a meta tag: {html}",
@@ -284,7 +395,7 @@ mod tests {
         // <script> or <style> that would breach the byte-identical self-only CSP
         // (FR-UI-22, ADR-44). The bundle fitness test (tests/spa_bundle.rs) guards
         // the embedded bytes; this guards the runtime injection over the shell.
-        let html = served_shell("0011223344556677").expect("shell is embedded");
+        let html = served_shell(&EmbeddedSpa, "0011223344556677").expect("shell is embedded");
         assert!(!html.contains("<script>"), "no inline <script> in the served shell");
         assert!(!html.contains("<style>"), "no inline <style> in the served shell");
     }
@@ -293,7 +404,7 @@ mod tests {
     fn served_shell_escapes_the_token_into_the_attribute() {
         // The token is read-model-trusted hex, but the boundary escapes anyway
         // (defense in depth) so a stray quote can never break out of the attribute.
-        let html = served_shell("a\"b").expect("shell is embedded");
+        let html = served_shell(&EmbeddedSpa, "a\"b").expect("shell is embedded");
         assert!(html.contains("content=\"a&quot;b\">"), "the token is attribute-escaped: {html}");
         assert!(!html.contains("content=\"a\"b\""), "no unescaped quote breaks the attribute");
     }
@@ -372,7 +483,7 @@ mod tests {
         // time) this is EXPECTED to be non-empty; the assertion holds precisely
         // when a consistent bundle was built. We therefore assert the invariant
         // the guard relies on: every reported gap is genuinely absent from Spa.
-        for gap in missing_shell_assets() {
+        for gap in missing_shell_assets(&EmbeddedSpa) {
             assert!(
                 Spa::get(gap.trim_start_matches('/')).is_none(),
                 "a reported missing asset must truly be absent from the embed: {gap}"

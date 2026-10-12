@@ -75,7 +75,7 @@ async fn status_tool(root: &Path) -> Value {
     let engine = Engine::start(root).expect("engine starts");
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::new(engine).serve(server_io).await {
+        if let Ok(running) = LogosMcp::new(engine, &logos_ext::ExtensionHost::new()).serve(server_io).await {
             let _ = running.waiting().await;
         }
     });

@@ -14,7 +14,7 @@
 # logos resolves is the copy — never this repository.
 #
 # The binary is $LOGOS_E2E_BIN, else the tree's debug build. It must embed a
-# real SPA build: `npm run build` in web/ui, THEN `cargo build -p logos`.
+# real SPA build: `npm run build` in web/ui, THEN `cargo build -p logos --features agents`.
 # scripts/gate.sh's ui-e2e leg does both. A missing binary exits 2 rather than
 # falling back to whatever `logos` is on PATH, which is not this tree's code.
 
@@ -39,7 +39,7 @@ ROOT="$(git -C "$HERE" rev-parse --show-toplevel)"
 BIN="${LOGOS_E2E_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/logos}"
 if [ ! -x "$BIN" ]; then
     echo "serve-fixture.sh: no logos binary at $BIN" >&2
-    echo "  build it from this tree: (cd web/ui && npm run build) && cargo build -p logos" >&2
+    echo "  build it from this tree: (cd web/ui && npm run build) && cargo build -p logos --features agents" >&2
     exit 2
 fi
 

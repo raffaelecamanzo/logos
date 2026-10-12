@@ -9,7 +9,7 @@
 //! [FR-UI-18]: ../../docs/specs/requirements/FR-UI-18.md
 //! [ADR-40]: ../../docs/specs/architecture/decisions/ADR-40.md
 
-use chat_agent::db::{title_from_first_message, THREAD_TITLE_MAX};
+use chat_agent::db::{normalize_thread_title, title_from_first_message, THREAD_TITLE_MAX};
 use chat_agent::{db, ChatRole, ChatStore, MemoryStore, ScratchpadEntry, ToolTrace};
 use tempfile::TempDir;
 
@@ -349,15 +349,31 @@ fn auto_title_from_first_message_is_stable_across_turns() {
     );
 }
 
-/// The title-derivation contract [`title_from_first_message`] must honor
-/// regardless of implementation choices: trimmed, single-line, capped at
-/// [`THREAD_TITLE_MAX`] characters (a char cut, never a byte cut that could
-/// panic on / corrupt a multi-byte message), with a non-empty fallback for a
-/// blank message (`chat_threads.title` is `NOT NULL`).
+/// The title-derivation contract [`title_from_first_message`] must honor — the
+/// cleaned first message [FR-UI-48] falls back to: trimmed, whitespace collapsed,
+/// sentence case, single-line, capped at [`THREAD_TITLE_MAX`] characters at a word
+/// boundary (a char cut, never a byte cut that could panic on / corrupt a
+/// multi-byte message, when one word outruns the cap), with a non-empty fallback
+/// for a blank message (`chat_threads.title` is `NOT NULL`).
+///
+/// [FR-UI-48]: ../../docs/specs/requirements/FR-UI-48.md
 #[test]
-fn title_from_first_message_honors_the_truncation_contract() {
-    // A short, padded message is trimmed to its text.
-    assert_eq!(title_from_first_message("  hello world  "), "hello world");
+fn title_from_first_message_honors_the_cleaning_contract() {
+    // A short, padded message is trimmed to its text, in sentence case.
+    assert_eq!(title_from_first_message("  hello world  "), "Hello world");
+    // Whitespace runs collapse; only the FIRST letter is cased, so a code name
+    // keeps its spelling.
+    assert_eq!(
+        title_from_first_message("where   is\tEngine::run   defined?"),
+        "Where is Engine::run defined?"
+    );
+    // Leading blank lines are skipped: the title is the first line with text.
+    assert_eq!(
+        title_from_first_message("\n  \n how does the binder work?\nmore"),
+        "How does the binder work?"
+    );
+    // An already-capitalised or non-letter start is left as it is.
+    assert_eq!(title_from_first_message("`binder.rs` callers"), "`binder.rs` callers");
 
     // A single-line title: a multi-line paste is titled by its first line only.
     let multiline = title_from_first_message("first line\nsecond line\nthird");
@@ -373,25 +389,46 @@ fn title_from_first_message_honors_the_truncation_contract() {
         "a whitespace-only message must still yield a non-empty title"
     );
 
-    // An over-long message is truncated to exactly THREAD_TITLE_MAX *characters*
-    // — pinning the content, not just the length, guards against an off-by-one or
-    // wrong-prefix bug in the char take.
+    // A single word longer than the cap has no boundary to cut at: it is cut to
+    // exactly THREAD_TITLE_MAX *characters* — pinning the content, not just the
+    // length, guards against an off-by-one or wrong-prefix bug in the char take.
     let long = "x".repeat(THREAD_TITLE_MAX * 3);
     assert_eq!(
         title_from_first_message(&long),
-        "x".repeat(THREAD_TITLE_MAX),
-        "a long title is the first THREAD_TITLE_MAX characters, verbatim"
+        format!("X{}", "x".repeat(THREAD_TITLE_MAX - 1)),
+        "an unbroken long title is its first THREAD_TITLE_MAX characters"
     );
 
     // Exact boundary: a message of exactly THREAD_TITLE_MAX chars is kept whole;
     // one char longer loses exactly the final char.
-    let exact = "a".repeat(THREAD_TITLE_MAX);
+    let exact = format!("A{}", "a".repeat(THREAD_TITLE_MAX - 1));
     assert_eq!(title_from_first_message(&exact), exact, "exactly MAX chars is kept whole");
     let over_by_one = "a".repeat(THREAD_TITLE_MAX + 1);
     assert_eq!(
         title_from_first_message(&over_by_one),
-        "a".repeat(THREAD_TITLE_MAX),
+        format!("A{}", "a".repeat(THREAD_TITLE_MAX - 1)),
         "MAX+1 chars truncates to exactly MAX"
+    );
+
+    // Words over the cap are cut at the last word boundary inside it — never
+    // mid-word — and a cap that lands exactly on a space keeps the whole last word.
+    let words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo";
+    let cut = title_from_first_message(words);
+    assert_eq!(cut, "Alpha bravo charlie delta echo foxtrot golf hotel india");
+    assert!(cut.chars().count() <= THREAD_TITLE_MAX);
+    let on_space = format!("{} tail", "b".repeat(THREAD_TITLE_MAX));
+    assert_eq!(
+        title_from_first_message(&on_space),
+        format!("B{}", "b".repeat(THREAD_TITLE_MAX - 1)),
+        "a cap that falls on a word boundary keeps the word before it whole"
+    );
+    // MAX-2 chars, a space, then a two-letter word: MAX+1 chars, the last word
+    // straddling the cap by one char — it is dropped whole, never cut to "c".
+    let near = format!("{} cd", "a".repeat(THREAD_TITLE_MAX - 2));
+    assert_eq!(
+        title_from_first_message(&near),
+        format!("A{}", "a".repeat(THREAD_TITLE_MAX - 3)),
+        "a word straddling the cap by one char is dropped whole"
     );
 
     // A multi-byte message over the cap must truncate on a char boundary — no
@@ -404,13 +441,13 @@ fn title_from_first_message_honors_the_truncation_contract() {
     );
 }
 
-/// `latest_version` is unchanged by S-208 — the per-thread delete + auto-title
-/// ride the existing multi-thread tables with **no new migration** ([ADR-47]
-/// "no migration"). Migration 2 (the multi-step memory of [S-175]) remains the
-/// head of the ledger.
+/// S-208's per-thread delete + auto-title rode the existing multi-thread tables
+/// with **no new migration** ([ADR-47] "no migration"), as did S-623's rename. The
+/// head of the ledger is migration 3, S-624's memory attribution for truncation
+/// (`tests/truncate.rs`) — the only migration since the multi-step memory of [S-175].
 #[test]
 fn latest_version_is_unchanged_no_migration() {
-    assert_eq!(db::latest_version(), 2, "S-208 adds no migration");
+    assert_eq!(db::latest_version(), 3, "only S-624 has migrated since S-175");
 }
 
 /// Appending to a non-existent thread is rejected (no orphaned message) rather
@@ -524,4 +561,72 @@ fn message_and_trace_order_is_insertion_order() {
         .map(|t| t.tool_name.as_str())
         .collect();
     assert_eq!(names, vec!["c", "a", "b"], "traces preserve issue order, not name order");
+}
+
+/// **S-623 / [FR-UI-48]:** a conversation can be renamed, the rename persists
+/// across a store reopen (a `serve --ui` restart), it leaves the rail order alone,
+/// and an empty or over-long name is refused with the title unchanged.
+///
+/// [FR-UI-48]: ../../docs/specs/requirements/FR-UI-48.md
+#[test]
+fn rename_thread_persists_across_a_reopen_and_refuses_an_empty_name() {
+    let dir = TempDir::new().unwrap();
+    let (older, newer) = {
+        let mut store = ChatStore::open(dir.path()).unwrap();
+        let older = store.create_thread_from_message("where is the binder?").unwrap();
+        let newer = store.create_thread_from_message("what is risky here?").unwrap();
+        assert!(store.rename_thread(older, "  Binder\n location  ").unwrap(), "a hit renames");
+        (older, newer)
+    };
+
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.thread(older).unwrap().unwrap().title,
+        "Binder location",
+        "the rename is durable and normalized"
+    );
+    let order: Vec<i64> = store.list_threads().unwrap().iter().map(|t| t.id).collect();
+    assert_eq!(order, [newer, older], "renaming is not activity: the rail order is unchanged");
+
+    for refused in ["", "   \t\n ", &"x".repeat(THREAD_TITLE_MAX + 1)] {
+        assert!(store.rename_thread(older, refused).is_err(), "{refused:?} is refused");
+    }
+    assert_eq!(store.thread(older).unwrap().unwrap().title, "Binder location", "title unchanged");
+
+    assert!(!store.rename_thread(9_999, "Ghost").unwrap(), "an unknown id renames nothing");
+}
+
+/// The one shaping rule a rename and a Synthesizer title share.
+#[test]
+fn normalize_thread_title_collapses_whitespace_and_bounds_length() {
+    assert_eq!(normalize_thread_title(" a \n b\t c ").as_deref(), Some("a b c"));
+    assert_eq!(normalize_thread_title(""), None);
+    assert_eq!(normalize_thread_title(" \n "), None);
+    let exact = "y".repeat(THREAD_TITLE_MAX);
+    assert_eq!(normalize_thread_title(&exact).as_deref(), Some(exact.as_str()));
+    assert_eq!(normalize_thread_title(&"y".repeat(THREAD_TITLE_MAX + 1)), None);
+}
+
+/// **S-623 / [FR-UI-48]:** the first turn's title replaces only the title the
+/// thread was created with — a rename made meanwhile is kept.
+///
+/// [FR-UI-48]: ../../docs/specs/requirements/FR-UI-48.md
+#[test]
+fn replace_title_only_replaces_the_expected_title() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let id = store.create_thread_from_message("where is the binder?").unwrap();
+    let fallback = title_from_first_message("where is the binder?");
+
+    assert!(store.replace_title(id, &fallback, "  Binder   map ").unwrap());
+    assert_eq!(store.thread(id).unwrap().unwrap().title, "Binder map", "normalized");
+
+    store.rename_thread(id, "My own name").unwrap();
+    assert!(
+        !store.replace_title(id, "Binder map", "Generated").unwrap(),
+        "a title that is no longer the expected one is not replaced"
+    );
+    assert_eq!(store.thread(id).unwrap().unwrap().title, "My own name");
+    assert!(store.replace_title(id, "My own name", "").is_err(), "an empty title is refused");
+    assert!(!store.replace_title(9_999, "x", "Ghost").unwrap(), "an unknown id replaces nothing");
 }

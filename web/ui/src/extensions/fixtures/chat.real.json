@@ -1,0 +1,37 @@
+{
+  "extensions": [
+    {
+      "id": "chat",
+      "ui": {
+        "nav": [
+          {
+            "id": "chat",
+            "label": "Chat",
+            "path": "/chat",
+            "group": "A",
+            "scope": "member",
+            "replaced_in_workspace_by": "workspace-chat"
+          },
+          {
+            "id": "workspace-chat",
+            "label": "Chat",
+            "path": "/workspace-chat",
+            "group": "A",
+            "scope": "app"
+          }
+        ],
+        "views": [
+          "/chat",
+          "/workspace-chat"
+        ],
+        "config_panels": [
+          {
+            "id": "chat",
+            "label": "Chat",
+            "table": "chat"
+          }
+        ]
+      }
+    }
+  ]
+}

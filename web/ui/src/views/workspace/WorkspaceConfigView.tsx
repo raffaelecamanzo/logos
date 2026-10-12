@@ -14,7 +14,9 @@
  *     every member that declares none inherits — and nothing else. The workspace
  *     root holds no graph, so the group offers no indexing key, no rules document
  *     and no Apply action, and says so on the surface rather than leaving the
- *     absence to be discovered (NFR-CC-04).
+ *     absence to be discovered (NFR-CC-04). It is the `chat` extension's
+ *     workspace config panel since S-643 ({@link WorkspaceChatTierPanel}), so it is
+ *     offered only while that extension is active.
  *
  * The editing grammar is the member Config editor's (S-099, FR-UI-12), carried in
  * rather than re-invented: typed fields for the scalar/list keys, a raw-TOML pane
@@ -102,6 +104,8 @@ import {
   Widget,
   WidgetStack,
 } from "../../components/index.ts";
+import { ExtensionConfigPanels, useMountedConfigTable } from "../../extensions/ConfigPanels.tsx";
+import type { ConfigPanelProps } from "../../extensions/registry.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { WORKSPACE_CONFIG_FILE, WORKSPACE_SECRETS_FILE } from "../chat/chatModel.ts";
 import { dropEmptyTable, patch, type TomlFieldType } from "../config/toml.ts";
@@ -711,8 +715,9 @@ const PROVIDERS = [
 ] as const;
 
 /**
- * The tier's typed fields: `[chat]` provider/model/base_url and `[wiki].model` —
- * the keys this root is read for, and only those. Every other `[chat]` key (the
+ * The tier's typed fields: `[chat]` provider/model/base_url and — while the `wiki`
+ * extension edits the table (`withWiki`, S-644) — `[wiki].model`: the keys this root
+ * is read for, and only those. Every other `[chat]` key (the
  * budget tree, retry policy, per-role overrides) is edited in the raw pane, as in
  * the member editor.
  *
@@ -721,8 +726,8 @@ const PROVIDERS = [
  * are indistinguishable for every `[chat]` key but `model` (ADR-67 §3). A default
  * is patched into the raw pane only if the field is edited.
  */
-function tierFields(c: ParsedConfig): FieldGroup[] {
-  return [
+function tierFields(c: ParsedConfig, withWiki: boolean): FieldGroup[] {
+  const groups: (FieldGroup | null)[] = [
     {
       legend: "[chat]",
       fields: [
@@ -753,6 +758,7 @@ function tierFields(c: ParsedConfig): FieldGroup[] {
       ),
     },
   ];
+  return groups.filter((g): g is FieldGroup => g !== null && (withWiki || g.legend !== "[wiki]"));
 }
 
 /** Which members take what from this root — the reach of a save, stated where it
@@ -940,7 +946,10 @@ function TierEditor({
   onReload: (notice: ResultMessage) => void;
 }) {
   const parsed = doc.config.parsed;
-  const groups = parsed === null ? [] : tierFields(parsed);
+  // `[wiki]` is the `wiki` extension's table (S-644): its field is offered while the
+  // extension mounts a panel editing it, as `[chat]`'s are by chat's (S-643).
+  const withWiki = useMountedConfigTable("workspace", "wiki");
+  const groups = parsed === null ? [] : tierFields(parsed, withWiki);
   const [raw, setRaw] = useState(doc.config.content);
   const [fingerprint, setFingerprint] = useState(doc.config.fingerprint);
   const [values, setValues] = useState<Record<string, string>>(() => seedValues(groups));
@@ -1108,6 +1117,16 @@ function TierGroup() {
   );
 }
 
+/**
+ * The workspace chat tier — the `chat` extension's workspace config panel (S-643),
+ * mounted by {@link ExtensionConfigPanels} while the extension is active. The group
+ * owns its reads and saves, so it needs nothing from this view; a build without the
+ * extension offers no workspace chat tier at all.
+ */
+export function WorkspaceChatTierPanel(_props: ConfigPanelProps) {
+  return <TierGroup />;
+}
+
 // ── The view ───────────────────────────────────────────────────────────────────
 
 export function WorkspaceConfigView() {
@@ -1146,7 +1165,9 @@ export function WorkspaceConfigView() {
       </Callout>
       {/* Each group is a sibling ConfigGroup owning its own reads and saves. */}
       <ManifestGroup />
-      <TierGroup />
+      {/* The panels of the mounted extensions (S-642) — the `chat` extension's
+          workspace chat tier among them (S-643). */}
+      <ExtensionConfigPanels scope="workspace" />
     </WidgetStack>
   );
 }

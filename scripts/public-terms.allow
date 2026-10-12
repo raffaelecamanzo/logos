@@ -1,0 +1,18 @@
+# public-terms.allow — reviewed lines scripts/check-public-terms.sh admits.
+#
+# One `path:sha256` entry per admitted line, where the digest is of the whole
+# line (its bytes without the line ending). An entry survives the line moving and
+# lapses when the line changes, so an edited line is reviewed again. Generate the
+# candidates with `bash scripts/check-public-terms.sh --emit-allow` and add only
+# the ones a reviewer has read. Say why a line is admitted without quoting the
+# term the gate found in it.
+
+# Licence texts, verbatim and never edited: the Apache-2.0 licence, and the copy
+# of it vendored with a web asset.
+LICENSE:0a34ffca9f4f6a3cc545968aaf22bb29e8e8354c70f8f29f61fc6f65db769c54
+web/assets/vendor/licenses/echarts-LICENSE.txt:0a34ffca9f4f6a3cc545968aaf22bb29e8e8354c70f8f29f61fc6f65db769c54
+
+# A test's loop counter: the word in its ordinary sense of one repetition of an
+# experiment. The chat-agent entry admits two identical lines in that file.
+chat-agent/src/db.rs:55166485c78a516b86c2027f173105a3d36c005f438cc518ef151e14c9c416a6
+logos-core/src/history/db.rs:55166485c78a516b86c2027f173105a3d36c005f438cc518ef151e14c9c416a6

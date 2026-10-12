@@ -4,7 +4,7 @@
 //! Thin adapter over the thick-core [`logos_core::federation::query`] read-models
 //! (NFR-MA-02, ADR-01): each subcommand discovers the workspace, builds a lazy
 //! member [`EngineRegistry`], and serialises exactly one `query::*` read-model.
-//! The bulk lives here (not `main.rs`/`dispatch.rs`) so those stay under their
+//! The bulk lives here (not `lib.rs`/`dispatch.rs`) so those stay under their
 //! line budgets, mirroring the [`crate::workspace_init`] precedent.
 //!
 //! `--json` stays machine-clean: every path routes through [`Output::print`],

@@ -3,11 +3,11 @@
 //!
 //! A single tool-less `rig` [`Agent`](agent_core::rig::agent::Agent) on the
 //! shared [`agent-core`] substrate that loops the deterministic FR-WK-13
-//! generation queue ([`Engine::wiki_generate`](logos_core::Engine::wiki_generate)),
+//! generation queue ([`Engine::wiki_generate`](logos_wiki::WikiEngine::wiki_generate)),
 //! synthesizes each drifted/absent page using the embedded `logos-wiki` skill
-//! body ([`wiki::rendered_skill`](logos_core::wiki::rendered_skill), [FR-WK-08])
+//! body ([`logos_wiki::rendered_skill`], [FR-WK-08])
 //! **as its system prompt**, and persists each page via the unchanged `wiki
-//! write` contract ([`Engine::wiki_write`](logos_core::Engine::wiki_write),
+//! write` contract ([`Engine::wiki_write`](logos_wiki::WikiEngine::wiki_write),
 //! [FR-WK-02]) — write-time anchors, HEAD, and built-at-revision — so dual-axis
 //! freshness ([FR-WK-03], [FR-WK-12]) is preserved.
 //!
@@ -20,16 +20,19 @@
 //! ([`DEFAULT_RUN_CEILING`], [ADR-42], [CR-056]). An empty work-list starts no run
 //! and makes no model call ([NFR-CC-04]); a ceiling or provider halt is reported
 //! honestly, and pages already written persist (each
-//! [`wiki write`](logos_core::Engine::wiki_write) is atomic).
+//! [`wiki write`](logos_wiki::WikiEngine::wiki_write) is atomic).
 //!
 //! # Offline carve-out ([NFR-SE-01], [ADR-40])
 //!
 //! The substrate's `rig`/`reqwest` HTTP client is confined to [`agent-core`], and
-//! this crate — like [chat-agent] — reaches the `logos` binary only through the
-//! `web` adapter under the non-default `ui` cargo feature. The **default**
+//! this crate — like [chat-agent] — reaches the `logos` binary only under its
+//! non-default `agents` cargo feature, where the binary's composition hands
+//! `ConfiguredGenerator` to the `wiki` extension (S-644). No adapter depends on
+//! this crate: the `web` dependency runs from here up to it, behind this crate's
+//! own `web` feature ([ADR-74] §3). The **default**
 //! `logos` tree links no HTTP client and the byte-identical no-networking-crate
 //! fitness function (`logos-core/tests/no_network_deps.rs`) is unchanged;
-//! `tests/carve_out.rs` locks the ui-vs-default boundary and
+//! `tests/carve_out.rs` locks the default / `ui` / `agents` boundary and
 //! `tests/generation.rs` proves a full mock-`CompletionModel` pass dials nothing.
 //!
 //! [CR-047]: ../../../docs/requests/CR-047-internal-wiki-generation-on-agent-substrate.md
@@ -45,6 +48,7 @@
 //! [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
 //! [ADR-41]: ../../../docs/specs/architecture/decisions/ADR-41.md
 //! [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
+//! [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
 //! [`agent-core`]: ../../../docs/specs/architecture/components/agent-core.md
 //! [chat-agent]: ../../../docs/specs/architecture/components/chat-agent.md
 
@@ -53,9 +57,13 @@
 mod agent;
 mod configured;
 mod grounding;
+#[cfg(feature = "web")]
+mod web;
 
 pub use agent::{
     WikiAgent, WikiProgress, WikiRunOutcome, DEFAULT_GROUNDING_BUDGET, DEFAULT_RUN_BUDGET,
     DEFAULT_RUN_CEILING, DEFAULT_SYNTHESIS_TIMEOUT,
 };
 pub use configured::{run_configured, ConfiguredRun};
+#[cfg(feature = "web")]
+pub use web::ConfiguredGenerator;

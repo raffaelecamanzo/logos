@@ -10,12 +10,16 @@
  *   - the explicit Apply is decoupled from Save and renders the honest outcome.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ToastProvider } from "../../components/index.ts";
 import type { ConfigReadModel, VerifyReport } from "../../api/types.ts";
 import type { WorkspaceRoster } from "../../api/types.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../../extensions/registry.ts";
+import { mountChat } from "../../test/chat.ts";
+import { mountAgentsBuild, mountWiki } from "../../test/wiki.ts";
+import { extensionsInfo, STUB_UI, stubInfo } from "../../test/extensions.tsx";
 import { ConfigView } from "./ConfigView.tsx";
 import styles from "./ConfigView.module.css";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
@@ -23,9 +27,16 @@ import { setScopedMember } from "../../workspace/scope.ts";
 import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
 import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
 
+// The release (`agents`) build: the `chat` and `wiki` extensions active, as its server
+// reports them (S-643, S-644) — the `[chat]` fields and the key card are chat's, the
+// `[wiki]` fields the wiki's. A spec about a build without one clears the registry
+// first (`clearExtensions`) and mounts what that build composes.
+beforeEach(mountAgentsBuild);
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  clearExtensions();
 });
 
 /** A loaded read-model: an indexed config.toml with a `[chat]` section, a
@@ -528,6 +539,59 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     await waitFor(() =>
       expect(screen.queryByText(/table is inherited from the workspace root/)).not.toBeInTheDocument(),
     );
+  });
+
+  /** The key card's section (S-452): the chat extension's member panel (S-643). */
+  const keyCard = () => screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
+
+  it("moves the key card's note with the re-read after a save — the panel reads the host's fresh read-model (S-643)", async () => {
+    // A panel is handed the Config view's re-read (`ConfigPanelHost.fresh`), not the
+    // read-model it mounted with: once a save makes the policy the member's own, the
+    // card stops saying a key saved here is unused.
+    let reads = 0;
+    const own = inheriting();
+    own.effective_chat = { ...own.effective_chat, policy: { ...own.effective_chat.policy, model: "own-model" }, policy_origin: "member" };
+    mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? inheriting() : own) }),
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 140, provenance_stamped: false }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(keyCard()).toHaveTextContent("A key saved here is not used while this member inherits the workspace [chat] table");
+
+    fireEvent.change(screen.getByLabelText("model"), { target: { value: "own-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
+    await screen.findByText(/Saved \.logos\/config\.toml \(140 bytes\)/);
+    await waitFor(() => expect(keyCard()).toHaveTextContent("Saving a key here overrides it for this member only."));
+  });
+
+  it("drops every inheritance note when the re-read after a save fails (NFR-CC-04)", async () => {
+    // `ConfigPanelHost.fresh` is null while the last re-read failed: the page no longer
+    // knows the resolution, so neither the [chat] note nor the key card asserts one.
+    let reads = 0;
+    mockFetch({
+      "GET /api/v1/config": () =>
+        reads++ === 0
+          ? { ok: true, status: 200, body: JSON.stringify(inheriting()) }
+          : { ok: false, status: 500, body: "boom" },
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 140, provenance_stamped: false }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getAllByText(/inherited from the workspace root/).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
+    await screen.findByText(/Saved \.logos\/config\.toml \(140 bytes\)/);
+    await waitFor(() => expect(screen.queryByText(/inherited from the workspace root/)).not.toBeInTheDocument());
+    expect(keyCard()).not.toHaveTextContent("A key saved here is not used");
   });
 
   it("says the key is inherited without ever showing the inherited key's last-4", async () => {
@@ -1191,5 +1255,147 @@ describe("the Config editors render as registered tool panels in one stack (S-61
     expectToolPanel(panels[1], "chatKey");
     expectToolPanel(panels[2], "graphConsistency");
     expectToolPanel(panels[3], "policyFile");
+  });
+});
+
+describe("the config panels of the mounted extensions (S-642, FR-UI-51)", () => {
+  it("renders an active extension's member panel after the built-in ones, in the same stack", async () => {
+    mockFetch({});
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    const { container } = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    const panel = await screen.findByTestId("stub-member-panel");
+    expect(panel).toHaveTextContent("Stub config [stub] (member)");
+    // The workspace's variant of the same panel is not this view's.
+    expect(screen.queryByTestId("stub-workspace-panel")).toBeNull();
+    // In the one widget stack, directly beneath the config document whose tables
+    // the extensions' panels edit (S-643) — before the consistency check and rules.
+    const stack = container.querySelector("[data-widget-stack]") as HTMLElement;
+    expect(stack.contains(panel)).toBe(true);
+    const titles = expectOneWidgetStack(container).map(widgetTitle);
+    expect(titles[0]).toBe("config.toml");
+    expect(titles.slice(-2)).toEqual(["Graph consistency check", "rules.toml"]);
+    expect(panel.compareDocumentPosition(screen.getByRole("heading", { name: "Graph consistency check" })))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("renders it when the boot read settles after the view mounted", async () => {
+    mockFetch({});
+    registerExtensionUi(STUB_UI);
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByTestId("stub-member-panel")).toBeNull();
+
+    act(() => setActiveExtensions(extensionsInfo(stubInfo())));
+    expect(await screen.findByTestId("stub-member-panel")).toBeInTheDocument();
+  });
+
+  it("renders no panel for an extension the server does not report active", async () => {
+    mockFetch({});
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo());
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByTestId("stub-member-panel")).toBeNull();
+  });
+
+  it("renders the chat key card beneath config.toml while chat is active — the release build's stack", async () => {
+    mockFetch({});
+    const { container } = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual([
+      "config.toml",
+      "chat API key",
+      "Graph consistency check",
+      "rules.toml",
+    ]);
+  });
+});
+
+describe("a build without the chat extension — the default build (S-643)", () => {
+  beforeEach(() => {
+    clearExtensions();
+    mountWiki();
+  });
+
+  it("offers neither the [chat] fields nor the chat key card — only the built-in editors", async () => {
+    mockFetch({});
+    const { container } = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual([
+      "config.toml",
+      "Graph consistency check",
+      "rules.toml",
+    ]);
+    expect(screen.queryByText("[chat]", { selector: "legend" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "chat API key" })).toBeNull();
+    // The other typed groups are untouched — the wiki's among them, in this build.
+    expect(screen.getByText("[wiki]", { selector: "legend" })).toBeInTheDocument();
+  });
+
+  it("offers no [chat] fields beside another extension's member panel — only a panel on [chat] brings them", async () => {
+    mockFetch({});
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    renderView();
+    await screen.findByTestId("stub-member-panel");
+    expect(screen.queryByText("[chat]", { selector: "legend" })).toBeNull();
+  });
+
+  it("keeps an existing [chat] table in the raw candidate, so a save never drops it", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    const raw = screen.getAllByRole("textbox").find((t) => (t as HTMLTextAreaElement).value.includes("[chat]"));
+    expect(raw).toBeDefined();
+  });
+});
+
+describe("a build without the wiki extension (S-644)", () => {
+  it("offers no [wiki] fields while chat alone is active", async () => {
+    clearExtensions();
+    mountChat();
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getByText("[chat]", { selector: "legend" })).toBeInTheDocument();
+    expect(screen.queryByText("[wiki]", { selector: "legend" })).toBeNull();
+  });
+
+  it("pre-fills the [chat] and [wiki] fields when the boot read settles after the view mounted", async () => {
+    clearExtensions();
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByText("[wiki]", { selector: "legend" })).toBeNull();
+
+    act(() => mountAgentsBuild());
+    expect(await screen.findByText("[wiki]", { selector: "legend" })).toBeInTheDocument();
+    expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("claude-wiki");
+    expect((screen.getByLabelText("provider") as HTMLInputElement).value).toBe("openai");
+  });
+
+  it("offers neither [chat] nor [wiki] fields with no extension active — the built-in editors alone", async () => {
+    clearExtensions();
+    mockFetch({});
+    const { container } = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByText("[chat]", { selector: "legend" })).toBeNull();
+    expect(screen.queryByText("[wiki]", { selector: "legend" })).toBeNull();
+    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual([
+      "config.toml",
+      "Graph consistency check",
+      "rules.toml",
+    ]);
+  });
+
+  it("keeps an existing [wiki] table in the raw candidate, so a save never drops it", async () => {
+    clearExtensions();
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(configRaw().value).toContain("[wiki]");
   });
 });

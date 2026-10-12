@@ -15,8 +15,9 @@
 //!
 //! # Read-only by construction ([FR-UI-03], [ADR-28])
 //! Every endpoint is a `GET` and reads through the façade's **non-persisting**
-//! accessors — `status`, the read-only `latest_*` twins, `coverage_*`, the wiki
-//! read models, `config_read`, and the pure navigation readers. Loading any
+//! accessors — `status`, the read-only `latest_*` twins, `coverage_*`,
+//! `config_read`, and the pure navigation readers (the wiki's read models are the
+//! `wiki` extension's routes since S-644, under the same rule). Loading any
 //! endpoint once or repeatedly mutates no store (the no-write-on-read invariant
 //! the [`crate`] `method_guard` keeps GET-only is preserved here verbatim). The
 //! config-read endpoint returns the **masked** chat key only — masked by
@@ -29,7 +30,7 @@
 //! corresponding server-rendered view *degrades* rather than fails (the language
 //! composition, the temporal hotspot board) mirrors that policy exactly — a
 //! defaulted composition, an `Option` hotspot board — so the API layer invents no
-//! new degradation rule of its own. An absent wiki page is an honest `404`.
+//! new degradation rule of its own.
 //!
 //! These DTO shapes are **internal to the bundled frontend** (same binary, same
 //! version): not a public API, deliberately outside the versioned-contract
@@ -49,12 +50,11 @@
 //! [spa-frontend]: ../../docs/specs/architecture/components/spa-frontend.md
 
 use std::collections::HashMap;
-use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
-    extract::{Form, Path, Query, State},
-    http::{header, StatusCode},
+    extract::{Form, Query, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -72,15 +72,17 @@ use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::observability::Surface;
 use logos_core::models::navigation::{
-    BranchOverlapResult, GraphElements, ImpactIntersectionResult, ImpactResult,
+    BranchOverlapResult, GraphElements, GraphGranularity, ImpactIntersectionResult, ImpactResult,
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
 };
 use logos_core::models::quality::{
     DsmReport, EvolutionReport, GateResult, LanguagesInfo, LatestHealth, RulesReport, ScanResult,
     StatsInfo, VerifyReport,
 };
-use logos_core::wiki::{AnchorProvenance, DocCategory, WikiHit, WikiPage, WikiStatus};
 use logos_core::Engine;
+use logos_ext::ui::UiManifest;
+use logos_ext::web::OverviewField;
+use logos_ext::ExtensionHost;
 
 use crate::member::{workspace_root_of, MemberEngine, WorkspaceRoot};
 use crate::query::QueryResponse;
@@ -94,7 +96,7 @@ use crate::{
 /// blank or fabricated figure (web-surface failure mode). Mirrors the per-widget
 /// error panels the server-rendered views render.
 #[derive(Debug, Serialize)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     /// The flattened façade error chain (`{e:#}`), exactly as the HTML views show
     /// it — actionable, never swallowed.
     pub error: String,
@@ -102,19 +104,19 @@ pub(crate) struct ApiError {
 
 /// Serialize `model` as a `200 application/json` body — the success arm shared by
 /// every endpoint.
-fn ok<T: Serialize>(model: T) -> Response {
+pub fn ok<T: Serialize>(model: T) -> Response {
     Json(model).into_response()
 }
 
 /// Map a failed read-model to a `500` with the explicit [`ApiError`] chain — the
 /// failure is surfaced, not masked ([NFR-RA-05]).
-fn fail(err: anyhow::Error) -> Response {
+pub fn fail(err: anyhow::Error) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: format!("{err:#}") })).into_response()
 }
 
 /// Collapse a composed `Result` bundle into its response: the serialized bundle on
 /// success, the honest `500` error chain on failure.
-fn respond<T: Serialize>(model: anyhow::Result<T>) -> Response {
+pub fn respond<T: Serialize>(model: anyhow::Result<T>) -> Response {
     match model {
         Ok(model) => ok(model),
         Err(err) => fail(err),
@@ -141,28 +143,73 @@ pub(crate) struct OverviewModel {
     /// onboarding when no `rules.toml` (`rules_present == false`).
     rules: RulesReport,
     stats: StatsInfo,
-    /// The agent Project-Overview wiki page, or `null` when none is written yet
-    /// (an honest absence, not an error — [NFR-CC-04]).
-    overview_page: Option<WikiPage>,
+    /// The fields the active extensions add ([`OverviewField`], [FR-DS-04]),
+    /// after the core's, each under its own key — the `wiki` extension's
+    /// `overview_page`, the Project Overview its Dashboard card renders (S-644).
+    /// A key a core field already uses is never added.
+    ///
+    /// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
+    #[serde(flatten)]
+    extensions: serde_json::Map<String, serde_json::Value>,
 }
 
-/// `GET /api/v1/overview` — the Dashboard data ([FR-UI-09], [FR-UI-21]).
-pub(crate) async fn overview(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_overview", Surface::Web, |e| -> anyhow::Result<OverviewModel> {
-        Ok(OverviewModel {
-            status: e.status(),
-            // The view degrades a composition-read fault to the empty card, never
-            // blanks the page — mirror that here ([NFR-CC-04]).
-            composition: e.language_composition().unwrap_or_default(),
-            languages: e.languages(),
-            gate: e.latest_gate()?,
-            coverage: e.coverage_status()?,
-            rules: e.check_rules(None, false)?,
-            stats: e.stats(None),
-            overview_page: e.wiki_read(crate::wiki::PROJECT_OVERVIEW_SLUG)?,
+/// The core's own keys in [`OverviewModel`] — an extension field named like one
+/// is dropped rather than allowed to shadow it, as the MCP adapter drops an
+/// extension tool named like a core tool. Pinned to the model's serialised keys
+/// (`the_core_overview_keys_are_the_models_own`).
+const OVERVIEW_CORE_KEYS: [&str; 7] =
+    ["status", "composition", "languages", "gate", "coverage", "rules", "stats"];
+
+/// The extension fields the overview serves, in registration order: a field whose
+/// key a core field or an earlier field already holds is dropped, so the first
+/// registered wins — the MCP adapter's rule for a tool named like a registered one.
+fn admitted_overview_fields(fields: Vec<OverviewField>) -> Vec<OverviewField> {
+    let mut taken: Vec<&'static str> = OVERVIEW_CORE_KEYS.to_vec();
+    fields
+        .into_iter()
+        .filter(|field| {
+            if taken.contains(&field.key()) {
+                tracing::warn!(
+                    target: "logos::web",
+                    field = field.key(),
+                    "an extension overview field is named like a registered field; keeping the registered one"
+                );
+                return false;
+            }
+            taken.push(field.key());
+            true
         })
+        .collect()
+}
+
+/// The Dashboard bundle over one engine: the core's read-models, then `fields`.
+fn read_overview(e: &Engine, fields: &[OverviewField]) -> anyhow::Result<OverviewModel> {
+    Ok(OverviewModel {
+        status: e.status(),
+        // The view degrades a composition-read fault to the empty card, never
+        // blanks the page — mirror that here ([NFR-CC-04]).
+        composition: e.language_composition().unwrap_or_default(),
+        languages: e.languages(),
+        gate: e.latest_gate()?,
+        coverage: e.coverage_status()?,
+        rules: e.check_rules(None, false)?,
+        stats: e.stats(None),
+        extensions: fields
+            .iter()
+            .map(|field| Ok((field.key().to_string(), field.read(e)?)))
+            .collect::<anyhow::Result<_>>()?,
     })
-    .await;
+}
+
+/// `GET /api/v1/overview` — the Dashboard data ([FR-UI-09], [FR-UI-21]): the
+/// core's read-models and the active extensions' fields, all read inside one
+/// bridge over the requested member.
+pub(crate) async fn overview(
+    MemberEngine(engine): MemberEngine,
+    State(host): State<ExtensionHost>,
+) -> Response {
+    let fields = admitted_overview_fields(host.overview_fields());
+    let model = bridge(engine, "api_v1_overview", Surface::Web, move |e| read_overview(e, &fields)).await;
     respond(model)
 }
 
@@ -273,7 +320,11 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 /// render as a not-indexed state — never dressed up as a measurement ([NFR-CC-04],
 /// [NFR-RA-05]).
 ///
-/// # The one handler on this surface that is not [`Surface::Web`]
+/// # One of the two handlers on this surface that are not [`Surface::Web`]
+///
+/// The other is [`code_refs`]; both are app chrome ([BR-42]) and they are a closed
+/// set, pinned by
+/// `every_handler_names_its_surface_and_only_chrome_handlers_name_the_shell`.
 ///
 /// The app header re-issues this read on **every** client-side navigation
 /// ([FR-UI-34]) — a request the user's own navigation caused incidentally, not
@@ -298,7 +349,7 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 /// asking a genuine question would have its reads silently excluded with
 /// nothing failing. If one appears, it needs its own route (or the
 /// classification needs to move to the caller), not a second caller here.
-/// `every_handler_names_its_surface_and_only_status_names_the_shell` guards the
+/// `every_handler_names_its_surface_and_only_chrome_handlers_name_the_shell` guards the
 /// handler side of this; the consumer side is an assumption, stated here
 /// because nothing enforces it.
 ///
@@ -308,6 +359,56 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 pub(crate) async fn status(MemberEngine(engine): MemberEngine) -> Response {
     let info: StatusInfo = bridge(engine, "api_v1_status", Surface::Shell, |e| e.status()).await;
     ok(info)
+}
+
+// ── Extensions (the host this serve composes, [FR-UI-51]) ─────────────────────
+
+/// What `GET /api/v1/extensions` answers: the active extensions, each with the
+/// UI manifest it contributes.
+#[derive(Debug, Serialize)]
+pub(crate) struct ExtensionsInfo {
+    /// The **active** extensions, in registration order. A registered extension
+    /// whose feature is not enabled is not here: it contributes nothing anywhere.
+    extensions: Vec<ExtensionInfo>,
+}
+
+/// One active extension.
+#[derive(Debug, Serialize)]
+pub(crate) struct ExtensionInfo {
+    /// The extension's id.
+    id: &'static str,
+    /// What it adds to the SPA — `null` for an extension with no UI.
+    ui: Option<UiManifest>,
+}
+
+/// `GET /api/v1/extensions` — which extensions are active, and their UI
+/// manifests ([FR-UI-51], CR-213, [ADR-74]): what the SPA will read on
+/// boot to decide which navigation entries, views and config panels to mount.
+///
+/// A read of the [`ExtensionHost`] the router was composed with, so it reaches no
+/// engine: it crosses no adapter boundary and records no telemetry event, hence
+/// it names no telemetry surface and is not app chrome in
+/// `every_handler_names_its_surface_and_only_chrome_handlers_name_the_shell`'s
+/// sense — the closed chrome set stays `status` and `code_refs`. A host with no
+/// extension answers `{"extensions":[]}`.
+///
+/// It sits in the ordinary guard stack: `GET`-only ([`crate::method_guard`]),
+/// loopback-only ([`crate::host_guard`]) and same-origin (no cross-origin grant is
+/// added; the self-only CSP stamps it).
+///
+/// [FR-UI-51]: ../../docs/specs/requirements/FR-UI-51.md
+/// [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
+pub(crate) async fn extensions(State(host): State<ExtensionHost>) -> Response {
+    ok(ExtensionsInfo {
+        extensions: host
+            .active()
+            .iter()
+            .map(|extension| ExtensionInfo {
+                id: extension.id(),
+                ui: extension.ui_manifest(),
+            })
+            .collect(),
+    })
 }
 
 // ── Statistics (mirrors `logos stats`, [FR-OB-04]/[FR-UI-27]) ─────────────────
@@ -657,6 +758,206 @@ pub(crate) async fn search(
     let limit = q.get("limit").and_then(|n| n.parse::<usize>().ok());
     let result: SearchResult = bridge(engine, "api_v1_search", Surface::Web, move |e| e.search(&term, kind, limit)).await;
     ok(result)
+}
+
+// ── Code references (chat answer links, [FR-UI-47]) ───────────────────────────
+
+/// The most distinct spans one resolution request resolves ([FR-UI-47]: the
+/// candidate count per turn is capped). The chat client sends at most this many
+/// (`CODE_REF_CAP` in `web/ui/src/views/chat/codeRefs.ts`); a request carrying
+/// more is not refused — the excess is counted in `over_cap` and left unresolved,
+/// so a hand-built URL cannot buy unbounded lookups.
+pub(crate) const CODE_REF_CAP: usize = 24;
+
+/// The longest span considered a candidate. A backticked span longer than any
+/// plausible path or symbol is prose or code, and is not looked up.
+const CODE_REF_MAX_LEN: usize = 200;
+
+/// What a candidate span LOOKS like — the only thing decided from its text.
+/// Whether it links is decided by the graph, never by this shape ([NFR-CC-04]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeRefShape<'a> {
+    /// A project-relative path, any `:line` / `:line-line` suffix removed.
+    Path(&'a str),
+    /// A bare identifier, any trailing `()` removed.
+    Symbol(&'a str),
+}
+
+/// Classify one backticked span ([FR-UI-47]): a repository path, a `path:line`, or
+/// a symbol name — else `None`, and it is never looked up.
+///
+/// - A bare identifier (`build_router`, `MarkdownAnswer`, `f()`) is a symbol.
+/// - A path is `[A-Za-z0-9_./-]` only and either contains `/` or ends in a
+///   `.ext` (`web/src/lib.rs`, `build.rs`, `lib.rs:42`, `src/a.rs:3-9`). A leading
+///   `./` is dropped, as the navigation readers do.
+/// - Everything else is not a candidate: whitespace (a command line), an absolute
+///   or parent-relative path (never project-relative), a URL, a flag, a qualified
+///   name (`Engine::node` — the graph's name lookup is by bare name, so it could
+///   only ever come back unresolved).
+fn code_ref_shape(text: &str) -> Option<CodeRefShape<'_>> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > CODE_REF_MAX_LEN || text.contains(char::is_whitespace) {
+        return None;
+    }
+    let is_ident = |s: &str| {
+        let mut chars = s.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let callable = text.strip_suffix("()").unwrap_or(text);
+    if is_ident(callable) {
+        return Some(CodeRefShape::Symbol(callable));
+    }
+    // `path:line` and `path:line-line` name the file; the line is not a node.
+    let path = match text.rsplit_once(':') {
+        Some((path, line))
+            if !line.is_empty()
+                && line.split('-').count() <= 2
+                && line.split('-').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            path
+        }
+        _ => text,
+    };
+    let path = path.strip_prefix("./").unwrap_or(path);
+    let path_chars = path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-'));
+    let has_extension = path
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && !stem.ends_with('/') && !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let rooted_or_parent = path.starts_with('/') || path.split('/').any(|seg| seg.is_empty() || seg == "..");
+    if path_chars && !rooted_or_parent && (path.contains('/') || has_extension) {
+        return Some(CodeRefShape::Path(path));
+    }
+    None
+}
+
+/// How one span resolved. Only `File` and `Symbol` carry a seed, and only those
+/// two become links ([FR-UI-47], [NFR-CC-04]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CodeRefOutcome {
+    /// An indexed file: `seed` is its project-relative path, a file-tier seed.
+    File,
+    /// Exactly one node answers to the name: `seed` is its canonical symbol.
+    Symbol,
+    /// More than one node answers to the name; no link is chosen for the reader.
+    Ambiguous,
+    /// Nothing in the graph answers to it, or it is not path- or symbol-shaped.
+    Unresolved,
+}
+
+/// One span's resolution fact.
+#[derive(Debug, Serialize)]
+pub(crate) struct CodeRef {
+    /// The span exactly as sent.
+    text: String,
+    outcome: CodeRefOutcome,
+    /// The `/graph?seed=` value: the file path for `File`, the canonical symbol
+    /// for `Symbol`; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<String>,
+}
+
+/// The batched resolution ([FR-UI-47]): one fact per distinct span, in the order
+/// sent, up to [`CODE_REF_CAP`].
+#[derive(Debug, Serialize)]
+pub(crate) struct CodeRefResolution {
+    /// The per-request candidate cap this answer was resolved under.
+    cap: usize,
+    /// Distinct spans beyond the cap — received, not resolved.
+    over_cap: usize,
+    refs: Vec<CodeRef>,
+}
+
+/// Resolve one span against the graph through the existing navigation readers.
+///
+/// A path is asked of the very accessor the Graph view's link will call —
+/// `graph_elements` at the file tier, seeded on the path — so a file links only if
+/// that view can seed on it. A name is asked of `node`, whose [FR-NV-15] answer
+/// lists every other node the bare name matched: none means exactly one symbol,
+/// any means ambiguous. Neither is a new core query ([ADR-01]).
+///
+/// [FR-NV-15]: ../../docs/specs/requirements/FR-NV-15.md
+fn resolve_code_ref(engine: &Engine, text: String) -> CodeRef {
+    let (outcome, seed) = match code_ref_shape(&text) {
+        Some(CodeRefShape::Path(path)) => {
+            // `cap: 1` — only whether the seed is in the graph is read, and the
+            // seed's own component is non-empty exactly when it is.
+            let elements =
+                engine.graph_elements(Some(path), Some(1), None, None, Some(GraphGranularity::File), false);
+            if elements.total_nodes > 0 {
+                (CodeRefOutcome::File, Some(path.to_string()))
+            } else {
+                (CodeRefOutcome::Unresolved, None)
+            }
+        }
+        Some(CodeRefShape::Symbol(name)) => {
+            let info = engine.node(name, false);
+            match info.node {
+                Some(detail) if info.alternatives.is_empty() => (CodeRefOutcome::Symbol, Some(detail.symbol.symbol)),
+                Some(_) => (CodeRefOutcome::Ambiguous, None),
+                None => (CodeRefOutcome::Unresolved, None),
+            }
+        }
+        None => (CodeRefOutcome::Unresolved, None),
+    };
+    CodeRef { text, outcome, seed }
+}
+
+/// `GET /api/v1/code-refs?ref=<span>&ref=…` — resolve the backticked spans of one
+/// finalized chat answer against the graph, in one batched read ([FR-UI-47]).
+///
+/// Member-addressed like every member read: in workspace mode `?repo=` selects
+/// the member whose graph answers, which is how the Workspace Chat resolves
+/// against the addressed member ([FR-WS-34]). `ref` repeats, so the query is read
+/// as ordered pairs (as [`impact_intersection`] reads `item`); spans are
+/// de-duplicated in arrival order and capped at [`CODE_REF_CAP`].
+///
+/// A pure reader ([ADR-28]) that returns resolution facts only — no edges, no
+/// code. Infallible at the surface: no `ref`, an empty one, or one that is not
+/// path- or symbol-shaped is an honest `unresolved`, never a `4xx` ([NFR-CC-04]).
+///
+/// # App chrome, not graph navigation
+///
+/// The chat fires this on **every** finalized answer, up to [`CODE_REF_CAP`]
+/// spans each, so a single answer makes up to that many traced `node` /
+/// `graph_elements` engine calls. No user asked a graph question: the app
+/// resolved its own answer's backticks. So it names [`Surface::Shell`] at the
+/// `bridge`, like [`status`], and its events never count as a developer's graph
+/// navigation in `logos stats` or the usage figures ([BR-42] — classify by whose
+/// question a request answers). They are still recorded: the exclusion
+/// re-attributes, it does not destroy ([NFR-CC-04]). Owner ruling at the
+/// Sprint 95 review of S-622 (finding 10), HF-1.
+///
+/// The one-route-one-caller caveat on [`status`] applies here too: the chat is
+/// this route's only consumer, and a second one asking a genuine graph question
+/// would need its own route.
+///
+/// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
+/// [FR-UI-47]: ../../docs/specs/requirements/FR-UI-47.md
+/// [FR-WS-34]: ../../docs/specs/requirements/FR-WS-34.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) async fn code_refs(
+    MemberEngine(engine): MemberEngine,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    let mut spans: Vec<String> = Vec::new();
+    for (key, value) in pairs {
+        if key == "ref" && !spans.contains(&value) {
+            spans.push(value);
+        }
+    }
+    let over_cap = spans.len().saturating_sub(CODE_REF_CAP);
+    spans.truncate(CODE_REF_CAP);
+    let resolution = bridge(engine, "api_v1_code_refs", Surface::Shell, move |e| CodeRefResolution {
+        cap: CODE_REF_CAP,
+        over_cap,
+        refs: spans.into_iter().map(|text| resolve_code_ref(e, text)).collect(),
+    })
+    .await;
+    ok(resolution)
 }
 
 // ── Cross-service workspace fan-out (S-249, [FR-WS-06], [ADR-52]) ─────────────
@@ -1308,381 +1609,6 @@ pub(crate) async fn workspace_statistics_aggregate(
     .await
 }
 
-// ── Wiki (index / search / page, [FR-UI-06]/[FR-WK-05]) ───────────────────────
-
-/// `GET /api/v1/wiki` — the dual-axis `wiki status` read-model ([FR-UI-06],
-/// [FR-WK-12]): per-anchor freshness counts, the revision-stale count, and the
-/// revision they were computed at. A documented pure read that never prunes
-/// ([ADR-28]).
-pub(crate) async fn wiki_index(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_wiki", Surface::Web, |e| -> anyhow::Result<WikiStatus> {
-        e.wiki_status()
-    })
-    .await;
-    respond(model)
-}
-
-/// `GET /api/v1/wiki/search?q=<term>` — the FTS search over the wiki ([FR-WK-05]).
-/// Each hit carries its staleness flag exactly as `wiki search` reports it;
-/// read-only — no `wiki.db` write ([ADR-28]). An empty `q` is an honest empty list
-/// (`200`), never an error.
-pub(crate) async fn wiki_search(
-    MemberEngine(engine): MemberEngine,
-    Query(q): Query<HashMap<String, String>>,
-) -> Response {
-    let term = q.get("q").cloned().unwrap_or_default().trim().to_string();
-    let model = bridge(engine, "api_v1_wiki_search", Surface::Web, move |e| -> anyhow::Result<Vec<WikiHit>> {
-        if term.is_empty() {
-            Ok(Vec::new())
-        } else {
-            e.wiki_search(&term, false)
-        }
-    })
-    .await;
-    respond(model)
-}
-
-/// The agent wiki-page **presentation bundle** ([FR-UI-06], S-189) the migrated SPA
-/// reader mounts. It carries the page's provenance + per-anchor freshness verbatim
-/// from the [`WikiPage`] read-model, **plus the server-rendered, already-safe HTML
-/// body** (`rendered_html`) and the derived freshness verdict (`regen_pending`).
-///
-/// The Markdown→HTML render is done **server-side** by the same [`crate::markdown`]
-/// (comrak) the legacy view uses — so the XSS-neutralization boundary stays on the
-/// server (raw HTML / dangerous URLs dropped; ` ```mermaid ` fences rewritten to
-/// `.mermaid` blocks the client renders) and the SPA mounts a string it can trust
-/// (`dangerouslySetInnerHTML`) without shipping a client Markdown engine. The
-/// single page `h1` is rendered from `title`; a body that opens by repeating the
-/// title is suppressed before render, so the title shows exactly once
-/// ([FR-UI-06] single-title).
-#[derive(Debug, Serialize)]
-pub(crate) struct WikiPageView {
-    slug: String,
-    title: String,
-    /// The server-rendered, comrak-sanitized HTML body — empty for a `placeholder`.
-    rendered_html: String,
-    /// A known scaffold slug with no agent prose yet renders the honest "not yet
-    /// generated" placeholder (`200`), never a fabricated body ([NFR-CC-04]).
-    placeholder: bool,
-    /// Provenance — `null` on a placeholder (no page written yet).
-    generator: Option<String>,
-    written_head: Option<String>,
-    marker: Option<&'static str>,
-    built_at_revision: Option<u64>,
-    /// Per-anchor freshness; empty for an unanchored (overview) or placeholder page.
-    anchors: Vec<AnchorProvenance>,
-    stale: bool,
-    has_missing: bool,
-    /// Derived "stale — regeneration pending": the graph advanced past the page's
-    /// built-at revision ([FR-WK-12]). Computed on read, written nowhere ([ADR-28]).
-    regen_pending: bool,
-    /// The graph revision the verdict was derived against (the banner's "graph now").
-    current_revision: u64,
-}
-
-/// `GET /api/v1/wiki/page/*slug` — the agent wiki-page presentation bundle
-/// ([FR-UI-06], S-189): provenance, per-anchor freshness, and the **server-rendered,
-/// already-safe HTML body** the SPA reader mounts (comrak does the XSS
-/// neutralization server-side; the SPA renders the `.mermaid` blocks client-side as
-/// today). A present page is `200`; a known **scaffold** slug with no prose yet is a
-/// `200` placeholder (the honest "not yet generated" state, [NFR-CC-04]); any other
-/// unknown slug is an honest `404` — never a fabricated body. Read-only ([ADR-28]).
-pub(crate) async fn wiki_page(
-    MemberEngine(engine): MemberEngine,
-    Path(slug): Path<String>,
-) -> Response {
-    let model = bridge(engine, "api_v1_wiki_page", Surface::Web, move |e| -> anyhow::Result<WikiPageOutcome> {
-        // Only the revision is needed, so it is read directly: `status()` would
-        // also re-walk every unbound call for its per-language residue (S-589).
-        // `0` when it cannot be read, as `status()`'s degraded read-model says.
-        let current_revision = e
-            .runtime()
-            .and_then(|rt| rt.submit_read(|store| store.graph_revision()).ok())
-            .unwrap_or(0);
-        match e.wiki_read(&slug)? {
-            Some(page) => {
-                let regen_pending =
-                    logos_core::wiki::revision_pending(page.built_at_revision, current_revision);
-                // Render the title-suppressed body server-side (the comrak safety
-                // boundary, [FR-UI-06] single-title); the SPA mounts the result.
-                let rendered_html = crate::markdown::render(
-                    &crate::markdown::suppress_leading_title_heading(&page.body, &page.title),
-                );
-                Ok(WikiPageOutcome::Page(Box::new(WikiPageView {
-                    slug: page.slug,
-                    title: page.title,
-                    rendered_html,
-                    placeholder: false,
-                    generator: Some(page.generator),
-                    written_head: Some(page.written_head),
-                    marker: Some(page.marker),
-                    built_at_revision: Some(page.built_at_revision),
-                    anchors: page.anchors,
-                    stale: page.stale,
-                    has_missing: page.has_missing,
-                    regen_pending,
-                    current_revision,
-                })))
-            }
-            // A known scaffold slug with no prose yet is the honest placeholder
-            // (200), mirroring the server-rendered reader; any other slug is 404.
-            // A User Guide `guide/*` slug ([FR-WK-23]) is not in the fixed
-            // `scaffold_label` set (its file set is dynamic, per project), so it is
-            // checked separately against the current `docs/howto/*.md` files before
-            // falling back to 404 — a page `wiki materialize` has not yet written
-            // still lands on an honest placeholder, never a 404 ([NFR-CC-04]).
-            None => {
-                let guide_label = e
-                    .wiki_guide_pages()
-                    .into_iter()
-                    .find(|(guide_slug, _)| *guide_slug == slug)
-                    .map(|(_, label)| label);
-                match guide_label.or_else(|| crate::wiki::scaffold_label(&slug).map(str::to_string)) {
-                    Some(label) => Ok(WikiPageOutcome::Placeholder(Box::new(WikiPageView {
-                        slug,
-                        title: label,
-                        rendered_html: String::new(),
-                        placeholder: true,
-                        generator: None,
-                        written_head: None,
-                        marker: None,
-                        built_at_revision: None,
-                        anchors: Vec::new(),
-                        stale: false,
-                        has_missing: false,
-                        regen_pending: false,
-                        current_revision,
-                    }))),
-                    None => Ok(WikiPageOutcome::Missing(slug)),
-                }
-            }
-        }
-    })
-    .await;
-    match model {
-        Ok(WikiPageOutcome::Page(view)) | Ok(WikiPageOutcome::Placeholder(view)) => ok(*view),
-        Ok(WikiPageOutcome::Missing(slug)) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError { error: format!("no wiki page at `{slug}`") }),
-        )
-            .into_response(),
-        Err(err) => fail(err),
-    }
-}
-
-/// The three outcomes of a wiki-page read: a present page, an honest placeholder
-/// for a known scaffold slug, or a genuine miss (`404`). Boxed views keep the
-/// variants size-balanced (clippy `large_enum_variant`).
-enum WikiPageOutcome {
-    Page(Box<WikiPageView>),
-    Placeholder(Box<WikiPageView>),
-    Missing(String),
-}
-
-// ── Wiki doc-asset serving (same-origin, path-sandboxed, [FR-WK-27]/[ADR-58]) ──
-
-/// The repo-relative **doc roots** the asset route serves image files from — the
-/// only directories a request may resolve into ([FR-WK-27]). Their *canonicalized*
-/// form is the structural containment boundary ([NFR-SE-04], the read-only source
-/// sandbox's posture).
-const DOC_ASSET_ROOTS: &[&str] = &["docs/specs", "docs/howto"];
-
-/// Map a filename extension to the image content-type the asset route serves, or
-/// `None` for a non-image file ([FR-WK-27]: "only image content-types are served").
-/// Kept in lockstep with the transform's allow-list
-/// (`logos_core::wiki::present::is_image_path`). An actual `.<ext>` is required — a
-/// dotless name is never an image.
-fn image_content_type(path: &str) -> Option<&'static str> {
-    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        _ => return None,
-    })
-}
-
-/// The outcome of resolving a doc-asset request: a served image, or one of the two
-/// distinct refusals the [`wiki_asset`] route reports.
-enum AssetOutcome {
-    /// The sandboxed, image-typed file — its content-type and bytes.
-    Image(&'static str, Vec<u8>),
-    /// The request is not an image file — refused (`415`, only images are served).
-    NotImage,
-    /// The path escapes the doc roots, or the file is absent/unreadable — refused
-    /// (`404`, leaking nothing about what lies outside the sandbox).
-    Denied,
-}
-
-/// Resolve a doc-asset request **structurally** ([FR-WK-27], [NFR-SE-04]): serve an
-/// image file only when it canonicalizes to a path **inside** a canonicalized doc
-/// root.
-///
-/// The containment check is a **canonicalized-prefix** test — never string matching.
-/// [`std::fs::canonicalize`] resolves every `.`/`..` segment and symlink and fails on
-/// an absent file, so the real target path is what [`FsPath::starts_with`]
-/// (component-wise) is tested against a real doc root: a `..` traversal, an absolute
-/// path, or a symlink pointing outside all resolve away *before* the prefix test and
-/// fail it. The doc roots are canonicalized too, so a symlink in the repo prefix
-/// (e.g. macOS `/tmp` → `/private/tmp`) cannot cause a spurious mismatch.
-fn resolve_doc_asset(root: &FsPath, rel_path: &str) -> AssetOutcome {
-    // Only image files are ever served — a cheap gate before any filesystem work.
-    let Some(mime) = image_content_type(rel_path) else {
-        return AssetOutcome::NotImage;
-    };
-    // Canonicalize the allowed roots, skipping one that is absent in this project.
-    let allowed: Vec<PathBuf> =
-        DOC_ASSET_ROOTS.iter().filter_map(|r| std::fs::canonicalize(root.join(r)).ok()).collect();
-    // Canonicalize the requested target — resolves `..`/`.`/symlinks, errors if absent.
-    let Ok(full) = std::fs::canonicalize(root.join(rel_path)) else {
-        return AssetOutcome::Denied;
-    };
-    // Structural containment: the real target must sit within a real doc root.
-    if !allowed.iter().any(|base| full.starts_with(base)) {
-        return AssetOutcome::Denied;
-    }
-    match std::fs::read(&full) {
-        Ok(bytes) => AssetOutcome::Image(mime, bytes),
-        // A directory or unreadable node with an image-looking name → refused.
-        Err(_) => AssetOutcome::Denied,
-    }
-}
-
-/// `GET /api/v1/wiki/asset/*path` — the same-origin, read-only **doc-image asset
-/// route** ([FR-WK-27], [ADR-58]) that presented pages' `<img src>` values resolve to
-/// (rewritten by the [FR-WK-25] transform, `logos_core::wiki::present::rewrite_refs`).
-/// It serves image files from the doc roots (`docs/specs/**`, `docs/howto/**`) only,
-/// **path-sandboxed** by canonicalized-prefix containment ([`resolve_doc_asset`],
-/// [NFR-SE-04]): a `..`/absolute/symlink escape is an honest `404`, a non-image path
-/// a `415`, and only image content-types are served. A served image also carries
-/// `X-Content-Type-Options: nosniff`, so a browser honors the declared image type and
-/// never MIME-sniffs a doc file into an active document (defense in depth for the
-/// `image/svg+xml` type, atop the unchanged self-only CSP). Read-only — the fetch
-/// mutates no store ([ADR-28]); the assets are **same-origin**, so the self-only CSP
-/// is byte identical (no `data:` inlining, no external host).
-///
-/// The blocking filesystem read runs on the pool via the [`bridge`](crate::bridge)
-/// ([ADR-03]), never the current-thread serve loop.
-///
-/// [FR-WK-27]: ../../docs/specs/requirements/FR-WK-27.md
-/// [FR-WK-25]: ../../docs/specs/requirements/FR-WK-25.md
-/// [NFR-SE-04]: ../../docs/specs/requirements/NFR-SE-04.md
-/// [ADR-58]: ../../docs/specs/architecture/decisions/ADR-58.md
-/// [ADR-28]: ../../docs/specs/architecture/decisions/ADR-28.md
-/// [ADR-03]: ../../docs/specs/architecture/decisions/ADR-03.md
-pub(crate) async fn wiki_asset(
-    MemberEngine(engine): MemberEngine,
-    Path(rel_path): Path<String>,
-) -> Response {
-    let outcome =
-        bridge(engine, "api_v1_wiki_asset", Surface::Web, move |e| resolve_doc_asset(e.root(), &rel_path)).await;
-    match outcome {
-        AssetOutcome::Image(mime, bytes) => (
-            [
-                (header::CONTENT_TYPE, mime),
-                (header::CACHE_CONTROL, "no-cache"),
-                // Honor the declared image type; never sniff a doc file into an active
-                // document (belt-and-suspenders for `image/svg+xml`, atop the CSP).
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            ],
-            bytes,
-        )
-            .into_response(),
-        AssetOutcome::NotImage => (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "the wiki asset route serves image files only",
-        )
-            .into_response(),
-        AssetOutcome::Denied => (StatusCode::NOT_FOUND, "no such wiki asset").into_response(),
-    }
-}
-
-// ── Wiki navigation IA (four-tier menu, [FR-UI-06]) ───────────────────────────
-
-/// One leaf of a {@link WikiNavTier}: a page link by its fixed slug + label.
-#[derive(Debug, Serialize)]
-pub(crate) struct WikiNavItem {
-    slug: String,
-    label: String,
-}
-
-/// One tier of the wiki menu — its title and its discrete page links.
-#[derive(Debug, Serialize)]
-pub(crate) struct WikiNavTier {
-    title: String,
-    items: Vec<WikiNavItem>,
-}
-
-/// The wiki menu **information architecture** ([FR-UI-06], CR-034/CR-035/CR-039/
-/// CR-062) the SPA renders: **Summary / User Guide / Design / Specs** tiers plus a
-/// top-level Search link — the User Guide tier present only when
-/// [`Engine::wiki_guide_pages`] is non-empty ([FR-WK-23]). Composed from the
-/// **same** [`crate::wiki`] constants the server-rendered menu uses (the
-/// `DocCategory` slug/title contract + the Summary scaffold), so the two menus can
-/// never disagree; Frontend Design appears in Design only when its source doc
-/// exists (read through the engine, never a filesystem scan).
-#[derive(Debug, Serialize)]
-pub(crate) struct WikiNav {
-    tiers: Vec<WikiNavTier>,
-    /// The top-level Search link label (a sibling of the tiers, CR-039).
-    search_label: String,
-}
-
-/// `GET /api/v1/wiki/nav` — the wiki menu IA ([FR-UI-06], S-189, CR-062). A pure
-/// read: the fixed Summary/Design/Specs slug contracts, a single engine read for
-/// Frontend-Design presence, and a single engine read for the dynamic User Guide
-/// page set; it touches no store ([ADR-28]).
-pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
-    use crate::wiki::{
-        DESIGN_DOCS, GUIDED_TOUR, OVERVIEW_ARCHITECTURE, OVERVIEW_ARCHITECTURE_LABEL, SPECS_DOCS,
-        SPECS_SRS, SPECS_SRS_LABEL, USER_GUIDE_TIER_TITLE,
-    };
-    let nav = bridge(engine, "api_v1_wiki_nav", Surface::Web, |e| {
-        let item = |slug: &str, label: &str| WikiNavItem { slug: slug.into(), label: label.into() };
-        let doc_item = |c: DocCategory| WikiNavItem { slug: c.slug().into(), label: c.title().into() };
-
-        // Summary — the agent-tier Overview scaffold. The architecture narrative
-        // left this tier (CR-062/ADR-57): it is now the presented
-        // docs/specs/architecture.md under Design, so GUIDED_TOUR no longer carries
-        // it and no filter is needed here.
-        let summary = GUIDED_TOUR.iter().map(|(slug, label)| item(slug, label)).collect();
-
-        // User Guide — one page per docs/howto/*.md file (CR-062, [FR-WK-23]);
-        // absent entirely when docs/howto/ has no files, never an empty tier.
-        let guide_items: Vec<WikiNavItem> =
-            e.wiki_guide_pages().into_iter().map(|(slug, label)| item(&slug, &label)).collect();
-        let user_guide = (!guide_items.is_empty())
-            .then(|| WikiNavTier { title: USER_GUIDE_TIER_TITLE.into(), items: guide_items });
-
-        // Design — the presented Architecture page, the consolidated ADRs/Components/
-        // Integrations docs, and Frontend Design only when its source doc exists.
-        let mut design = vec![item(OVERVIEW_ARCHITECTURE, OVERVIEW_ARCHITECTURE_LABEL)];
-        design.extend(DESIGN_DOCS.iter().map(|&c| doc_item(c)));
-        if e.wiki_doc_category_present(DocCategory::FrontendDesign) {
-            design.push(doc_item(DocCategory::FrontendDesign));
-        }
-
-        // Specs — the presented SRS hub (CR-064, [FR-WK-26]) first, then the
-        // consolidated requirement / UAT documents.
-        let mut specs = vec![item(SPECS_SRS, SPECS_SRS_LABEL)];
-        specs.extend(SPECS_DOCS.iter().map(|&c| doc_item(c)));
-
-        let mut tiers = vec![WikiNavTier { title: "Summary".into(), items: summary }];
-        tiers.extend(user_guide);
-        tiers.push(WikiNavTier { title: "Design".into(), items: design });
-        tiers.push(WikiNavTier { title: "Specs".into(), items: specs });
-
-        WikiNav { tiers, search_label: "Search".into() }
-    })
-    .await;
-    ok(nav)
-}
-
 // ── Config-read (masked key only, [FR-UI-12]/[FR-CF-06]) ──────────────────────
 
 /// `GET /api/v1/config` — the config read-model ([FR-UI-12], [ADR-31]): the current
@@ -2124,6 +2050,54 @@ fn wants_optin_flag(params: &HashMap<String, String>, key: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The core-key list the overview's shadow guard reads is the model's own: the
+    /// keys a bare overview serialises, no more and no fewer — so a core field
+    /// added later is guarded the day it lands.
+    #[test]
+    fn the_core_overview_keys_are_the_models_own() {
+        let dir = tempfile::TempDir::new().expect("temp root");
+        let engine = Engine::start(dir.path()).expect("the engine starts");
+        let model = read_overview(&engine, &[]).expect("the overview reads");
+        let value = serde_json::to_value(model).expect("serialise");
+        let mut served: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+        let mut core = OVERVIEW_CORE_KEYS.to_vec();
+        served.sort_unstable();
+        core.sort_unstable();
+        assert_eq!(served, core);
+    }
+
+    /// A field that fails fails the bundle, as a required core read does — never a
+    /// `200` carrying a `null` the Dashboard card would read as "not written yet".
+    #[test]
+    fn a_failing_overview_field_fails_the_bundle() {
+        let dir = tempfile::TempDir::new().expect("temp root");
+        let engine = Engine::start(dir.path()).expect("the engine starts");
+        let failing =
+            OverviewField::new("page", |_: &Engine| -> anyhow::Result<()> { anyhow::bail!("the page read failed") });
+        let err = read_overview(&engine, &[failing]).expect_err("a failing field fails the bundle");
+        assert_eq!(err.to_string(), "the page read failed");
+    }
+
+    /// An extension field named like a core field, or like an earlier extension
+    /// field, is dropped: the first registered wins, as in the MCP adapter.
+    #[test]
+    fn an_overview_field_never_shadows_a_registered_one() {
+        let field = |key: &'static str, value: &'static str| {
+            OverviewField::new(key, move |_: &Engine| Ok::<_, anyhow::Error>(value))
+        };
+        let admitted = admitted_overview_fields(vec![
+            field("status", "shadow"),
+            field("page", "first"),
+            field("page", "second"),
+            field("card", "card"),
+        ]);
+        let dir = tempfile::TempDir::new().expect("temp root");
+        let engine = Engine::start(dir.path()).expect("the engine starts");
+        let read: Vec<(&str, serde_json::Value)> =
+            admitted.iter().map(|f| (f.key(), f.read(&engine).expect("reads"))).collect();
+        assert_eq!(read, [("page", serde_json::json!("first")), ("card", serde_json::json!("card"))]);
+    }
+
     #[test]
     fn wants_flag_reads_presence_and_explicit_off() {
         let on = HashMap::from([("untested".to_string(), String::new())]);
@@ -2186,5 +2160,51 @@ mod tests {
             assert!(!truthy(Some(&f.to_string())), "{f} is not truthy");
         }
         assert!(!truthy(None), "absent is not truthy");
+    }
+
+    /// The shape gate decides only what is LOOKED UP ([FR-UI-47]); each accepted
+    /// form sits beside the near miss one character away that must not be.
+    #[test]
+    fn code_ref_shape_admits_paths_lines_and_bare_names_and_rejects_their_near_misses() {
+        use CodeRefShape::{Path, Symbol};
+        for (span, want) in [
+            ("build_router", Some(Symbol("build_router"))),
+            ("MarkdownAnswer", Some(Symbol("MarkdownAnswer"))),
+            ("f()", Some(Symbol("f"))),
+            ("_private", Some(Symbol("_private"))),
+            ("web/src/lib.rs", Some(Path("web/src/lib.rs"))),
+            ("./web/src/lib.rs", Some(Path("web/src/lib.rs"))),
+            ("web/src/lib.rs:42", Some(Path("web/src/lib.rs"))),
+            ("web/src/lib.rs:42-57", Some(Path("web/src/lib.rs"))),
+            ("build.rs", Some(Path("build.rs"))),
+            ("web/ui", Some(Path("web/ui"))),
+            // Near misses.
+            ("f(x)", None),
+            ("9lives", None),
+            ("Engine::node", None),
+            ("web/src/lib.rs:", None),
+            ("web/src/lib.rs:4a", None),
+            ("web/src/lib.rs:1-2-3", None),
+            ("web/src/lib.rs:-2", None),
+            ("/etc/passwd", None),
+            ("../secret.rs", None),
+            ("web//lib.rs", None),
+            ("web/", None),
+            (".gitignore", None),
+            ("lib.", None),
+            ("https://example.com/a.rs", None),
+            ("cargo test", None),
+            ("--release", None),
+            ("", None),
+        ] {
+            assert_eq!(code_ref_shape(span), want, "`{span}`");
+        }
+        let long = "a".repeat(CODE_REF_MAX_LEN + 1);
+        assert_eq!(code_ref_shape(&long), None, "a span over the length bound is not looked up");
+        assert_eq!(
+            code_ref_shape(&"a".repeat(CODE_REF_MAX_LEN)),
+            Some(Symbol(&"a".repeat(CODE_REF_MAX_LEN))),
+            "the bound itself is admitted"
+        );
     }
 }

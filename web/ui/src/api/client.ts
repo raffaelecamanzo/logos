@@ -19,6 +19,7 @@ import { apiGet, ApiError } from "../intent.ts";
 import { REPO_PARAM, scopedMember } from "../workspace/scope.ts";
 import type {
   ArchitectureModel,
+  CodeRefResolution,
   CoverageModel,
   FilesModel,
   GapsModel,
@@ -141,6 +142,20 @@ export function fetchImpact(seed: string): Promise<ImpactResult> {
 /** `GET /api/v1/node?symbol=<sym>` — the single-symbol detail read-model (FR-NV-04). */
 export function fetchNode(symbol: string): Promise<NodeInfo> {
   return apiFetch<NodeInfo>("node", { symbol });
+}
+
+/**
+ * `GET /api/v1/code-refs?ref=<span>&ref=…` — resolve a finalized chat answer's
+ * backticked spans against the graph in ONE batched read (S-622, FR-UI-47). `ref`
+ * repeats, which the params bag cannot express, so the spans are appended to the
+ * scoped URL `apiUrl` builds — keeping the workspace member's `?repo=`, so the
+ * addressed member's graph answers.
+ */
+export function fetchCodeRefs(refs: readonly string[]): Promise<CodeRefResolution> {
+  const search = new URLSearchParams();
+  for (const ref of refs) search.append("ref", ref);
+  const base = apiUrl("code-refs");
+  return apiGet<CodeRefResolution>(`${base}${base.includes("?") ? "&" : "?"}${search.toString()}`);
 }
 
 /** `GET /api/v1/overview` — the Dashboard roll-up bundle (FR-UI-09). */

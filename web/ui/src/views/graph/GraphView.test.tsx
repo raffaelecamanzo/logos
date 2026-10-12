@@ -305,3 +305,92 @@ describe("the Graph view's panels are registered tool panels in one stack (S-617
     expectToolPanel(panels[2], "graphTable");
   });
 });
+
+describe("GraphView — the /graph?seed= deep link (S-622, FR-UI-47)", () => {
+  afterEach(() => window.history.replaceState({}, "", "/"));
+
+  it("opens focused on a symbol seed: the opening fetch is seed-scoped and the node is locked", async () => {
+    window.history.replaceState({}, "", "/graph?seed=scip%3A%3Aa");
+    const urls = stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    expect(urls[0]).toBe("/api/v1/graph?cap=250&seed=scip%3A%3Aa");
+    expect(screen.getByText(/Focused on alpha — Reset to return/i)).toBeInTheDocument();
+    // Locked, so the Decisions panel loads the seed's trace without a click.
+    await waitFor(() => expect(urls.some((u) => u.startsWith("/api/v1/impact?seed=scip%3A%3Aa"))).toBe(true));
+  });
+
+  it("consumes the deep link: the seed leaves the URL, the member stays", async () => {
+    window.history.replaceState({}, "", "/graph?seed=scip%3A%3Aa&repo=api");
+    stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    // A member switch keeps the query and remounts the view; with the seed still
+    // there it would re-seed this node into the other member's graph.
+    await waitFor(() => expect(window.location.search).toBe("?repo=api"));
+    expect(screen.getByText(/Focused on alpha/i)).toBeInTheDocument();
+  });
+
+  it("opens a file seed at the file tier, focused but not locked", async () => {
+    window.history.replaceState({}, "", "/graph?seed=src%2Fa.rs&granularity=file");
+    const file: GraphElements = {
+      ...GRAPH,
+      seed: "src/a.rs",
+      granularity: "file",
+      nodes: [{ id: "src/a.rs", label: "src/a.rs", kind: null, layer: "code" }],
+      edges: [],
+    };
+    const urls = stubApi(file);
+    render(<GraphView />);
+    await screen.findByRole("application");
+    expect(urls[0]).toBe("/api/v1/graph?cap=250&seed=src%2Fa.rs&granularity=file");
+    expect(screen.getByText(/Focused on src\/a.rs/i)).toBeInTheDocument();
+    expect(screen.getByText(/Lock a symbol to see the requirements/i)).toBeInTheDocument();
+    expect(urls.some((u) => u.startsWith("/api/v1/impact"))).toBe(false);
+  });
+
+  it("keeps a seeded open's scope and tier through a filter, and Reset returns to the whole graph", async () => {
+    window.history.replaceState({}, "", "/graph?seed=src%2Fa.rs&granularity=file");
+    const file: GraphElements = {
+      ...GRAPH,
+      seed: "src/a.rs",
+      granularity: "file",
+      nodes: [{ id: "src/a.rs", label: "src/a.rs", kind: null, layer: "code" }],
+      edges: [],
+    };
+    const urls = stubApi(file);
+    render(<GraphView />);
+    await screen.findByRole("application");
+
+    // A filter re-fetches the SEEDED scope at the FILE tier — the state `focusOn`
+    // leaves behind — not the seed at the symbol tier, which would be empty.
+    await userEvent.click(screen.getByRole("checkbox", { name: "Docs" }));
+    await waitFor(() => expect(urls.some((u) => u.includes("layers="))).toBe(true));
+    const filtered = urls.filter((u) => u.includes("layers="));
+    expect(filtered.at(-1)).toMatch(/seed=src%2Fa\.rs/);
+    expect(filtered.at(-1)).toMatch(/granularity=file/);
+
+    // Reset: the whole graph at the symbol tier, unseeded.
+    const before = urls.length;
+    await userEvent.click(screen.getByRole("button", { name: "Reset to whole graph" }));
+    await waitFor(() => expect(urls.length).toBeGreaterThan(before));
+    expect(urls.at(-1)).toBe("/api/v1/graph?cap=250");
+  });
+
+  it("says a seed the graph does not hold is not there, rather than 'run logos index'", async () => {
+    window.history.replaceState({}, "", "/graph?seed=gone");
+    stubApi(EMPTY_GRAPH);
+    render(<GraphView />);
+    expect(await screen.findByText("Nothing in this graph answers to “gone”.")).toBeInTheDocument();
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+  });
+
+  it("leaves the unseeded opening fetch byte-identical", async () => {
+    window.history.replaceState({}, "", "/graph");
+    const urls = stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    expect(urls[0]).toBe("/api/v1/graph?cap=250");
+    expect(screen.queryByText(/Focused on/i)).not.toBeInTheDocument();
+  });
+});

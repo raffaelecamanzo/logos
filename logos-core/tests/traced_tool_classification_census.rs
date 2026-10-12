@@ -99,9 +99,12 @@
 //!
 //! # The denominator
 //!
-//! **2026-09-26 — 75 registered tools enumerated, 4 classified, 71 excluded
+//! **2026-10-10 — 61 registered tools enumerated, 4 classified, 57 excluded
 //! with a reason**, pinned by
-//! [`the_census_reports_its_denominator`], which prints the three counts.
+//! [`the_census_reports_its_denominator`], which prints the three counts. It was
+//! 75/4/71 on 2026-09-26; S-644 moved the wiki's fourteen tools out of the core
+//! registry to the `wiki` extension's `ExtensionTool`s (none was classified, all
+//! fourteen were excluded), so the core registry this census reads is 14 smaller.
 //!
 //! `CallOutcome` is `pub(crate)` in `observability::tool`, so this integration
 //! test cannot name it as a type or link to it — it reads the source instead,
@@ -123,7 +126,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 /// The date the figures in this module's header were taken.
-const AUDITED_ON: &str = "2026-09-26";
+const AUDITED_ON: &str = "2026-10-10";
 
 /// The registry file, and the production tree the classification is read
 /// from, both relative to `logos-core` (`env!("CARGO_MANIFEST_DIR")`).
@@ -163,7 +166,7 @@ const REASON_SESSION_GATE: &str =
      has no answer to classify.";
 const REASON_ENGINE_INTERNAL: &str =
     "Engine-internal (Tool::tool_class() == EngineInternal): a mutation or build step over \
-     Logos's own artifacts (the index, the wiki store, the config store), not a query with an \
+     Logos's own artifacts (the index, the integration files, the config store), not a query with an \
      answer to classify. `ok` already reports whether it succeeded; the \
      Answered/Empty/Unresolved/Failed vocabulary describes what a query found, not what a write \
      or build step did.";
@@ -171,7 +174,7 @@ const REASON_READ_MODEL: &str =
     "Read-model (Tool::tool_class() == ReadModel): reports Logos's own state rather than a fact \
      about the indexed code, and no answered/empty/unresolved split has been defined for it. \
      (Only stats and status are also excluded from the usage figures as self-referential \
-     reads, Tool::event_class / FR-OB-09; languages, wiki_status and config_read are counted.)";
+     reads, Tool::event_class / FR-OB-09; languages and config_read are counted.)";
 
 /// `(registered variant, reason)`. Compared for equality with the walk, in
 /// both directions: a registered, unclassified tool absent from here fails
@@ -190,8 +193,6 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("Implements", REASON_NAVIGATION_UNCLASSIFIED),
     ("ReferencingDocs", REASON_NAVIGATION_UNCLASSIFIED),
     ("GraphElements", REASON_NAVIGATION_UNCLASSIFIED),
-    ("WikiRead", REASON_NAVIGATION_UNCLASSIFIED),
-    ("WikiSearch", REASON_NAVIGATION_UNCLASSIFIED),
     // ── Quality gate ─────────────────────────────────────────────────────────
     ("Scan", REASON_QUALITY_GATE),
     ("Rescan", REASON_QUALITY_GATE),
@@ -235,18 +236,7 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("CoverageIngest", REASON_ENGINE_INTERNAL),
     ("CoverageIngestAuto", REASON_ENGINE_INTERNAL),
     ("CoverageRefresh", REASON_ENGINE_INTERNAL),
-    // ── Engine-internal: the wiki store's writes and generation ─────────────
-    ("WikiWrite", REASON_ENGINE_INTERNAL),
-    ("WikiDelete", REASON_ENGINE_INTERNAL),
-    ("WikiPrunedLog", REASON_ENGINE_INTERNAL),
-    ("WikiGenerate", REASON_ENGINE_INTERNAL),
-    ("WikiNative", REASON_ENGINE_INTERNAL),
-    ("WikiDocCategoryPresent", REASON_ENGINE_INTERNAL),
-    ("WikiSrsMode", REASON_ENGINE_INTERNAL),
-    ("WikiGuidePages", REASON_ENGINE_INTERNAL),
-    ("WikiReconcile", REASON_ENGINE_INTERNAL),
-    ("WikiMaterialize", REASON_ENGINE_INTERNAL),
-    ("WikiSkillEmit", REASON_ENGINE_INTERNAL),
+    // ── Engine-internal: the quality-report hook install ────────────────────
     ("WikiQualityReportHookEmit", REASON_ENGINE_INTERNAL),
     // ── Engine-internal: the project's own policy store ─────────────────────
     ("ConfigWrite", REASON_ENGINE_INTERNAL),
@@ -256,7 +246,6 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("Stats", REASON_READ_MODEL),
     ("Status", REASON_READ_MODEL),
     ("Languages", REASON_READ_MODEL),
-    ("WikiStatus", REASON_READ_MODEL),
     ("ConfigRead", REASON_READ_MODEL),
 ];
 
@@ -643,8 +632,8 @@ fn the_census_reports_its_denominator() {
     );
     assert_eq!(
         (enumerated, classified_count, excluded_count),
-        (75, 4, 71),
-        "traced-tool classification census as of {AUDITED_ON}: expected 75 enumerated tools, \
-         4 classified via traced_with, 71 excluded with a reason"
+        (61, 4, 57),
+        "traced-tool classification census as of {AUDITED_ON}: expected 61 enumerated tools, \
+         4 classified via traced_with, 57 excluded with a reason"
     );
 }

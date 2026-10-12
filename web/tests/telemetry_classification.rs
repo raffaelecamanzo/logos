@@ -56,6 +56,11 @@ use logos_core::Engine;
 /// criterion's own figure ("navigating between six views").
 const NAVIGATIONS: usize = 6;
 
+/// How many finalized chat answers the fixture resolves code refs for. Each
+/// request carries one path-shaped and one symbol-shaped span, so each reads the
+/// graph twice (`graph_elements`, `node`).
+const CODE_REFS_LOOKUPS: usize = 3;
+
 fn get(path: &str) -> Request<Body> {
     Request::builder()
         .method(Method::GET)
@@ -106,6 +111,19 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
         assert_eq!(resp.status(), StatusCode::OK, "the status endpoint answers");
     }
 
+    // …and the chat's automatic code-refs lookup, once per finalized answer
+    // ([FR-UI-47]): a path-shaped span reads `graph_elements`, a symbol-shaped one
+    // reads `node`. Nobody asked a graph question — the chat resolves its own
+    // answer's backticks — so these are app chrome too ([BR-42], HF-1).
+    for _ in 0..CODE_REFS_LOOKUPS {
+        let resp = router
+            .clone()
+            .oneshot(get("/api/v1/code-refs?ref=lib.rs&ref=f"))
+            .await
+            .expect("route responds");
+        assert_eq!(resp.status(), StatusCode::OK, "the code-refs endpoint answers");
+    }
+
     // Opening the Statistics tab, three times over (an initial render plus two
     // re-queries) — the route the tab actually calls, over the same session
     // ([S-306] AC 3, [FR-OB-09] AC 1 widened). The response bodies are not
@@ -129,35 +147,34 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
     let telemetry_db = root.join(".logos").join("telemetry.db");
     assert!(telemetry_db.is_file(), "telemetry.db created ([FR-OB-03])");
 
-    // ── One chrome-issued read of a tool the TOOL arm counts ────────────────
-    //
-    // Without this the test cannot tell the two classification arms apart. The
-    // only chrome route that exists calls `status`, which is independently
-    // excluded as a *tool* — so every assertion below would hold just as well
-    // with the surface arm switched off entirely, and a review proved exactly
-    // that by running the mutation. Seeding a `shell`-surface `search` — a wire
-    // name the tool arm counts — into the store the real emission path just
-    // wrote makes the exclusion below attributable to the surface arm and to
-    // nothing else, while the test stays end-to-end.
-    //
-    // It is written directly because no route can produce it yet, which is the
-    // point: the classification must be right *before* the second chrome read
-    // exists, not after it has already been miscounted.
-    {
-        let conn = Connection::open(&telemetry_db).expect("open telemetry.db read-write");
-        conn.execute(
-            "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
-             VALUES (strftime('%s','now'), 'shell', 'search', 5, 1, 'main', 'probe')",
-            [],
-        )
-        .expect("seed a chrome-issued search");
-    }
+    // The code-refs lookup is what keeps this test able to tell the two
+    // classification arms apart. `status` is independently excluded as a *tool*,
+    // so its assertions alone would hold with the surface arm switched off
+    // entirely (a review proved that by running the mutation). `node` and
+    // `graph_elements` are navigation tools the TOOL arm counts, so a
+    // `shell`-surface one is kept out of the figures by the surface arm and by
+    // nothing else — and the route that produces it is the real one, not a seed.
 
     // ── Nothing was destroyed: the reads are in the raw store ([NFR-CC-04]) ──
     assert_eq!(
         count_events(&telemetry_db, "surface = 'shell' AND tool = 'status'"),
         NAVIGATIONS as i64,
         "every navigation's readout is recorded, attributed to the shell"
+    );
+    assert_eq!(
+        count_events(&telemetry_db, "surface = 'shell' AND tool = 'node'"),
+        CODE_REFS_LOOKUPS as i64,
+        "every code-refs lookup's symbol read is recorded, attributed to the shell"
+    );
+    assert_eq!(
+        count_events(&telemetry_db, "surface = 'shell' AND tool = 'graph_elements'"),
+        CODE_REFS_LOOKUPS as i64,
+        "and so is its path read"
+    );
+    assert_eq!(
+        count_events(&telemetry_db, "surface = 'web' AND tool IN ('node', 'graph_elements')"),
+        0,
+        "none of them is booked as a developer's graph navigation on the web surface"
     );
     assert_eq!(
         count_events(&telemetry_db, "surface = 'web' AND tool = 'search'"),
@@ -193,9 +210,14 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
         !counted.iter().any(|(_, tool)| *tool == "stats"),
         "and opening the Statistics tab counts on no surface at all: {counted:?}"
     );
-    // The surface arm, isolated: `search` is counted by the tool arm, so the
-    // only thing that can keep the chrome-issued one out of this figure is the
-    // classification on `Surface::Shell`.
+    // The surface arm, isolated: `node` and `graph_elements` are counted by the
+    // tool arm, so the only thing that can keep the code-refs lookups out of
+    // these figures is the classification on `Surface::Shell`.
+    assert!(
+        !counted.iter().any(|(_, tool)| matches!(*tool, "node" | "graph_elements")),
+        "the chat's code-refs lookups are excluded by the SURFACE arm, \
+         so no node or graph_elements read counts: {counted:?}"
+    );
     assert_eq!(
         stats
             .calls_by_tool
@@ -204,8 +226,7 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
             .map(|u| u.calls)
             .sum::<u64>(),
         1,
-        "the chrome-issued search is excluded by the SURFACE arm, \
-         leaving only the user's own: {counted:?}"
+        "and the user's own search is the one navigation read that counts: {counted:?}"
     );
 
     // The daily series and the origin split each carry their own copy of the

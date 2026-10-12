@@ -226,7 +226,7 @@ async fn workspace_status_mcp_reports_intake_on_every_row_and_splits_the_counts(
 #[test]
 fn the_workspace_status_tool_description_documents_the_intake_split() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new())).list_tools();
+    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new()), &logos_ext::ExtensionHost::new()).list_tools();
     let description = tools
         .iter()
         .find(|t| t.name == "workspace_status")
@@ -324,7 +324,7 @@ async fn workspace_status_mcp_publishes_the_resolved_edge_headline_with_its_rate
 #[test]
 fn the_workspace_status_tool_description_documents_the_resolved_edge_headline() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new())).list_tools();
+    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new()), &logos_ext::ExtensionHost::new()).list_tools();
     let description = tools
         .iter()
         .find(|t| t.name == "workspace_status")

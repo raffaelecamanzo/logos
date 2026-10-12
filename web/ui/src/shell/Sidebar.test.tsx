@@ -1,8 +1,11 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
 import { NAV_GROUPS, NAV_ITEMS, navItemsFor, WORKSPACE_NAV_ITEMS } from "../nav.ts";
+import { clearExtensions } from "../extensions/registry.ts";
+import { mountChat } from "../test/chat.ts";
+import { mountWiki } from "../test/wiki.ts";
 import { removeHiddenWidgetEntry } from "../test/hiddenWidgets.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import styles from "./Sidebar.module.css";
@@ -366,6 +369,9 @@ describe("the Architecture view is hidden from the sidebar (CR-208, FR-UI-41)", 
 
   it("lists it again, after Wiki, once its register entry is removed", async () => {
     onTestFinished(removeHiddenWidgetEntry("architecture-view"));
+    // The default build: the wiki extension's entry precedes it (S-644).
+    mountWiki();
+    onTestFinished(clearExtensions);
     mountWithMode(404);
     const link = await screen.findByRole("link", { name: /Architecture/ });
     expect(link).toHaveAttribute("href", "/architecture");
@@ -381,6 +387,10 @@ describe("the Architecture view is hidden from the sidebar (CR-208, FR-UI-41)", 
 // covered only the member roster.
 
 describe("the Workspace Chat replaces the member Chat in a workspace (S-485, FR-WS-34)", () => {
+  // Chat is the `chat` extension's (S-643): these are the release build's, with it active.
+  beforeEach(mountChat);
+  afterEach(clearExtensions);
+
   it("lists Chat in the Workspace section at /workspace-chat, and none under Service", async () => {
     mountWithMode(200);
     await screen.findByRole("link", { name: /Workspace/ });
@@ -399,6 +409,26 @@ describe("the Workspace Chat replaces the member Chat in a workspace (S-485, FR-
     expect(screen.getAllByRole("link", { name: /^Chat$/ }).map((a) => a.getAttribute("href"))).toEqual([
       "/chat",
     ]);
+  });
+
+  it("carries the chat icon on both entries — the extension's, as the built-in map has none", async () => {
+    for (const status of [404, 200] as const) {
+      mountWithMode(status);
+      const link = await screen.findByRole("link", { name: /^Chat$/ });
+      expect(link.querySelector("svg")).not.toBeNull();
+      cleanup();
+    }
+  });
+});
+
+describe("a build without the chat extension (S-643)", () => {
+  it("offers no Chat entry in either mode", async () => {
+    for (const status of [404, 200] as const) {
+      mountWithMode(status);
+      await screen.findAllByRole("link", { name: /^Dashboard$/ });
+      expect(screen.queryByRole("link", { name: /^Chat$/ })).toBeNull();
+      cleanup();
+    }
   });
 });
 

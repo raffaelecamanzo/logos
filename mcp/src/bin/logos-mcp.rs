@@ -16,5 +16,6 @@ fn main() -> anyhow::Result<()> {
         Some(arg) => PathBuf::from(arg),
         None => std::env::current_dir()?,
     };
-    mcp::serve_stdio(root)
+    // A test entrypoint, not a composition root: it composes no extension.
+    mcp::serve_stdio(root, &logos_ext::ExtensionHost::new())
 }

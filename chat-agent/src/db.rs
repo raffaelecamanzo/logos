@@ -53,7 +53,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 /// Forward-only migration ledger for `chat.db` — dense, 1-based, strictly
 /// increasing (mirrors `wiki::db::MIGRATIONS`). Migration 1 is **never** edited;
@@ -154,7 +154,48 @@ const MIGRATIONS: &[(i64, &str)] = &[(
          summary    TEXT    NOT NULL,
          updated_at INTEGER NOT NULL             -- unix seconds (last write)
      ) STRICT;",
+), (
+    // Migration 3 — attribute every memory row to the point in its thread it was
+    // written at ([FR-UI-46] edit-and-resend, [S-624]), so
+    // [`ChatStore::truncate_after`] deletes exactly the memory written after a cut.
+    //
+    // Before this, a memory row could not be tied to a message: the scratchpad's
+    // `turn` is `MAX(turn) + 1` of the scratchpad itself (a turn that recorded
+    // nothing hands its number to the next run), and the working-memory row has no
+    // position at all (CR-204 CRA-01, recorded false).
+    //
+    // `written_at_ordinal` is the thread's newest `chat_messages.ordinal` when the
+    // row was written (`-1` before any message). A turn's scratchpad is written
+    // after its question is appended and before its answer is, so the whole turn
+    // carries its question's ordinal. Existing rows are backfilled from the
+    // timestamps: the newest message created at or before the row. At one-second
+    // resolution that can name a message written in the same second just AFTER the
+    // row — a later ordinal, never an earlier one — so a backfilled row is at worst
+    // deleted by a cut it could have survived, never kept past one it should not.
+    //
+    // [S-624]: ../../docs/planning/journal.md#s-624-a-user-message-can-be-edited-and-resent-and-regenerate-truncates-in-the-store
+    3,
+    "ALTER TABLE chat_scratchpad ADD COLUMN written_at_ordinal INTEGER;
+     UPDATE chat_scratchpad SET written_at_ordinal = (
+         SELECT COALESCE(MAX(m.ordinal), -1) FROM chat_messages m
+          WHERE m.thread_id = chat_scratchpad.thread_id
+            AND m.created_at <= chat_scratchpad.created_at
+     );
+     ALTER TABLE chat_working_memory ADD COLUMN written_at_ordinal INTEGER;
+     UPDATE chat_working_memory SET written_at_ordinal = (
+         SELECT COALESCE(MAX(m.ordinal), -1) FROM chat_messages m
+          WHERE m.thread_id = chat_working_memory.thread_id
+            AND m.created_at <= chat_working_memory.updated_at
+     );",
 )];
+
+/// The SQL every memory writer stores as `written_at_ordinal` (migration 3): the
+/// thread's newest message ordinal at the moment of the write, `-1` before any
+/// message. `?1` is the thread id. One expression, shared by the scratchpad and
+/// the working-memory writers in [`crate::memory`], so the two tiers cannot
+/// disagree on what "written after the cut" means.
+pub(crate) const WRITTEN_AT_ORDINAL_SQL: &str =
+    "(SELECT COALESCE(MAX(ordinal), -1) FROM chat_messages WHERE thread_id = ?1)";
 
 /// The conversational role of a [`ChatMessage`].
 ///
@@ -308,11 +349,12 @@ impl ChatStore {
 
     /// Create a new conversation **auto-titled** from its first user message
     /// ([FR-UI-26], [ADR-47] decision (3)): the title is
-    /// [`title_from_first_message`]'s truncation of `first_user_message`, set
-    /// **once** at creation. Nothing — not [`append_message`](Self::append_message),
-    /// not a later turn — ever rewrites it, so the auto-title is stable for the
-    /// life of the conversation (the [FR-UI-26](../../docs/specs/requirements/FR-UI-26.md)
-    /// "auto-titled from its first user message" contract). Returns the new id.
+    /// [`title_from_first_message`]'s cleaning of `first_user_message`, set at
+    /// creation. It is the deterministic fallback [FR-UI-48] keeps when the
+    /// Synthesizer's first answer carries no usable `TITLE:` trailer. Only
+    /// [`rename_thread`](Self::rename_thread) rewrites it — the first turn's
+    /// trailer title, or the user's rename; [`append_message`](Self::append_message)
+    /// and a later turn never do. Returns the new id.
     ///
     /// This is the canonical derivation the web adapter creates threads through;
     /// [`create_thread`](Self::create_thread) with an explicit title stays for
@@ -344,6 +386,136 @@ impl ChatStore {
             .execute("DELETE FROM chat_threads WHERE id = ?1", [thread_id])
             .with_context(|| format!("deleting chat thread {thread_id}"))?;
         Ok(removed > 0)
+    }
+
+    /// **Rename one conversation** ([FR-UI-48], [ADR-47] as extended by CR-204): a
+    /// single `UPDATE chat_threads SET title=? WHERE id=?` writing `title` as
+    /// [`normalize_thread_title`] shapes it. The user's inline rename and the
+    /// Synthesizer's first-turn title both land here. Returns `true` if a thread
+    /// was renamed, `false` if no thread had that id (the rename API's `404`).
+    ///
+    /// `updated_at` is left alone: it is the rail's most-recent-first sort key, and
+    /// renaming an old conversation is not activity in it, so the row stays where
+    /// it is.
+    ///
+    /// # Errors
+    /// Returns an error if `title` has no usable text or runs past
+    /// [`THREAD_TITLE_MAX`] characters (the route refuses those first, with a
+    /// `400`), or if the update fails.
+    pub fn rename_thread(&mut self, thread_id: i64, title: &str) -> Result<bool> {
+        let Some(title) = normalize_thread_title(title) else {
+            anyhow::bail!(
+                "a conversation title must be non-empty and at most {THREAD_TITLE_MAX} characters"
+            );
+        };
+        let renamed = self
+            .conn
+            .execute(
+                "UPDATE chat_threads SET title = ?1 WHERE id = ?2",
+                rusqlite::params![title, thread_id],
+            )
+            .with_context(|| format!("renaming chat thread {thread_id}"))?;
+        Ok(renamed > 0)
+    }
+
+    /// Replace a conversation's title with `title` only while it is still
+    /// `current` — how the first turn's Synthesizer title lands ([FR-UI-48]). The
+    /// turn passes the fallback title the thread was created with, so a rename the
+    /// user made while that turn was running is kept: the reader's name beats a
+    /// generated one. Returns `true` if the title was replaced, `false` if the
+    /// thread is gone or no longer carries `current`. Normalizes and refuses
+    /// `title` exactly as [`rename_thread`](Self::rename_thread) does.
+    ///
+    /// # Errors
+    /// Returns an error if `title` has no usable text or is over-long, or if the
+    /// update fails.
+    pub fn replace_title(&mut self, thread_id: i64, current: &str, title: &str) -> Result<bool> {
+        let Some(title) = normalize_thread_title(title) else {
+            anyhow::bail!(
+                "a conversation title must be non-empty and at most {THREAD_TITLE_MAX} characters"
+            );
+        };
+        let replaced = self
+            .conn
+            .execute(
+                "UPDATE chat_threads SET title = ?1 WHERE id = ?2 AND title = ?3",
+                rusqlite::params![title, thread_id, current],
+            )
+            .with_context(|| format!("titling chat thread {thread_id}"))?;
+        Ok(replaced > 0)
+    }
+
+    /// **Truncate one conversation after `ordinal`** ([FR-UI-46], [ADR-47] as
+    /// extended by CR-204): delete every message whose ordinal is greater (their
+    /// tool traces go by cascade) **and** every memory row written after the cut —
+    /// the scratchpad entries and the working-memory summary whose
+    /// `written_at_ordinal` (migration 3) is greater, or unknown — in **one**
+    /// transaction, so a failure leaves the thread exactly as it was. This is how
+    /// an edited or regenerated turn replaces what came after it: the store holds
+    /// one answer per turn, and no memory of a superseded one ([FR-UI-20]).
+    ///
+    /// A negative `ordinal` empties the conversation but keeps it (its title stays).
+    /// Returns `true` when the thread exists (whether or not anything lay after the
+    /// cut), `false` when no thread has that id (the truncate API's `404`).
+    /// `updated_at` is left alone: the re-run turn that follows bumps it.
+    ///
+    /// # Errors
+    /// Returns an error if any delete fails or the transaction cannot commit.
+    pub fn truncate_after(&mut self, thread_id: i64, ordinal: i64) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction()
+            .context("opening the chat truncate transaction")?;
+        let exists = tx
+            .query_row("SELECT 1 FROM chat_threads WHERE id = ?1", [thread_id], |_| Ok(()))
+            .optional()
+            .with_context(|| format!("checking chat thread {thread_id}"))?
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+        for (what, sql) in [
+            (
+                "messages",
+                "DELETE FROM chat_messages WHERE thread_id = ?1 AND ordinal > ?2",
+            ),
+            (
+                "scratchpad entries",
+                "DELETE FROM chat_scratchpad WHERE thread_id = ?1
+                   AND (written_at_ordinal IS NULL OR written_at_ordinal > ?2)",
+            ),
+            (
+                "working memory",
+                "DELETE FROM chat_working_memory WHERE thread_id = ?1
+                   AND (written_at_ordinal IS NULL OR written_at_ordinal > ?2)",
+            ),
+        ] {
+            tx.execute(sql, rusqlite::params![thread_id, ordinal])
+                .with_context(|| format!("truncating the {what} of thread {thread_id}"))?;
+        }
+        tx.commit().context("committing the chat truncate")?;
+        Ok(true)
+    }
+
+    /// The ordinal of the thread's `user_turn`-th **user** message (0-based, in
+    /// stored order), or `None` when the thread holds fewer user messages. How the
+    /// truncate API turns "the reader's second question" into the cut
+    /// [`truncate_after`](Self::truncate_after) takes: the browser counts the
+    /// questions it sent, but cannot know the stored ordinals — a turn that was
+    /// stopped, halted or faulted stored its question and no answer.
+    ///
+    /// # Errors
+    /// Returns an error on an unexpected store failure.
+    pub fn user_turn_ordinal(&self, thread_id: i64, user_turn: u32) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT ordinal FROM chat_messages WHERE thread_id = ?1 AND role = 'user'
+                 ORDER BY ordinal LIMIT 1 OFFSET ?2",
+                rusqlite::params![thread_id, user_turn],
+                |row| row.get(0),
+            )
+            .optional()
+            .with_context(|| format!("locating user turn {user_turn} of thread {thread_id}"))
     }
 
     /// Append a message (and its tool traces) to a thread in **one**
@@ -556,50 +728,82 @@ impl ChatStore {
     }
 }
 
-/// The longest an auto-derived conversation title may run, in characters (not
-/// bytes — the cut lands on a `char` / UTF-8 scalar boundary so a multi-byte
-/// title is never sliced into invalid UTF-8). The canonical cap the store and
-/// every caller share ([FR-UI-26] "truncated"); the web adapter no longer keeps
-/// its own copy.
+/// The longest a conversation title may run, in characters (not bytes — the cut
+/// lands on a `char` / UTF-8 scalar boundary so a multi-byte title is never sliced
+/// into invalid UTF-8). The canonical cap the store and every caller share
+/// ([FR-UI-26] "truncated"; [FR-UI-48] for a rename or a Synthesizer title); the
+/// web adapter no longer keeps its own copy. The SPA mirrors it as the rename
+/// field's limit (`THREAD_TITLE_MAX` in `web/ui/src/views/chat/chatModel.ts`).
 pub const THREAD_TITLE_MAX: usize = 60;
 
 /// Derive a stable, single-line conversation title from a conversation's first
 /// user message ([FR-UI-26], [ADR-47] decision (3)).
 ///
-/// This is the one canonical place the truncation rule lives — [`ChatStore::
+/// This is the one canonical place the fallback-title rule lives — [`ChatStore::
 /// create_thread_from_message`] and the web adapter both route through it, so the
 /// title a conversation is born with is identical no matter who creates it.
 ///
-/// The contract the tests in `tests/store.rs` pin:
-/// - a normal message becomes its (trimmed) text, at most [`THREAD_TITLE_MAX`]
-///   characters — and truncation happens on a **character** boundary so a
-///   multi-byte message (e.g. `"日本語…"`) never panics or yields invalid UTF-8;
+/// The contract the tests in `tests/store.rs` pin — the **cleaned first message**
+/// [FR-UI-48] names as the deterministic fallback when the Synthesizer gives no
+/// usable `TITLE:` trailer:
+/// - the result is single-line (a multi-line paste is titled by its first
+///   non-blank line), so the rail row never wraps, and its whitespace runs
+///   collapse to one space;
+/// - it is in sentence case: the first letter is upper-cased and the rest is left
+///   as typed, so an identifier (`Engine::run`, `binder.rs`) keeps its spelling;
+/// - it is at most [`THREAD_TITLE_MAX`] characters, cut at the last word boundary
+///   inside the cap — a single word longer than the cap is cut on a **character**
+///   boundary, so a multi-byte message (e.g. `"日本語…"`) never panics or yields
+///   invalid UTF-8;
 /// - a message with no usable text (empty, or only whitespace) falls back to a
 ///   non-empty placeholder rather than an empty title (`chat_threads.title` is
-///   `NOT NULL` and the rail must render *something*);
-/// - the result is single-line (a multi-line paste is titled by its first line),
-///   so the rail row never wraps.
+///   `NOT NULL` and the rail must render *something*).
 ///
 /// # Design note (why this is a deliberate choice, not boilerplate)
 /// "Truncated first user message" leaves several real decisions: whole message
 /// vs. first line only; trim leading/trailing whitespace or not; hard character
 /// cut vs. break on a word boundary vs. append an ellipsis; and what an
 /// empty/whitespace-only message should title to. Each shapes what the history
-/// rail actually reads.
+/// rail actually reads. "Sentence case" stops at the first letter on purpose:
+/// lower-casing the rest would mangle the code names questions here are about.
 #[must_use]
 pub fn title_from_first_message(first_user_message: &str) -> String {
-    // First line only (a multi-line paste is titled by its first line), trimmed,
-    // then a **character** truncation to `THREAD_TITLE_MAX` — never a byte slice,
-    // which would panic on / corrupt a multi-byte title. A blank or
-    // whitespace-only message falls back to a non-empty placeholder because
-    // `chat_threads.title` is `NOT NULL` and the history rail must render a row.
-    let line = first_user_message.lines().next().unwrap_or("").trim();
-    let title: String = line.chars().take(THREAD_TITLE_MAX).collect();
-    if title.is_empty() {
-        "New chat".to_string()
-    } else {
-        title
+    let line = first_user_message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let Some(first) = chars.next() else {
+        // `chat_threads.title` is `NOT NULL` and the history rail must render a row.
+        return "New chat".to_string();
+    };
+    let cased: String = first.to_uppercase().chain(chars).collect();
+    if cased.chars().count() <= THREAD_TITLE_MAX {
+        return cased;
     }
+    // Cut on a CHARACTER boundary — never a byte slice, which would panic on or
+    // corrupt a multi-byte title — then back off to the last word boundary inside
+    // the cap, unless the cap already falls on one or the first word alone is
+    // longer than the cap.
+    let cut: String = cased.chars().take(THREAD_TITLE_MAX).collect();
+    let next_is_space = cased.chars().nth(THREAD_TITLE_MAX).is_some_and(char::is_whitespace);
+    match cut.rfind(' ') {
+        Some(space) if !next_is_space && space > 0 => cut[..space].to_string(),
+        _ => cut.trim_end().to_string(),
+    }
+}
+
+/// Shape a conversation title for storage — the one rule a user's rename and the
+/// Synthesizer's trailer title share ([FR-UI-48]): whitespace runs (newlines
+/// included) collapse to one space and the ends are trimmed. `None` when nothing
+/// is left, or when the result runs past [`THREAD_TITLE_MAX`] characters: the
+/// rename route refuses those (`400`) rather than silently cutting a name the
+/// user typed.
+#[must_use]
+pub fn normalize_thread_title(raw: &str) -> Option<String> {
+    let title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty() && title.chars().count() <= THREAD_TITLE_MAX).then_some(title)
 }
 
 /// The resolved `.logos/chat.db` path for a worktree `root`.
@@ -652,11 +856,14 @@ fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatThread> {
 pub(crate) fn open_migrated(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)
         .with_context(|| format!("opening the chat store at {}", path.display()))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+    // Busy timeout first, and a busy switch to WAL on a store another request is
+    // creating at the same moment is retried rather than failed.
+    logos_core::sqlite::execute_pragmas_retrying_busy(
+        &conn,
+        "PRAGMA busy_timeout = 250;
+         PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 250;",
+         PRAGMA foreign_keys = ON;",
     )
     .context("applying the chat pragma contract")?;
     apply_migrations(&mut conn)?;
@@ -674,6 +881,8 @@ pub(crate) fn open_migrated(path: &Path) -> Result<Connection> {
 /// `chat.db` track through the one shared [`MIGRATIONS`] ledger when it opens its
 /// own connection (the multi-step memory rides migration 2+, not a new file).
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
+    // Read without a lock first: every request opens the store, and an up-to-date
+    // one must not queue behind a writer just to learn it has nothing to do.
     let current: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("reading chat user_version")?;
@@ -682,9 +891,19 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
         if version <= current {
             continue;
         }
+        // A pending step takes the write lock BEFORE re-reading the version, so two
+        // connections opening one store at once cannot both apply it — the second
+        // waits for the first to commit, then sees the step done (a deferred
+        // transaction let both run `ALTER TABLE … ADD COLUMN`, and one failed).
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .with_context(|| format!("opening transaction for chat migration {version}"))?;
+        let applied: i64 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("re-reading chat user_version")?;
+        if version <= applied {
+            continue;
+        }
         tx.execute_batch(sql)
             .with_context(|| format!("applying chat migration {version}"))?;
         tx.execute(
@@ -705,4 +924,132 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
 #[must_use]
 pub fn latest_version() -> i64 {
     MIGRATIONS.last().map(|&(version, _)| version).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Requests creating a `chat.db` that does not exist yet all succeed: the
+    /// first Chat view load opens the store from several routes at once, and the
+    /// concurrent switch of a brand-new file to WAL can answer "database is
+    /// locked" without consulting the busy timeout (seen live, Sprint 95 testing).
+    #[test]
+    fn concurrent_opens_of_a_fresh_store_all_succeed() {
+        use std::sync::{Arc, Barrier};
+        for _trial in 0..10 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("chat.db");
+            let barrier = Arc::new(Barrier::new(4));
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        open_migrated(&path).map(drop).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert_eq!(open.join().unwrap(), Ok(()));
+            }
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(version, latest_version());
+        }
+    }
+
+    /// Two requests opening a version-2 store at the same moment both succeed and
+    /// the store ends migrated once: each pending step is applied under the write
+    /// lock, after re-reading the version, so the slower opener finds it done.
+    #[test]
+    fn concurrent_opens_of_a_store_that_needs_a_migration_all_succeed() {
+        use std::sync::{Arc, Barrier};
+        for _trial in 0..10 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("chat.db");
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+                for &(version, sql) in &MIGRATIONS[..2] {
+                    conn.execute_batch(sql).unwrap();
+                    conn.pragma_update(None, "user_version", version).unwrap();
+                }
+            }
+            let barrier = Arc::new(Barrier::new(4));
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        open_migrated(&path).map(drop).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert_eq!(open.join().unwrap(), Ok(()));
+            }
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(version, latest_version());
+            let recorded: i64 = conn
+                .query_row("SELECT COUNT(*) FROM schema_versions WHERE version = 3", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(recorded, 1, "migration 3 is applied exactly once");
+        }
+    }
+
+    /// Migration 3 backfills `written_at_ordinal` on rows a version-2 store already
+    /// holds, from the timestamps: the newest message created at or before the row.
+    /// A row written in the same second as a later message is attributed to that
+    /// later message (the safe direction — a cut deletes it rather than keeps it),
+    /// and a row older than every message is `-1`. Only the row's own thread is read:
+    /// a busier conversation's ordinals never leak in.
+    #[test]
+    fn migration_3_backfills_the_attribution_of_existing_memory() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // A version-2 store, built from the ledger's own first two migrations.
+        for &(version, sql) in &MIGRATIONS[..2] {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO chat_threads VALUES (1, 't', 100, 100);
+             INSERT INTO chat_messages (thread_id, ordinal, role, content, created_at) VALUES
+                 (1, 0, 'user', 'q0', 100), (1, 1, 'assistant', 'a0', 105),
+                 (1, 2, 'user', 'q1', 110), (1, 3, 'assistant', 'a1', 112);
+             INSERT INTO chat_scratchpad (thread_id, turn, ordinal, kind, payload, created_at) VALUES
+                 (1, 0, 0, 'note', '{}', 99),
+                 (1, 0, 1, 'note', '{}', 103),
+                 (1, 1, 0, 'note', '{}', 112);
+             INSERT INTO chat_working_memory (thread_id, summary, updated_at) VALUES (1, 's', 111);
+             -- A busier conversation written earlier: its ordinals must not leak into
+             -- thread 1's backfill.
+             INSERT INTO chat_threads VALUES (2, 'busy', 50, 50);
+             INSERT INTO chat_messages (thread_id, ordinal, role, content, created_at)
+                 SELECT 2, value, 'user', 'b', 90 FROM json_each('[0,1,2,3,4,5,6,7,8,9]');",
+        )
+        .unwrap();
+
+        apply_migrations(&mut conn).unwrap();
+
+        let attributed: Vec<Option<i64>> = conn
+            .prepare("SELECT written_at_ordinal FROM chat_scratchpad ORDER BY turn, ordinal")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            attributed,
+            [Some(-1), Some(0), Some(3)],
+            "before every message, after q0, the same second as a1"
+        );
+        let summary: Option<i64> = conn
+            .query_row("SELECT written_at_ordinal FROM chat_working_memory", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(summary, Some(2), "written after q1, before a1");
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+    }
 }

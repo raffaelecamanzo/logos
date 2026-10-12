@@ -41,7 +41,7 @@ async fn the_status_tool_carries_the_rust_rows_call_residue() {
 
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::new(engine).serve(server_io).await {
+        if let Ok(running) = LogosMcp::new(engine, &logos_ext::ExtensionHost::new()).serve(server_io).await {
             let _ = running.waiting().await;
         }
     });

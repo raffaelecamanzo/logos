@@ -20,7 +20,7 @@ import { apiMutate } from "../intent.ts";
 import { withMemberScope } from "../workspace/scope.ts";
 import type { ConfigReadModel } from "./types.ts";
 
-/** The intent-guarded wiki-generation trigger route (mirrors `web::WIKI_GENERATE_ROUTE`). */
+/** The intent-guarded wiki-generation trigger route (mirrors `logos_wiki::web::WIKI_GENERATE_ROUTE`). */
 export const WIKI_GENERATE_ROUTE = "/wiki/generate";
 
 /**

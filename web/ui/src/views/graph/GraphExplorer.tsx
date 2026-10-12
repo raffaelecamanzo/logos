@@ -57,22 +57,44 @@ function metaFrom(e: GraphElements): Meta {
   };
 }
 
-export function GraphExplorer({ initial }: { initial: GraphElements }) {
+export function GraphExplorer({
+  initial,
+  initialFocus = null,
+  initialGranularity = "symbol",
+}: {
+  initial: GraphElements;
+  /** A deep-linked seed `initial` was fetched around (S-622): the explorer opens
+   *  in the state {@link focusOn} leaves behind, so filters re-scope to it and
+   *  Reset returns to the whole graph. */
+  initialFocus?: string | null;
+  /** The tier `initialFocus` is a key of. */
+  initialGranularity?: GraphGranularity;
+}) {
+  // Only a symbol-tier seed is a node the Decisions panel and the table's 1-hop
+  // view can lock onto; a file-tier seed is a cluster key, so it focuses only.
+  const seededNode = initialGranularity === "symbol" ? initialFocus : null;
   const [loaded, setLoaded] = useState<LoadedSet>(() => loadedFrom(initial.nodes, initial.edges));
   const [meta, setMeta] = useState<Meta>(() => metaFrom(initial));
   const [layers, setLayers] = useState<Layers>(ALL_LAYERS_ON);
   const [edgeTypes, setEdgeTypes] = useState<Record<string, boolean>>({});
   const [intent, setIntent] = useState(false);
-  const [granularity, setGranularity] = useState<GraphGranularity>("symbol");
+  const [granularity, setGranularity] = useState<GraphGranularity>(initialGranularity);
   const [depth, setDepth] = useState(0);
-  const [focusId, setFocusId] = useState<string | null>(null);
-  const [lockedId, setLockedId] = useState<string | null>(null);
-  const [locatedId, setLocatedId] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(initialFocus);
+  const [lockedId, setLockedId] = useState<string | null>(seededNode);
+  const [locatedId, setLocatedId] = useState<string | null>(initialFocus);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(() =>
+    initialFocus
+      ? `Focused on ${initial.nodes.find((n) => n.id === initialFocus)?.label ?? initialFocus} — Reset to return.`
+      : "",
+  );
   // The accessibility table's own view: null = show the full loaded set (no
-  // selection); non-null = the fetched 1-hop neighbourhood of the locked node.
-  const [tableSet, setTableSet] = useState<LoadedSet | null>(null);
+  // selection); non-null = the fetched 1-hop neighbourhood of the locked node —
+  // for a deep-linked seed, the opening snapshot already is that neighbourhood.
+  const [tableSet, setTableSet] = useState<LoadedSet | null>(() =>
+    seededNode ? loadedFrom(initial.nodes, initial.edges) : null,
+  );
   const canvasRef = useRef<GraphCanvasHandle>(null);
   // A monotonic guard for the imperative re-fetches (filter/focus/expand/reset):
   // only the latest issued fetch may commit, so two quick toggles can't let a slow

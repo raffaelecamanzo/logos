@@ -1,8 +1,10 @@
 //! The rmcp `ServerHandler` — the `logos:*` tools, each a thin delegator
 //! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02). The single-root backing exposes the
-//! 30-tool `single_tool_router` roster; the federated workspace backing composes
+//! 25-tool `single_tool_router` roster; the federated workspace backing composes
 //! the `xservice_*`/`workspace_*` cross-service tools on top, leaving every
-//! single-root tool byte-identical (FR-WS-05, S-248).
+//! single-root tool byte-identical (FR-WS-05, S-248). The active extensions'
+//! tools join either roster through the extension host — the `wiki` extension's
+//! five `wiki_*` tools among them since S-644 (FR-DS-04).
 //!
 //! Tool names are registered BARE (`search`, not `logos:search`): MCP hosts
 //! namespace tools by *server identity* — this server identifies as `logos`
@@ -18,11 +20,12 @@ use logos_core::federation::{
     TypeReferences,
 };
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
-use rmcp::{
-    handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ErrorData, Implementation, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router, ServerHandler,
-};
+use logos_ext::mcp::{InvalidParams, McpTool};
+use logos_ext::ExtensionHost;
+use rmcp::handler::server::tool::{ToolCallContext, ToolRoute, ToolRouter};
+use rmcp::model::{CallToolResult, Content, ErrorData, Implementation};
+use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::{handler::server::wrapper::Parameters, schemars, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
 /// `server-instructions` steering graph-first usage, the session-gate
@@ -36,11 +39,18 @@ pub const INSTRUCTIONS: &str = include_str!("instructions.md");
 /// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
 /// read-model over the member registry); no business logic lives here (FR-MC-02).
 ///
-/// [`new`](Self::new) is the single-root server (one [`Engine`], the 30-tool
+/// [`new`](Self::new) is the single-root server (one [`Engine`], the 25-tool
 /// `single_tool_router`); [`federated`](Self::federated) composes the
 /// `xservice_*` tools on top and runs the shared tools against the default
 /// member. The single-root roster carries no `repo` dimension, so its
 /// `tools/list` is byte-identical whether or not federation exists (FR-WS-05).
+///
+/// Both compose the active extensions' tools from the [`ExtensionHost`] onto
+/// the roster ([FR-DS-04], [ADR-74]), as dynamic routes; the public host has
+/// none, so its roster is the core's alone.
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
 #[derive(Clone)]
 pub struct LogosMcp {
     /// The serve backing (ADR-52): the single engine, or the member registry.
@@ -59,30 +69,80 @@ pub struct LogosMcp {
 
 impl LogosMcp {
     /// Wrap a started (long-lived) [`Engine`] — one per worktree root
-    /// (ADR-04, ADR-15, FR-WT-04). The single-root roster is byte-for-byte
-    /// today's (FR-WS-05).
-    pub fn new(engine: impl Into<Arc<Engine>>) -> Self {
+    /// (ADR-04, ADR-15, FR-WT-04) — serving the core roster plus `host`'s
+    /// active extension tools. Under the public host the single-root roster is
+    /// byte-for-byte today's (FR-WS-05).
+    pub fn new(engine: impl Into<Arc<Engine>>, host: &ExtensionHost) -> Self {
         Self {
             backing: Arc::new(Backing::Single(engine.into())),
             bridge: Arc::new(ContractBridge::new()),
             build_deps: Arc::new(BuildDependencies::new()),
             type_refs: Arc::new(TypeReferences::new()),
-            tool_router: Self::single_tool_router(),
+            tool_router: Self::with_extensions(Self::single_tool_router(), host),
         }
     }
 
     /// Wrap a workspace member [`EngineRegistry`] — the federated backing
     /// ([FR-WS-05], [ADR-52]): the single-root roster (against the default
-    /// member) plus the `xservice_*` tools. Only constructed when a manifest is
-    /// present, so single-root never pays for the extra roster.
-    pub fn federated(registry: EngineRegistry<Engine>) -> Self {
+    /// member) plus the `xservice_*` tools, plus `host`'s active extension
+    /// tools. Only constructed when a manifest is present, so single-root never
+    /// pays for the extra roster.
+    pub fn federated(registry: EngineRegistry<Engine>, host: &ExtensionHost) -> Self {
         Self {
             backing: Arc::new(Backing::Federated(Box::new(registry))),
             bridge: Arc::new(ContractBridge::new()),
             build_deps: Arc::new(BuildDependencies::new()),
             type_refs: Arc::new(TypeReferences::new()),
-            tool_router: Self::single_tool_router() + Self::xservice_tool_router(),
+            tool_router: Self::with_extensions(
+                Self::single_tool_router() + Self::xservice_tool_router(),
+                host,
+            ),
         }
+    }
+
+    /// `core` plus every active extension tool of `host`, each as a dynamic
+    /// route ([`ToolRoute::new_dyn`]) — the `+` composition [`federated`]
+    /// already uses, because an `#[tool]` method cannot be added to this type
+    /// from another crate ([ADR-74]).
+    ///
+    /// The core roster wins a name clash: an extension tool named like a
+    /// registered one is dropped with a warning, never allowed to shadow it.
+    ///
+    /// [`federated`]: Self::federated
+    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+    fn with_extensions(core: ToolRouter<Self>, host: &ExtensionHost) -> ToolRouter<Self> {
+        let mut extensions = ToolRouter::new();
+        for tool in host.mcp_tools() {
+            if core.has_route(tool.name()) || extensions.has_route(tool.name()) {
+                tracing::warn!(
+                    target: "logos::mcp",
+                    tool = tool.name(),
+                    "an extension tool is named like a registered tool; keeping the registered one"
+                );
+                continue;
+            }
+            extensions.add_route(Self::extension_route(tool));
+        }
+        core + extensions
+    }
+
+    /// One extension tool as a dynamic route: its own `tools/list` definition,
+    /// answered against the default engine through [`run_result`](Self::run_result)
+    /// — the bridge every core tool uses, so its result, its failures and its log
+    /// line are indistinguishable from a core tool's ([FR-DS-04]).
+    ///
+    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    fn extension_route(tool: McpTool) -> ToolRoute<Self> {
+        let attr = tool.tool().clone();
+        ToolRoute::new_dyn(attr, move |context: ToolCallContext<'_, Self>| {
+            let tool = tool.clone();
+            let arguments = context.arguments.unwrap_or_default();
+            let service = context.service;
+            Box::pin(async move {
+                let name = tool.name().to_string();
+                service.run_result(&name, move |engine| tool.call(engine, arguments)).await
+            })
+        })
     }
 
     /// This backing's registered tool roster — introspection for the roster
@@ -130,7 +190,7 @@ impl LogosMcp {
     /// line + warnings, NFR-RA-11).
     async fn run_result<T, F>(
         &self,
-        tool: &'static str,
+        tool: &str,
         call: F,
     ) -> Result<CallToolResult, ErrorData>
     where
@@ -198,11 +258,13 @@ impl LogosMcp {
 
     /// The shared submit-and-await bridge (ADR-03): run one blocking job, emit
     /// the per-call telemetry event, and map the outcome to the tool result with
-    /// the ADR-14 severity tags — the error mapping lives here once, for both the
-    /// per-engine and `xservice_*` tools.
+    /// the ADR-14 severity tags — the error mapping lives here once, for the
+    /// per-engine, `xservice_*` and extension tools. Only an extension tool can
+    /// report the caller's mistake ([`InvalidParams`]); it maps to
+    /// `invalid_params`, as a core tool's argument mismatch does.
     async fn run_blocking<T, F>(
         &self,
-        tool: &'static str,
+        tool: &str,
         job: F,
     ) -> Result<CallToolResult, ErrorData>
     where
@@ -233,6 +295,9 @@ impl LogosMcp {
                 )
             })?
             .map_err(|err| {
+                if let Some(InvalidParams(message)) = err.downcast_ref::<InvalidParams>() {
+                    return ErrorData::invalid_params(message.clone(), None);
+                }
                 ErrorData::internal_error(
                     format!("logos:{tool} failed: {err:#}"),
                     Some(serde_json::json!({
@@ -420,41 +485,7 @@ pub struct CoverageIngestParams {
     pub format: Option<String>,
 }
 
-// ── Wiki tool parameter schemas (CR-008, FR-WK-02/04/05 wire contracts) ─────
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
-pub struct WikiWriteParams {
-    /// The page slug (path-like: lowercase/digit/`-`/`_` segments, FR-WK-02).
-    pub slug: String,
-    /// The page title.
-    pub title: String,
-    /// The markdown body, stored byte-verbatim (1 MiB cap, FR-WK-02).
-    pub body: String,
-    /// Anchor entity ids: `file:<path>` or `symbol:<symbol>` (default none).
-    #[serde(default)]
-    pub anchors: Vec<String>,
-    /// The mandatory non-empty generator label (FR-WK-02).
-    pub generator: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
-pub struct WikiReadParams {
-    /// The slug to read.
-    pub slug: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
-pub struct WikiSearchParams {
-    /// The search query (omit with `list: true` to enumerate all pages).
-    pub query: Option<String>,
-    /// Enumerate all pages instead of searching (default false).
-    pub list: Option<bool>,
-}
-
-// ── The 30 single-root tools (FR-MC-01) ─────────────────────────────────────
+// ── The 25 single-root core tools (FR-MC-01) ────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
@@ -692,66 +723,6 @@ impl LogosMcp {
     )]
     async fn coverage_refresh(&self) -> Result<CallToolResult, ErrorData> {
         self.run_result("coverage_refresh", |e| e.coverage_refresh())
-            .await
-    }
-
-    // — Source wiki (5): the agent-generated wiki surface (CR-008,
-    //   FR-WK-02/04/05/06/09) plus the CR-062 deterministic presented tier
-    //   (FR-WK-20). Each behind the SAME `api` method as its CLI twin, so
-    //   payloads are byte-identical (NFR-CC-01). Gate-immune: never read by the
-    //   metric path (BR-29). `wiki delete`/`wiki skill` stay CLI-only —
-    //   destructive/install ops off the agent surface. —
-
-    #[tool(
-        description = "Write (upsert) a source-wiki page by slug (FR-WK-02): byte-verbatim markdown body (1 MiB cap), write-time anchor resolution to content hashes, write-time HEAD tag, and a MANDATORY non-empty generator label. Anchors are `file:<repo-relative-path>` or `symbol:<canonical-symbol>`; an unknown anchor / empty generator / over-cap body is rejected loudly with the store left byte-identical. The gate-immune wiki store (BR-29) — never moves the quality signal."
-    )]
-    async fn wiki_write(
-        &self,
-        Parameters(p): Parameters<WikiWriteParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        self.run_result("wiki_write", move |e| {
-            e.wiki_write(&p.slug, &p.title, &p.body, &p.anchors, &p.generator)
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Read a source-wiki page by slug (FR-WK-04) with MANDATORY provenance no surface may omit: the generator label, the written-at HEAD commit, per-anchor freshness (fresh/stale/missing, computed against the current tree — no sync needed), and the fixed 'generated content — not extracted by Logos' marker. A miss (or an all-anchors-gone auto-prune) returns null. Wiki prose is generated content, never extracted fact."
-    )]
-    async fn wiki_read(
-        &self,
-        Parameters(p): Parameters<WikiReadParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        self.run_result("wiki_read", move |e| e.wiki_read(&p.slug))
-            .await
-    }
-
-    #[tool(
-        description = "FTS5 bm25 search over source-wiki page titles and bodies (FR-WK-05), indexed inside wiki.db so it survives `index`. Every hit carries its staleness flag and provenance summary (generator, HEAD). `list: true` enumerates all pages (slug-ordered) instead of searching. Offline; no vectors (NFR-SE-01). A pure read — never prunes."
-    )]
-    async fn wiki_search(
-        &self,
-        Parameters(p): Parameters<WikiSearchParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let list = p.list.unwrap_or(false);
-        self.run_result("wiki_search", move |e| {
-            e.wiki_search(p.query.as_deref().unwrap_or(""), list)
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Source-wiki store summary + regeneration work-list (FR-WK-06): page/stale/missing counts and the freshness fraction, the pruned-orphan log, and the work-list driving regeneration — stale pages, missing-anchor pages, and page-worthy entities lacking a page (modules, top-level files, and — only when the swe-skills doc graph is present — Requirement/Adr/Story nodes). Logos discovers deterministically; the agent writes the pages."
-    )]
-    async fn wiki_status(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("wiki_status", |e| e.wiki_status()).await
-    }
-
-    #[tool(
-        description = "Deterministically materialize the presented tier (FR-WK-20, CR-062): in SRS mode, assembles each present Design/Specs category and the single-file Architecture page from the project's authored `docs/specs/**` sources into `wiki.db` with `generator = \"logos:doc-present\"`, then runs the reconciliation sweep. Pure local-FS reads + `wiki.db` writes — no LLM, no network (NFR-SE-01); byte-identical on re-run. Outside SRS mode (Case 2) this is a no-op returning the empty summary."
-    )]
-    async fn wiki_materialize(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("wiki_materialize", |e| e.wiki_materialize())
             .await
     }
 

@@ -43,7 +43,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use super::miner::{CommitFact, FileChange};
 
@@ -205,15 +205,23 @@ const MIGRATIONS: &[(i64, &str)] = &[
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)
         .with_context(|| format!("opening history store at {}", path.display()))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 250;",
-    )
-    .context("applying the history pragma contract")?;
+    apply_pragma_contract(&conn)?;
     apply_migrations(&mut conn)?;
     Ok(conn)
+}
+
+/// Apply the history pragma contract. The busy timeout comes first, and a busy
+/// switch to WAL on a store another connection is creating at the same moment is
+/// retried ([`crate::sqlite::execute_pragmas_retrying_busy`]).
+fn apply_pragma_contract(conn: &Connection) -> Result<()> {
+    crate::sqlite::execute_pragmas_retrying_busy(
+        conn,
+        "PRAGMA busy_timeout = 250;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA foreign_keys = ON;",
+    )
+    .context("applying the history pragma contract")
 }
 
 /// Apply every embedded migration newer than the store's `user_version` — one
@@ -223,6 +231,8 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
 /// gate, so it can be read before migration 1 creates `schema_versions`, and a
 /// rolled-back migration reverts the version pointer with the schema.
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
+    // Read without a lock first: every request opens the store, and an up-to-date
+    // one must not queue behind a writer just to learn it has nothing to do.
     let current: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("reading history user_version")?;
@@ -231,9 +241,19 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
         if version <= current {
             continue;
         }
+        // A pending step takes the write lock BEFORE re-reading the version, so two
+        // connections creating one store at once cannot both apply it — the second
+        // waits for the first to commit, then sees the step done (a deferred
+        // transaction let both run `CREATE TABLE`, and one failed).
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .with_context(|| format!("opening transaction for history migration {version}"))?;
+        let applied: i64 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("re-reading history user_version")?;
+        if version <= applied {
+            continue;
+        }
         tx.execute_batch(sql)
             .with_context(|| format!("applying history migration {version}"))?;
         tx.execute(
@@ -612,6 +632,40 @@ mod tests {
             None,
             "a never-mined store has no cursor"
         );
+    }
+
+    /// Two requests opening a store that does not exist yet both succeed, and the
+    /// store ends migrated once. The Chat welcome reads `/api/v1/files` twice at
+    /// once (S-621), so on a fresh project two connections create `history.db`
+    /// together: under a deferred transaction both ran migration 1, and one
+    /// failed with "table schema_versions already exists". Same fix and pin as
+    /// the `chat.db` ladder's (`0bca6e75`).
+    #[test]
+    fn concurrent_opens_of_a_fresh_store_all_succeed() {
+        use std::sync::{Arc, Barrier};
+        for _trial in 0..10 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("history.db");
+            let barrier = Arc::new(Barrier::new(4));
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        open(&path).map(drop).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert_eq!(open.join().unwrap(), Ok(()));
+            }
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(current_version(&conn).unwrap(), latest_version());
+            let recorded: i64 = conn
+                .query_row("SELECT COUNT(*) FROM schema_versions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(recorded, latest_version(), "each migration is applied exactly once");
+        }
     }
 
     /// Persisting commits + file changes and advancing the cursor round-trips,

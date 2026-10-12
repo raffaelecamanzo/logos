@@ -894,7 +894,7 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
 
     // The `--json` payload, produced exactly as `Output::print` produces it for
-    // `logos workspace status --json` (cli/src/main.rs): `serde_json` over the
+    // `logos workspace status --json` (cli/src/lib.rs): `serde_json` over the
     // value `federation::query::workspace_status` returns.
     let payload = serde_json::to_value(workspace_status(&registry)).expect("the payload serializes");
     let a = admission(&payload);

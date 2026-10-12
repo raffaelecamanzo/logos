@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 #[path = "support/roster.rs"]
 mod roster;
 
-use roster::{COVERAGE_TOOLS, NAV_TOOLS, QUALITY_TOOLS, TEMPORAL_TOOLS, WIKI_TOOLS};
+use roster::{COVERAGE_TOOLS, NAV_TOOLS, QUALITY_TOOLS, TEMPORAL_TOOLS};
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -45,7 +45,7 @@ async fn connect_over(
     let engine = Engine::start(dir.path()).expect("engine start");
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::new(engine).serve(server_io).await {
+        if let Ok(running) = LogosMcp::new(engine, &logos_ext::ExtensionHost::new()).serve(server_io).await {
             let _ = running.waiting().await;
         }
     });
@@ -101,7 +101,6 @@ async fn exactly_the_declared_tool_roster_registers_with_bare_names() {
         .chain(QUALITY_TOOLS.iter())
         .chain(TEMPORAL_TOOLS.iter())
         .chain(COVERAGE_TOOLS.iter())
-        .chain(WIKI_TOOLS.iter())
         .copied()
         .collect();
     expected.sort_unstable();
@@ -111,12 +110,12 @@ async fn exactly_the_declared_tool_roster_registers_with_bare_names() {
     assert_eq!(
         names,
         expected,
-        "exactly the {} navigation + {} quality + {} temporal + {} coverage + {} wiki tools must register (FR-MC-01)",
+        "exactly the {} navigation + {} quality + {} temporal + {} coverage tools must register \
+         (FR-MC-01) — the core roster; an extension's tools join it through the host",
         NAV_TOOLS.len(),
         QUALITY_TOOLS.len(),
         TEMPORAL_TOOLS.len(),
         COVERAGE_TOOLS.len(),
-        WIKI_TOOLS.len(),
     );
 
     // Namespacing is the HOST's job, derived from the server identity: names
@@ -175,7 +174,7 @@ async fn server_instructions_contain_all_three_steers() {
 /// FR-IN-09 (S-362/CR-114): the served text is the shipped `INSTRUCTIONS`
 /// constant, byte for byte.
 ///
-/// `mcp::INSTRUCTIONS` is what `cli/src/main.rs::surface_parity` asserts the
+/// `mcp::INSTRUCTIONS` is what `cli/src/lib.rs::surface_parity` asserts the
 /// FR-IN-09 content properties over — the ordering, the three planning-time
 /// tools, and the NFR-CC-04 hypothesis caveat. Restating those here would be a
 /// second copy of the same assertions; what the wire adds, and only the wire can

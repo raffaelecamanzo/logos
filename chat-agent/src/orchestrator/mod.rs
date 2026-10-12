@@ -34,14 +34,17 @@ pub mod event;
 pub mod history;
 pub mod plan;
 pub mod planner;
+pub mod preset;
 pub mod roster;
 pub mod step;
+pub mod title;
 
 pub use budget::{BudgetBound, BudgetTree};
 pub use event::{CapturingSink, EventSink, FanOut, OrchestratorEvent};
 pub use history::{ConversationWindow, PriorTurn};
 pub use plan::{PlanStep, PlannerDecision, StepRole};
 pub use planner::{member_roster, workspace_planner_preamble, Planner, DEFAULT_PLANNER_PREAMBLE};
+pub use preset::Preset;
 pub use roster::{
     workspace_synthesizer_preamble, RoleModels, SubagentRoster, SynthesizerGrounding,
     WorkspaceRoster, GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE,
@@ -50,6 +53,9 @@ pub use roster::{
     WORKSPACE_RANKING_CLAUSE, WORKSPACE_SOURCE_READER_PREAMBLE,
 };
 pub use step::{AnswerSink, StepContext, StepError, StepExecutor, StepObservation};
+pub use title::{TITLE_MAX_WORDS, TITLE_TRAILER_CLAUSE};
+
+use title::TrailerHoldback;
 
 use agent_core::rig::completion::CompletionModel;
 
@@ -180,6 +186,12 @@ pub struct Orchestrator<M, E> {
     ///
     /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
     history: ConversationWindow,
+    /// The conversation this turn opened, when it did ([`titling`](Self::titling)):
+    /// its answer then carries the `TITLE:` trailer ([FR-UI-48]). `None` on every
+    /// later turn, which therefore never retitles.
+    ///
+    /// [FR-UI-48]: ../../docs/specs/requirements/FR-UI-48.md
+    title_thread: Option<i64>,
 }
 
 impl<M, E> Orchestrator<M, E>
@@ -195,6 +207,7 @@ where
             executor,
             budget,
             history: ConversationWindow::default(),
+            title_thread: None,
         }
     }
 
@@ -206,6 +219,7 @@ where
             executor,
             budget,
             history: ConversationWindow::default(),
+            title_thread: None,
         }
     }
 
@@ -218,6 +232,21 @@ where
     #[must_use]
     pub fn with_history(mut self, history: ConversationWindow) -> Self {
         self.history = history;
+        self
+    }
+
+    /// Mark this turn as the one that opened conversation `thread_id`
+    /// ([FR-UI-48]): its Synthesizer is asked for a final `TITLE:` trailer
+    /// ([`TITLE_TRAILER_CLAUSE`], appended to the role's preamble), the trailer is
+    /// withheld from the streamed answer and stripped from the final one, and a
+    /// well-formed title is emitted as [`OrchestratorEvent::ThreadTitle`] after the
+    /// [`FinalAnswer`](OrchestratorEvent::FinalAnswer). It rides the answer's own
+    /// request, so the turn makes no extra provider call.
+    ///
+    /// [FR-UI-48]: ../../docs/specs/requirements/FR-UI-48.md
+    #[must_use]
+    pub fn titling(mut self, thread_id: i64) -> Self {
+        self.title_thread = Some(thread_id);
         self
     }
 
@@ -483,11 +512,12 @@ where
         }
         let instruction = self.with_window(instruction);
         match self.synthesize_answer(&instruction, sink).await {
-            Ok(summary) => {
+            Ok((summary, title)) => {
                 let answer = format!("{marker}\n{summary}");
                 sink.emit(OrchestratorEvent::FinalAnswer {
                     answer: answer.clone(),
                 });
+                self.emit_title(title, sink);
                 Ok(TurnOutcome::Answered(answer))
             }
             // Synthesis could produce no grounded answer — report the honest halt
@@ -533,10 +563,11 @@ where
              inventing facts. The user's question was:\n{request}"
         ));
         match self.synthesize_answer(&instruction, sink).await {
-            Ok(answer) => {
+            Ok((answer, title)) => {
                 sink.emit(OrchestratorEvent::FinalAnswer {
                     answer: answer.clone(),
                 });
+                self.emit_title(title, sink);
                 Ok(TurnOutcome::Answered(answer))
             }
             Err(err) => Err(synthesis_error(err)),
@@ -546,7 +577,8 @@ where
     /// Run one tool-free [`Synthesizer`](StepRole::Synthesizer) pass, streaming the
     /// answer's tokens through the [`AnswerForwarder`] as
     /// [`AnswerDelta`](OrchestratorEvent::AnswerDelta) events ([FR-UI-19]) and
-    /// returning the accumulated answer text.
+    /// returning the accumulated answer text, with the conversation title its
+    /// trailer named on a titling turn.
     ///
     /// The shared finalize primitive: both the planner-`final` reroute
     /// ([`finalize_via_synthesizer`](Self::finalize_via_synthesizer)) and the
@@ -557,16 +589,46 @@ where
     /// authoritative grounding (S-175). Neither the terminal `FinalAnswer` nor any
     /// caller-specific marker is emitted here — the caller owns that, so the bounded
     /// path can prefix its marker and this path can stream raw.
+    ///
+    /// On the turn that opened its conversation ([`titling`](Self::titling)) the
+    /// pass also asks for the `TITLE:` trailer, streams through a
+    /// [`TrailerHoldback`] so no part of the trailer is ever forwarded, and returns
+    /// the answer without it plus a well-formed trailer's title. The caller emits
+    /// that title ([`emit_title`](Self::emit_title)) after its
+    /// [`FinalAnswer`](OrchestratorEvent::FinalAnswer) ([FR-UI-19], [FR-UI-48]). A
+    /// missing or malformed trailer names nothing: the conversation keeps the title
+    /// the store gave it from the first message.
+    ///
+    /// [FR-UI-48]: ../../docs/specs/requirements/FR-UI-48.md
     async fn synthesize_answer(
         &self,
         instruction: &str,
         sink: &impl EventSink,
-    ) -> Result<String, StepError> {
+    ) -> Result<(String, Option<String>), StepError> {
         let synth_step = PlanStep::new(StepRole::Synthesizer, instruction);
         let forwarder = AnswerForwarder(sink);
-        let ctx = StepContext::with_answer_sink(&self.budget, &forwarder);
+        if self.title_thread.is_none() {
+            let ctx = StepContext::with_answer_sink(&self.budget, &forwarder);
+            let observation = self.executor.execute(&synth_step, &ctx).await?;
+            return Ok((observation.summary, None));
+        }
+        let holdback = TrailerHoldback::new(&forwarder);
+        let ctx = StepContext::with_answer_sink(&self.budget, &holdback)
+            .with_preamble_clause(TITLE_TRAILER_CLAUSE);
         let observation = self.executor.execute(&synth_step, &ctx).await?;
-        Ok(observation.summary)
+        Ok(holdback.finish(&observation.summary))
+    }
+
+    /// Emit the conversation title a titling turn's Synthesizer named, as the
+    /// additive [`OrchestratorEvent::ThreadTitle`] — after the turn's
+    /// [`FinalAnswer`](OrchestratorEvent::FinalAnswer), where [FR-UI-19] places it.
+    /// Nothing on a turn that did not open its conversation, or named no title.
+    ///
+    /// [FR-UI-19]: ../../docs/specs/requirements/FR-UI-19.md
+    fn emit_title(&self, title: Option<String>, sink: &impl EventSink) {
+        if let (Some(thread_id), Some(title)) = (self.title_thread, title) {
+            sink.emit(OrchestratorEvent::ThreadTitle { thread_id, title });
+        }
     }
 }
 

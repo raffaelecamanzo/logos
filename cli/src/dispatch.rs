@@ -13,23 +13,26 @@
 //! lives once in the [`Output::query`]/[`Output::try_query`]/
 //! [`Output::report_gate`]/[`Output::report_check`] chokepoints (the CLI twin
 //! of the MCP adapter's `run`/`run_result` delegators), so the arms below are
-//! mostly zero-`?` one-liners. Only the `wiki` command group — the heaviest
-//! remaining cluster — is peeled into its own function to keep `dispatch`
-//! comfortably under the gate.
+//! mostly zero-`?` one-liners. The `wiki` command group, once peeled into its own
+//! function here, is the `wiki` extension's subcommand since S-644, dispatched by
+//! the library's composed command like any extension's.
 
 use std::path::Path;
 
 use anyhow::Result;
 use logos_core::{config::load_config_from_root, Engine};
+use logos_ext::ExtensionHost;
 
-use crate::{engine, init_options, read_wiki_body, Commands, CoverageCommands, Output, WikiCommands};
+use crate::{engine, init_options, Commands, CoverageCommands, Output};
 
 /// Route one parsed command to exactly one `Engine` call. Simple reads go
 /// through the [`Output`] chokepoints; `gate`/`doctor`/`verify` project a
 /// verdict via [`Output::report_gate`], `check` via its own tri-state
-/// [`Output::report_check`] (FR-GV-22); `wiki` (its own subcommand cluster)
-/// delegates to [`wiki`]; `serve` owns stdout and delegates to the surface crate.
-pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i32> {
+/// [`Output::report_check`] (FR-GV-22); `serve` owns stdout and delegates to the
+/// surface crate.
+/// `host` reaches the two arms extensions contribute to: `init` runs their init
+/// steps, `serve` their routes and tools (FR-DS-04, ADR-74).
+pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &ExtensionHost) -> Result<i32> {
     match command {
         Commands::Init {
             interactive,
@@ -55,9 +58,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             // enable members and never wants it. The rationale for the split
             // lives once, on `workspace_init::run`'s `fallback` parameter.
             if let Some(nudged) = crate::workspace_init::nudge(root, workspace, interactive || hooks, crate::ask) {
-                crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor)
+                crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor, host)
             } else {
-                out.print(&Engine::init_with(root, &init_options(interactive, hooks))?)?;
+                out.print(&Engine::init_with_contributions(root, &init_options(interactive, hooks), &host.init_steps())?)?;
                 Ok(0)
             }
         }
@@ -210,7 +213,10 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             CoverageCommands::Status => out.try_query(root, |e| e.coverage_status()),
             CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
         },
-        Commands::Wiki { command } => wiki(command, root, out),
+        // The session-start quality-report hook (S-638): a core command, not a
+        // wiki one. `wiki hook` is its hidden alias, the `wiki` extension's, and
+        // makes the same core call.
+        Commands::Hook(args) => hook_emit(root, args, out),
         // The cross-service query surface (FR-WS-05): each discovers the
         // workspace and serialises one `query::*` read-model over the member
         // registry (logic lives in logos-core, per NFR-MA-02).
@@ -231,64 +237,24 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
         // surface stays thin (ADR-27, NFR-MA-02).
         #[cfg(feature = "ui")]
         Commands::Serve { mcp, ui, port, standalone } => {
-            web::serve_surfaces(root, mcp, ui, port, standalone)?;
+            web::serve_surfaces(root, mcp, ui, port, standalone, host)?;
             Ok(0)
         }
         #[cfg(not(feature = "ui"))]
         Commands::Serve { mcp: _ } => {
-            mcp::serve_stdio(root)?;
+            mcp::serve_stdio(root, host)?;
             Ok(0)
         }
     }
 }
 
-/// The source wiki (CR-008): write/read/search/status/materialize/delete are
-/// each one `Engine` call → byte-identical payloads with the MCP twin
-/// (FR-WK-09). `generate` bypasses `print` for the human path because
-/// `render_prompt_block` returns prose, not a `Serialize` payload; `skill`/
-/// `hook` are pure filesystem materialization (no index) so they use the
-/// unguarded `Engine::open`.
-fn wiki(command: WikiCommands, root: &Path, out: &Output) -> Result<i32> {
-    match command {
-        WikiCommands::Write {
-            slug,
-            title,
-            generator,
-            anchors,
-            body_file,
-            body,
-        } => {
-            let body = read_wiki_body(body, body_file)?;
-            out.try_query(root, |e| e.wiki_write(&slug, &title, &body, &anchors, &generator))
-        }
-        WikiCommands::Read { slug } => out.try_query(root, |e| e.wiki_read(&slug)),
-        WikiCommands::Search { query, list } => {
-            out.try_query(root, |e| e.wiki_search(query.as_deref().unwrap_or(""), list))
-        }
-        WikiCommands::Status => out.try_query(root, |e| e.wiki_status()),
-        WikiCommands::Generate => {
-            let queue = engine(root, false)?.wiki_generate()?;
-            if out.json {
-                out.print(&queue)?;
-            } else if !out.quiet {
-                print!("{}", queue.render_prompt_block());
-            }
-            Ok(0)
-        }
-        WikiCommands::Materialize => out.try_query(root, |e| e.wiki_materialize()),
-        WikiCommands::Delete { slug } => out.try_query(root, |e| e.wiki_delete(&slug)),
-        WikiCommands::Skill { emit: _, dir, force } => {
-            out.print(&Engine::open(root).wiki_skill_emit(dir.as_deref(), force)?)?;
-            Ok(0)
-        }
-        // Emits the session-start quality-report hook into the shared
-        // .claude/settings.json and sweeps the retired SessionEnd entry
-        // (CR-095; CR-070 retired the PostToolUse augment hook this once also
-        // emitted).
-        WikiCommands::Hook { emit: _, force } => {
-            let engine = Engine::open(root);
-            out.print(&engine.wiki_quality_report_hook_emit(force)?)?;
-            Ok(0)
-        }
-    }
+/// Emit the session-start quality-report hook into the shared
+/// .claude/settings.json and sweep the retired SessionEnd entry (CR-095; CR-070
+/// retired the PostToolUse augment hook this once also emitted) — `logos hook
+/// --emit`. Its hidden alias `logos wiki hook --emit` is the `wiki` extension's,
+/// and makes the same core call.
+fn hook_emit(root: &Path, args: crate::HookArgs, out: &Output) -> Result<i32> {
+    let engine = Engine::open(root);
+    out.print(&engine.quality_report_hook_emit(args.force)?)?;
+    Ok(0)
 }

@@ -13,6 +13,367 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.15.8] — 2026-10-12
+
+### Added
+
+- **A gate keeps a reviewed list of terms out of the repository's text (S-716).**
+  `scripts/check-public-terms.sh` reads every text file `git ls-files` lists, plus
+  the untracked files `git add -A` would take, and fails naming `file:line:term`
+  when one holds a listed word or pair of adjacent words. Matching is whole-word
+  and case-insensitive; punctuation (hyphens, underscores, dashes and curly
+  quotes included) and camelCase humps separate words. The list is stored only
+  as SHA-256 digests (`scripts/public-terms.sha256`), and
+  `scripts/public-terms.allow` admits reviewed lines by path and line digest. A
+  walk that reads no text file fails. `gate.sh` runs it at both tiers as the
+  `public-terms` gate and prints the files scanned; `verify-evidence.sh` refuses
+  fast- and full-tier evidence without it; CI runs it first on the checkout.
+  About 7 s on this repository.
+
+### Changed
+
+- **The extension host gates extensions through one neutral feature gate
+  (S-714).** `logos-ext` defines a single trait, `FeatureGate`, which reports the
+  enabled features and is asked again on every evaluation: what a surface reads per
+  request (the extensions list, the overview fields) follows a change at run time,
+  while web routes, MCP tools and CLI subcommands keep the answer they were
+  composed with at start-up. An extension names the feature it needs with
+  `Extension::required_feature()`, and a binary supplies a gate with
+  `ExtensionHost::with_gate`; with no gate, only extensions that name no feature
+  are active. `GET /api/v1/extensions` answers `{"extensions": [...]}`: the active
+  extensions and their UI manifests, and nothing else.
+
+## [1.15.7] — 2026-10-11
+
+### Added
+
+- **Fitness tests for a build without extensions (CR-213, S-645).** The build
+  that composes no extension (`--no-default-features --features lang-all,ui`) is
+  now tested. Its route census, MCP `tools/list`, `logos --help`, `GET
+  /api/v1/extensions` and SPA navigation name no chat or wiki entry. Each is the
+  default build's committed surface less exactly the chat and wiki entries.
+  `status` and `serve --ui` start on a project with `[chat]`, `[wiki]` and a chat
+  key. The few chat-adjacent items that stay are each listed with the decision
+  behind it. A dependency test reads `cargo metadata` and fails, naming the edge,
+  if `logos-core`, `logos-ext`, `mcp`, `web` or the CLI library depends on
+  `logos-wiki`, `logos-chat`, `chat-agent`, `wiki-agent` or `agent-core`. The
+  no-network check now also covers the no-extension tree, and the `agents` tree
+  less `agent-core`. `gate.sh full` (a new `test-noext` leg) and CI run the
+  no-extension build. In that build, `logos --help` no longer names the `logos
+  wiki hook --emit` alias, which does not exist there. The default and release
+  help are unchanged.
+
+### Changed
+
+- **Chat is a registered extension (CR-213, S-643).** The chat turn and
+  conversation-history routes, the workspace chat, the `[chat]` table, the
+  `chat.api_key` secret, the Chat and Workspace Chat views and the chat config
+  panels moved out of the `web` crate into a new `chat` extension crate,
+  `logos-chat`, which the `logos` binary's `main` registers under `agents`. `web`
+  no longer depends on `chat-agent` and has no `agents` arm that names chat; the
+  extension depends on `web`, never the reverse. The release (`agents`) binary's
+  surface is unchanged — route census, `POST` allow-list, config read-model, MCP
+  tools, CLI help and SPA navigation all equal the committed snapshots. A build
+  without `agents` serves no chat turn or conversation-history route and offers no
+  Chat entry, view, `[chat]` fields or key panel; an existing `[chat]` config still
+  loads there, read and validated as before. Three chat-adjacent core routes stay
+  in every build because the default build's committed surface carries them: the
+  chat-key writes (`POST /config/secret`, `POST /api/v1/workspace/config/secret`)
+  and the Workspace Chat's read-roots read (`GET
+  /api/v1/workspace/config/read-roots`). With `agents`, the extension validates `[chat]` and its key,
+  and a malformed table is reported as its error, naming the table and the file
+  and never echoing what the file holds (the line and column of the old parse
+  error are not carried). An extension's web
+  route can now be a `WebRoute::shell` — a `GET` answered with the SPA shell — so a
+  view path that also takes a `POST` (`/chat`) still serves the app on a browser
+  navigation. The Playwright leg of `gate.sh full` builds the `agents` binary,
+  which is the surface its specs drive.
+- **The source wiki is its own crate (CR-213, S-644).** `logos-core/src/wiki/` and
+  the fourteen `Engine::wiki_*` methods moved into a new `logos-wiki` crate.
+  It works over `&Engine` through a `WikiEngine` trait the engine implements, so
+  a caller that imports the trait keeps writing `engine.wiki_read(slug)`. The
+  core no longer holds a wiki engine and cannot depend on the crate. The `init
+  -i` wiki-skill step is now a contributed init step that the CLI supplies. As a
+  result its row in the `init` report comes after the session-start hook's row
+  instead of before it; the rows themselves are unchanged. Nothing else changes
+  for a user: the MCP `tools/list`, `logos wiki` and its subcommands, the web
+  wiki routes, `wiki.db` and the telemetry tool names are byte-identical. This
+  prepares the wiki to register as an extension.
+- **The wiki is a registered extension (CR-213, S-644).** `logos-wiki` is now the
+  `wiki` extension, compiled under a new default-on `wiki` cargo feature and
+  registered by the `logos` binary's `main`; the in-app generator joins it under
+  `agents` (`wiki-agent` hands the extension its configured run service). Its five
+  MCP tools are served as dynamic routes with the same names, descriptions and input
+  schemas; `logos wiki` is the extension's subcommand, listed in `logos --help` where
+  it always was; the wiki's web read routes, the Wiki-tab generation trigger, the
+  `init -i` skill step, the `[wiki]` table, the fourteen `wiki_*` telemetry names,
+  the Dashboard's Project Overview card and the Wiki view all register through the
+  host. `mcp`, `web` and the CLI library no longer depend on `logos-wiki`,
+  `wiki-agent` or `agent-core`, and `web` has no `agents` feature left. The default
+  and release binaries' surfaces are unchanged — every committed surface snapshot
+  holds. A build without the `wiki` feature (the slim
+  `--no-default-features --features lang-all` build, for one) has no `logos wiki`,
+  no `wiki_*` tool, no wiki route, Wiki view or Project Overview card, and never
+  opens, migrates or deletes an existing `.logos/wiki.db`; a `[wiki]` table there is
+  ignored and reported, as an unclaimed extension table is. With the extension, a
+  malformed `[wiki]` is reported as its error, naming the table and the file. The
+  Dashboard's overview read-model now carries `overview_page` only while the wiki is
+  composed, and an extension can add a field to it and a card to the Dashboard.
+
+## [1.15.6] — 2026-10-10
+
+### Added
+
+- **An extension host composes optional capabilities at one composition root
+  (CR-213, S-639).** A new crate, `logos-ext`, defines `Extension` — with every
+  contribution point: config tables, secret keys, MCP tools, web routes and their
+  `POST` allow-list entries, a CLI subcommand, init steps, a UI manifest and
+  telemetry tools — plus `ExtensionHost`. The CLI is now a library,
+  `logos_cli::run(ExtensionHost)`, behind a thin `main` that registers the
+  extensions its build includes. Every surface takes the host: `serve --ui` mounts
+  the active extensions' routes inside the same loopback, CSP, method and intent
+  guards as the core's; `serve --mcp` serves their tools beside the core roster as
+  dynamic routes; `logos --help` lists their subcommands; `logos init` runs their
+  steps after the core's; `logos stats` classifies their telemetry tools. An
+  extension can never shadow a core tool, route or command, and one that is
+  unregistered, or names a feature the build does not enable, contributes nothing.
+  Nothing changes for a user: chat and the wiki are not moved yet, and the default
+  and `agents` builds expose exactly the surface they did — frozen as committed
+  snapshots (web route census and `POST` allow-list, MCP `tools/list`, `logos
+  --help` and `logos wiki --help`, the config read-model, the SPA navigation) taken
+  before the change.
+- **The server states its active extensions, and the SPA bundle is an injected asset
+  provider (CR-213, S-641).** `GET /api/v1/extensions` answers which extensions the
+  running server composes, each with the UI manifest it contributes (an empty list
+  when the build registers none). It is `GET`-only, loopback-only and same-origin
+  like every read route, reaches no engine, and is the one added row in the
+  committed web route census. The router no longer names the embedded bundle: it
+  serves a `SpaAssets` provider, and the default (`EmbeddedSpa`) serves the same
+  embedded `web/ui/dist/` bytes, so a binary that composes an extension with its own
+  SPA bundle can hand the router that bundle (`hosted_router_with_assets`,
+  `serve_surfaces_with_assets`). Nothing changes for a user: the shell, the assets
+  and the history fallback behave as before.
+
+- **Extensions own their config tables and secret keys, and an unclaimed
+  `[chat]` or `[wiki]` table still parses (CR-213, S-640).** Each top-level
+  table of `config.toml` and each `secrets.toml` key goes to the core or to the
+  extension that claims it. The extension validates its own tables on every load
+  and before every Config editor save, and its secrets are masked in the config
+  read-model the way `chat.api_key` is. `[chat]` and `[wiki]` (and the
+  `chat.api_key` secret) are reserved: in a build with no extension that owns
+  them they are accepted, ignored, reported once on stderr, and kept in the file
+  when the editors save. Nothing changes for a user of the default or `agents`
+  binary: the core still owns `[chat]` and `[wiki]`, and they resolve exactly as
+  before. An unknown table or key still fails with the same error.
+
+- **The SPA mounts navigation, views and config panels from registered
+  extensions (CR-213, S-642).** The navigation list, the view registry, the
+  sidebar's icon map and both Config views' panel lists are now registrable. Extension
+  UI code enters through a build-time module, `virtual:logos-extensions`, which this
+  build aliases to an entry that registers nothing; the SPA reads
+  `GET /api/v1/extensions` once at boot and mounts an entry only when the server
+  reports its extension active and lists it in that extension's manifest. A visit
+  to the route of an extension that is not active lands on the Dashboard, like a
+  hidden view. Nothing changes for a user: no extension registers UI yet, so the
+  navigation, views and config panels render exactly as before — the committed SPA
+  navigation snapshot is unchanged.
+
+### Changed
+
+- **The session-start quality-report hook is a core command, outside the wiki
+  (S-638).** `logos hook --emit [--force]` installs the Claude Code hook — the
+  same script and the same non-clobbering `.claude/settings.json` merge as
+  before, byte for byte — and `logos init -i` installs it exactly as it did. Its
+  code moved from the wiki module to the core, so it survives a build that leaves the
+  wiki out. `logos wiki hook --emit` stays as a hidden alias with identical
+  output and exit codes; it no longer appears in `logos wiki --help`, and
+  `logos --help` now lists `hook`. The telemetry name of the install is unchanged,
+  so recorded history stays attributed.
+
+## [1.15.5] — 2026-10-10
+
+### Changed
+
+- **The chat's automatic code-refs lookup counts as app chrome, not as graph
+  navigation (HF-1, S-622).** `GET /api/v1/code-refs` runs on every finalized chat
+  answer and makes up to 24 traced `node` / `graph_elements` reads, although nobody
+  asked a graph question. It was recorded on the `web` surface, so those reads counted
+  as a developer's graph navigation in `logos stats` and the dogfood usage figures. It
+  now names the `shell` surface, like the app header's `status` readout: the events are
+  still recorded in `telemetry.db`, attributed to `shell`, and no usage figure counts
+  them. The response and its cap are unchanged. The guard test that pins which
+  handlers name the shell is now a closed set of exactly `status` and `code_refs`; a
+  third handler naming it fails.
+
+## [1.15.4] — 2026-10-10
+
+### Added
+
+- **A chat message can be edited and resent, and Regenerate replaces the answer in
+  the store (CR-204 C6, S-624).** Your own messages carry a pencil (hidden while a
+  turn runs) that opens the text in place: Resend or Enter asks the edited
+  question, Cancel or Esc leaves it — Esc there never stops a running turn. There
+  is no branching. Edit and Regenerate both first cut the conversation back to
+  before the question in `.logos/chat.db`, then ask it, through the same send path
+  as any turn, so it carries the conversation's preset. The cut deletes the
+  question, every later message, and the scratchpad and working memory written
+  after it, in one transaction. A reloaded conversation now shows one answer per
+  regenerated turn; before, the store kept the replaced answer and a reload showed
+  both. The cut is a new intent-guarded `POST …/chat/threads/{id}/truncate` with a
+  `user_turn` form field (the 0-based index among the stored questions) on the
+  member and the Workspace Chat alike; it is on the enumerated allow-list, a
+  missing or non-numeric `user_turn` is `400`, and an unknown conversation `404`.
+  `chat.db` migrates to version 3: each memory row records the point in its
+  conversation it was written at, and existing rows are backfilled from their
+  timestamps, at worst one message late, so a cut can only delete such a row
+  early, never keep it.
+
+- **An empty chat greets the reader with suggestion chips filled from the graph
+  (CR-204 C1, S-621).** In place of the one-line hint, an empty conversation shows a
+  greeting and three chips built from fixed templates. The member chat fills them
+  from `GET /api/v1/files` — the top hotspot, the riskiest untested file (the
+  `?untested` board) and the indexed file count. The Workspace Chat fills them from
+  the roster the shell already holds — the member count and the selected member —
+  and makes no request of its own, so opening it never starts a member's engine. It
+  does not read `workspace/status`, which opens every member's store. Both are
+  existing reads; no core query or projection was added. A "largest module" chip was
+  left out because no read-model serves a module size. A fact that was not returned
+  turns its chip generic, and a chip never names anything the read-models did not
+  return. No model writes a chip and no provider request is made before a send.
+  Before consent the chips are disabled; after consent a chip sends its text through
+  the composer's own send path, so it carries whatever the conversation's turn
+  carries, and the chips disappear.
+
+- **A chat turn runs under a prompt-only preset chosen in the composer (CR-204 C7,
+  S-625).** The composer's **+** button, a placeholder until now, opens a menu of
+  four built-in presets: Default, Impact analysis, Onboarding and Troubleshooting.
+  Each has a one-line description. A preset adds one clause to the planner's
+  instructions and one to the Synthesizer's, on the member chat and the Workspace
+  Chat alike. Tests pin that the tools, the subagent roster and the budget-tree
+  bounds are Default's under every preset, on both rosters. Default adds nothing, so
+  an unsteered turn's instructions are unchanged. The member and workspace turn
+  routes take an optional `preset` form field. An absent field means Default, and
+  any value other than the four is a `400` that starts no turn and calls no
+  provider. The choice belongs to the conversation: each conversation keeps its own
+  across a reload, per chat. Every send in it uses the preset, including Regenerate
+  and Retry. A non-Default preset shows as a chip in the composer that clears back
+  to Default. A first turn under any preset is still titled.
+
+- **Chat code is syntax-highlighted, and the code references the graph confirms
+  link to it (CR-204 C4/C5, S-622).** A fenced block in a chat answer or an
+  Activity step result is highlighted when it is tagged with a language Logos
+  indexes or a common config, shell or patch format; any other block renders
+  plain, as before. Highlighting uses a bundled `highlight.js` core with an explicit
+  language list. It emits CSS classes only, with no wasm and no inline style, so
+  the self-only CSP is unchanged. The colours are seven new `--syntax-*` tokens for
+  both themes, each at least 4.5:1 against the code-block background. Once an
+  answer is final, its backticked file paths and symbol names are checked against
+  the graph in one `GET /api/v1/code-refs` request of at most 24 spans. Only an
+  indexed source file, or a name exactly one node carries, becomes a link, and the
+  link opens the Graph view focused on it. Ambiguous names and missing paths stay
+  plain code. In the Workspace Chat the check runs against the member selected in
+  the shell. The Graph view now honours `?seed=` (and `?granularity=`) when it
+  opens, so the Architecture view's cycle links open focused on the module too. The
+  SPA bundle grows by 117,676 bytes, to 4.66 MiB of its 8 MiB budget.
+  `highlight.js` is BSD-3-Clause.
+
+- **A silent chat stream is reported, with Retry and Stop (CR-204 C9, S-626).**
+  While a chat turn is open, Logos already sent an empty SSE comment every 15 s on
+  the member and the Workspace Chat turn routes. That comment now reads
+  `: keepalive`. It is still a comment, not an event, so no SSE consumer sees a
+  new event. The Chat tab now counts any received byte, keepalive included, as
+  proof the connection is alive. After 45 s with nothing received, the turn's
+  "Working…" line is replaced by "No response from the server for 45 s. The
+  connection may be lost." with **Retry** (re-runs the question in place) and
+  **Stop**. A byte arriving later clears the notice. A slow subagent step never
+  trips it, because the keepalive keeps arriving. Both intervals are fixed and
+  documented in `docs/howto/usage.md`; neither is a setting. A server that exits
+  closes the connection instead, and that is still reported at once as a dropped
+  connection. Retrying the first turn of a new chat continues in the conversation
+  the retry creates; the stalled attempt's question stays in the history rail as
+  its own unanswered conversation.
+
+- **A new conversation is titled by its first answer, and a conversation can be
+  renamed (CR-204 C3, S-623).** On the turn that starts a conversation, the
+  Synthesizer is asked to end its answer with one line, `TITLE: <title>`, of at
+  most six words. The line never reaches the answer — not even for a moment when
+  it arrives split across two streamed chunks — and the title replaces the rail's
+  first-message title as the answer finishes. It rides the answer's own request,
+  so a turn makes no extra provider call. A missing, empty or over-long title
+  leaves the first-message title, which is now cleaned: whitespace collapsed, the
+  first letter capitalised, and cut at a word boundary within 60 characters. A
+  later turn never retitles. The stream carries the title as a new
+  `thread_title` event (`thread_id`, `title`); the seven existing events are
+  unchanged. Rename a conversation from the pencil on its row, or by
+  double-clicking its title: Enter saves, Esc cancels, and an empty name is
+  refused. Rename is an intent-guarded `POST …/chat/threads/{id}/rename` with a
+  `title` form field, on the member and the Workspace Chat alike; a blank,
+  missing or over-long title is `400` and an unknown conversation `404`. Renaming
+  does not move a conversation in the rail.
+
+### Changed
+
+- **Chat prose reads on its own 16px scale, and the red is kept for small signals
+  (CR-204, S-618).** Answer and user-turn text in the Chat and the Workspace Chat
+  now render at 16px on a 28px line, and answer h2/h3/h4 take weight 600 with
+  −0.025em tracking (1.875, 1.5 and 1.25rem). The app-wide 15px base is unchanged.
+  Six tokens land in `tokens.css` for the rest of the chat refresh to use:
+  `--radius-3`, `--elevation-composer` (themed), `--measure-prose`, `--text-chat`,
+  `--leading-chat` and `--tracking-heading`. "Start chatting", Send and the
+  conversation-delete confirm no longer fill with the signal red; Send carries a
+  small red dot while there is something to send. No inline style or script is
+  added, and the served CSP is byte-identical.
+- **The chat fills the window, with one scroller, a pill composer, a cardless rail
+  and a consent chip (CR-204, S-619).** At desktop widths (1024px and up) the
+  Chat and the Workspace Chat now fill the height below the header. The page no
+  longer scrolls: the transcript is the only scroller, the composer stays in view,
+  and a streaming answer is still followed to the bottom. Answer prose is held to
+  a left-aligned reading width (`--measure-prose`). The composer is now one rounded
+  pill with a focus ring around the whole pill. The input starts at one line and
+  grows to eight before it scrolls. A round Send button sits inside the pill. It is
+  neutral while the input is empty, red once there is something to send, and
+  becomes Stop while a turn runs. This replaces the red dot added above. A "+"
+  button at the start of the pill is a disabled placeholder for now. The history
+  rail is no longer a card. The open conversation and the hovered one are filled
+  rows, and the open one has a small red marker on its left edge instead of a red
+  outline. Each row's delete control is a trash icon, shown on hover, keyboard
+  focus and the open row, with the same Delete / Cancel confirmation. A toggle at
+  every width hides or shows the rail. On a wide window each chat remembers that
+  choice in the browser; on a narrow one the rail still starts collapsed. After consent, the provider/model status band becomes a one-line chip
+  (`CHAT openai · host · model · budget 24/8/3`) that expands to the full band.
+  The consent disclosure before it is unchanged. Below 1024px the panes still
+  stack, and the transcript keeps its own bounded height.
+
+- **Chat turns get rounded bubbles, icon actions, a scroll-to-bottom button and four
+  keyboard shortcuts (CR-204, S-620).** Your own turns are bubbles with a 24px
+  radius (`--radius-3`) and a 10px × 20px inset; the assistant turn stays flat. Copy
+  and Regenerate under an answer are now 24px icon buttons with a tooltip and an
+  accessible name, filled with the hover tint on hover and on keyboard focus; Copy
+  shows a check for 1.5 s once it has copied. When you scroll away from the bottom
+  of a long conversation a round ↓ button floats above the composer; it returns to
+  the bottom and the conversation follows the stream again, and at the bottom the
+  button is not rendered. **Enter** sends, **Shift+Enter** inserts a new line,
+  **Esc** stops a running turn through the same Stop the pill uses, and **⌘K**
+  (**Ctrl+K** off macOS) starts a new chat. ⌘K and Esc ignore a key typed in a text
+  field outside the conversation. A muted hint under the composer names Enter and
+  Shift+Enter, and `docs/howto/usage.md` lists all four. The Workspace Chat behaves
+  identically. No Rust, route or wire change; the served CSP is unchanged.
+
+### Fixed
+
+- **The first Chat or Files load on a fresh project no longer fails one of its
+  requests.** Opening the Chat view on a project whose history or chat store did
+  not exist yet makes several requests at once, and each one creates the store.
+  Two of them could both apply the same schema step ("table schema_versions
+  already exists") or collide switching the new file to WAL ("database is
+  locked"), and that request answered `500`. A pending step is now applied under
+  the write lock after re-reading the version, and a busy switch to WAL is
+  retried for up to about a second. Found while testing Sprint 95: 5 of 12
+  concurrent first reads failed before, 0 of 20 after.
+
+- **A chat turn stopped before any answer no longer reads "Working…" (S-626).**
+  Stop finalised the turn, but its progress line stayed up indefinitely.
+
 ## [1.15.3] — 2026-10-09
 
 ### Added

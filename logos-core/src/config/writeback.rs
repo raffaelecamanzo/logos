@@ -26,6 +26,7 @@
 //! [CR-025]: ../../../docs/requests/CR-025-interactive-config-editing.md
 //! [BR-35]: ../../../docs/specs/software-spec.md#326-web-ui
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -132,6 +133,16 @@ pub struct ConfigReadModel {
     /// [FR-CF-07]: ../../../docs/specs/requirements/FR-CF-07.md
     /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
     pub effective_wiki: EffectiveWiki,
+
+    /// The active extensions' secret keys (`table.key`), **masked** exactly as
+    /// [`chat_key`](Self::chat_key) is ([FR-CF-09], [NFR-SE-07]). Omitted when
+    /// empty, and declared last, so a read-model with no extension secret
+    /// serializes to the bytes it always did.
+    ///
+    /// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
+    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extension_secrets: BTreeMap<String, MaskedSecret>,
 }
 
 /// The read-model projection of an [`EffectiveWikiModel`] (Sprint 77 HF-1): the
@@ -495,7 +506,9 @@ pub fn read_documents(
     // The chat key is loaded only to be **masked** — the raw value never enters
     // the read-model (S-169, [NFR-SE-07]). A present-but-invalid secrets.toml
     // fails loud through the load path, like the policy files.
-    let chat_key = load_secrets_from_root(root)?.chat_key_masked();
+    let secrets = load_secrets_from_root(root)?;
+    let chat_key = secrets.chat_key_masked();
+    let extension_secrets = secrets.extension_secrets_masked();
     // The defaults projection is computed purely from Rust code — never from
     // the just-loaded documents above — so it can never echo a user's current
     // value back as a "default" (CR-067, NFR-RA-05).
@@ -526,6 +539,7 @@ pub fn read_documents(
         defaults,
         effective_chat,
         effective_wiki,
+        extension_secrets,
     })
 }
 
@@ -542,9 +556,19 @@ pub fn read_documents(
 /// [`ConfigError`] (exit 2) for an invalid candidate, or [`ConfigError::Write`]
 /// if the atomic write itself fails (original unchanged).
 pub fn write_config(root: &Path, candidate: &str) -> Result<ConfigWriteOutcome, ConfigError> {
+    write_config_validated(root, candidate, |text, path| parse_config(text, path).map(drop))
+}
+
+/// [`write_config`] over the validation `validate` — the load path's, for
+/// every caller but a test of the write itself.
+fn write_config_validated(
+    root: &Path,
+    candidate: &str,
+    validate: impl FnOnce(&str, &Path) -> Result<(), ConfigError>,
+) -> Result<ConfigWriteOutcome, ConfigError> {
     let path = root.join(CONFIG_RELPATH);
     // Validate-before-write: the candidate must clear the load path verbatim.
-    parse_config(candidate, &path)?;
+    validate(candidate, &path)?;
     // Checked-in policy → default (world-readable) perms; it travels in VCS.
     let bytes_written = atomic_write(&path, candidate.as_bytes(), None)?;
     Ok(ConfigWriteOutcome {
@@ -596,9 +620,11 @@ pub fn write_rules(root: &Path, candidate: &str) -> Result<ConfigWriteOutcome, C
 /// `api_key` is the raw key the editor posted. A blank/whitespace value
 /// **clears** the key (writes a `secrets.toml` with no `api_key`), so the
 /// editor's "remove the key" action and a fresh install converge on the same
-/// shape. Any existing secret store is loaded first so an unrelated future
-/// secret is preserved; the chat key is then set/cleared, the document
-/// re-serialised, and atomically swapped — never a partial write.
+/// shape. Any existing secret store is loaded first, and the edit is made to
+/// that document, so every other table survives — an extension's secrets, or
+/// a reserved one no active extension claims ([FR-CF-09]); the chat key is
+/// then set/cleared, the document re-serialised, and atomically swapped —
+/// never a partial write.
 ///
 /// The returned [`SecretWriteOutcome`] carries only the **masked** new state
 /// (presence + last-4), never the raw key ([NFR-SE-07]).
@@ -609,27 +635,39 @@ pub fn write_rules(root: &Path, candidate: &str) -> Result<ConfigWriteOutcome, C
 /// unchanged).
 ///
 /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
+/// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
 pub fn write_secret(root: &Path, api_key: &str) -> Result<SecretWriteOutcome, ConfigError> {
     let path = root.join(SECRETS_RELPATH);
     // Load-merge so a present-but-invalid store fails loud rather than being
-    // silently overwritten, and any unrelated secret survives.
-    let mut secrets = load_secrets_from_root(root)?;
-    let trimmed = api_key.trim();
-    secrets.chat.api_key = if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+    // silently overwritten, and every other table survives: the load path
+    // validates the store, and the edit is made to the document it read.
+    let existing = read_to_string_if_present(&path)?;
+    super::secrets::parse_secrets(&existing, &path)?;
+    let serialise_error = |message: String| ConfigError::InvalidValue {
+        key: "chat.api_key".to_string(),
+        message: format!("could not serialise secrets.toml: {message}"),
     };
-    // Serialising a `Secrets` cannot itself produce invalid TOML, but round-
+    let mut document: toml::Table =
+        toml::from_str(&existing).map_err(|e| serialise_error(e.message().to_string()))?;
+    let chat = document
+        .entry("chat")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let toml::Value::Table(chat) = chat else {
+        return Err(serialise_error("`chat` is not a table".to_string()));
+    };
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        chat.remove("api_key");
+    } else {
+        chat.insert("api_key".to_string(), toml::Value::String(trimmed.to_string()));
+    }
+    // Serialising a table cannot itself produce invalid TOML, but round-
     // tripping the exact bytes through the load-path parser keeps the "validate
     // before write" contract honest by construction.
-    let document = toml::to_string(&secrets).map_err(|source| ConfigError::InvalidValue {
-        key: "chat.api_key".to_string(),
-        message: format!("could not serialise secrets.toml: {source}"),
-    })?;
-    super::secrets::parse_secrets(&document, &path)?;
+    let document = toml::to_string(&document).map_err(|e| serialise_error(e.to_string()))?;
+    let secrets = super::secrets::parse_secrets(&document, &path)?;
     // The credential is written 0o600 (owner-only) so the at-rest key is never
     // group/world-readable, even for the brief temp-file window ([NFR-SE-07]).
     atomic_write(&path, document.as_bytes(), Some(0o600))?;
@@ -1161,8 +1199,14 @@ mod tests {
         let original = "max_file_size = 4096\n";
         seed(dir.path(), "config.toml", original);
 
+        super::super::wiki::claim_wiki_for_tests();
         let err = write_config(dir.path(), "[wiki]\nbogus = 1\n").unwrap_err();
-        assert!(matches!(err, ConfigError::Parse { .. }));
+        // The `wiki` extension validates the table it owns (S-644): rejected as
+        // its value, naming the table, the key and the file.
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, ref message } if key == "wiki" && message.contains("unknown field")),
+            "{err:?}"
+        );
         assert_eq!(err.exit_code(), 2);
         assert_eq!(
             fs::read_to_string(dir.path().join(".logos/config.toml")).unwrap(),
@@ -1179,9 +1223,10 @@ mod tests {
         let original = "max_file_size = 4096\n";
         seed(dir.path(), "config.toml", original);
 
+        super::super::wiki::claim_wiki_for_tests();
         let err = write_config(dir.path(), "[wiki]\nmodel = \"   \"\n").unwrap_err();
         assert!(
-            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "wiki.model"),
+            matches!(err, ConfigError::InvalidValue { ref key, ref message } if key == "wiki" && message.starts_with("wiki.model: must not be empty")),
             "a blank wiki.model is rejected naming wiki.model: {err:?}"
         );
         assert_eq!(err.exit_code(), 2);
@@ -1197,6 +1242,7 @@ mod tests {
         // FR-CF-07 AC: setting `[wiki].model` persists across restarts — a fresh
         // `read_documents` (simulating a reload) sees the same resolved model,
         // independent of `[chat].model`.
+        super::super::wiki::claim_wiki_for_tests();
         let dir = tempfile::tempdir().unwrap();
         let candidate = "[chat]\nmodel = \"chat/model\"\n\n[wiki]\nmodel = \"wiki/model\"\n";
         write_config(dir.path(), candidate).unwrap();
@@ -1307,6 +1353,7 @@ mod tests {
     /// never a single-root read — and the literal document still declares none.
     #[test]
     fn the_effective_wiki_slice_inherits_the_workspace_wiki_model_only_under_an_inherited_policy() {
+        super::super::wiki::claim_wiki_for_tests();
         let (ws, member) = inheriting_member();
         seed(
             ws.path(),
@@ -1493,3 +1540,7 @@ mod tests {
         assert_eq!(docs.effective_chat.credential_origin, ChatOrigin::Member);
     }
 }
+
+#[cfg(test)]
+#[path = "writeback_ownership_tests.rs"]
+mod ownership_tests;

@@ -1980,7 +1980,7 @@ fn repo_scopes_the_residue_to_the_named_members_egress() {
 /// The CLI half of the [ADR-64] no-unmarked-admission contract, at the grain the
 /// surfaces actually disagree on: the **help text**, not the payload.
 ///
-/// `xservice route-providers` is a registered MCP twin (`cli/src/main.rs`'s
+/// `xservice route-providers` is a registered MCP twin (`cli/src/lib.rs`'s
 /// `Twin("xservice route-providers")`), but that registry pins the twin's
 /// *existence*, never its wording — so the two descriptions can drift silently,
 /// and they did. [S-420] T1 made a `route` target that committed overlays compose

@@ -14,9 +14,10 @@
 //! loopback-only. It is the behavioral complement to the *structural* default-
 //! tree no-egress-client scan in logos-core/tests/no_network_deps.rs — there is
 //! no network *client* crate in this surface's graph, so it can only listen,
-//! never dial. The `agents`-gated chat/wiki-generation surface has its own
-//! zero-egress proof over the full orchestrated turn (web/tests/uat_ui_07.rs,
-//! [UAT-UI-07]).
+//! never dial. The surfaces that dial are extensions with their own zero-egress
+//! proofs: the chat extension's over the full orchestrated turn
+//! (logos-chat/tests/uat_ui_07.rs, [UAT-UI-07]), and the wiki generator's
+//! (wiki-agent/tests/uat_wk_06.rs).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -482,7 +483,7 @@ async fn config_save_without_origin_is_403() {
 }
 
 /// A `POST` to a non-enumerated path still returns `405`: the `POST` relaxation is
-/// bounded to exactly the enumerated config/chat routes, so the SPA host (`/`), the
+/// bounded to exactly the enumerated config routes, so the SPA host (`/`), the
 /// `/api/v1/*` read-models, and any unknown path stay GET-only.
 #[tokio::test]
 async fn post_to_non_config_route_is_405() {
@@ -498,42 +499,52 @@ async fn post_to_non_config_route_is_405() {
     }
 }
 
-/// Under a listen-only `--features ui` build (no `agents`), the chat and
-/// wiki-**generation** POST routes are never mounted and `method_guard` never
-/// admits them, so a **well-formed** mutating POST (valid same-origin + intent
-/// token, to rule out a mere CSRF `403`) is answered `405` — the dialing seam is
-/// genuinely absent, not merely guarded (CR-078, ADR-60, S-286). This is the
-/// complementary listen-only assertion to the `agents`-side positive coverage in
-/// `chat_sse.rs` / `wiki_sse.rs`, and it locks the core runtime consequence of
-/// the S-286 carve-out. Compiled only without `agents` (under `agents` these
-/// routes are admitted, so a 405 assertion would be wrong).
-#[cfg(not(feature = "agents"))]
+/// A fully valid mutating POST (same-origin + intent token, to rule out a mere
+/// CSRF `403`) to `path` on a router composing no extension, answered by the method
+/// guard's `405` — the only rejection left when the route is neither mounted nor
+/// admitted.
+async fn assert_unmounted_post_is_405(path: &str, why: &str) {
+    let (_dir, router, intent) = mutating_router();
+    let req = config_post(path, Some(intent.as_str()), Some("http://127.0.0.1:4983"), "q=hi");
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "POST {path} must be 405: {why}");
+}
+
+/// Chat is the `chat` extension's (S-643): a router that composes no extension
+/// mounts none of its routes and admits none of its POSTs, in **every** build — so
+/// the turn, the workspace turn and every per-thread write (delete S-209, rename
+/// S-623, truncate S-624, and their workspace twins S-482) are `405`. Only a
+/// binary's `main` composes chat in, under `agents` (the composed surface is the
+/// `cli` surface snapshots' and `logos-chat`'s own suites').
 #[tokio::test]
-async fn chat_and_wiki_generation_posts_are_405_without_agents() {
-    // The per-thread delete (`…/threads/{id}/delete`, S-209) replaced the global
-    // `/chat/clear` in the mutating allow-list; under no-`agents` it is neither
-    // mounted nor admitted, so a well-formed POST to it is still `405`.
-    // The workspace chat's turn and delete (S-482) are agents-only the same way.
+async fn chat_posts_are_405_without_the_chat_extension() {
     for path in [
-        web::CHAT_POST_ROUTE,
+        "/chat",
         "/api/v1/chat/threads/1/delete",
-        web::WORKSPACE_CHAT_POST_ROUTE,
+        "/api/v1/chat/threads/1/rename",
+        "/api/v1/chat/threads/1/truncate",
+        "/workspace/chat",
         "/api/v1/workspace/chat/threads/1/delete",
-        web::WIKI_GENERATE_ROUTE,
+        "/api/v1/workspace/chat/threads/1/rename",
+        "/api/v1/workspace/chat/threads/1/truncate",
     ] {
-        let (_dir, router, intent) = mutating_router();
-        // A fully valid mutating POST — same-origin + intent token — so the only
-        // possible rejection is `method_guard`'s 405 (an unmounted, unadmitted
-        // route), never `intent_guard`'s 403.
-        let req = config_post(path, Some(intent.as_str()), Some("http://127.0.0.1:4983"), "q=hi");
-        let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::METHOD_NOT_ALLOWED,
-            "POST {path} must be 405 in a listen-only (no-`agents`) build — the \
-             chat/wiki-generation dialing seam is carved out (CR-078, ADR-60)",
-        );
+        assert_unmounted_post_is_405(path, "no extension composes chat into this router (S-643)").await;
     }
+}
+
+/// The wiki-**generation** trigger is the `wiki` extension's, mounted only when a
+/// binary hands it a generator (S-644): a router that composes no extension mounts
+/// it nowhere and admits no `POST` to it, in **every** build, so a **well-formed**
+/// mutating POST is answered `405` — the dialing seam is genuinely absent, not
+/// merely guarded (CR-078, ADR-60, S-286). The positive coverage is the
+/// extension's own (`logos-wiki/tests/wiki_sse.rs`).
+#[tokio::test]
+async fn wiki_generation_post_is_405_without_the_wiki_extension() {
+    assert_unmounted_post_is_405(
+        "/wiki/generate",
+        "no extension composes the wiki generator into this router (S-644)",
+    )
+    .await;
 }
 
 /// An invalid candidate is rejected `422` with the typed validation message and

@@ -16,7 +16,7 @@
 //! - a work-list that **grows between auto-continued chunks** reports a
 //!   scope-accurate progress denominator, never `written > total` ([CR-093]).
 //!
-//! The real-`Engine` fixture helpers mirror `logos-core/tests/wiki_store.rs`; the
+//! The real-`Engine` fixture helpers mirror `logos-wiki/tests/wiki_store.rs`; the
 //! tripwire mirrors `agent-core/tests/zero_egress.rs`.
 
 use std::path::Path;
@@ -31,13 +31,13 @@ use agent_core::rig::completion::{
 use agent_core::rig::streaming::StreamingCompletionResponse;
 use agent_core::{MockCompletionModel, MockRawResponse, MockTurn};
 use logos_core::config::{ChatProvider, EffectiveWikiModel};
-use logos_core::wiki::{revision_pending, GenerationCategory};
 use logos_core::Engine;
+use logos_wiki::{revision_pending, GenerationCategory, WikiEngine as _};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use wiki_agent::{run_configured, ConfiguredRun, WikiAgent, WikiProgress};
 
-// ── Real-Engine fixture helpers (mirror logos-core/tests/wiki_store.rs) ───────
+// ── Real-Engine fixture helpers (mirror logos-wiki/tests/wiki_store.rs) ───────
 
 fn sh_git(cwd: &Path, args: &[&str]) {
     let out = Command::new("git")

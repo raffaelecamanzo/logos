@@ -9,7 +9,7 @@
 
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ManifestSaveOutcome,
@@ -24,6 +24,10 @@ import { WorkspaceProvider, useWorkspace } from "../../workspace/WorkspaceContex
 import { setScopedMember } from "../../workspace/scope.ts";
 import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
 import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../../extensions/registry.ts";
+import { mountChat } from "../../test/chat.ts";
+import { mountAgentsBuild } from "../../test/wiki.ts";
+import { extensionsInfo, STUB_UI, stubInfo } from "../../test/extensions.tsx";
 import { WorkspaceConfigView } from "./WorkspaceConfigView.tsx";
 
 const ROSTER: WorkspaceRoster = { workspace: "shop", default: "api", members: ["api", "web"] };
@@ -166,11 +170,17 @@ function rawPane(): HTMLTextAreaElement {
   return screen.getByLabelText(/^Raw TOML/) as HTMLTextAreaElement;
 }
 
+// The release (`agents`) build: the `chat` and `wiki` extensions active, as its server
+// reports them (S-643, S-644) — the workspace chat tier is chat's config panel here,
+// and its `[wiki]` field is offered because the wiki edits that table.
+beforeEach(mountAgentsBuild);
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   setScopedMember(null);
   switcher.current = null;
+  clearExtensions();
 });
 
 describe("the hybrid editor over the manifest (FR-UI-38 AC1)", () => {
@@ -1164,5 +1174,61 @@ describe("the workspace Config groups render as registered tool panels in one st
     const panels = expectOneWidgetStack(document.body);
     expect(panels.map(widgetTitle)).toEqual(["Workspace manifest", "Workspace chat policy and credential"]);
     for (const panel of panels) expectToolPanel(panel, "workspaceConfigGroup");
+  });
+});
+
+describe("the config panels of the mounted extensions (S-642, FR-UI-51)", () => {
+  it("renders an active extension's workspace panel last in the stack, and not its member panel", async () => {
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    await mount();
+
+    const panel = await screen.findByTestId("stub-workspace-panel");
+    expect(panel).toHaveTextContent("Stub config [stub] (workspace)");
+    expect(screen.queryByTestId("stub-member-panel")).toBeNull();
+    const stack = document.body.querySelector("[data-widget-stack]") as HTMLElement;
+    expect(stack.lastElementChild).toBe(panel);
+  });
+
+  it("renders no panel for an extension the server does not report active", async () => {
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo());
+    await mount();
+    expect(screen.queryByTestId("stub-workspace-panel")).toBeNull();
+  });
+
+  it("renders no panel in a single-root serve, where the view states it is not a workspace", async () => {
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    await mount({ probeStatus: 404 });
+    await screen.findByText(/Not a workspace/);
+    expect(screen.queryByTestId("stub-workspace-panel")).toBeNull();
+  });
+});
+
+describe("a build without the chat extension (S-643)", () => {
+  beforeEach(clearExtensions);
+
+  it("offers no workspace chat tier — the manifest group alone", async () => {
+    await mount();
+    expect(screen.getByText("Workspace manifest")).toBeInTheDocument();
+    expect(screen.queryByText("Workspace chat policy and credential")).toBeNull();
+    expect(screen.queryByText("chat API key")).toBeNull();
+  });
+
+  it("offers it again, as the chat extension's panel, once the server reports chat active", async () => {
+    mountChat();
+    await mount();
+    expect(await screen.findByText("Workspace chat policy and credential")).toBeInTheDocument();
+  });
+});
+
+describe("the tier's [wiki] field is the wiki extension's (S-644)", () => {
+  it("is not offered while chat alone is active — a build without the wiki", async () => {
+    clearExtensions();
+    mountChat();
+    const { card } = await mountedTier();
+    expect(within(card).getByText("[chat]", { selector: "legend" })).toBeInTheDocument();
+    expect(within(card).queryByText("[wiki]", { selector: "legend" })).toBeNull();
   });
 });

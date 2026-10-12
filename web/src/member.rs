@@ -53,8 +53,11 @@ pub(crate) const REPO_PARAM: &str = "repo";
 /// default member, or the `?repo=`-selected member (see the module docs).
 ///
 /// Extracted in place of `State<Arc<Engine>>` by every `/api/v1/*` read handler,
-/// so a handler body is unchanged — it still just holds an `Arc<Engine>`.
-pub(crate) struct MemberEngine(pub(crate) Arc<Engine>);
+/// so a handler body is unchanged — it still just holds an `Arc<Engine>`. Public
+/// so an extension's handlers (the `chat` extension's, S-643) scope a request to
+/// the member exactly as the core's do: their state needs only `Arc<Engine>` and
+/// `Arc<Backing<Engine>>` through [`FromRef`].
+pub struct MemberEngine(pub Arc<Engine>);
 
 /// An honest error body at `status` ([NFR-RA-05]).
 fn refuse(status: StatusCode, error: String) -> Response {
@@ -148,15 +151,16 @@ where
 /// has no second tier by construction ([ADR-52]). Taken from the backing, never
 /// discovered: no manifest parse, no up-tree walk.
 ///
-/// The **one** spelling of that derivation. The member config read, the chat and
-/// wiki-generation services, and the [`WorkspaceRoot`] extractor all ask here, so
+/// The **one** spelling of that derivation. The member config read, the chat
+/// extension's services (S-643), the wiki-generation service, and the
+/// [`WorkspaceRoot`] extractor all ask here, so
 /// the root the Config tab reports inheriting from, the root a turn dials with,
 /// and the root a workspace save writes to cannot drift apart.
 ///
 /// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
 /// [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
 /// [ADR-67]: ../../docs/specs/architecture/decisions/ADR-67.md
-pub(crate) fn workspace_root_of(backing: &Backing<Engine>) -> Option<PathBuf> {
+pub fn workspace_root_of(backing: &Backing<Engine>) -> Option<PathBuf> {
     backing
         .as_federated()
         .map(|registry| registry.federation().root.clone())
@@ -175,7 +179,7 @@ pub(crate) fn workspace_root_of(backing: &Backing<Engine>) -> Option<PathBuf> {
 /// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
 /// [ADR-40]: ../../docs/specs/architecture/decisions/ADR-40.md
 /// [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
-pub(crate) struct WorkspaceRoot(pub(crate) PathBuf);
+pub struct WorkspaceRoot(pub PathBuf);
 
 #[async_trait]
 impl<S> FromRequestParts<S> for WorkspaceRoot

@@ -353,15 +353,24 @@ pub struct Config {
     /// [FR-CF-06], [ADR-40], [ADR-41]). Optional; an absent table behaves as
     /// all-defaults (OpenRouter `base_url`, the documented budget-tree defaults).
     /// The **API key is not here** — it lives in the gitignored
-    /// [`secrets.toml`](super::secrets) ([NFR-SE-07]). Chat is `ui`-only at
-    /// runtime, but its *policy* is parsed in the core like every other table so
-    /// the substrate needs no `ui`-only config dependency.
+    /// [`secrets.toml`](super::secrets) ([NFR-SE-07]).
+    ///
+    /// **Not in the core's own parse** (`skip_deserializing`): the table may be
+    /// claimed by the `chat` extension ([FR-CF-09], S-643), so it is routed before
+    /// the core's `deny_unknown_fields` parse and validated by that extension when
+    /// it is active. The core still *reads* it, because it is the
+    /// policy half of the `resolve_chat` seam the chat extension and the wiki
+    /// generator both dial through: [`parse_config`](super::parse_config) fills
+    /// this field — from the table its owner validated, or, with no extension
+    /// claiming it, by the core's own parse exactly as before. It is still
+    /// serialised, so the config read-model is unchanged.
     ///
     /// [FR-CF-06]: ../../../../docs/specs/requirements/FR-CF-06.md
+    /// [FR-CF-09]: ../../../../docs/specs/requirements/FR-CF-09.md
     /// [NFR-SE-07]: ../../../../docs/specs/requirements/NFR-SE-07.md
     /// [ADR-40]: ../../../../docs/specs/architecture/decisions/ADR-40.md
     /// [ADR-41]: ../../../../docs/specs/architecture/decisions/ADR-41.md
-    #[serde(default)]
+    #[serde(skip_deserializing)]
     pub chat: ChatConfig,
 
     /// Dedicated wiki generation model, distinct from [`chat`](Self::chat)
@@ -370,10 +379,20 @@ pub struct Config {
     /// no separate wiki `provider`/`base_url`/secret — those are always
     /// inherited from `[chat]`/`secrets.toml`.
     ///
+    /// **Not in the core's own parse** (`skip_deserializing`): the table is the
+    /// `wiki` extension's ([S-644], [FR-CF-09]), routed out of the core's
+    /// `deny_unknown_fields` parse and validated by that extension when it is
+    /// active. [`parse_config`](super::parse_config) fills this field from the
+    /// table its owner validated; with no extension claiming it, the table is
+    /// ignored like any reserved table and this is the default. It is still
+    /// serialised, so the config read-model is unchanged.
+    ///
     /// [CR-047]: ../../../../docs/requests/CR-047-internal-wiki-generation-on-agent-substrate.md
     /// [FR-CF-07]: ../../../../docs/specs/requirements/FR-CF-07.md
+    /// [FR-CF-09]: ../../../../docs/specs/requirements/FR-CF-09.md
     /// [ADR-42]: ../../../../docs/specs/architecture/decisions/ADR-42.md
-    #[serde(default)]
+    /// [S-644]: ../../../../docs/planning/journal.md#s-644-the-wiki-is-its-own-crate-and-a-registered-extension
+    #[serde(skip_deserializing)]
     pub wiki: WikiConfig,
 }
 
@@ -1020,13 +1039,11 @@ impl Config {
                 });
             }
         }
-        // [FR-CF-06] / S-169: the `[chat]` budget-tree + range knobs fail loud at
-        // load (exit 2) — an out-of-range value never reaches the orchestrator.
-        self.chat.validate()?;
-        // [FR-CF-07] / CR-047: a blank `[wiki].model` fails loud at load (exit 2)
-        // rather than resolving to a meaningless override. [FR-WK-17]: a `0`
-        // `revision_stale_threshold` is likewise rejected at load.
-        self.wiki.validate()?;
+        // `[chat]`'s bounds ([FR-CF-06]) are checked where it is read since S-643:
+        // by the `chat` extension when it claims the table ([FR-CF-09]), else by
+        // the core's own parse (`ChatConfig::from_document`) — never here.
+        // `[wiki]`'s bounds ([FR-CF-07], [FR-WK-17]) are likewise its owner's since
+        // S-644: the `wiki` extension validates the table it claims ([FR-CF-09]).
         Ok(())
     }
 

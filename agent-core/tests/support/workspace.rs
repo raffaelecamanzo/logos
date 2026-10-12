@@ -4,7 +4,7 @@
 //! directory beside the members.
 //!
 //! Shared by path, not copied: `agent-core/tests/addressed_workspace_tools.rs`
-//! (the tools' own behaviour) and `web/tests/mcp_parity_workspace_tools.rs` (the
+//! (the tools' own behaviour) and `logos-chat/tests/mcp_parity_workspace_tools.rs` (the
 //! tools against their MCP twins) must read the same workspace, or a payload
 //! that differs between them could be a fixture that drifted rather than a tool
 //! that diverged. Everything here is fixture plumbing: no assertions live in this

@@ -138,6 +138,27 @@ describe("ArchitectureView with the cycles register entry removed (S-612, FR-UI-
     expect(within(cyclesTable).getByRole("button", { name: "db" })).toBeInTheDocument();
   });
 
+  it("opens a cycle participant in the Graph view at the DSM's own tier (S-622)", async () => {
+    // A DSM row is a key of the rollup view it was built at; the Graph view seeds
+    // within a tier, so the link must name it — a symbol-tier seed of `api` would
+    // find nothing.
+    for (const [tier, expected] of [
+      ["module", "/graph?seed=api&granularity=module"],
+      ["file", "/graph?seed=api&granularity=file"],
+    ] as const) {
+      window.history.replaceState({}, "", "/architecture");
+      const model = withCycle();
+      model.dsm.granularity = tier;
+      stub(model);
+      render(<ArchitectureView />);
+      const cyclesTable = await screen.findByRole("table", { name: "Cycles" });
+      within(cyclesTable).getByRole("button", { name: "api" }).click();
+      expect(`${window.location.pathname}${window.location.search}`).toBe(expected);
+      cleanup();
+    }
+    window.history.replaceState({}, "", "/");
+  });
+
   it("reads an acyclic graph as muted and shows the no-cycles state", async () => {
     const acyclic = withCycle();
     acyclic.dsm.matrix = [

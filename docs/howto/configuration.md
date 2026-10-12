@@ -389,6 +389,31 @@ on another machine cannot mislabel a member that has an index):
 Absent file (or absent fields) = defaults. **Unknown keys fail loud with
 exit 2** — a typo never silently does nothing.
 
+**Tables an extension owns.** Each top-level table of `config.toml`, and each
+key of `secrets.toml`, belongs either to the core or to an extension compiled
+into the binary. An extension checks its own tables when the file is loaded
+and before an editor saves it. A failure exits 2, just like a core error:
+``invalid value for <table>: … (the table belongs to the `<id>` extension; in
+<file>)``. It names the table, its extension and the file, but not a line and
+column, and it never repeats a value from the file. Two
+extensions own tables today. The `wiki` extension, on in the default and
+release builds, owns `[wiki]`. The `chat` extension, compiled under `agents`
+(the release binary), owns `[chat]` and the `chat.api_key` secret.
+
+These tables are **reserved**, so a config written for a build with an
+extension keeps working in a build without it:
+
+- **`[wiki]` without the wiki** still parses. Logos ignores it, prints one
+  notice on stderr naming it (`notice: … declares [wiki], which no active
+  extension claims: ignored, and kept in the file`), and the Config editor
+  keeps it in the file when it saves.
+- **`[chat]` without chat** is still read and validated by the core, exactly
+  as before chat became an extension: a malformed table fails with the core's
+  parse error, line and column included. The `chat.api_key` secret is kept,
+  and the key-write routes stay available.
+
+Every other unknown table or key still fails with the same error as before.
+
 ```toml
 # Optional code-language admission allowlist (grammar names from `logos languages`).
 # Omit it (or use []) to index every compiled-in code language out of the box —
@@ -1069,13 +1094,15 @@ member engine.
 
 | Route | Does |
 |---|---|
-| `POST /workspace/chat` | One turn (form `q=`, optional `thread=`), streamed as Server-Sent Events with `Accept: text/event-stream`, else the buffered answer — the `POST /chat` contract. `?repo=` is ignored. |
+| `POST /workspace/chat` | One turn (form `q=`, optional `thread=`, optional `preset=`), streamed as Server-Sent Events with `Accept: text/event-stream`, else the buffered answer — the `POST /chat` contract. `preset` is `default`, `impact_analysis`, `onboarding` or `troubleshooting` (absent means `default`); any other value is a `400` and runs no turn. `?repo=` is ignored. |
 | `GET /api/v1/workspace/chat/threads` | The workspace chat's conversations, most recent first. |
 | `GET /api/v1/workspace/chat/threads/{id}` | One conversation's messages; `404` for an unknown id. |
 | `POST /api/v1/workspace/chat/threads/{id}/delete` | Deletes one conversation; `404` for an unknown id. |
+| `POST /api/v1/workspace/chat/threads/{id}/rename` | Renames one conversation (form `title=`, at most 60 characters); `400` for a blank or over-long title, `404` for an unknown id. |
+| `POST /api/v1/workspace/chat/threads/{id}/truncate` | Cuts one conversation back to before a question (form `user_turn=`, the 0-based index among its stored questions): that question, every later message and the agent memory written after the cut are deleted together. A `user_turn` past the stored questions deletes nothing. `400` for a missing or non-numeric `user_turn`, `404` for an unknown id. |
 | `GET /api/v1/workspace/config/read-roots` | Every member's effective `[chat] read_roots`, with where its policy came from (`policy_origin`) and the root they resolve against (`declared_by`: `member` or `workspace`; `null` when that member's chat config cannot be read). Config reads only — no member engine is started. |
 
-The two POST routes carry the same-origin + intent-token guard, and every route above
+The four POST routes carry the same-origin + intent-token guard, and every route above
 answers `404 not a workspace` under a single-root server. A build without `agents` has
 no chat routes at all; the read-roots route, which reads config only, is served in
 every `ui` build.

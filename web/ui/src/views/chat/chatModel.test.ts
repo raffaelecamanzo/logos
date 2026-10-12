@@ -18,11 +18,14 @@ import {
   configureFirstCopy,
   initialTurn,
   modelLabel,
+  normalizeThreadTitle,
   readRoots,
   parseSseBlock,
   readSseStream,
   rememberConsent,
   roleLabel,
+  THREAD_TITLE_MAX,
+  threadTitleOf,
   turnEndedEmpty,
   workspaceChatReadiness,
   workspaceConfigRepairHref,
@@ -776,5 +779,40 @@ describe("readRoots (sprint-79 HF-1) — the declared extra read roots", () => {
       "../logos-docs",
       "/srv/specs",
     ]);
+  });
+});
+
+describe("threadTitleOf (S-623, FR-UI-48) — the title a thread_title frame carries", () => {
+  const frame = (name: string, data: string): SseFrame => ({ name, data });
+
+  it("reads the conversation and its title", () => {
+    expect(threadTitleOf(frame("thread_title", '{"thread_id":9,"title":"Risk in alpha"}'))).toEqual({
+      threadId: 9,
+      title: "Risk in alpha",
+    });
+  });
+
+  it("drops every other frame, and a malformed one, rather than guess", () => {
+    for (const f of [
+      frame("final_answer", '{"thread_id":9,"title":"x"}'),
+      frame("thread_title", "not json"),
+      frame("thread_title", '{"thread_id":9.5,"title":"x"}'),
+      frame("thread_title", '{"thread_id":"9","title":"x"}'),
+      frame("thread_title", '{"thread_id":9}'),
+      frame("thread_title", '{"thread_id":9,"title":" "}'),
+    ]) {
+      expect(threadTitleOf(f), JSON.stringify(f)).toBeNull();
+    }
+  });
+});
+
+describe("normalizeThreadTitle (S-623) — a rename as the store will hold it", () => {
+  it("collapses whitespace and refuses an empty or over-long name", () => {
+    expect(normalizeThreadTitle("  Binder \n  map ")).toBe("Binder map");
+    expect(normalizeThreadTitle(" \t ")).toBeNull();
+    expect(normalizeThreadTitle("y".repeat(THREAD_TITLE_MAX))).toBe("y".repeat(THREAD_TITLE_MAX));
+    expect(normalizeThreadTitle("y".repeat(THREAD_TITLE_MAX + 1))).toBeNull();
+    // Counted in characters, as the store counts them, not UTF-16 units.
+    expect(normalizeThreadTitle("😀".repeat(THREAD_TITLE_MAX))).toBe("😀".repeat(THREAD_TITLE_MAX));
   });
 });

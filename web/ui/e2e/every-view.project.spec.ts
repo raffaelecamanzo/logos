@@ -5,13 +5,14 @@
 // browser from the served bundle.
 //
 // "Every" is the sidebar's own list (`navItemsFor` in src/nav.ts — the registry
-// less what the hidden-widget register hides), not a hand-kept one: the first
-// test fails until a new view has a case here.
+// less what the hidden-widget register hides) plus the member views the served
+// build's active extensions add (`GET /api/v1/extensions`, S-642), not a hand-kept
+// one: the first test fails until a new view has a case here.
 import { expect, test, type Page } from "@playwright/test";
 
 import { navItemsFor } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
-import { configuredChat, layoutCase, type ViewCase } from "./views.ts";
+import { configuredChat, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
 const CASES: Record<string, ViewCase> = {
   "/": { ready: "Code coverage" },
@@ -28,8 +29,12 @@ const CASES: Record<string, ViewCase> = {
   "/config": { ready: "rules.toml" },
 };
 
-test("a layout case exists for every view the project sidebar offers", () => {
-  expect(Object.keys(CASES).sort()).toEqual(navItemsFor(false).map((item) => item.path).sort());
+test("a layout case exists for every view the project sidebar offers", async ({ request }) => {
+  const composed = [
+    ...navItemsFor(false).map((item) => item.path),
+    ...(await extensionNavPaths(request, "member")),
+  ];
+  expect(Object.keys(CASES).sort()).toEqual(composed.sort());
 });
 
 // The Architecture view is hidden through the register (CR-208, FR-UI-41): the

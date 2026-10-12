@@ -1,8 +1,9 @@
 /*
  * Chat view model (S-190, CR-049, FR-UI-18, FR-UI-19, FR-UI-23) — the PURE half of
- * the migrated Chat tab: the SSE wire types, the SSE-block parser, the per-turn
- * event reducer (plan / subagent-activity / answer-token / final-answer / honest
- * halt / honest error), the readiness verdict over the effective chat resolution
+ * the migrated Chat tab: the SSE wire types, the shared SSE reader (re-exported from
+ * `api/sse.ts`) and the stalled-stream threshold (S-626), the per-turn event
+ * reducer (plan / subagent-activity / answer-token / final-answer / honest halt /
+ * honest error), the readiness verdict over the effective chat resolution
  * (S-452 — which root was inspected, which half is absent, where the present half
  * came from), and the consent + endpoint-disclosure helpers.
  *
@@ -15,6 +16,7 @@
  * the effective provider, model, and endpoint host (NFR-SE-07).
  */
 
+import type { SseFrame } from "../../api/sse.ts";
 import { WORKSPACE_NAV_ITEMS } from "../../nav.ts";
 import { urlWithMember } from "../../workspace/scope.ts";
 import type { WorkspaceMode } from "../../workspace/WorkspaceContext.tsx";
@@ -45,7 +47,11 @@ export type OrchestratorEvent =
   | { event: "step_observed"; index: number; role: StepRole; summary: string }
   | { event: "halted"; round: number; bound: BudgetBound }
   | { event: "answer_delta"; delta: string }
-  | { event: "final_answer"; answer: string };
+  | { event: "final_answer"; answer: string }
+  // Additive (S-623, FR-UI-48): the Synthesizer named the conversation its turn
+  // opened. Not a turn transition — `applyFrame` leaves it alone; the runtime hands
+  // it to the rail ({@link threadTitleOf}).
+  | { event: "thread_title"; thread_id: number; title: string };
 
 // ── Config read-model (the effective-chat slice, S-448/S-452) ──────────────────
 // A focused mirror of the ONE part of `ConfigReadModel`
@@ -136,7 +142,8 @@ export interface MemberChatReadRoots {
 // plain fixture. No secret ever rides these payloads ([NFR-SE-07]).
 
 /** One conversation in the rail list (mirrors `web::ThreadSummary`,
- *  `GET /api/v1/chat/threads`): the rowid, the S-208 auto-title, and the
+ *  `GET /api/v1/chat/threads`): the rowid, the title (the Synthesizer's, the
+ *  cleaned first message, or the user's rename — S-208, S-623), and the
  *  most-recent-first `updated_at` sort key (Unix seconds). */
 export interface ThreadSummary {
   id: number;
@@ -254,7 +261,7 @@ function rootInspected(scope: ChatScope): RootInspected {
  * answer and decides nothing.
  *
  * Ready iff BOTH origins are declared. That is the predicate the turn path applies
- * (`turn_provider`, `web/src/chat/mod.rs`) to the same resolution ([ADR-67] §6), so
+ * (`turn_provider`, `logos-chat/src/service.rs`) to the same resolution ([ADR-67] §6), so
  * the tab and the turn cannot disagree. No second model-or-key check is made here:
  * the seam already treats a blank model and a blank key as undeclared.
  */
@@ -323,7 +330,7 @@ export function workspaceConfigRepairHref(scope: ChatScope): string | null {
 
 /** The configure-first state's sentences, composed from the verdict alone so the
  *  view only lays them out. Worded to match the turn path's refusal
- *  (`configure_first_message`, `web/src/chat/mod.rs`): same halves, same origins. */
+ *  (`configure_first_message`, `logos-chat/src/service.rs`): same halves, same origins. */
 export interface ConfigureFirstCopy {
   /** The root inspected and the absent half, e.g. "Chat is not configured yet for
    *  billing-service — no API key is declared by billing-service or by the
@@ -468,65 +475,26 @@ export function boundNote(bound: BudgetBound | undefined): string {
   return "the turn halted at a budget bound";
 }
 
-// ── SSE block parsing (mirrors chat.js `parseBlock`) ──────────────────────────
+// ── SSE reading and stream liveness ───────────────────────────────────────────
 
-/** One parsed SSE frame: the `event:` name and the joined `data:` payload. */
-export interface SseFrame {
-  name: string;
-  data: string;
-}
-
-/**
- * Parse one SSE block (a run of lines up to a blank line) into a {@link SseFrame},
- * or `null` when the block carries no `data:` line (a bare keep-alive comment). The
- * default event name is `"message"` (the SSE spec default), matching the wire.
- */
-export function parseSseBlock(block: string): SseFrame | null {
-  let name = "message";
-  const dataParts: string[] = [];
-  for (const line of block.split("\n")) {
-    if (line === "" || line.charAt(0) === ":") continue; // blank or keep-alive comment
-    if (line.startsWith("event:")) {
-      name = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      dataParts.push(line.slice(5).replace(/^ /, ""));
-    }
-  }
-  return dataParts.length > 0 ? { name, data: dataParts.join("\n") } : null;
-}
+// The chat surface reads its stream through the one shared SSE reader the wiki
+// surface also uses (S-626 removed this module's hand-mirrored copy of it, so the
+// byte-arrival hook the liveness watchdog needs exists once).
+export { parseSseBlock, readSseStream, type SseFrame } from "../../api/sse.ts";
 
 /**
- * Read an SSE response body to completion, invoking `onFrame` for each parsed
- * frame. Mirrors chat.js's reader loop: decode incrementally, split on the `\n\n`
- * block separator, flush the tail. Operates on the raw `ReadableStream` so it is
- * driven identically by the browser and by a test's hand-built stream.
+ * Seconds of silence — no byte at all, event or keepalive comment — after which an
+ * open chat turn shows the stalled-stream notice (S-626, [FR-UI-50]). The server
+ * writes a `: keepalive` comment every 15 s while a turn is open
+ * (`CHAT_KEEPALIVE_INTERVAL` in `web/src/lib.rs`), so this is three missed
+ * keepalives: a slow subagent step never trips it, only a dead connection does. A
+ * documented constant, not a setting (`docs/howto/usage.md`).
  */
-export async function readSseStream(
-  body: ReadableStream<Uint8Array> | null,
-  onFrame: (frame: SseFrame) => void,
-): Promise<void> {
-  if (!body) return;
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    buffer += decoder.decode(chunk.value, { stream: true });
-    let sep: number;
-    while ((sep = buffer.indexOf("\n\n")) !== -1) {
-      const block = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const frame = parseSseBlock(block);
-      if (frame) onFrame(frame);
-    }
-  }
-  buffer += decoder.decode(); // flush any partial multi-byte char the streaming decoder held
-  if (buffer.trim()) {
-    const frame = parseSseBlock(buffer);
-    if (frame) onFrame(frame);
-  }
-}
+export const STALL_THRESHOLD_SECONDS = 45;
+
+/** The stalled-stream notice, verbatim from [FR-UI-50]. It names what the client
+ *  observed — silence — and claims no cause it cannot see ([NFR-CC-04]). */
+export const STALL_NOTICE = `No response from the server for ${STALL_THRESHOLD_SECONDS} s. The connection may be lost.`;
 
 // ── Per-turn state machine ────────────────────────────────────────────────────
 
@@ -650,6 +618,43 @@ export function applyFrame(state: TurnState, frame: SseFrame): TurnState {
     return { ...state, answer: answer || state.answer, streaming: false, finalized: true };
   }
   return state;
+}
+
+/** The longest a conversation title may run, in characters (mirrors
+ *  `chat_agent::THREAD_TITLE_MAX`): the rename field's limit, which the store
+ *  enforces again. */
+export const THREAD_TITLE_MAX = 60;
+
+/**
+ * A rename as the store will hold it (mirrors `chat_agent::normalize_thread_title`):
+ * whitespace runs collapse to one space and the ends are trimmed. `null` when nothing
+ * is left or the result runs past {@link THREAD_TITLE_MAX} characters — the rail
+ * refuses those rather than sending them. The two whitespace classes differ at the
+ * edges (JS `\s` takes U+FEFF and not U+0085; Rust's `White_Space` the reverse);
+ * the store's form wins, because the rail re-reads the list after every rename.
+ */
+export function normalizeThreadTitle(raw: string): string | null {
+  const title = raw.split(/\s+/).filter(Boolean).join(" ");
+  return title !== "" && [...title].length <= THREAD_TITLE_MAX ? title : null;
+}
+
+/**
+ * The conversation title a `thread_title` frame carries (S-623, [FR-UI-48]), or
+ * `null` for any other frame or a malformed one — never a guessed title.
+ */
+export function threadTitleOf(frame: SseFrame): { threadId: number; title: string } | null {
+  if (frame.name !== "thread_title") return null;
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(frame.data) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const threadId = data.thread_id;
+  const title = data.title;
+  if (typeof threadId !== "number" || !Number.isInteger(threadId)) return null;
+  if (typeof title !== "string" || title.trim() === "") return null;
+  return { threadId, title };
 }
 
 /**
@@ -937,7 +942,7 @@ export function workspaceChatReadiness(model: WorkspaceChatConfigReadModel): Wor
 
 /** The Workspace Chat's configure-first sentences, from the verdict and the
  *  workspace's name — worded as the workspace turn's own refusal is
- *  (`configure_first_message`, `web/src/chat/workspace.rs`): the workspace root, the
+ *  (`configure_first_message`, `logos-chat/src/service/workspace.rs`): the workspace root, the
  *  missing half, the present half, and that a member's `[chat]` does not configure
  *  this chat. The view links the action to Workspace Config. */
 export interface WorkspaceConfigureFirstCopy {

@@ -8,13 +8,60 @@
  * function here is pure (NFR-RA-06 determinism).
  */
 
-import type { GraphElementEdge, GraphElementNode, GraphLayer } from "../../api/types.ts";
+import type { GraphElementEdge, GraphElementNode, GraphGranularity, GraphLayer } from "../../api/types.ts";
 
 /** The home-tier visible-element budget (graph.js `capForZoom(1)`) — the cap the
  *  opening snapshot and every re-fetch use. Defined once here so `GraphView`
  *  (opening fetch) and `GraphExplorer` (re-fetches) can never drift, which would
  *  desync the merge/elision counting. */
 export const DEFAULT_CAP = 250;
+
+// ── The `/graph?seed=` deep link (S-622, FR-UI-47) ───────────────────────────
+// Written by the chat's verified code-reference links, read by `GraphView` when it
+// opens. Both directions live here so the spelling has one definition.
+
+/** A deep link into the Graph view: the seed and the tier it is a key of. */
+export interface GraphSeedLink {
+  seed: string | null;
+  granularity: GraphGranularity;
+}
+
+/** The Graph view URL seeded on `seed`. A symbol seed is a key of the default
+ *  symbol tier and carries no tier param; a file path is a key of the file tier
+ *  only (`graph_elements` resolves a seed within its tier), so it names it. */
+export function graphSeedHref(seed: string, granularity: GraphGranularity = "symbol"): string {
+  const params = new URLSearchParams({ seed });
+  if (granularity !== "symbol") params.set("granularity", granularity);
+  return `/graph?${params.toString()}`;
+}
+
+/** `url` with the deep link's `seed`/`granularity` params removed and every other
+ *  param (the member's `repo`) and the fragment kept. The Graph view consumes the
+ *  link once: left in the URL, a member switch (which keeps the query) or a reload
+ *  after Reset would re-seed a node the view has moved away from. */
+export function withoutGraphSeed(url: string): string {
+  const hashAt = url.indexOf("#");
+  const hash = hashAt === -1 ? "" : url.slice(hashAt);
+  const bare = hashAt === -1 ? url : url.slice(0, hashAt);
+  const queryAt = bare.indexOf("?");
+  if (queryAt === -1) return url;
+  const params = new URLSearchParams(bare.slice(queryAt + 1));
+  params.delete("seed");
+  params.delete("granularity");
+  const query = params.toString();
+  return `${bare.slice(0, queryAt)}${query ? `?${query}` : ""}${hash}`;
+}
+
+/** Read a deep link from a `location.search` string. An absent or empty seed is
+ *  the whole graph; an unrecognised tier is the default symbol tier, as the
+ *  server's `?granularity=` reads it. */
+export function graphSeedFromSearch(search: string): GraphSeedLink {
+  const params = new URLSearchParams(search);
+  const seed = params.get("seed")?.trim() || null;
+  const tier = params.get("granularity");
+  const granularity: GraphGranularity = tier === "file" || tier === "module" ? tier : "symbol";
+  return { seed, granularity };
+}
 
 // ── Palettes (mirror logos.css §1.2 / graph.js; ECharts paints to <canvas> and
 // cannot read CSS custom properties, so the few hues it needs are reproduced). ──

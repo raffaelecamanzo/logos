@@ -1882,8 +1882,8 @@ pub struct StatsInfo {
 pub struct ToolUsage {
     /// The recording surface, e.g. `"cli"`, `"mcp"`, `"watcher"`, `"web"`,
     /// `"shell"`, `"wikigen"`, or `"chat"`. Self-referential reads — the
-    /// Statistics tab's own `stats` request and the shell's `status` readout —
-    /// are excluded per event, so opening the tab never inflates its own
+    /// Statistics tab's own `stats` request, the shell's `status` readout and
+    /// the chat's automatic code-refs lookup — are excluded per event, so opening the tab never inflates its own
     /// numbers ([FR-OB-09]); a graph query issued through the dashboard is
     /// counted like any other, so `"web"` rows do appear here.
     ///

@@ -11,6 +11,7 @@ export {
   apiFetch,
   apiUrl,
   fetchArchitecture,
+  fetchCodeRefs,
   fetchCoverage,
   fetchFiles,
   fetchGaps,

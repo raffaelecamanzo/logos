@@ -652,134 +652,12 @@ fn hooks_outside_a_git_repository_skip_gracefully() {
     assert!(!s.detail.is_empty());
 }
 
-// ── FR-WK-08 / UAT-WK-04: the embedded wiki-generation skill, materialized ──
-
-/// `init -i` lays down the canonical layout: `.agents/skills/logos-wiki/` holds
-/// the content, `.claude/skills/logos-wiki` resolves to it, and the content
-/// equals the embedded asset including the binary-version header (UAT-WK-04).
-#[test]
-fn init_i_materializes_the_wiki_skill_in_the_canonical_layout() {
-    let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
-
-    let skill_dir = tmp.path().join(logos_core::wiki::SKILL_DIR_REL);
-    let link = tmp.path().join(logos_core::wiki::SKILL_LINK_REL);
-    assert!(skill_dir.join("SKILL.md").exists(), "canonical dir exists");
-
-    // Content equals the embedded asset, version header resolved.
-    let expected = logos_core::wiki::rendered_skill();
-    assert_eq!(
-        read(tmp.path(), ".agents/skills/logos-wiki/SKILL.md"),
-        expected
-    );
-    assert!(expected.contains("name: logos-wiki"), "frontmatter present");
-    assert!(
-        !expected.contains("{{LOGOS_VERSION}}"),
-        "the version header is resolved"
-    );
-
-    // The pointer resolves to the same content (symlink on unix, copy elsewhere).
-    assert_eq!(fs::read_to_string(link.join("SKILL.md")).unwrap(), expected);
-    #[cfg(unix)]
-    assert!(
-        fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        ".claude/skills/logos-wiki is a symlink on unix"
-    );
-
-    let s = step(&result, ".agents/skills/logos-wiki");
-    assert_eq!(s.action, InitAction::Created);
-}
-
-/// A second `init -i` skips the skill, preserving a local edit (FR-IN-02
-/// idempotence); plain `init` (no `-i`) never materializes it.
-#[test]
-fn second_init_i_skips_the_skill_preserving_edits() {
-    let tmp = TempDir::new().unwrap();
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
-
-    let skill_file = tmp.path().join(".agents/skills/logos-wiki/SKILL.md");
-    fs::write(&skill_file, "LOCAL EDIT").unwrap();
-
-    let again = Engine::init_with(tmp.path(), &interactive()).unwrap();
-    assert_eq!(
-        step(&again, ".agents/skills/logos-wiki").action,
-        InitAction::Unchanged
-    );
-    assert_eq!(
-        fs::read_to_string(&skill_file).unwrap(),
-        "LOCAL EDIT",
-        "the unforced re-run preserves the local edit"
-    );
-}
-
-/// Plain `init` (no host-integration steps) leaves the skill unmaterialized —
-/// it rides the `-i` integration only.
-#[test]
-fn plain_init_does_not_materialize_the_skill() {
-    let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
-    assert!(
-        !tmp.path().join(".agents/skills/logos-wiki").exists(),
-        "no skill without -i"
-    );
-}
-
-/// `Engine::wiki_skill_emit` is the standalone refresh path behind
-/// `logos wiki skill --emit [dir] [--force]`: unforced skips an existing
-/// install; `--force` restores the embedded content (UAT-WK-04).
-#[test]
-fn wiki_skill_emit_skip_and_force_round_trip() {
-    let tmp = TempDir::new().unwrap();
-    let engine = Engine::open(tmp.path());
-
-    let created = engine.wiki_skill_emit(None, false).unwrap();
-    assert_eq!(created.action, logos_core::wiki::EmitAction::Created);
-
-    let skill_file = tmp.path().join(".agents/skills/logos-wiki/SKILL.md");
-    fs::write(&skill_file, "LOCAL EDIT").unwrap();
-
-    let skipped = engine.wiki_skill_emit(None, false).unwrap();
-    assert_eq!(skipped.action, logos_core::wiki::EmitAction::Skipped);
-    assert_eq!(fs::read_to_string(&skill_file).unwrap(), "LOCAL EDIT");
-
-    let forced = engine.wiki_skill_emit(None, true).unwrap();
-    assert_eq!(forced.action, logos_core::wiki::EmitAction::Forced);
-    assert_eq!(
-        fs::read_to_string(&skill_file).unwrap(),
-        logos_core::wiki::rendered_skill(),
-        "--force restores the embedded content"
-    );
-}
-
-/// `--emit [dir]` targets an explicit base directory, not the project root.
-#[test]
-fn wiki_skill_emit_honours_an_explicit_dir() {
-    let tmp = TempDir::new().unwrap();
-    let sub = tmp.path().join("elsewhere");
-    fs::create_dir_all(&sub).unwrap();
-
-    Engine::open(tmp.path())
-        .wiki_skill_emit(Some(&sub), false)
-        .unwrap();
-
-    assert!(
-        sub.join(".agents/skills/logos-wiki/SKILL.md").exists(),
-        "skill materialized under the explicit dir"
-    );
-    assert!(
-        !tmp.path().join(".agents/skills/logos-wiki").exists(),
-        "the project root is untouched"
-    );
-}
-
 // ── CR-070 / FR-WK-14 retirement: the PostToolUse augmentation hook is gone ──
 
 /// [CR-070] regression: `init -i` installs no PostToolUse augmentation entry
-/// and writes no `logos-wiki-augment.sh` — only the embedded skill and the
-/// [FR-IN-07] session-start quality-report hook install.
+/// and writes no `logos-wiki-augment.sh` — of the core's steps, only the
+/// [FR-IN-07] session-start quality-report hook installs (the embedded skill is
+/// the `logos-wiki` crate's contributed step, tested there).
 #[test]
 fn init_i_installs_no_augmentation_hook() {
     let tmp = TempDir::new().unwrap();
@@ -1086,4 +964,62 @@ fn init_hooks_from_a_linked_worktree_names_the_limit_it_installed_under() {
         !main.path().join(".logos/hooks").exists(),
         "the primary must not be wired to a worktree's scripts"
     );
+}
+
+// ── Contributed init steps (S-639, FR-DS-04, ADR-74) ────────────────────────
+
+/// A contributed step: records the options it saw and reports one row.
+struct Contributed {
+    seen: std::sync::Mutex<Vec<bool>>,
+    fail: bool,
+}
+
+impl logos_core::init::InitContribution for Contributed {
+    fn run(&self, root: &Path, options: &InitOptions) -> anyhow::Result<Vec<InitStep>> {
+        self.seen.lock().unwrap().push(options.write_claude_md);
+        if self.fail {
+            anyhow::bail!("could not write {}", root.join(".logos/contributed").display());
+        }
+        Ok(vec![InitStep {
+            target: ".logos/contributed".to_string(),
+            action: InitAction::Created,
+            detail: String::new(),
+        }])
+    }
+}
+
+fn contributed(fail: bool) -> std::sync::Arc<Contributed> {
+    std::sync::Arc::new(Contributed { seen: std::sync::Mutex::new(Vec::new()), fail })
+}
+
+/// A contributed step runs after every core step, with the options `init` was
+/// given, and its rows join the report; with none, the report is `init_with`'s.
+#[test]
+fn a_contributed_init_step_runs_after_the_core_steps_with_the_same_options() {
+    let dir = TempDir::new().unwrap();
+    let step = contributed(false);
+    let contributions: Vec<std::sync::Arc<dyn logos_core::init::InitContribution>> = vec![step.clone()];
+    let result = Engine::init_with_contributions(dir.path(), &interactive(), &contributions).unwrap();
+
+    let targets: Vec<&str> = result.steps.iter().map(|s| s.target.as_str()).collect();
+    assert_eq!(targets.last(), Some(&".logos/contributed"), "last, after the core steps: {targets:?}");
+    assert!(targets.contains(&".logos/config.toml"), "the core steps still ran: {targets:?}");
+    assert_eq!(*step.seen.lock().unwrap(), [true], "run once, with `-i`'s options");
+
+    let plain = TempDir::new().unwrap();
+    let without = Engine::init_with_contributions(plain.path(), &interactive(), &[]).unwrap();
+    let with_init_with = Engine::init_with(TempDir::new().unwrap().path(), &interactive()).unwrap();
+    let names = |r: &InitResult| r.steps.iter().map(|s| s.target.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&without), names(&with_init_with), "no contribution is `init_with` exactly");
+}
+
+/// A contributed step's I/O failure fails `init` loud, like a core artifact's.
+#[test]
+fn a_failing_contributed_init_step_fails_init() {
+    let dir = TempDir::new().unwrap();
+    let contributions: Vec<std::sync::Arc<dyn logos_core::init::InitContribution>> =
+        vec![contributed(true)];
+    let err = Engine::init_with_contributions(dir.path(), &InitOptions::default(), &contributions)
+        .expect_err("the contribution's failure is init's");
+    assert!(format!("{err:#}").contains(".logos/contributed"), "{err:#}");
 }

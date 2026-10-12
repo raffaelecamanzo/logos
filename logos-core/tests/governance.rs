@@ -1528,6 +1528,207 @@ fn dsm_returns_a_square_layer_ordered_matrix() {
     assert_eq!(default.granularity, "module");
 }
 
+// ── S-527 / FR-GV-07: the Go DSM lists packages, not files ──────────────────
+
+/// A Go project: package `store` over two files (a method in one on a type in
+/// the other, so the package couples to itself), package `api` over one that
+/// uses it, and room for an external test package `store_test` beside `store`.
+fn go_project() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "go.mod", "module example.com/m\n\ngo 1.22\n");
+    write(
+        tmp.path(),
+        "store/a.go",
+        "// Package store keeps things.\npackage store\n\nfunc (s Store) Put() { s.get() }\n",
+    );
+    write(
+        tmp.path(),
+        "store/b.go",
+        "package store\n\ntype Store struct{}\n\nfunc (s Store) get() {}\n",
+    );
+    write(
+        tmp.path(),
+        "api/c.go",
+        "package api\n\nimport \"example.com/m/store\"\n\nfunc Handle() {\n\tvar s store.Store\n\ts.Put()\n}\n",
+    );
+    tmp
+}
+
+fn module_rows(report: &logos_core::models::quality::DsmReport) -> Vec<&str> {
+    report.rows.iter().map(|r| r.name.as_str()).collect()
+}
+
+fn row_of(report: &logos_core::models::quality::DsmReport, needle: &str) -> usize {
+    module_rows(report)
+        .iter()
+        .position(|r| r.contains(needle))
+        .unwrap_or_else(|| panic!("no row names {needle:?}: {:?}", module_rows(report)))
+}
+
+#[test]
+fn go_dsm_has_one_row_per_package_not_per_file() {
+    let tmp = go_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.dsm(None, true).expect("dsm runs");
+    assert_eq!(report.granularity, "module");
+    let rows = module_rows(&report);
+    assert_eq!(
+        rows,
+        ["go:api:api", "go:store:store"],
+        "two files of one package plus one of another are two rows, named \
+         `go:<directory>:<package>` and ordered by name"
+    );
+    let n = rows.len();
+    assert!(
+        report.matrix.len() == n && report.matrix.iter().all(|row| row.len() == n),
+        "the matrix stays square"
+    );
+
+    // The fixture must carry the coupling the rollup has to fold away, or the
+    // assertions below prove nothing: at file grain `store/a.go` depends on
+    // `store/b.go`, and `api/c.go` on both.
+    let files = engine
+        .dsm(Some(logos_core::governance::DsmGranularity::File), true)
+        .expect("file dsm runs");
+    let fcell = |from: &str, to: &str| files.matrix[row_of(&files, from)][row_of(&files, to)];
+    assert!(fcell("store/a.go", "store/b.go") >= 1, "{:?}", files.matrix);
+    let api_to_store = fcell("api/c.go", "store/a.go") + fcell("api/c.go", "store/b.go");
+    assert!(api_to_store >= 1, "{:?}", files.matrix);
+
+    // Cross-package weight is summed over the files; the intra-package edge is
+    // no coupling between rows.
+    let (api, store) = (row_of(&report, "api"), row_of(&report, "store"));
+    assert_eq!(report.matrix[api][store], api_to_store);
+    assert_eq!(report.matrix[store][store], 0, "no self-coupling cell");
+}
+
+#[test]
+fn go_dsm_keeps_an_external_test_package_apart_from_its_directory() {
+    let tmp = go_project();
+    write(
+        tmp.path(),
+        "store/a_test.go",
+        "package store_test\n\nfunc TestPut() {}\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.dsm(None, true).expect("dsm runs");
+    let rows = module_rows(&report);
+    assert_eq!(
+        rows,
+        ["go:api:api", "go:store:store", "go:store:store_test"],
+        "`package store` and `package store_test` share a directory, not a package"
+    );
+}
+
+#[test]
+fn go_dsm_tells_same_named_packages_apart_and_folds_in_package_tests_in() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "go.mod", "module example.com/m\n\ngo 1.22\n");
+    write(tmp.path(), "a/util/x.go", "package util\n\nfunc X() {}\n");
+    write(tmp.path(), "b/util/y.go", "package util\n\nfunc Y() {}\n");
+    // The common Go layout: a test file in the package it tests.
+    write(
+        tmp.path(),
+        "a/util/x_test.go",
+        "package util\n\nfunc TestX() { X() }\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.dsm(None, true).expect("dsm runs");
+    assert_eq!(
+        module_rows(&report),
+        ["go:a/util:util", "go:b/util:util"],
+        "one package name in two directories is two packages; an in-package \
+         `_test.go` adds no row"
+    );
+}
+
+#[test]
+fn go_dsm_leaves_the_rows_of_every_other_language_as_they_were() {
+    let rust = |root: &Path| {
+        write(
+            root,
+            "src/lib.rs",
+            "pub mod inner;\n\npub fn f() { inner::g(); }\n",
+        );
+        write(root, "src/inner.rs", "pub fn g() {}\n");
+    };
+
+    let only_rust = TempDir::new().unwrap();
+    rust(only_rust.path());
+    let engine = Engine::start(only_rust.path()).expect("engine starts");
+    let before = engine.dsm(None, true).expect("dsm runs");
+    let rust_rows: Vec<String> = before.rows.iter().map(|r| r.name.clone()).collect();
+    assert!(
+        rust_rows.len() >= 2 && rust_rows.iter().all(|r| r.starts_with("module:")),
+        "{rust_rows:?}"
+    );
+    assert!(
+        before.matrix.iter().flatten().any(|&cell| cell > 0),
+        "the Rust fixture carries a coupling to preserve: {:?}",
+        before.matrix
+    );
+
+    let mixed = go_project();
+    rust(mixed.path());
+    let engine = Engine::start(mixed.path()).expect("engine starts");
+    let after = engine.dsm(None, true).expect("dsm runs");
+    let kept: Vec<usize> = (0..after.rows.len())
+        .filter(|&i| after.rows[i].name.starts_with("module:"))
+        .collect();
+    assert_eq!(
+        kept.iter()
+            .map(|&i| after.rows[i].name.clone())
+            .collect::<Vec<_>>(),
+        rust_rows,
+        "the Rust rows are the same rows, in the same order, beside the Go ones"
+    );
+    let submatrix: Vec<Vec<u32>> = kept
+        .iter()
+        .map(|&i| kept.iter().map(|&j| after.matrix[i][j]).collect())
+        .collect();
+    assert_eq!(submatrix, before.matrix, "and couple exactly as before");
+    assert_eq!(
+        after.rows.len() - kept.len(),
+        2,
+        "the Go files add their two package rows: {:?}",
+        module_rows(&after)
+    );
+}
+
+#[test]
+fn go_dsm_says_when_a_file_without_a_clause_falls_back_to_its_directory() {
+    let tmp = go_project();
+    write(tmp.path(), "store/empty.go", "// no clause here\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.dsm(None, true).expect("dsm runs");
+    let rows = module_rows(&report);
+    assert!(
+        rows.contains(&"go:store") && rows.contains(&"go:store:store"),
+        "the clause-less file is keyed by directory alone: {rows:?}"
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.starts_with("1 Go file(s) had no readable `package` clause")),
+        "the fallback is reported, not silent: {:?}",
+        report.notes
+    );
+
+    let clean = go_project();
+    let engine = Engine::start(clean.path()).expect("engine starts");
+    let report = engine.dsm(None, true).expect("dsm runs");
+    assert!(
+        report.notes.iter().all(|n| !n.contains("package` clause")),
+        "a project whose files all carry a clause notes nothing: {:?}",
+        report.notes
+    );
+}
+
 // ── FR-AN-05 (integration): the indexed graph persists `is_test` for both the
 // evidence (#[cfg(test)]) and path (tests/) conventions — the column the
 // `[[require_tested]]` contract seeds `test_reachable_set` from (CR-001 CRA-01).

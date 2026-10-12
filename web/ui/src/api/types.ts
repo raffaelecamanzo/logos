@@ -184,6 +184,28 @@ export interface NodeInfo {
   warnings: string[];
 }
 
+/** How one chat code-reference span resolved (mirrors `CodeRefOutcome`, S-622,
+ *  FR-UI-47). Only `file` and `symbol` carry a seed, and only they become links. */
+export type CodeRefOutcome = "file" | "symbol" | "ambiguous" | "unresolved";
+
+/** One span's resolution fact (mirrors `CodeRef`). */
+export interface CodeRef {
+  /** The span exactly as sent. */
+  text: string;
+  outcome: CodeRefOutcome;
+  /** The `/graph?seed=` value: a file path (file tier) or a canonical symbol. */
+  seed?: string;
+}
+
+/** The batched code-reference resolution (mirrors `CodeRefResolution`). */
+export interface CodeRefResolution {
+  /** The per-request candidate cap it was resolved under. */
+  cap: number;
+  /** Distinct spans beyond the cap — received, not resolved. */
+  over_cap: number;
+  refs: CodeRef[];
+}
+
 /** One ranked query result row (mirrors `QueryHit`). */
 export interface QueryHit {
   /** The canonical symbol = the canvas node id (round-trips into a lock target). */
@@ -464,8 +486,11 @@ export interface OverviewModel {
    *  (CR-079). Replaces the retired `gaps`/`cross`/`hotspots` roll-ups. */
   rules: RulesReport;
   stats: StatsInfo;
-  /** The Project-Overview wiki page, or `null` when none is written yet (honest absence). */
-  overview_page: WikiPage | null;
+  /** The Project-Overview wiki page, or `null` when none is written yet (honest
+   *  absence) — the field the `wiki` extension adds to the bundle (S-644), so it is
+   *  absent from a server without the extension. Its Dashboard card is the
+   *  extension's too (`views/wiki/extension.tsx`). */
+  overview_page?: WikiPage | null;
 }
 
 /** A normalized + raw metric pair (mirrors `MetricValue`). */

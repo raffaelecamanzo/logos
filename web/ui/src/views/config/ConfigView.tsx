@@ -18,6 +18,12 @@
  * explicit confirmation (BR-35). The chat API key is a write-only/masked secret
  * (FR-CF-06, NFR-SE-07) edited in its own section — never echoed onto this surface.
  *
+ * Chat is an extension (S-643): the `[chat]` typed fields join the document form, and
+ * the key card ({@link ChatKeyPanel}) is mounted beneath it, only while the `chat`
+ * extension is active and mounts its config panel — a build without it offers
+ * neither, and its `[chat]` table, if any, is edited in the raw pane like any other
+ * text.
+ *
  * Inheritance (S-452, FR-WS-30): in a workspace a member may inherit either chat
  * half from the workspace root. That is disclosed as read-only prose beside the
  * `[chat]` fields and in the key card, read off the read-model's `effective_chat`
@@ -33,7 +39,7 @@
  * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 
 import {
@@ -52,6 +58,8 @@ import {
   WORKSPACE_CONFIG_FILE,
   WORKSPACE_SECRETS_FILE,
 } from "../chat/chatModel.ts";
+import { ExtensionConfigPanels, useMountedConfigTable } from "../../extensions/ConfigPanels.tsx";
+import type { ConfigPanelHost, ConfigPanelProps } from "../../extensions/registry.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import type {
   ConfigApplyOutcome,
@@ -226,10 +234,18 @@ function inheritedPolicyNote(effective: EffectiveChat | null): ReactNode {
   );
 }
 
-/** The `config.toml` typed fields: top-level scalars/lists + the `[chat]` group
- *  (with its read-only inheritance note, when the policy is inherited). */
-function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat | null): FieldGroup[] {
-  return [
+/** The `config.toml` typed fields: top-level scalars/lists + — while the `chat`
+ *  extension edits it (`withChat`, S-643) — the `[chat]` group (with its read-only
+ *  inheritance note, when the policy is inherited), and — while the `wiki` extension
+ *  edits it (`withWiki`, S-644) — the `[wiki]` group. */
+function configGroups(
+  c: ParsedConfig,
+  d: ParsedConfig,
+  effective: EffectiveChat | null,
+  withChat: boolean,
+  withWiki: boolean,
+): FieldGroup[] {
+  const groups: (FieldGroup | null)[] = [
     {
       fields: [
         { table: "", key: "languages", control: "list", initial: initList(c.languages), help: "Language plugins to enable. One per line.", defaultHint: defaultHint(d.languages) },
@@ -239,7 +255,7 @@ function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat
         { table: "", key: "framework_hints", control: "list", initial: initList(c.framework_hints), help: "Framework hints biasing extraction. One per line.", defaultHint: defaultHint(d.framework_hints) },
       ],
     },
-    {
+    withChat ? {
       legend: "[chat]",
       fields: [
         { table: "chat", key: "provider", control: "provider", initial: c.chat.provider, help: "The provider family. openai is OpenAI-compatible (base_url defaults to OpenRouter); anthropic uses the native Messages endpoint.", defaultHint: defaultHint(d.chat.provider) },
@@ -247,8 +263,8 @@ function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat
         { table: "chat", key: "base_url", control: "str", initial: c.chat.base_url, placeholder: "leave blank for the default (OpenRouter)", help: "The OpenAI-compatible endpoint for the openai provider (anthropic ignores this). Leave blank to fall back to OpenRouter.", defaultHint: defaultHint(d.chat.base_url) },
       ],
       note: inheritedPolicyNote(effective),
-    },
-    {
+    } : null,
+    withWiki ? {
       // S-224/FR-CF-07: the `[wiki]` section carries only `model` — provider,
       // base_url, and the API key are inherited from `[chat]`, so this single
       // field fully surfaces it (no new secret surface, NFR-SE-07).
@@ -267,8 +283,9 @@ function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat
           defaultHint: defaultHint(d.wiki?.model),
         },
       ],
-    },
+    } : null,
   ];
+  return groups.filter((g): g is FieldGroup => g !== null);
 }
 
 /** The `rules.toml` typed fields: the `[constraints]` and `[metric_thresholds]`
@@ -570,7 +587,10 @@ function FileEditor({
               <FieldControl
                 key={fieldId(d)}
                 d={d}
-                value={values[fieldId(d)]}
+                // A group can appear after mount — an extension's table is offered once
+                // the boot read settles (S-643, S-644) — so an unseeded field shows its
+                // parsed value, never a blank that misstates the file.
+                value={values[fieldId(d)] ?? d.initial}
                 onChange={(v) => onFieldChange(d, v)}
               />
             ))}
@@ -840,20 +860,45 @@ function GraphConsistencyCard() {
   );
 }
 
+/**
+ * The member chat API key card — the `chat` extension's member config panel (S-643),
+ * mounted beneath the config document by {@link ExtensionConfigPanels} while the
+ * extension is active. Seeded from the Config view's read-model, and told the
+ * resolution's current state (the re-read after each save) for its inheritance
+ * notes; its own save asks the view to re-read. Renders nothing outside a Config
+ * view that hands it a host.
+ */
+export function ChatKeyPanel({ host }: ConfigPanelProps): ReactNode {
+  if (host === undefined) return null;
+  const effective = host.fresh?.effective_chat ?? null;
+  return (
+    <SecretEditor
+      initial={host.model.chat_key}
+      inherited={effective?.credential_origin === "workspace"}
+      policyInherited={effective?.policy_origin === "workspace"}
+      onSaved={host.refresh}
+    />
+  );
+}
+
 /** The editors over a loaded read-model. */
 function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
   // The inheritance notes are claims about the RESOLUTION, which a save can change
-  // (a member that declares its own model stops inheriting the table). So the slice
-  // is re-read after a write; the editors themselves keep their own state and are
-  // never re-seeded from it. A failed re-read drops the notes rather than keep
-  // asserting a resolution this page no longer knows to be current (NFR-CC-04).
-  const [effective, setEffective] = useState<EffectiveChat | null>(model.effective_chat);
-  const refreshEffective = useCallback(() => {
-    fetchConfig().then(
-      (fresh) => setEffective(fresh.effective_chat),
-      () => setEffective(null),
-    );
+  // (a member that declares its own model stops inheriting the table). So the
+  // read-model is re-read after a write; the editors themselves keep their own state
+  // and are never re-seeded from it. A failed re-read drops the notes rather than
+  // keep asserting a resolution this page no longer knows to be current (NFR-CC-04).
+  const [fresh, setFresh] = useState<ConfigReadModel | null>(model);
+  const refresh = useCallback(() => {
+    fetchConfig().then(setFresh, () => setFresh(null));
   }, []);
+  const host: ConfigPanelHost = useMemo(() => ({ model, fresh, refresh }), [model, fresh, refresh]);
+  // `[chat]` is the `chat` extension's table (S-643): its typed fields are offered
+  // while the extension mounts a panel editing it.
+  const withChat = useMountedConfigTable("member", "chat");
+  // `[wiki]` likewise the `wiki` extension's (S-644).
+  const withWiki = useMountedConfigTable("member", "wiki");
+  const effective = fresh?.effective_chat ?? null;
   // One stack (S-617, FR-UI-40): the advisory, then each editor panel.
   return (
     <WidgetStack>
@@ -867,19 +912,16 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <FileEditor
         file="config"
         view={model.config}
-        groups={configGroups(model.config.parsed, model.defaults.config, effective)}
+        groups={configGroups(model.config.parsed, model.defaults.config, effective, withChat, withWiki)}
         isRules={false}
-        onSaved={refreshEffective}
+        onSaved={refresh}
       />
-      {/* Directly beneath the [chat] fields (S-452): the key is a separate save to a
-          separate endpoint, and an unrelated card between the two made saving the
-          config document read as completing the chat configuration. */}
-      <SecretEditor
-        initial={model.chat_key}
-        inherited={effective?.credential_origin === "workspace"}
-        policyInherited={effective?.policy_origin === "workspace"}
-        onSaved={refreshEffective}
-      />
+      {/* The mounted extensions' panels (S-642), directly beneath the config document
+          whose tables they edit: the chat key card sits right under the [chat] fields
+          (S-452) — a separate save to a separate endpoint, and an unrelated card between
+          the two made saving the config document read as completing the chat
+          configuration. */}
+      <ExtensionConfigPanels scope="member" host={host} />
       <GraphConsistencyCard />
       <FileEditor
         file="rules"

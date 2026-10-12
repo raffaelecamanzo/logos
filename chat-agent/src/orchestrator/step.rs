@@ -105,6 +105,7 @@ pub struct StepContext<'t> {
     tree: &'t BudgetTree,
     subagent: ToolBudget,
     answer: Option<&'t dyn AnswerSink>,
+    preamble_clause: Option<&'t str>,
 }
 
 impl<'t> StepContext<'t> {
@@ -116,6 +117,7 @@ impl<'t> StepContext<'t> {
             subagent: tree.new_subagent_budget(),
             tree,
             answer: None,
+            preamble_clause: None,
         }
     }
 
@@ -127,7 +129,26 @@ impl<'t> StepContext<'t> {
             subagent: tree.new_subagent_budget(),
             tree,
             answer: Some(answer),
+            preamble_clause: None,
         }
+    }
+
+    /// Append `clause` to the Synthesizer's preamble for this step — how the
+    /// orchestrator asks for the first turn's `TITLE:` trailer ([FR-UI-48]) without
+    /// knowing, or replacing, the preamble the roster chose. The roster honours it
+    /// on the tool-less Synthesizer step only; a tool-bearing step ignores it.
+    ///
+    /// [FR-UI-48]: ../../../docs/specs/requirements/FR-UI-48.md
+    #[must_use]
+    pub(crate) fn with_preamble_clause(mut self, clause: &'t str) -> Self {
+        self.preamble_clause = Some(clause);
+        self
+    }
+
+    /// The clause to append to the Synthesizer's preamble, if the orchestrator set
+    /// one.
+    pub fn preamble_clause(&self) -> Option<&str> {
+        self.preamble_clause
     }
 
     /// Stream one chunk of the final answer, if this step has an [`AnswerSink`]

@@ -20,7 +20,10 @@
 //!   [FR-SY-05]);
 //! - the embedded wiki-generation skill materialized into the canonical
 //!   `.agents/skills/logos-wiki/` + `.claude/skills/logos-wiki` layout,
-//!   skip-if-present ([FR-IN-02] as modified by CR-008, [FR-WK-08]).
+//!   skip-if-present ([FR-IN-02] as modified by CR-008, [FR-WK-08]) — no
+//!   longer a core step: the `logos-wiki` crate owns the skill and supplies
+//!   the step as an [`InitContribution`] (S-644), which reads
+//!   [`InitOptions::materialize_skill`].
 //!
 //! Failure posture (DL-06): a host-integration target we cannot *safely*
 //! touch (malformed `.mcp.json`, a foreign `core.hooksPath`, a non-managed
@@ -34,6 +37,7 @@
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 //! [FR-IN-09]: ../../../docs/specs/requirements/FR-IN-09.md
 //! [FR-SY-05]: ../../../docs/specs/requirements/FR-SY-05.md
+//! [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
 //! [MCP Host]: ../../../docs/specs/architecture/integrations/mcp-host.md
 
 use std::fs;
@@ -62,7 +66,9 @@ pub struct InitOptions {
     pub install_hooks: bool,
     /// Materialize the embedded wiki-generation skill into the canonical layout
     /// (`.agents/skills/logos-wiki/` + `.claude/skills/logos-wiki`),
-    /// skip-if-present (FR-IN-02 as modified by CR-008, FR-WK-08).
+    /// skip-if-present (FR-IN-02 as modified by CR-008, FR-WK-08). The core
+    /// owns the flag, not the step: the contributed step the `logos-wiki`
+    /// crate supplies reads it (S-644).
     pub materialize_skill: bool,
     /// Install the Claude Code **session-start** quality-report hook (FR-IN-07,
     /// ADR-49, CR-095): a marker-tagged hook script + a non-clobbering merge into
@@ -85,6 +91,32 @@ pub struct InitOptions {
     /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
     /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
     pub workspace_member: bool,
+}
+
+/// An `init` step contributed from outside the core — by an extension, through
+/// the extension host ([FR-DS-04], [ADR-74]).
+///
+/// The core runs contributed steps after its own, in the order given, against
+/// the same resolved root and with the same [`InitOptions`]: a step decides from
+/// them whether it applies (an `-i`-only step returns no rows on a plain
+/// `init`). It follows the core steps' failure posture — a target it cannot
+/// safely touch is a `Skipped` row with the reason, and only an I/O failure on
+/// an artifact it owns is an error.
+///
+/// Declared here rather than in the host's crate because `init` is the core's,
+/// and the core names no extension ([BR-63]): the host implements this
+/// contract; the core never learns who did.
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+/// [BR-63]: ../../../docs/specs/software-spec.md#320-distribution
+pub trait InitContribution: Send + Sync {
+    /// Run the step for the resolved project `root`, returning the rows it
+    /// reports — none when it does not apply to `options`.
+    ///
+    /// # Errors
+    /// An I/O failure writing an artifact the step owns.
+    fn run(&self, root: &Path, options: &InitOptions) -> Result<Vec<InitStep>>;
 }
 
 // ── Generated content ──────────────────────────────────────────────────────
@@ -329,7 +361,7 @@ pub(crate) fn ignored_state() -> Vec<&'static str> {
 /// Ordered **scoping first, navigation second** since S-362/CR-114. The two
 /// texts are deliberately parallel: an agent that reads only one of them should
 /// come away with the same ordering, so `mcp/src/instructions.md` moves with
-/// this constant (`cli/src/main.rs`'s `surface_parity` module asserts each of
+/// this constant (`cli/src/lib.rs`'s `surface_parity` module asserts each of
 /// the three satisfies [FR-IN-09]).
 ///
 /// The ordering is a hypothesis, not a finding, and the block says so — the
@@ -454,9 +486,6 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
     if options.install_hooks {
         steps.push(install_hooks(root)?);
     }
-    if options.materialize_skill {
-        steps.push(materialize_skill(root)?);
-    }
     if options.install_quality_report_hook {
         steps.push(materialize_quality_report_hook(root)?);
     }
@@ -465,9 +494,9 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
 
 /// Materialize the Claude Code session-start quality-report hook ([FR-IN-07],
 /// [FR-GV-02], [FR-GV-05], [ADR-49], [CR-055], [CR-095]), default-on under `-i`
-/// alongside the embedded skill. Delegates to the [`crate::wiki`] engine — the
-/// sole owner of the hook artifacts — and maps the
-/// [`crate::wiki::HookEmitSummary`] onto an [`InitStep`] targeting
+/// alongside the embedded skill. Delegates to the [`crate::hooks`] materializer —
+/// the sole owner of the hook artifacts — and maps the
+/// [`crate::hooks::HookEmitSummary`] onto an [`InitStep`] targeting
 /// `.claude/settings.json`. Non-clobbering: an already-present managed entry is
 /// `Unchanged`; a foreign settings file is `Skipped` with the reason, never
 /// overwritten.
@@ -483,12 +512,12 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
 /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
 /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
-    use crate::wiki::EmitAction;
+    use crate::hooks::EmitAction;
     // Merging into a pre-existing settings file is an Updated, not a Created —
     // the same convention as the `.mcp.json` injection above.
-    let settings_existed = root.join(crate::wiki::SETTINGS_REL).exists();
+    let settings_existed = root.join(crate::hooks::SETTINGS_REL).exists();
     // `init -i` never clobbers: unforced, so an existing managed entry skips.
-    let summary = crate::wiki::materialize_quality_report_hook(root, false)?;
+    let summary = crate::hooks::materialize_quality_report_hook(root, false)?;
     let (action, detail) = match (summary.action, &summary.notice) {
         (EmitAction::Created, _) => (
             if settings_existed {
@@ -512,7 +541,7 @@ fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
         (EmitAction::Skipped, Some(reason)) => (InitAction::Skipped, reason.clone()),
         (EmitAction::Skipped, None) => (
             InitAction::Unchanged,
-            "already present — never overwritten; `logos wiki hook --emit --force` refreshes"
+            "already present — never overwritten; `logos hook --emit --force` refreshes"
                 .to_string(),
         ),
     };
@@ -527,37 +556,6 @@ fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
         )
     };
     Ok(step(&summary.settings, action, detail))
-}
-
-/// Materialize the embedded wiki-generation skill into the canonical layout,
-/// skip-if-present (FR-IN-02 as modified by CR-008, [FR-WK-08]). Delegates to
-/// the [`crate::wiki`] engine — the sole owner of the skill asset — and maps the
-/// [`crate::wiki::EmitSummary`] onto an [`InitStep`].
-///
-/// [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
-fn materialize_skill(root: &Path) -> Result<InitStep> {
-    use crate::wiki::{EmitAction, LinkKind};
-    // `init -i` never clobbers local edits: unforced, so an existing skill skips.
-    let summary = crate::wiki::materialize_skill(root, false)?;
-    let action = match summary.action {
-        EmitAction::Created => InitAction::Created,
-        // The skill's skip-if-present means an unforced re-emit never writes, so
-        // `Reconciled` is unreachable here — mapped alongside `Forced` because
-        // both are writes, rather than left to a catch-all that would silently
-        // absorb a future variant ([CR-095]).
-        EmitAction::Forced | EmitAction::Reconciled => InitAction::Updated,
-        EmitAction::Skipped => InitAction::Unchanged,
-    };
-    let detail = match (summary.action, summary.link_kind, &summary.notice) {
-        (EmitAction::Skipped, _, _) => {
-            "already present — never overwritten; `logos wiki skill --emit --force` refreshes"
-                .to_string()
-        }
-        (_, _, Some(notice)) => notice.clone(),
-        (_, Some(LinkKind::Symlink), None) => format!("{} → {}", summary.link, summary.skill_dir),
-        _ => String::new(),
-    };
-    Ok(step(&summary.skill_dir, action, detail))
 }
 
 fn step(target: &str, action: InitAction, detail: impl Into<String>) -> InitStep {

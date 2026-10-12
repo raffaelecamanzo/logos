@@ -14,7 +14,9 @@ import {
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import { ruleFindings } from "../../copy/ruleFindings.copy.ts";
 import type { CopyEntry, NoExplanationEntry } from "../../copy/types.ts";
+import { clearExtensions } from "../../extensions/registry.ts";
 import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
+import { mountWiki } from "../../test/wiki.ts";
 import { DashboardView } from "./DashboardView.tsx";
 
 // ── A fully-populated, indexed overview read-model ────────────────────────────
@@ -75,7 +77,14 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-beforeEach(() => vi.clearAllMocks());
+// The default build: the `wiki` extension active, as its server reports it (S-644) —
+// the Project Overview card is its. A spec about a build without it clears the
+// registry first.
+beforeEach(() => {
+  vi.clearAllMocks();
+  mountWiki();
+});
+afterEach(clearExtensions);
 
 describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
   it("renders the verdict-first roll-up: every figure from the read-model", async () => {
@@ -469,5 +478,28 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     // Graph's not-yet-counted lines name the full index, in its evidence.
     expect(screen.getByText(DASHBOARD_ABSENCE.noLines)).toBeInTheDocument();
     expect(DASHBOARD_ABSENCE.noLines).toContain("a full logos index counts them");
+  });
+});
+
+describe("the Project Overview card is the wiki extension's (S-644)", () => {
+  it("renders in the extension slot, directly after the freshness statement", async () => {
+    stub(OVERVIEW);
+    const { container } = render(<DashboardView />);
+    await screen.findByText(/Logos is a structural code-intelligence engine/);
+    const titles = expectOneWidgetStack(container).map(widgetTitle);
+    expect(titles.indexOf("Project Overview")).toBe(titles.indexOf("Quality index") - 1);
+  });
+
+  it("is absent, with every other widget unchanged, in a build without the wiki", async () => {
+    clearExtensions();
+    // A server without the extension adds no `overview_page` field at all.
+    const { overview_page: _absent, ...withoutWiki } = OVERVIEW;
+    stub(withoutWiki);
+    const { container } = render(<DashboardView />);
+    await screen.findByText("Quality index");
+    const titles = expectOneWidgetStack(container).map(widgetTitle);
+    expect(titles).not.toContain("Project Overview");
+    expect(titles).toContain("Quality index");
+    expect(screen.queryByText(/project overview/i)).toBeNull();
   });
 });

@@ -21,8 +21,8 @@ use agent_core::rig::agent::AgentBuilder;
 use agent_core::rig::completion::{CompletionModel, Prompt};
 use agent_core::{classify_provider_error, ToolBudget};
 use anyhow::{Context, Result};
-use logos_core::wiki::{Freshness, GenerationItem, WikiGenerationQueue};
 use logos_core::Engine;
+use logos_wiki::{Freshness, GenerationItem, WikiEngine as _, WikiGenerationQueue};
 
 use crate::grounding;
 pub use crate::grounding::DEFAULT_GROUNDING_BUDGET;
@@ -53,71 +53,9 @@ pub const DEFAULT_RUN_CEILING: usize = 5000;
 /// [`WikiAgent::with_synthesis_timeout`].
 pub const DEFAULT_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// A per-page progress event emitted across a generation run ([FR-WK-18]). The
-/// S-178 web surface maps these onto the SSE stream; the `event`-tagged
-/// serialization keeps the wire form self-describing.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "event", rename_all = "kebab-case")]
-pub enum WikiProgress {
-    /// The run started over a non-empty work-list of `total` pages. Emitted
-    /// exactly once per run; a scope that grows later is carried on
-    /// [`PageStarted`](Self::PageStarted)'s `total`, never by a second `Started`.
-    Started {
-        /// The opening work-list size — the run's initial scope estimate.
-        total: usize,
-        /// The configured per-page synthesis liveness timeout, in whole seconds
-        /// ([`DEFAULT_SYNTHESIS_TIMEOUT`], [`WikiAgent::with_synthesis_timeout`]) —
-        /// carried so the surface can make the bound VISIBLE (a long-running page is
-        /// a liveness guard counting down, not an unexplained stall) without the
-        /// frontend duplicating the value ([CR-059], [S-239]).
-        synthesis_timeout_secs: u64,
-    },
-    /// Synthesis of one page began.
-    PageStarted {
-        /// The target wiki slug.
-        slug: String,
-        /// The page title.
-        title: String,
-        /// The 1-based position of this page in the queue.
-        index: usize,
-        /// The run's scope as of this page: the pages attempted so far plus the
-        /// unattempted items the latest queue re-read surfaced ([CR-093]). Equal to
-        /// `Started`'s total until a re-read surfaces work the opening read did not
-        /// contain; it may also shrink when an item leaves the work-list unattempted,
-        /// so a surface folds it as a monotonic maximum. Never below `index`.
-        total: usize,
-    },
-    /// One page was synthesized and persisted via [`wiki write`](Engine::wiki_write).
-    PageWritten {
-        /// The target wiki slug.
-        slug: String,
-        /// The number of anchors resolved and stored at write time.
-        anchor_count: usize,
-        /// `true` when the write replaced an existing page (a refresh).
-        replaced: bool,
-    },
-    /// One page's write was rejected (e.g. an over-cap body or an unknown anchor);
-    /// the run continues with the next page ([NFR-CC-04] — no fabrication).
-    PageFailed {
-        /// The target wiki slug.
-        slug: String,
-        /// The honest failure reason.
-        error: String,
-    },
-    /// The run halted early — a spent per-run budget or a provider failure —
-    /// reported honestly ([NFR-CC-04]). Pages already written persist.
-    Halted {
-        /// Which limit or failure halted the run.
-        reason: String,
-    },
-    /// The run finished (whether completed or halted); the terminal event.
-    Completed {
-        /// Pages persisted this run.
-        pages_written: usize,
-        /// Pages whose write was rejected this run.
-        pages_failed: usize,
-    },
-}
+/// The per-page progress event, defined beside the wiki's web surface that
+/// streams it ([`logos_wiki::WikiProgress`], S-644) and re-exported here.
+pub use logos_wiki::WikiProgress;
 
 /// The outcome of a generation run ([FR-WK-18], [NFR-CC-04]).
 ///
@@ -221,7 +159,7 @@ where
     /// work-list size (the opening cumulative denominator for progress, [FR-UI-19]) and,
     /// for each queued page in order: synthesizes the body with a fresh tool-less
     /// agent, resolves the write-time anchors, and persists via the unchanged
-    /// [`wiki write`](Engine::wiki_write) contract. Every [`WikiProgress`] transition
+    /// [`wiki write`](logos_wiki::WikiEngine::wiki_write) contract. Every [`WikiProgress`] transition
     /// is emitted through `sink`.
     ///
     /// After each **per-chunk budget** slice ([`with_budget`](Self::with_budget))
@@ -577,8 +515,8 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use logos_core::wiki::{DocGrounding, GenerationCategory, GenerationItem};
     use logos_core::Engine;
+    use logos_wiki::{DocGrounding, GenerationCategory, GenerationItem};
 
     use super::*;
 

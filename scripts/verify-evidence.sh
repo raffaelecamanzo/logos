@@ -30,15 +30,18 @@
 #     recomputed right now                            only fast, then commit)
 #
 # THE TWO TIERS IT WILL CERTIFY, and why `fast` is not a loophole
-#   `--tier full` (the default) is unchanged: all nine gates, each recorded by a
-#   full-tier run of gate.sh, all on one tree which is the tree that exists now.
+#   `--tier full` (the default) is unchanged: every gate in ALL_GATES, each
+#   recorded by a full-tier run of gate.sh, all on one tree which is the tree that
+#   exists now.
 #
-#   `--tier fast` certifies what `gate.sh fast` actually runs — clippy, test, arch
-#   — and NOTHING is relaxed about those three: same recomputation from counters,
-#   same tree identity, same refusal of a "skip". It exists because the standing
-#   sprint contract runs one full gate on MERGED MAIN at review rather than eight
-#   per-branch full gates, and without it a fast-tier session cannot hand off at
-#   all. Three properties keep it honest:
+#   `--tier fast` certifies what `gate.sh fast` actually runs — clippy, test,
+#   arch, public-terms — and NOTHING is relaxed about those four: same
+#   recomputation from counters, same tree identity, same refusal of a "skip".
+#   (public-terms is required at both tiers, S-716: a term merged after a fast
+#   gate is as public as one merged after a full gate.) The fast tier exists
+#   because the standing sprint contract runs one full gate on MERGED MAIN at
+#   review rather than eight per-branch full gates, and without it a fast-tier
+#   session cannot hand off at all. Three properties keep it honest:
 #     - the marker records the tier, the gates and the TEST DENOMINATOR, so a
 #       merge commit can state what was certified instead of implying "all of it"
 #       (gate.sh's fast tier runs tests only over packages touched vs HEAD, which
@@ -147,7 +150,7 @@ evid, tree_now, mode, expect_tier = sys.argv[1], sys.argv[2], sys.argv[3], sys.a
 
 # The full tier's contract. A gate absent from disk is a gate that did not run.
 ALL_GATES = [
-    "clippy", "test", "test-agents", "deny", "arch",
+    "clippy", "test", "test-agents", "test-noext", "deny", "arch", "public-terms",
     "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
 ]
 # What `gate.sh fast` actually runs. Its two UI legs are conditional on web/ui
@@ -157,7 +160,31 @@ ALL_GATES = [
 # older tree is history from an earlier run, not a claim about the tree being
 # handed off, so it is skipped rather than treated as a failure: the marker will
 # name the gates it actually certified.
-FAST_GATES = ["clippy", "test", "arch"]
+FAST_GATES = ["clippy", "test", "arch", "public-terms"]
+
+# What a unit counts, per gate, in every message and row that names it: test
+# binaries and tests by default. The public-terms gate's one unit counts the
+# text files its walk read, and its failures are term hits (gate.sh's
+# gate_public_terms). The counters are checked identically; only the words
+# differ, and its floor of 1 is the zero-file walk, already reported as such.
+DEFAULT_WORDS = {
+    "things": "binaries", "short": "bins",
+    "killed": "a binary was killed mid-run",
+    "failures": "test(s) failed",
+    "nothing_ran": "no test binary executed at all",
+    "floor": "the tests/*.rs floor",
+    "row_field": "passed", "row_extra": "%d passed",
+}
+UNIT_WORDS = {
+    "public-terms": {
+        "things": "text files", "short": "files",
+        "killed": "the scan was killed mid-walk",
+        "failures": "term hit(s)",
+        "nothing_ran": "the walk read zero text files",
+        "floor": None,
+        "row_field": "failed", "row_extra": "%d hits",
+    },
+}
 
 REQUIRED = FAST_GATES if expect_tier == "fast" else ALL_GATES
 OPTIONAL = [g for g in ALL_GATES if g not in REQUIRED]
@@ -224,6 +251,7 @@ for gate in REQUIRED + OPTIONAL:
     # Recompute every unit's verdict from its own counters. The `verdict` field
     # is the one value an agent must not be able to assert into existence.
     units = doc.get("units") or []
+    words = UNIT_WORDS.get(gate, DEFAULT_WORDS)
     for u in units:
         name = "%s/%s" % (gate, u.get("unit"))
         started = u.get("started", 0)
@@ -233,23 +261,23 @@ for gate in REQUIRED + OPTIONAL:
         floor = u.get("floor", 0)
 
         if started == 0:
-            problems.append("%s: no test binary executed at all" % name)
+            problems.append("%s: %s" % (name, words["nothing_ran"]))
         elif started > finished:
             problems.append(
-                "%s: %d binaries started, only %d finished — a binary was killed "
-                "mid-run" % (name, started, finished)
+                "%s: %d %s started, only %d finished — %s"
+                % (name, started, words["things"], finished, words["killed"])
             )
         elif finished < expected:
             problems.append(
-                "%s: %d of %d binaries ran — the run was truncated"
-                % (name, finished, expected)
+                "%s: %d of %d %s ran — the run was truncated"
+                % (name, finished, expected, words["things"])
             )
         if failed:
-            problems.append("%s: %d test(s) failed" % (name, failed))
-        if expected < floor:
+            problems.append("%s: %d %s" % (name, failed, words["failures"]))
+        if words["floor"] and expected < floor:
             problems.append(
-                "%s: expected %d is below the tests/*.rs floor of %d — the count "
-                "is wrong, not the suite" % (name, expected, floor)
+                "%s: expected %d is below %s of %d — the count "
+                "is wrong, not the suite" % (name, expected, words["floor"], floor)
             )
         if u.get("verdict") == "pass" and (
             started == 0 or started > finished or finished < expected or failed
@@ -259,13 +287,14 @@ for gate in REQUIRED + OPTIONAL:
     if units:
         tot_exp = sum(u.get("expected", 0) for u in units)
         tot_fin = sum(u.get("finished", 0) for u in units)
-        tot_pass = sum(u.get("passed", 0) for u in units)
-        rows.append((gate, tier, verdict, "%d/%d bins" % (tot_fin, tot_exp),
-                     "%d passed" % tot_pass))
+        tot_extra = sum(u.get(words["row_field"], 0) for u in units)
+        rows.append((gate, tier, verdict,
+                     "%d/%d %s" % (tot_fin, tot_exp, words["short"]),
+                     words["row_extra"] % tot_extra))
     else:
         rows.append((gate, tier, verdict, "exit %s" % doc.get("exit_code"), ""))
 
-    if gate in ("test", "test-agents"):
+    if gate in ("test", "test-agents", "test-noext"):
         # The denominator, carried into the marker. A test gate with no units is
         # a pass over ZERO binaries; the marker must say so rather than let a
         # reader infer a suite ran.

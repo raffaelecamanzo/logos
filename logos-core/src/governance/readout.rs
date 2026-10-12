@@ -6,13 +6,15 @@
 //!
 //! # Why this lives in `governance` and not in the hook module
 //!
-//! It first landed beside the hook *materializer* ([`crate::wiki::hook`]), on the
-//! reasoning that both are "the hook". They are not the same concern: that module
-//! writes a script and merges a settings entry — pure install-time filesystem I/O
-//! that never touches a read-model — while this projects a governance read-model
-//! for one consumer. Co-locating them was the only reason `wiki` depended on
-//! `models` at all. The payload is a rendering of the readout, so it belongs with
-//! the readout, and `wiki::hook` goes back to owning only the artifacts it writes.
+//! It first landed beside the hook *materializer* (then the wiki module's
+//! `hook`, now `hooks::quality_report`), on the reasoning that both are "the
+//! hook". They are not the same concern: that module writes a script and merges
+//! a settings entry — pure install-time filesystem I/O that never touches a
+//! read-model — while this projects a governance read-model for one consumer.
+//! Co-locating them was the only reason the wiki depended on `models` at all
+//! (the wiki has since left the core for the `logos-wiki` crate). The payload is a
+//! rendering of the readout, so it belongs with the readout, and the
+//! materializer goes back to owning only the artifacts it writes.
 //!
 //! Since [CR-096] the violations half is **dated**: it renders the age and the
 //! `HEAD` of the [FR-GV-21] run marker the readout carries, states a *recorded*

@@ -23,7 +23,6 @@ import type { ComponentType, SVGProps } from "react";
 
 import {
   IconArchitecture,
-  IconChat,
   IconConfig,
   IconCoverage,
   IconDashboard,
@@ -32,7 +31,6 @@ import {
   IconGraph,
   IconHealth,
   IconStatistics,
-  IconWiki,
   IconWorkspace,
 } from "../components/icons.tsx";
 import {
@@ -43,19 +41,19 @@ import {
   navItemsFor,
   type NavItem,
 } from "../nav.ts";
+import { mountedIcon, useExtensions } from "../extensions/registry.ts";
 import { navigate } from "../router.tsx";
 import { useStatisticsAwaiting } from "../views/statistics/useStatisticsAvailability.ts";
 import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
 import { MemberSelector } from "./MemberSelector.tsx";
 import styles from "./Sidebar.module.css";
 
-/** The idiomatic icon for each nav id (keyed to nav.ts ids). */
+/** The idiomatic icon for each built-in nav id (keyed to nav.ts ids). A mounted
+ *  extension's entries get theirs from the registry (`iconFor`, S-642). */
 const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   overview: IconDashboard,
   health: IconHealth,
   graph: IconGraph,
-  chat: IconChat,
-  wiki: IconWiki,
   architecture: IconArchitecture,
   files: IconFiles,
   gaps: IconGaps,
@@ -75,14 +73,19 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // S-430: the app-level Config editor answers "what is configured", one scope up
   // from the member-scoped Config tab, so it carries the same icon (FR-UI-38).
   "workspace-config": IconConfig,
-  // S-485: the Workspace Chat answers the member Chat's question for the whole
-  // workspace — the member chat it replaces there — so it carries the same icon.
-  "workspace-chat": IconChat,
+  // The member Chat and the Workspace Chat are the `chat` extension's entries
+  // (S-643); their icon comes with its registration (`views/chat/extension.tsx`).
 };
+
+/** The icon for nav id `id`: the built-in map first, so an extension never re-skins a
+ *  built-in entry, then the icons the mounted extensions register. */
+function iconFor(id: string): ComponentType<SVGProps<SVGSVGElement>> | undefined {
+  return ICONS[id] ?? mountedIcon(id);
+}
 
 function NavLink({ item, active, muted }: { item: NavItem; active: boolean; muted?: boolean }) {
   const current = active ? "page" : undefined;
-  const Icon = ICONS[item.id];
+  const Icon = iconFor(item.id);
   const content = (
     <>
       <span className={styles.icon}>{Icon && <Icon />}</span>
@@ -171,6 +174,10 @@ export function Sidebar({ pathname }: { pathname: string }) {
   // The Statistics item is muted when the telemetry store is empty (NFR-CC-04) —
   // an honest "awaiting data" signal that agrees with the tab's own empty state.
   const statisticsAwaiting = useStatisticsAwaiting();
+  // The mounted extensions' entries arrive with the boot read (S-642); subscribing
+  // re-renders the list when they do. With none registered the mounted content never
+  // changes (the snapshot moves once, when the read settles).
+  useExtensions();
   // The workspace-only tabs exist only in workspace mode (S-250, FR-UI-29; S-428
   // added two beside the original); a plain repo renders the unchanged item list.
   const { mode } = useWorkspace();

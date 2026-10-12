@@ -1,0 +1,87 @@
+/*
+ * Syntax colours for highlighted chat code blocks (S-622, CR-204 C4, FR-UI-47,
+ * ADR-44).
+ *
+ * `highlight.ts` renders highlight.js's token spans with their own GLOBAL class
+ * names (`hljs-keyword`, `hljs-title function_`), so each rule is scoped under the
+ * module's `.code` — the `<code>` of a fenced block in `MarkdownAnswer.tsx` — and
+ * reaches the token with `:global()`. Nothing outside a chat code block is styled.
+ *
+ * Colours are the `--syntax-*` tokens only (`tokens.css`, both themes), each
+ * clearing WCAG 2.1 AA on the code-block fill (`--surface-2`, the block chrome in
+ * `Chat.module.css`). A token with no rule here — punctuation, operators, plain
+ * identifiers — keeps the block's text colour. The block chrome itself (border,
+ * header, padding) stays in `Chat.module.css`; this module only colours.
+ */
+
+.code :global(.hljs-keyword),
+.code :global(.hljs-meta),
+.code :global(.hljs-selector-tag),
+.code :global(.hljs-name),
+.code :global(.hljs-section),
+.code :global(.hljs-template-tag) {
+  color: var(--syntax-keyword);
+}
+
+.code :global(.hljs-string),
+.code :global(.hljs-regexp),
+.code :global(.hljs-char),
+.code :global(.hljs-link),
+.code :global(.hljs-addition) {
+  color: var(--syntax-string);
+}
+
+.code :global(.hljs-number),
+.code :global(.hljs-literal),
+.code :global(.hljs-symbol),
+.code :global(.hljs-bullet),
+.code :global(.hljs-deletion) {
+  color: var(--syntax-number);
+}
+
+.code :global(.hljs-comment),
+.code :global(.hljs-quote),
+.code :global(.hljs-doctag) {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+
+.code :global(.hljs-title),
+.code :global(.hljs-function) {
+  color: var(--syntax-function);
+}
+
+/* `title.class_` (a type's own name) outranks the plain `.hljs-title` above by
+   specificity, so a type reads as a type wherever it is declared. */
+.code :global(.hljs-type),
+.code :global(.hljs-built_in),
+.code :global(.hljs-title.class_),
+.code :global(.hljs-selector-class),
+.code :global(.hljs-selector-id) {
+  color: var(--syntax-type);
+}
+
+.code :global(.hljs-attr),
+.code :global(.hljs-attribute),
+.code :global(.hljs-property),
+.code :global(.hljs-variable),
+.code :global(.hljs-template-variable),
+.code :global(.hljs-selector-attr),
+.code :global(.hljs-selector-pseudo) {
+  color: var(--syntax-attribute);
+}
+
+/* The `meta` line's own keyword and string stay in their own hues. */
+.code :global(.hljs-meta .hljs-keyword) {
+  color: var(--syntax-keyword);
+}
+.code :global(.hljs-meta .hljs-string) {
+  color: var(--syntax-string);
+}
+
+.code :global(.hljs-emphasis) {
+  font-style: italic;
+}
+.code :global(.hljs-strong) {
+  font-weight: var(--weight-semibold);
+}

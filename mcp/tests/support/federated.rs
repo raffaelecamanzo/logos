@@ -89,7 +89,7 @@ pub type Client = RunningService<RoleClient, ()>;
 pub async fn boot(registry: EngineRegistry<Engine>) -> (Client, tokio::task::JoinHandle<()>) {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::federated(registry).serve(server_io).await {
+        if let Ok(running) = LogosMcp::federated(registry, &logos_ext::ExtensionHost::new()).serve(server_io).await {
             let _ = running.waiting().await;
         }
     });

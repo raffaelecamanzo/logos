@@ -11,7 +11,11 @@
 #   - cargo clippy -D warnings   any lint warning             (NFR-MA-04)
 #   - cargo test --workspace     any failing test, incl. the
 #                                no-network fitness function  (NFR-SE-01)
+#   - no-extension build         clippy + test of `logos` with no
+#                                extension composed           (FR-DS-05)
 #   - cargo deny check           license / advisory violation (NFR-CR-01)
+#   - public terms               a listed term in a tracked text
+#                                file, outside the allowlist  (NFR-CR-04)
 
 name: CI
 
@@ -43,6 +47,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # No listed term in a tracked text file (S-716, NFR-CR-04). First, on the
+      # fresh checkout: it needs only git and perl and takes seconds. It reads
+      # the tracked files plus untracked, non-ignored ones (none here, before
+      # any build step), and never through a symlink, so it reads no private
+      # docs directory on a development checkout either, and needs none here.
+      # The list is hashes only (scripts/public-terms.sha256); a hit is printed
+      # as file:line:term, and a reviewed line is admitted through
+      # scripts/public-terms.allow.
+      - name: public terms
+        run: bash scripts/check-public-terms.sh
 
       - name: Install Rust (stable) with clippy + rustfmt
         uses: dtolnay/rust-toolchain@stable
@@ -131,13 +146,26 @@ jobs:
           LOGOS_PERF_TOLERANCE: "3"
         run: cargo test --workspace
 
-      # The agent-tool ↔ MCP-twin payload parity (HF-2). The suite lives in `web`
-      # because `agent-core` may not dev-depend on the `mcp` surface crate, and it
-      # is `agents`-gated — so `cargo test --workspace` above, which builds no
-      # `agents` feature, compiles it to zero tests. It used to run there from
-      # agent-core; this step keeps it enforced.
-      - name: MCP-parity of the workspace agent tools (--features agents)
-        run: cargo test -p web --features agents --test mcp_parity_workspace_tools
+      # The no-extension build (S-645, FR-DS-05): `--no-default-features --features
+      # lang-all,ui` — the dashboard without the `wiki` or `agents` feature, so the
+      # composition registers nothing. Its fitness suite
+      # (cli/tests/no_extension_surface.rs: no chat or wiki route, tool, command or
+      # extension; `status` and `serve --ui` start on a chat- and wiki-configured
+      # project) compiles to nothing in the default build above, so it needs this
+      # build — clippy too, or that file would never be linted. Every other `logos`
+      # suite runs here as well. It recompiles logos-core, mcp, web and the cli in a
+      # feature set no other step builds: ~3 min on the reference machine (a 64 s
+      # cold build, the 99 s suite, ~20 s of clippy); unmeasured on a GitHub runner,
+      # which runs ~3x slower (see the test step above).
+      - name: clippy + test (no-extension build)
+        run: |
+          cargo clippy -p logos --no-default-features --features lang-all,ui --all-targets -- -D warnings
+          cargo test -p logos --no-default-features --features lang-all,ui
+
+      # The agent-tool ↔ MCP-twin payload parity (HF-2) needs no step of its own
+      # any more: its suite moved from `web`, where it was `agents`-gated, to the
+      # `chat` extension's crate (`logos-chat/tests/mcp_parity_workspace_tools.rs`,
+      # S-644), which is ungated — so `cargo test --workspace` above runs it.
 
       # Supply-chain gate — license allowlist + RustSec advisories (NFR-CR-01).
       # cargo-deny is version-pinned: an unpinned tool fetched at run time is

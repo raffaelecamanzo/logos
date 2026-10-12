@@ -12,16 +12,18 @@
 //!
 //! `rig` and its `reqwest` HTTP client are the only outbound-network machinery
 //! in the workspace. They are confined here, and this crate reaches the `logos`
-//! binary only through the `web` adapter, which links solely under the
-//! non-default `ui` cargo feature. The result:
+//! binary only through the `chat` extension (`logos-chat`) and the wiki's
+//! in-app generator (`wiki-agent`), which the binary's `main` composes solely
+//! under the non-default `agents` cargo feature (ADR-60; S-643, S-644 — the
+//! `web` adapter has no edge to this crate). The result:
 //!
-//! - the **default** `logos` dependency tree links **no** HTTP client — the
-//!   byte-identical no-networking-crate fitness function
-//!   (`logos-core/tests/no_network_deps.rs`) is unchanged;
-//! - the **`ui`** build links `rig`, and a mock-`CompletionModel` round-trip
+//! - the **default** (listen-only `ui`) and **slim** `logos` dependency trees
+//!   link **no** HTTP client — the no-networking-crate fitness function
+//!   (`logos-core/tests/no_network_deps.rs`) holds them to it;
+//! - the **`agents`** build links `rig`, and a mock-`CompletionModel` round-trip
 //!   proves the offline path dials nothing (`tests/zero_egress.rs`);
-//! - the carve-out boundary itself — `rig`/`reqwest` present under `ui`, absent
-//!   by default — is locked by `tests/carve_out.rs`.
+//! - the carve-out boundary itself — `rig`/`reqwest` present under `agents`,
+//!   absent from the slim and `ui` trees — is locked by `tests/carve_out.rs`.
 //!
 //! [ADR-40]: the `ui`-gated outbound carve-out.
 //! [ADR-41]: the `rig` decision + provider/mock strategy.

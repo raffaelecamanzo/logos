@@ -83,6 +83,9 @@ use crate::runtime::Runtime;
 /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 pub mod readout;
 
+/// Go packages as DSM rows ([S-527](../../../docs/planning/journal.md#s-527-the-go-dsm-lists-packages)).
+mod go_dsm;
+
 #[cfg(test)]
 mod tests;
 
@@ -849,7 +852,8 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
 /// which are annotation-materialised, not lexical code) are dropped from the
 /// node set **before** the rollup, so a test-only module and any
 /// test↔production edge never contribute. Reuses the SAME module rollup the
-/// `dsm` view builds ([`build_view`] at [`Granularity::Module`]) — it already
+/// `dsm` view starts from ([`build_view`] at [`Granularity::Module`]; the DSM then
+/// folds Go file modules into package rows, which these budgets do not) — it already
 /// applies the canonical-view edge set `BR-19` requires (`Contains`,
 /// `Accesses`, documentation, and config-reference edges excluded) and drops
 /// module self-loops, and it deduplicates rollup edges to one per `(src,
@@ -2942,7 +2946,9 @@ impl FromStr for DsmGranularity {
 
 /// `dsm` — the dependency structure matrix ([FR-GV-07]): cell `(i, j)`
 /// counts dep edges `i → j`, rows ordered by layer order then name (so
-/// forward deps sit below the diagonal).
+/// forward deps sit below the diagonal). At module granularity a Go package —
+/// a directory plus its `package` clause — is one row, not one row per file
+/// ([`go_dsm`]); every other language keeps the module rollup's rows.
 ///
 /// [FR-GV-07]: ../../../docs/specs/requirements/FR-GV-07.md
 pub(crate) fn dsm(
@@ -2961,21 +2967,37 @@ pub(crate) fn dsm(
     let graph = view.graph();
 
     // One row per aggregate vertex, with its layer when the key is
-    // file-backed (a module rollup key can fall back to `file:<path>`).
-    let mut order: Vec<usize> = (0..graph.node_count()).collect();
-    let rows_unsorted: Vec<DsmRow> = graph
-        .node_indices()
-        .map(|idx| {
-            let key = graph[idx].key.as_str();
-            let layer = dsm_key_path(key, granularity)
+    // file-backed (a module rollup key can fall back to `file:<path>`). A Go
+    // file module is not a Go module: its vertices roll up again, one row per
+    // directory plus `package` clause ([S-527]). Every other vertex is its own
+    // row, so a project without Go files is untouched.
+    //
+    // [S-527]: ../../../docs/planning/journal.md#s-527-the-go-dsm-lists-packages
+    let go_packages = match granularity {
+        DsmGranularity::Module => go_dsm::package_rows(
+            engine,
+            graph.node_weights().map(|vertex| vertex.key.as_str()),
+        )?,
+        DsmGranularity::File => go_dsm::GoPackages::default(),
+    };
+    let mut row_of_name: HashMap<&str, usize> = HashMap::new();
+    let mut row_of_vertex: Vec<usize> = Vec::with_capacity(graph.node_count());
+    let mut rows_unsorted: Vec<DsmRow> = Vec::new();
+    for idx in graph.node_indices() {
+        let key = graph[idx].key.as_str();
+        let name = go_packages.row_of.get(key).map_or(key, String::as_str);
+        let row = *row_of_name.entry(name).or_insert_with(|| {
+            let layer = dsm_key_path(name, granularity)
                 .and_then(|path| compiled.layer_of(path))
-                .map(|(name, _)| name.to_string());
-            DsmRow {
-                name: key.to_string(),
+                .map(|(layer, _)| layer.to_string());
+            rows_unsorted.push(DsmRow {
+                name: name.to_string(),
                 layer,
-            }
-        })
-        .collect();
+            });
+            rows_unsorted.len() - 1
+        });
+        row_of_vertex.push(row);
+    }
     let layer_order = |i: usize| -> u32 {
         rows_unsorted[i]
             .layer
@@ -2990,6 +3012,7 @@ pub(crate) fn dsm(
             })
             .unwrap_or(u32::MAX) // unassigned rows sort after every layer
     };
+    let mut order: Vec<usize> = (0..rows_unsorted.len()).collect();
     order.sort_by(|&a, &b| {
         layer_order(a)
             .cmp(&layer_order(b))
@@ -3005,13 +3028,18 @@ pub(crate) fn dsm(
     let mut matrix = vec![vec![0u32; n]; n];
     for edge in graph.edge_references() {
         let (src, dst) = (
-            position[&edge.source().index()],
-            position[&edge.target().index()],
+            position[&row_of_vertex[edge.source().index()]],
+            position[&row_of_vertex[edge.target().index()]],
         );
-        matrix[src][dst] += edge.weight().weight;
+        // Two files of one package depend on each other inside the package;
+        // that is not a coupling between rows (the rollup drops the same
+        // self-loop one level down).
+        if src != dst {
+            matrix[src][dst] += edge.weight().weight;
+        }
     }
 
-    Ok(DsmReport {
+    let mut report = DsmReport {
         granularity: match granularity {
             DsmGranularity::Module => "module".to_string(),
             DsmGranularity::File => "file".to_string(),
@@ -3024,7 +3052,15 @@ pub(crate) fn dsm(
         freshness: fresh.line(),
         warnings: fresh.warnings,
         notes: fresh.notes,
-    })
+    };
+    if go_packages.directory_only > 0 {
+        report.notes.push(format!(
+            "{} Go file(s) had no readable `package` clause and are grouped by directory alone; \
+             their package may show as a second row",
+            go_packages.directory_only
+        ));
+    }
+    Ok(report)
 }
 
 /// The file path behind a DSM vertex key, when one exists: a file-view key

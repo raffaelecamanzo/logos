@@ -1,0 +1,107 @@
+[
+  {
+    "id": "overview",
+    "label": "Dashboard",
+    "path": "/",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "health",
+    "label": "Health",
+    "path": "/health",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "graph",
+    "label": "Graph",
+    "path": "/graph",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "wiki",
+    "label": "Wiki",
+    "path": "/wiki",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "files",
+    "label": "Files & Risk",
+    "path": "/files",
+    "group": "B",
+    "scope": "member"
+  },
+  {
+    "id": "gaps",
+    "label": "Rule findings",
+    "path": "/gaps",
+    "group": "B",
+    "scope": "member"
+  },
+  {
+    "id": "coverage",
+    "label": "Coverage",
+    "path": "/coverage",
+    "group": "B",
+    "scope": "member"
+  },
+  {
+    "id": "statistics",
+    "label": "Statistics",
+    "path": "/statistics",
+    "group": "C",
+    "scope": "member"
+  },
+  {
+    "id": "config",
+    "label": "Config",
+    "path": "/config",
+    "group": "C",
+    "scope": "member"
+  },
+  {
+    "id": "workspace-dashboard",
+    "label": "Dashboard",
+    "path": "/workspace-dashboard",
+    "group": "A",
+    "scope": "app"
+  },
+  {
+    "id": "workspace-health",
+    "label": "Health",
+    "path": "/workspace-health",
+    "group": "A",
+    "scope": "app"
+  },
+  {
+    "id": "workspace",
+    "label": "Workspace",
+    "path": "/workspace",
+    "group": "A",
+    "scope": "app"
+  },
+  {
+    "id": "workspace-chat",
+    "label": "Chat",
+    "path": "/workspace-chat",
+    "group": "A",
+    "scope": "app"
+  },
+  {
+    "id": "workspace-statistics",
+    "label": "Statistics",
+    "path": "/workspace-statistics",
+    "group": "C",
+    "scope": "app"
+  },
+  {
+    "id": "workspace-config",
+    "label": "Config",
+    "path": "/workspace-config",
+    "group": "C",
+    "scope": "app"
+  }
+]

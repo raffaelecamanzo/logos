@@ -11,13 +11,13 @@
 //! - **Loopback only.** The listener binds [`BIND_ADDR`] (`127.0.0.1`), a
 //!   compile-time constant: no flag, env var, or config key can change it
 //!   (a revisable v1 posture, ADR-27). [`bind`] is the single bind site.
-//! - **No egress in the listen-only build.** Under `--features ui` alone the
-//!   surface only ever *listens and answers* — it never dials, and no network
-//!   client crate is in its graph (the only socket is the loopback listener).
-//!   The chat / wiki-**generation** egress client (`rig`/`reqwest`) is compiled
-//!   in only under the additional `agents` feature (CR-078, ADR-60); even then
-//!   egress stays user-initiated and consent-gated to a user-configured endpoint
-//!   (ADR-40) — the loopback/CSP/CSRF postures below are unchanged either way.
+//! - **No egress in this crate.** The surface only ever *listens and answers* —
+//!   it never dials, and no network client crate is in its graph (the only
+//!   socket is the loopback listener). The two features that dial — the chat
+//!   (S-643) and the wiki's in-app generation (S-644) — are extensions a
+//!   binary's `main` composes under its `agents` feature (CR-078, ADR-60, ADR-74);
+//!   even then egress stays user-initiated and consent-gated to a user-configured
+//!   endpoint (ADR-40) — the loopback/CSP/CSRF postures below are unchanged.
 //! - **GET-only, except the enumerated config-write/apply routes.** Every
 //!   non-GET request is answered `405` ([`method_guard`]) before any handler
 //!   runs, **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`]
@@ -39,46 +39,35 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-// The SSE keep-alive interval is used only by the agent handlers (chat turn /
-// wiki-generation trigger), so it is `agents`-only — a plain `--features ui`
-// build serves the listen-only dashboard and never streams (CR-078, ADR-60).
-#[cfg(feature = "agents")]
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Form, FromRef, Request, State},
+    extract::{Form, FromRef, MatchedPath, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{from_fn, from_fn_with_state, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-// The Server-Sent Events response types back the chat/wiki streaming handlers
-// only, so they compile solely under `agents` (CR-078, ADR-60).
-#[cfg(feature = "agents")]
-use axum::response::sse::{KeepAlive, Sse};
 use logos_core::config::{ConfigError, PolicyFile};
 use logos_core::federation::{discover, Backing, BuildDependencies, ContractBridge, EngineRegistry};
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::observability::{in_surface, Surface};
 use logos_core::Engine;
+use logos_ext::web::{WebContext, WebMethod, WebRoute};
+use logos_ext::ExtensionHost;
 
-use crate::member::MemberEngine;
-#[cfg(feature = "agents")]
-use crate::member::workspace_root_of;
+use crate::spa::{EmbeddedSpa, SpaAssets};
+// The per-request member and workspace extractors, and the workspace root a
+// backing holds — public so an extension's handlers resolve a request's scope
+// exactly as the core's do ([FR-DS-04], S-643): the edge runs extension → `web`.
+pub use crate::member::{workspace_root_of, MemberEngine, WorkspaceRoot};
 
 mod api_v1;
-// The chat and wiki-**generation** surfaces are the LLM egress carve-out
-// (CR-078, ADR-60): they hold the only edges to chat-agent / wiki-agent /
-// agent-core (and, through them, `rig` + `reqwest`), so they compile only under
-// `agents`. The wiki-**view** (`mod wiki` below) and every read-model stay in the
-// listen-only dashboard, present under `--features ui` alone.
-#[cfg(feature = "agents")]
-pub mod chat;
+// The chat and the wiki are extensions (S-643, S-644): their routes are mounted
+// from the host like any extension's, and this crate names neither.
 pub mod components;
-mod markdown;
 // The per-request member scope (S-250, FR-UI-29): the `?repo=` → `Engine`
 // extractor every `/api/v1/*` handler resolves its engine through, so the
 // workspace SPA's member selector scopes every existing view. Inert (and
@@ -86,9 +75,16 @@ mod markdown;
 mod member;
 mod query;
 pub mod spa;
-mod wiki;
-#[cfg(feature = "agents")]
-pub mod wikigen;
+
+/// The JSON replies every `/api/v1/*` read answers with — the `200` body, the
+/// honest `500` error chain ([`ApiError`](json::ApiError)) and the composed
+/// `Result` of both — public so an extension's read routes answer exactly as the
+/// core's do ([FR-DS-04], S-644): the edge runs extension → `web`.
+///
+/// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
+pub mod json {
+    pub use crate::api_v1::{fail, ok, respond, ApiError};
+}
 
 /// The loopback bind address — a **compile-time constant** (ADR-27). The
 /// carve-out boundary: the listener never opens on any other interface.
@@ -125,6 +121,9 @@ const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
 /// - `serve --mcp` (no `--ui`) → delegates to the MCP loop, same as the
 ///   default-build path.
 ///
+/// Both surfaces compose `host`'s active extensions ([FR-DS-04], [ADR-74]): their
+/// routes join the web surface, their tools the MCP roster.
+///
 /// # Errors
 /// Fails if discovery hits a malformed manifest, the engine cannot start, the
 /// runtime cannot build, the loopback port is already taken (an actionable error
@@ -133,7 +132,37 @@ const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
 /// [FR-WS-06]: ../../../docs/specs/requirements/FR-WS-06.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16, standalone: bool) -> Result<()> {
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+pub fn serve_surfaces(
+    root: &Path,
+    mcp: bool,
+    ui: bool,
+    port: u16,
+    standalone: bool,
+    host: &ExtensionHost,
+) -> Result<()> {
+    serve_surfaces_with_assets(root, mcp, ui, port, standalone, host, Arc::new(EmbeddedSpa))
+}
+
+/// [`serve_surfaces`] serving the web surface's SPA from `assets` instead of the
+/// bundle embedded in this binary ([FR-UI-51], [ADR-74]) — the entry point of a
+/// binary that composes an extension with its own SPA bundle. The MCP surface is
+/// unaffected.
+///
+/// # Errors
+/// As [`serve_surfaces`].
+///
+/// [FR-UI-51]: ../../../docs/specs/requirements/FR-UI-51.md
+pub fn serve_surfaces_with_assets(
+    root: &Path,
+    mcp: bool,
+    ui: bool,
+    port: u16,
+    standalone: bool,
+    host: &ExtensionHost,
+    assets: Arc<dyn SpaAssets>,
+) -> Result<()> {
     let backing = Arc::new(resolve_serve_backing(root, standalone)?);
     // One watcher for the whole process **only** on the single-root path
     // (S-022/FR-SY-04); a spawn failure degrades to watcherless serving (reconcile
@@ -168,11 +197,11 @@ pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16, standalone: b
             // Both: race the two serve loops on one runtime (NFR-RA-01 — MCP
             // keeps stdout; the web surface is stderr-only).
             (true, true) => tokio::select! {
-                r = serve_web(Arc::clone(&backing), port) => r,
-                r = mcp::serve_stdio_on(Arc::clone(&engine)) => r,
+                r = serve_web(Arc::clone(&backing), port, host, assets) => r,
+                r = mcp::serve_stdio_on(Arc::clone(&engine), host) => r,
             },
-            (false, true) => serve_web(backing, port).await,
-            (true, false) => mcp::serve_stdio_on(engine).await,
+            (false, true) => serve_web(backing, port, host, assets).await,
+            (true, false) => mcp::serve_stdio_on(engine, host).await,
             // clap guarantees at least one of --mcp/--ui; defend anyway.
             (false, false) => anyhow::bail!("serve needs --mcp and/or --ui"),
         }
@@ -215,8 +244,14 @@ pub fn resolve_serve_backing(root: &Path, standalone: bool) -> Result<Backing<En
 }
 
 /// Bind the loopback listener and serve the router until the process ends, over
-/// the discovered [`Backing`] (single-root or the member registry).
-async fn serve_web(backing: Arc<Backing<Engine>>, port: u16) -> Result<()> {
+/// the discovered [`Backing`] (single-root or the member registry), with `host`'s
+/// active extension routes and the SPA from `assets`.
+async fn serve_web(
+    backing: Arc<Backing<Engine>>,
+    port: u16,
+    host: &ExtensionHost,
+    assets: Arc<dyn SpaAssets>,
+) -> Result<()> {
     let listener = bind(port)?;
     let addr = listener
         .local_addr()
@@ -230,7 +265,7 @@ async fn serve_web(backing: Arc<Backing<Engine>>, port: u16) -> Result<()> {
     // binary once shipped a dead dashboard unnoticed. The consistency guard in
     // `render_shell` cannot catch it (the placeholder references no assets, so it is
     // internally consistent), so warn at startup the moment `--ui` binds.
-    if spa::is_placeholder_shell() {
+    if spa::is_placeholder_shell(assets.as_ref()) {
         tracing::warn!(
             target: "logos::web",
             "the web UI is the PLACEHOLDER shell, not a real build — http://{addr}/ will show a \
@@ -244,9 +279,21 @@ async fn serve_web(backing: Arc<Backing<Engine>>, port: u16) -> Result<()> {
         .context("switching the web listener to non-blocking")?;
     let listener = tokio::net::TcpListener::from_std(listener)
         .context("adopting the loopback listener into tokio")?;
-    axum::serve(listener, router_for_backing(backing)?)
+    axum::serve(listener, serving_router(backing, host, assets)?)
         .await
         .context("the web serve loop failed")
+}
+
+/// The router [`serve_web`] serves: a fresh session [`IntentToken`], `host`'s
+/// active extensions and the SPA from `assets` — split from the socket so the
+/// composition `serve_surfaces_with_assets` hands down is testable without
+/// binding one.
+fn serving_router(
+    backing: Arc<Backing<Engine>>,
+    host: &ExtensionHost,
+    assets: Arc<dyn SpaAssets>,
+) -> Result<Router> {
+    hosted_router_with_assets(backing, IntentToken::generate(), host, assets)
 }
 
 /// Bind the loopback listener on [`BIND_ADDR`] at `port` — the **single bind
@@ -267,9 +314,12 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 // ── Router skeleton (FR-UI-03, ADR-31) ──────────────────────────────────────
 
 /// The **enumerated** config-write routes on which [`method_guard`] admits a
-/// `POST` (ADR-31, NFR-SE-06) — the chat, wiki-generation and verify constants
-/// below are the only other admitted `POST`s; every other path/method stays
-/// GET-only (`405`). The three member routes bridge to the [`api-facade`]'s
+/// `POST` (ADR-31, NFR-SE-06) — the verify constant below and the active
+/// extensions' `POST` routes ([`ExtensionPosts`]; the chat turn and its per-thread
+/// writes are the `chat` extension's, S-643, the wiki-generation trigger the `wiki`
+/// extension's, S-644) are the only other admitted `POST`s; every other
+/// path/method stays GET-only (`405`).
+/// The three member routes bridge to the [`api-facade`]'s
 /// mutating config seam; the three workspace routes write at the workspace root
 /// without an engine (below). All six are additionally gated by [`intent_guard`]
 /// (same-origin + per-session token).
@@ -314,80 +364,6 @@ pub const CONFIG_POST_ROUTES: &[&str] = &[
     "/api/v1/workspace/config/secret",
     "/api/v1/workspace/manifest/save",
 ];
-
-/// The enumerated chat `POST` route (S-170, [FR-UI-19], [NFR-SE-06]): the only
-/// **non**-config path on which [`method_guard`] admits a `POST`. It carries a
-/// chat turn and streams the orchestrator's events back as Server-Sent Events
-/// (text/event-stream) under the unchanged self-only CSP, or — without
-/// `Accept: text/event-stream` — renders the buffered answer (the [FR-UI-19]
-/// progressive-enhancement fallback). Like the config `POST`s it is gated by
-/// [`intent_guard`] (same-origin + per-session token); the streaming request rides
-/// the `POST` precisely so it keeps that intent proof, which a `GET` `EventSource`
-/// cannot carry ([NFR-SE-06]). The agent logic lives in [`chat-agent`] ([ADR-01]).
-///
-/// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
-/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
-/// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
-/// [`chat-agent`]: ../../../docs/specs/architecture/components/chat-agent.md
-pub const CHAT_POST_ROUTE: &str = "/chat";
-
-/// The GET thread-list read route (S-209, [FR-UI-26], [ADR-47], [ADR-28]): the
-/// conversation-history rail's data seam — every persisted conversation
-/// (`id`, `title`, `updated_at`), most-recent-first. A pure loopback, same-origin
-/// GET carrying no secret ([NFR-SE-07]); the per-thread messages read hangs off
-/// the `{id}` sub-path, and the per-thread **delete** is the one mutating verb
-/// under this tree (a `POST` to `…/{id}/delete`, gated by [`intent_guard`]).
-///
-/// [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
-/// [ADR-47]: ../../../docs/specs/architecture/decisions/ADR-47.md
-/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
-pub const CHAT_THREADS_ROUTE: &str = "/api/v1/chat/threads";
-
-/// The workspace chat's turn `POST` route ([S-482], [FR-WS-34], [ADR-71]): the
-/// workspace roster's turn, served by its own service rather than a member's.
-/// It carries [`CHAT_POST_ROUTE`]'s contract unchanged — admitted by
-/// [`method_guard`], gated by [`intent_guard`], streaming SSE or rendering the
-/// buffered answer per `Accept` — but answers for the **workspace**: it reads no
-/// `?repo=`, takes its `[chat]` from the workspace tier alone, and persists to
-/// `<workspace root>/.logos/chat.db`. Mounted only under `agents`; under a
-/// single-root serve it answers `404` (not a workspace, [ADR-52]).
-///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
-/// [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
-/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-pub const WORKSPACE_CHAT_POST_ROUTE: &str = "/workspace/chat";
-
-/// The workspace chat's conversation-history routes ([S-482], [FR-UI-26]): the
-/// [`CHAT_THREADS_ROUTE`] list / messages / per-thread delete, over
-/// `<workspace root>/.logos/chat.db` instead of a member's. `?repo=` is not
-/// read; a single-root serve answers `404`.
-///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-/// [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
-pub const WORKSPACE_CHAT_THREADS_ROUTE: &str = "/api/v1/workspace/chat/threads";
-
-/// The enumerated wiki-generation trigger `POST` route (S-178, [FR-WK-18],
-/// [FR-UI-19], [NFR-SE-06]): the Wiki tab posts here on open to launch a
-/// background, single-run [`wiki-agent`] generation pass and stream its per-page
-/// [`WikiProgress`](wikigen::WikiFrame) back as Server-Sent Events
-/// (`text/event-stream`) under the unchanged self-only CSP — or, without
-/// `Accept: text/event-stream`, the buffered summary (the [FR-UI-19]
-/// progressive-enhancement fallback). Starting a run **mutates** (consent-gated
-/// egress + `wiki write`), so — exactly like the chat routes — it is admitted by
-/// [`method_guard`] and gated by [`intent_guard`] (same-origin + per-session token);
-/// the streaming request rides the `POST` precisely so it keeps that intent proof,
-/// which a `GET` `EventSource` cannot carry ([NFR-SE-06]). The generation logic
-/// lives in [`wiki-agent`] ([ADR-01], [ADR-42]); the surface holds none.
-///
-/// [FR-WK-18]: ../../../docs/specs/requirements/FR-WK-18.md
-/// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
-/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
-/// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
-/// [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
-/// [`wiki-agent`]: ../../../docs/specs/architecture/components/wiki-agent.md
-pub const WIKI_GENERATE_ROUTE: &str = "/wiki/generate";
 
 /// The enumerated deep-`verify` `POST` route (S-206, [FR-UI-25], [FR-GV-19],
 /// [ADR-46]): the on-demand graph-consistency check the Config tab (S-207) posts
@@ -483,34 +459,21 @@ pub(crate) struct WebState {
     /// coupling: nothing that reads the bridge reads it ([BR-58]).
     build_deps: Arc<BuildDependencies>,
     intent: IntentToken,
-    /// The chat seam (S-170): production resolves the configured provider; the
-    /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
-    /// composite state stays cheap to clone. `agents`-only — the listen-only
-    /// dashboard carries no chat surface (CR-078, ADR-60).
-    #[cfg(feature = "agents")]
-    chat: Arc<dyn chat::ChatService>,
-    /// The workspace chat seam ([S-482]): the workspace roster's service over
-    /// this surface's registry, bridge and build-dependency cache — `None` under
-    /// [`Backing::Single`], where its routes answer `404`. `agents`-only.
+    /// The extension host this serve composes ([FR-DS-04], [ADR-74]):
+    /// [`build_router`] mounts its active extensions' routes and admits their
+    /// `POST`s. The public host is empty, and the router is then the core's alone.
     ///
-    /// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-    #[cfg(feature = "agents")]
-    workspace_chat: Option<Arc<dyn chat::ChatService>>,
-    /// The wiki-generation seam (S-178): production resolves the configured wiki
-    /// model and drives [`run_configured`](wiki_agent::run_configured); the
-    /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
-    /// composite state stays cheap to clone. `agents`-only — the listen-only
-    /// dashboard serves the wiki-**view** but holds no generation trigger
-    /// (CR-078, ADR-60).
-    #[cfg(feature = "agents")]
-    wiki: Arc<dyn wikigen::WikiRunService>,
-    /// The single-run lock **and** connection-independent run registry (S-178,
-    /// S-222, [FR-WK-18], [CR-056]): gates the Wiki-tab trigger so a (re-)open while
-    /// a pass is in flight starts no second run, and owns the in-flight run's
-    /// lifetime in application state so a dropped SSE body no longer aborts it — the
-    /// run completes server-side. Cheap to clone (an `Arc<Mutex<…>>`). `agents`-only.
-    #[cfg(feature = "agents")]
-    wiki_state: wikigen::WikiRunState,
+    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+    host: ExtensionHost,
+    /// The SPA bundle the shell, the asset path and the history fallback serve
+    /// ([FR-UI-51], [ADR-74]): the embedded bundle by default
+    /// ([`spa::EmbeddedSpa`]), or the provider a composing binary injects through
+    /// [`hosted_router_with_assets`].
+    ///
+    /// [FR-UI-51]: ../../../docs/specs/requirements/FR-UI-51.md
+    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+    spa: Arc<dyn SpaAssets>,
 }
 
 impl FromRef<WebState> for Arc<Engine> {
@@ -543,48 +506,15 @@ impl FromRef<WebState> for IntentToken {
     }
 }
 
-#[cfg(feature = "agents")]
-impl FromRef<WebState> for Arc<dyn chat::ChatService> {
+impl FromRef<WebState> for Arc<dyn SpaAssets> {
     fn from_ref(state: &WebState) -> Self {
-        Arc::clone(&state.chat)
+        Arc::clone(&state.spa)
     }
 }
 
-/// The workspace chat service, extracted for its turn route ([S-482]) — or, when
-/// this serve has none (a single root), the workspace family's `404`, answered
-/// from the request head before the body is read. The [`WorkspaceRoot`]
-/// extractor's rule for the workspace config routes: the state holds the
-/// `Option`, the extractor yields the service, and the 404 is decided once.
-///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-/// [`WorkspaceRoot`]: crate::member::WorkspaceRoot
-#[cfg(feature = "agents")]
-pub(crate) struct WorkspaceChat(Arc<dyn chat::ChatService>);
-
-#[cfg(feature = "agents")]
-#[axum::async_trait]
-impl axum::extract::FromRequestParts<WebState> for WorkspaceChat {
-    type Rejection = Response;
-
-    async fn from_request_parts(
-        _parts: &mut axum::http::request::Parts,
-        state: &WebState,
-    ) -> Result<Self, Self::Rejection> {
-        state.workspace_chat.clone().map(Self).ok_or_else(api_v1::not_a_workspace)
-    }
-}
-
-#[cfg(feature = "agents")]
-impl FromRef<WebState> for Arc<dyn wikigen::WikiRunService> {
+impl FromRef<WebState> for ExtensionHost {
     fn from_ref(state: &WebState) -> Self {
-        Arc::clone(&state.wiki)
-    }
-}
-
-#[cfg(feature = "agents")]
-impl FromRef<WebState> for wikigen::WikiRunState {
-    fn from_ref(state: &WebState) -> Self {
-        state.wiki_state.clone()
+        state.host.clone()
     }
 }
 
@@ -605,8 +535,50 @@ pub fn router(engine: Arc<Engine>) -> Router {
 /// A federated backing whose default member cannot start (so no engine can answer
 /// the shared surface). The single-root backing is infallible.
 pub fn router_for_backing(backing: Arc<Backing<Engine>>) -> Result<Router> {
+    hosted_router(backing, IntentToken::generate(), &ExtensionHost::new())
+}
+
+/// Build the router over a discovered [`Backing`] **and** an [`ExtensionHost`] —
+/// the production serve's router ([`serve_surfaces`]), and the seam the
+/// stub-extension tests drive ([FR-DS-04]). The active extensions' routes are
+/// mounted inside the same guard stack as the core's, and their `POST`s admitted
+/// by the method guard; under the public host this is exactly
+/// [`router_for_backing`].
+///
+/// # Errors
+/// As [`router_for_backing`].
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+pub fn hosted_router(
+    backing: Arc<Backing<Engine>>,
+    intent: IntentToken,
+    host: &ExtensionHost,
+) -> Result<Router> {
+    hosted_router_with_assets(backing, intent, host, Arc::new(EmbeddedSpa))
+}
+
+/// [`hosted_router`] serving the SPA from `assets` instead of the bundle embedded
+/// in this binary ([FR-UI-51], [ADR-74]): the seam through which a binary that
+/// composes an extension with its own SPA bundle hands the router that bundle. The
+/// shell, the asset path, the history fallback, the consistency guard and the
+/// intent-token injection are the ones the embedded bundle goes through; with
+/// [`spa::EmbeddedSpa`] this is exactly [`hosted_router`].
+///
+/// # Errors
+/// As [`router_for_backing`].
+///
+/// [FR-UI-51]: ../../../docs/specs/requirements/FR-UI-51.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+pub fn hosted_router_with_assets(
+    backing: Arc<Backing<Engine>>,
+    intent: IntentToken,
+    host: &ExtensionHost,
+    assets: Arc<dyn SpaAssets>,
+) -> Result<Router> {
     let engine = backing.default_engine()?;
-    Ok(build_router(make_state(engine, backing, IntentToken::generate())))
+    let mut state = make_state(engine, backing, intent, host);
+    state.spa = assets;
+    Ok(build_router(state))
 }
 
 /// Build a workspace router over a member [`EngineRegistry`] — the seam the S-249
@@ -634,131 +606,26 @@ pub fn workspace_router_with_intent(
 ) -> Result<Router> {
     let backing = Arc::new(Backing::Federated(Box::new(registry)));
     let engine = backing.default_engine()?;
-    Ok(build_router(make_state(engine, backing, intent)))
-}
-
-/// Build a workspace router over an explicit [`IntentToken`] **and** workspace chat
-/// service — the seam the S-482 route tests drive to inject a mock-provider
-/// [`ChatService`](chat::ChatService) on `POST /workspace/chat`, proving its guards
-/// and SSE/buffered contract end-to-end without a live provider, as
-/// [`router_with_chat`] does for `/chat`. Everything else is the production
-/// workspace state.
-///
-/// # Errors
-/// The workspace's default member cannot start (see [`router_for_backing`]).
-#[cfg(feature = "agents")]
-pub fn workspace_router_with_chat(
-    registry: EngineRegistry<Engine>,
-    intent: IntentToken,
-    workspace_chat: Arc<dyn chat::ChatService>,
-) -> Result<Router> {
-    let backing = Arc::new(Backing::Federated(Box::new(registry)));
-    let engine = backing.default_engine()?;
-    let mut state = make_state(engine, backing, intent);
-    state.workspace_chat = Some(workspace_chat);
-    Ok(build_router(state))
-}
-
-/// The chat service for this request's member scope (S-250, [FR-UI-29]).
-///
-/// The injected [`ChatService`](chat::ChatService) is bound to the **default** engine at
-/// router build (and, in the carve-out tests, is a mock provider). That is right for
-/// single-root and for an unscoped workspace request. But a `?repo=`-scoped request is
-/// reading member B, so answering its chat turn from member A's graph would state one
-/// member's answers under another member's name ([NFR-RA-05]) — so bind a service to the
-/// resolved engine instead. `Arc::ptr_eq` is the test: same engine ⇒ the injected service
-/// (mock seams preserved); a different engine ⇒ a service for that member, resolving its
-/// inherited chat halves against the same `workspace_root` ([ADR-67]).
-///
-/// A scoped member's service is a member chat like any other: single-backing, with no
-/// cross-service reach ([S-481]) — that is the workspace chat's.
-///
-/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
-#[cfg(feature = "agents")]
-fn chat_for(
-    injected: &Arc<dyn chat::ChatService>,
-    default: &Arc<Engine>,
-    scoped: Arc<Engine>,
-    backing: &Arc<Backing<Engine>>,
-) -> Arc<dyn chat::ChatService> {
-    if Arc::ptr_eq(default, &scoped) {
-        Arc::clone(injected)
-    } else {
-        Arc::new(chat::ConfiguredChatService::new(scoped, workspace_root_of(backing)))
-    }
-}
-
-/// The wiki-generation service for this request's member scope (S-250, [FR-UI-29]).
-///
-/// The load-bearing case is a **write**: the Wiki tab's read-models are member-scoped, so
-/// a generation pass launched from it must write into the member whose pages it is
-/// showing — not into the workspace default's `wiki.db`. See [`chat_for`] for the
-/// same-engine ⇒ injected-service rule that keeps the S-178 mock seam intact.
-#[cfg(feature = "agents")]
-fn wiki_for(
-    injected: &Arc<dyn wikigen::WikiRunService>,
-    default: &Arc<Engine>,
-    scoped: Arc<Engine>,
-    workspace_root: Option<std::path::PathBuf>,
-) -> Arc<dyn wikigen::WikiRunService> {
-    if Arc::ptr_eq(default, &scoped) {
-        Arc::clone(injected)
-    } else {
-        Arc::new(wikigen::ConfiguredWikiRunService::new(
-            scoped,
-            workspace_root,
-        ))
-    }
+    Ok(build_router(make_state(engine, backing, intent, &ExtensionHost::new())))
 }
 
 /// Assemble the [`WebState`] from a resolved default `engine` and its `backing`,
-/// wiring the `agents`-only chat/wiki seams when present — the one place state is
+/// holding the extension `host` the router composes — the one place state is
 /// constructed, shared by every router entry point.
-fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: IntentToken) -> WebState {
-    let bridge = Arc::new(ContractBridge::new());
-    let build_deps = Arc::new(BuildDependencies::new());
-    #[cfg(feature = "agents")]
-    {
-        let workspace_root = workspace_root_of(&backing);
-        let chat: Arc<dyn chat::ChatService> = Arc::new(chat::ConfiguredChatService::new(
-            Arc::clone(&engine),
-            workspace_root.clone(),
-        ));
-        let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
-            wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine), workspace_root),
-        );
-        // The workspace chat stitches over the same bridge and build-dependency
-        // cache the `/api/v1/workspace/*` routes read (S-482); a single root
-        // mints no query backing, so it has no workspace chat.
-        let workspace_chat =
-            agent_core::XserviceBacking::federated(Arc::clone(&backing), Arc::clone(&bridge)).map(
-                |xservice| {
-                    Arc::new(chat::WorkspaceChatService::new(
-                        xservice.with_build_deps(Arc::clone(&build_deps)),
-                    )) as Arc<dyn chat::ChatService>
-                },
-            );
-        WebState {
-            engine,
-            backing,
-            bridge,
-            build_deps,
-            intent,
-            chat,
-            workspace_chat,
-            wiki,
-            wiki_state: wikigen::WikiRunState::new(),
-        }
-    }
-    #[cfg(not(feature = "agents"))]
-    {
-        WebState {
-            engine,
-            backing,
-            bridge,
-            build_deps,
-            intent,
-        }
+fn make_state(
+    engine: Arc<Engine>,
+    backing: Arc<Backing<Engine>>,
+    intent: IntentToken,
+    host: &ExtensionHost,
+) -> WebState {
+    WebState {
+        engine,
+        backing,
+        bridge: Arc::new(ContractBridge::new()),
+        build_deps: Arc::new(BuildDependencies::new()),
+        intent,
+        host: host.clone(),
+        spa: Arc::new(EmbeddedSpa),
     }
 }
 
@@ -774,93 +641,38 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
 pub fn router_with_intent(engine: Arc<Engine>, intent: IntentToken) -> Router {
     // Single-root backing: the engine IS the default, no registry is allocated —
     // the `/api/v1/workspace/*` surface answers `404` (not a workspace, ADR-52).
-    // Under `agents` the state carries the config-resolved chat + wiki-generation
-    // seams; under a plain `--features ui` build it is just the engine + intent
-    // token, and the chat/wiki routes are never mounted (CR-078, ADR-60).
+    // The empty host composes no extension, so no chat (S-643) or wiki (S-644)
+    // route is mounted.
     let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
-    build_router(make_state(engine, backing, intent))
-}
-
-/// Build the router over an explicit [`IntentToken`] **and** chat service — the
-/// seam the chat carve-out tests drive to inject a mock-provider
-/// [`ChatService`](chat::ChatService), proving the SSE route end-to-end (incremental
-/// events, clean teardown, zero real egress) without a live provider ([UAT-UI-07]).
-/// The wiki-generation seam gets the config-resolved production service.
-/// Production uses [`router`]/[`router_with_intent`], which supply both
-/// config-resolved services.
-///
-/// [UAT-UI-07]: ../../../docs/specs/requirements/UAT-UI-07.md
-///
-/// `agents`-only: the mock-provider chat surface exists solely in the egress build
-/// (CR-078, ADR-60).
-#[cfg(feature = "agents")]
-pub fn router_with_chat(
-    engine: Arc<Engine>,
-    intent: IntentToken,
-    chat: Arc<dyn chat::ChatService>,
-) -> Router {
-    let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(wikigen::ConfiguredWikiRunService::new(
-        Arc::clone(&engine),
-        None,
-    ));
-    let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
-    build_router(WebState {
-        engine,
-        backing,
-        bridge: Arc::new(ContractBridge::new()),
-        build_deps: Arc::new(BuildDependencies::new()),
-        intent,
-        chat,
-        workspace_chat: None,
-        wiki,
-        wiki_state: wikigen::WikiRunState::new(),
-    })
-}
-
-/// Build the router over an explicit [`IntentToken`] **and** wiki-generation service
-/// — the seam the S-178 wiki carve-out test drives to inject a mock-provider
-/// [`WikiRunService`](wikigen::WikiRunService), proving the trigger/SSE route
-/// end-to-end (exactly-one-run under the single-run lock, per-page streaming, clean
-/// teardown, zero real egress) without a live provider ([FR-WK-18]). The chat seam
-/// gets the config-resolved production service. Production uses
-/// [`router`]/[`router_with_intent`].
-///
-/// `agents`-only: the mock-provider wiki-generation surface exists solely in the
-/// egress build (CR-078, ADR-60).
-#[cfg(feature = "agents")]
-pub fn router_with_wiki(
-    engine: Arc<Engine>,
-    intent: IntentToken,
-    wiki: Arc<dyn wikigen::WikiRunService>,
-) -> Router {
-    let chat: Arc<dyn chat::ChatService> =
-        Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine), None));
-    let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
-    build_router(WebState {
-        engine,
-        backing,
-        bridge: Arc::new(ContractBridge::new()),
-        build_deps: Arc::new(BuildDependencies::new()),
-        intent,
-        chat,
-        workspace_chat: None,
-        wiki,
-        wiki_state: wikigen::WikiRunState::new(),
-    })
+    build_router(make_state(engine, backing, intent, &ExtensionHost::new()))
 }
 
 /// Build the router over a fully-constructed [`WebState`] — the shared skeleton
 /// every entry point (production and the single-seam test seams) delegates to.
 ///
 /// The read-only dashboard route table and the enumerated config-write/apply seam
-/// are always mounted; the chat and wiki-generation routes are added **only under
-/// `agents`** (CR-078, ADR-60). A plain `--features ui` build therefore serves the
-/// listen-only dashboard (graph/query/wiki-**view**) with no dialing seam, and
-/// [`method_guard`] keeps the (unmounted) chat/wiki paths GET-only.
+/// are always mounted; the chat routes are the `chat` extension's (S-643) and the
+/// wiki's read and generation routes the `wiki` extension's (S-644), mounted from
+/// the host like any extension's. This crate itself never dials.
 fn build_router(state: WebState) -> Router {
     // The intent-guard layer needs its own clone of the token; the rest lives in
     // `state`, moved into `.with_state` below.
     let intent = state.intent.clone();
+    // The active extensions' routes, built over this serve's default engine and
+    // backing ([FR-DS-04], [ADR-74]). Their `POST`s are the extensions' entries in
+    // the method guard's allow-list, so a contributed `POST` is admitted exactly
+    // when it is mounted.
+    let extension_routes = state.host.web_routes(&WebContext {
+        engine: Arc::clone(&state.engine),
+        backing: Arc::clone(&state.backing),
+    });
+    let extension_posts = ExtensionPosts(
+        extension_routes
+            .iter()
+            .filter(|r| r.method() == WebMethod::Post)
+            .map(WebRoute::path)
+            .collect(),
+    );
     let router = Router::new()
         // ── The embedded client-side SPA shell (CR-049, FR-UI-22, ADR-43) ─────
         // `/` is the SPA front door: the embedded Vite + React `index.html` with
@@ -885,6 +697,11 @@ fn build_router(state: WebState) -> Router {
         // FR-UI-34, CR-097) — the FR-NV-07 status projection alone, beside (not
         // instead of) the Health bundle above, which the Health view still owns.
         .route("/api/v1/status", get(api_v1::status))
+        // The extensions this serve composes (S-641, FR-UI-51, ADR-74): which are
+        // active and their UI manifests — what the SPA will read on boot to
+        // decide what to mount. A read of the host, so it reaches no engine
+        // and records nothing; GET, so the carve-out stack covers it.
+        .route("/api/v1/extensions", get(api_v1::extensions))
         .route("/api/v1/architecture", get(api_v1::architecture))
         .route("/api/v1/gaps", get(api_v1::gaps))
         .route("/api/v1/files", get(api_v1::files))
@@ -899,19 +716,10 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/branch-overlap", get(api_v1::branch_overlap))
         .route("/api/v1/node", get(api_v1::node))
         .route("/api/v1/search", get(api_v1::search))
-        .route("/api/v1/wiki", get(api_v1::wiki_index))
-        // The tiered wiki menu IA the SPA Wiki tab renders (S-189, [FR-UI-06]);
-        // composed from the same `crate::wiki` constants the read-models share.
-        .route("/api/v1/wiki/nav", get(api_v1::wiki_nav))
-        .route("/api/v1/wiki/search", get(api_v1::wiki_search))
-        .route("/api/v1/wiki/page/*slug", get(api_v1::wiki_page))
-        // The same-origin, read-only doc-image asset route (S-270, [FR-WK-27],
-        // [ADR-58]): presented pages' rewritten `<img src>` values resolve here. It
-        // serves image files from the doc roots only, path-sandboxed by
-        // canonicalized-prefix containment; GET, so the read-only carve-out stack
-        // already covers it, and the assets are same-origin so the self-only CSP is
-        // unchanged.
-        .route("/api/v1/wiki/asset/*path", get(api_v1::wiki_asset))
+        // Chat answer code references (S-622, FR-UI-47): one batched GET that
+        // resolves a finalized answer's backticked paths and symbols against the
+        // addressed member's graph. Read-only, so it joins no POST allow-list.
+        .route("/api/v1/code-refs", get(api_v1::code_refs))
         .route("/api/v1/config", get(api_v1::config))
         // The enriched telemetry read-model the Statistics tab consumes (S-234,
         // FR-OB-04/FR-UI-27): a thin `Engine::stats(window)` pass-through, `?window=`
@@ -984,51 +792,7 @@ fn build_router(state: WebState) -> Router {
         // `VERIFY_POST_ROUTE`, which `method_guard` consults.
         .route(VERIFY_POST_ROUTE, post(api_v1::verify));
 
-    // ── The chat + wiki-generation surface: the LLM egress carve-out, mounted
-    // only under `agents` (CR-078, ADR-60). A plain `--features ui` build omits
-    // these routes; `method_guard` then keeps their paths GET-only (a POST is
-    // `405`), so the listen-only dashboard exposes no dialing seam.
-    #[cfg(feature = "agents")]
     let router = router
-        // ── The chat turn (S-170, FR-UI-18/19, ADR-40): the one non-config
-        // intent-guarded POST. With `Accept: text/event-stream` it streams the
-        // orchestrator's plan / subagent-activity / token events as SSE under the
-        // unchanged self-only CSP (no WebSocket); otherwise it renders the buffered
-        // answer. Kept in lock-step with `CHAT_POST_ROUTE`, which `method_guard`
-        // consults. A GET to `/chat` is a browser navigation to the SPA's Chat
-        // client route, so it serves the SPA shell (the POST carries the turn).
-        .route(CHAT_POST_ROUTE, get(spa_shell).post(chat_turn))
-        // ── The conversation-history read/delete API (S-209, FR-UI-26, ADR-47).
-        // Two GET reads over the read-only seam — the thread list (id, title,
-        // updated_at, most-recent-first) and one thread's ordered messages
-        // (ADR-28) — plus the per-thread delete that supersedes the global clear:
-        // a `POST` to `…/{id}/delete` (DELETE is `405` under `method_guard`, so
-        // the mutation rides a POST verb) backed by `ChatStore::delete_thread`
-        // (S-208), intent-guarded like every mutating POST and kept in lock-step
-        // with `post_route_admitted` below.
-        .route(CHAT_THREADS_ROUTE, get(chat_threads))
-        .route("/api/v1/chat/threads/:id", get(chat_thread_messages))
-        .route("/api/v1/chat/threads/:id/delete", post(chat_thread_delete))
-        // ── The workspace chat (S-482, FR-WS-34, ADR-71): the workspace roster on
-        // its own route and store — the `/chat` turn and threads contract
-        // unchanged, answering for the workspace (no `?repo=`), configured from
-        // the workspace tier alone, persisted to `<workspace root>/.logos/chat.db`.
-        // A single-root serve answers all four `404`. The POSTs are kept in
-        // lock-step with `post_route_admitted` below.
-        .route(WORKSPACE_CHAT_POST_ROUTE, post(workspace_chat_turn))
-        .route(WORKSPACE_CHAT_THREADS_ROUTE, get(workspace_chat_threads))
-        .route("/api/v1/workspace/chat/threads/:id", get(workspace_chat_thread_messages))
-        .route("/api/v1/workspace/chat/threads/:id/delete", post(workspace_chat_thread_delete))
-        // ── The wiki-generation trigger (S-178, FR-WK-18, FR-UI-19, ADR-42): the
-        // Wiki tab POSTs here on open. Under the single-run lock it launches a
-        // background wiki-agent pass and, with `Accept: text/event-stream`, streams
-        // the per-page WikiProgress as SSE under the unchanged self-only CSP;
-        // otherwise it renders the buffered summary (the FR-UI-19 fallback). Kept in
-        // lock-step with `WIKI_GENERATE_ROUTE`, which `method_guard` consults. A GET
-        // to `/wiki/generate` is a browser navigation, so it serves the SPA shell.
-        .route(WIKI_GENERATE_ROUTE, get(spa_shell).post(wiki_generate));
-
-    router
         // ── The only non-GET surface (ADR-31, NFR-SE-06): enumerated, bounded
         // config-write/apply routes that bridge to the mutating façade seam. Kept
         // in lock-step with `CONFIG_POST_ROUTES`, which `method_guard` consults.
@@ -1043,218 +807,33 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/workspace/config/secret", post(api_v1::workspace_config_secret))
         // S-430 / FR-UI-38: the whole-manifest save — validate, refuse a stale
         // fingerprint, write verbatim. Listed in `CONFIG_POST_ROUTES` like the rest.
-        .route("/api/v1/workspace/manifest/save", post(api_v1::workspace_manifest_save))
+        .route("/api/v1/workspace/manifest/save", post(api_v1::workspace_manifest_save));
+
+    mount_extension_routes(router, extension_routes)
         // The SPA history fallback (ADR-43): an unmatched **HTML navigation** GET
         // returns the shell so a client-side route survives a refresh, and a
-        // root-level embedded asset (e.g. `/theme-init.js`) resolves from the
+        // root-level bundle asset (e.g. `/theme-init.js`) resolves from the
         // bundle; any other unmatched GET stays an honest `404`. Non-GET never
         // reaches here (`method_guard` answers `405` before routing).
         .fallback(spa_fallback)
         .with_state(state)
         // Innermost custom layer → runs just before routing, after `method_guard`
-        // has already filtered to GET + the enumerated config/chat POSTs.
+        // has already filtered to GET + the enumerated and extension-mounted POSTs.
         .layer(from_fn_with_state(intent, intent_guard))
-        .layer(from_fn(method_guard))
+        .layer(from_fn_with_state(extension_posts, method_guard))
         .layer(from_fn(host_guard))
         .layer(from_fn(csp_headers))
 }
 
-/// The chat turn handler (S-170, [FR-UI-18]/[FR-UI-19], [ADR-40]): forward the
-/// turn to the [`ChatService`](chat::ChatService) and either **stream** the
-/// orchestrator's events as Server-Sent Events or render the **buffered** answer,
-/// per the client's `Accept` — the surface holds no agent logic ([ADR-01]).
-///
-/// - `Accept: text/event-stream` → an SSE response streaming the plan,
-///   subagent-activity, and answer events incrementally under the **unchanged**
-///   self-only CSP (the outer [`csp_headers`] layer stamps the streaming
-///   response's headers before its body flows); the body owns the turn's abort
-///   guard, so a client disconnect cancels the in-flight turn ([FR-UI-19]).
-/// - otherwise → the buffered final answer (the non-streaming fallback,
-///   [FR-UI-19]), honest on a halt/fault
-///   ([NFR-CC-04]).
-///
-/// The route is already same-origin + intent-token gated by [`intent_guard`]
-/// ([NFR-SE-06]) — the streaming request rides this `POST` so it keeps that proof.
-///
-/// [FR-UI-18]: ../../../docs/specs/requirements/FR-UI-18.md
-/// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
-/// [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
-/// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
-/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
-/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-#[cfg(feature = "agents")]
-async fn chat_turn(
-    State(chat): State<Arc<dyn chat::ChatService>>,
-    State(default): State<Arc<Engine>>,
-    State(backing): State<Arc<Backing<Engine>>>,
-    MemberEngine(engine): MemberEngine,
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> Response {
-    // Answer from the member the user is actually reading (S-250), resolving its
-    // chat halves against the workspace root it may inherit them from ([ADR-67]).
-    let chat = chat_for(&chat, &default, engine, &backing);
-    serve_turn(chat, &headers, &form).await
-}
-
-/// The workspace chat turn handler ([S-482], [FR-WS-34]): [`chat_turn`]'s contract
-/// over the workspace chat service — the same form, the same SSE / buffered
-/// answer per `Accept` ([`serve_turn`]), the same guards — but no member is
-/// resolved, so `?repo=` is not read. A single-root serve never reaches here:
-/// the [`WorkspaceChat`] extractor answers `404` first.
-///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
-#[cfg(feature = "agents")]
-async fn workspace_chat_turn(
-    WorkspaceChat(chat): WorkspaceChat,
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> Response {
-    serve_turn(chat, &headers, &form).await
-}
-
-/// Run one chat turn on `chat` from the turn form and answer per `Accept` — the
-/// body [`chat_turn`] and [`workspace_chat_turn`] share, so the two routes cannot
-/// drift on the form fields, the empty-question refusal or the SSE / buffered
-/// split ([FR-UI-19]).
-///
-/// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
-#[cfg(feature = "agents")]
-async fn serve_turn(
-    chat: Arc<dyn chat::ChatService>,
-    headers: &HeaderMap,
-    form: &HashMap<String, String>,
-) -> Response {
-    let question = form
-        .get("q")
-        .or_else(|| form.get("message"))
-        .map(|q| q.trim().to_string())
-        .unwrap_or_default();
-    if question.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "a chat turn needs a non-empty `q` (the user message)",
-        )
-            .into_response();
-    }
-    // An optional existing thread to append to; an unparsable value starts a fresh
-    // thread rather than failing the turn.
-    let thread_id = form.get("thread").and_then(|t| t.trim().parse::<i64>().ok());
-
-    let stream = chat.start_turn(question, thread_id);
-
-    if wants_event_stream(headers) {
-        // Stream the turn. KeepAlive comments keep intermediaries from idling the
-        // connection between sparse orchestrator events.
-        Sse::new(chat::sse_body(stream))
-            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response()
-    } else {
-        // Progressive-enhancement fallback: drain the turn server-side and render
-        // the complete answer for the same turn (FR-UI-19).
-        let answer = stream.into_buffered().await;
-        (StatusCode::OK, answer).into_response()
-    }
-}
-
-/// The wiki-generation trigger handler (S-178, [FR-WK-18], [FR-UI-19], [ADR-42]):
-/// gate the Wiki-tab open through the single-run lock, then start a background
-/// [`wiki-agent`](wiki_agent) pass on the [`WikiRunService`](wikigen::WikiRunService)
-/// and either **stream** its per-page [`WikiProgress`](wikigen::WikiFrame) as
-/// Server-Sent Events or render the **buffered** summary, per the client's `Accept`
-/// — the surface holds no generation logic ([ADR-01]).
-///
-/// - lock **acquired** + `Accept: text/event-stream` → an SSE response streaming the
-///   run/page-lifecycle events incrementally under the **unchanged** self-only CSP
-///   (the outer [`csp_headers`] layer stamps the streaming response's headers before
-///   its body flows); the body is only a **subscriber** to the run's broadcast, so a
-///   client disconnect does **not** abort the run — it completes server-side, owned
-///   by [`WikiRunState`] ([CR-056], [S-222], [FR-UI-19]);
-/// - run **already in flight** + `Accept: text/event-stream` → the Wiki tab has
-///   **reopened** mid-run: **re-attach** ([`WikiRunState::subscribe`]) to the SAME
-///   run's progress rather than starting a second one or reporting `busy` — the
-///   reattached stream replays the run's cumulative history first, then continues
-///   live, so the reopened tab's "N of M" is exact from its first render, never a
-///   fresh "page 1 of N" ([S-223], [FR-WK-18] as amended by [CR-056], [FR-UI-19]);
-/// - run already in flight, **no** SSE opt-in → the buffered no-JS fallback cannot
-///   usefully wait out an unknown-length reattach, so it keeps reporting the
-///   in-flight run honestly as `busy` rather than blocking the response until the
-///   run drains;
-/// - lock acquired, no SSE opt-in → the buffered summary (the non-streaming
-///   fallback, [FR-UI-19]), honest on a configure-first / halt / fault
-///   ([NFR-CC-04]).
-///
-/// The route is already same-origin + intent-token gated by [`intent_guard`]
-/// ([NFR-SE-06]) — the streaming request rides this `POST` so it keeps that proof.
-/// The Wiki tab sends no body; a work-list check + configure-first are decided by
-/// the runner ([`run_configured`](wiki_agent::run_configured)), not here.
-///
-/// [FR-WK-18]: ../../../docs/specs/requirements/FR-WK-18.md
-/// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
-/// [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
-/// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
-/// [CR-056]: ../../../docs/requests/CR-056-wiki-generation-usability.md
-/// [S-222]: ../../../docs/planning/journal.md#s-222-connection-resilient-auto-continuing-background-generation-run
-/// [S-223]: ../../../docs/planning/journal.md#s-223-wiki-tab-re-attach-to-the-in-flight-run-and-cumulative-progress
-/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
-/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-/// [`wiki-agent`]: ../../../docs/specs/architecture/components/wiki-agent.md
-#[cfg(feature = "agents")]
-async fn wiki_generate(
-    State(wiki): State<Arc<dyn wikigen::WikiRunService>>,
-    State(default): State<Arc<Engine>>,
-    State(backing): State<Arc<Backing<Engine>>>,
-    MemberEngine(engine): MemberEngine,
-    State(run_state): State<wikigen::WikiRunState>,
-    headers: HeaderMap,
-) -> Response {
-    // Generate INTO the member whose pages the tab is showing — never the default's
-    // wiki.db (S-250; the Wiki read-models are member-scoped) — inheriting its chat
-    // provider and key through the same seam the turn reads ([ADR-67], [ADR-42]).
-    let wiki = wiki_for(&wiki, &default, engine, workspace_root_of(&backing));
-    let streaming = wants_event_stream(&headers);
-    // The single-run lock ([FR-WK-18]): begin → own the one connection-independent
-    // background run. The run's lifetime is owned by `run_state`, not this response
-    // body ([CR-056], [S-222]).
-    //
-    // Already in flight: a **streaming** reopen re-attaches to the SAME run instead
-    // of starting a second one ([S-223]) — this is what the Wiki tab actually sends
-    // (it always requests `text/event-stream`, [FR-UI-19]). The **buffered** no-JS
-    // fallback keeps the simpler honest `busy` report: it cannot progressively render
-    // a reattach, and blocking the whole response on an unknown-length live run would
-    // be a worse fallback than today's instant honest answer.
-    let stream = match run_state.begin() {
-        Some((guard, sink, stream)) => {
-            wiki.start_run(guard, sink);
-            stream
-        }
-        None if streaming => run_state.subscribe().unwrap_or_else(wikigen::WikiRunStream::busy),
-        None => wikigen::WikiRunStream::busy(),
-    };
-
-    if streaming {
-        // Stream the run. KeepAlive comments keep intermediaries from idling the
-        // connection between sparse per-page events.
-        Sse::new(wikigen::sse_body(stream))
-            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response()
-    } else {
-        // Progressive-enhancement fallback: drain the run server-side and render
-        // the honest summary (FR-UI-19).
-        let summary = stream.into_buffered().await;
-        (StatusCode::OK, summary).into_response()
-    }
-}
-
 /// Does the client accept Server-Sent Events? True iff the `Accept` header names
 /// `text/event-stream` — the SPA's streaming client sets it via `fetch`; absent
-/// it, a non-streaming buffered turn is rendered (the defensive fallback for a
-/// client that does not request SSE, [FR-UI-19]).
+/// it, a non-streaming buffered answer is rendered (the defensive fallback for a
+/// client that does not request SSE, [FR-UI-19]). Public so an extension's
+/// streaming routes — the chat turn (S-643) and the wiki-generation trigger
+/// (S-644) — split on `Accept` the same way.
 ///
 /// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
-#[cfg(feature = "agents")]
-fn wants_event_stream(headers: &HeaderMap) -> bool {
+pub fn wants_event_stream(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -1287,23 +866,28 @@ async fn host_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Method guard (FR-UI-03 as revised, ADR-31, S-170/S-209/S-206/S-482): the
-/// surface is GET-only **except** a `POST` to one of the enumerated
-/// [`CONFIG_POST_ROUTES`], the [`CHAT_POST_ROUTE`] or [`WORKSPACE_CHAT_POST_ROUTE`]
-/// (a turn), a per-thread delete under [`CHAT_THREADS_ROUTE`] or
-/// [`WORKSPACE_CHAT_THREADS_ROUTE`] (`…/{id}/delete`, S-209), the
-/// [`WIKI_GENERATE_ROUTE`] (the Wiki-tab generation trigger), or the
-/// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check). Every other method —
-/// and a `POST` to any other path — is answered `405` before any handler runs, so
+/// Method guard (FR-UI-03 as revised, ADR-31, S-206): the surface is GET-only
+/// **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`] or the
+/// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check), or a `POST` route an
+/// active extension mounted ([`ExtensionPosts`], FR-DS-04) — the `chat`
+/// extension's two turns and their per-thread writes (S-643) and the `wiki`
+/// extension's generation trigger (S-644) among them. Every other method — and a
+/// `POST` to any other path — is answered `405` before any handler runs, so
 /// relaxing the read-only posture stays bounded to exactly the config-write/apply
-/// seam, the four chat routes, the wiki-generation trigger, and the verify route
-/// (NFR-SE-06).
+/// seam, the verify route, and the extensions' declared writes (NFR-SE-06).
 /// The admitted `POST`s are gated again by [`intent_guard`] for same-origin +
 /// intent-token defense.
-async fn method_guard(req: Request, next: Next) -> Response {
+async fn method_guard(
+    State(extension_posts): State<ExtensionPosts>,
+    req: Request,
+    next: Next,
+) -> Response {
     let method = req.method();
     let path = req.uri().path();
-    let allowed = method == Method::GET || (method == Method::POST && post_route_admitted(path));
+    let matched = req.extensions().get::<MatchedPath>().map(MatchedPath::as_str);
+    let allowed = method == Method::GET
+        || (method == Method::POST
+            && (post_route_admitted(path) || extension_posts.admits(matched)));
     if !allowed {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -1314,48 +898,73 @@ async fn method_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Is a `POST` to `path` admitted past [`method_guard`] (every other method/path
-/// is `405`)? The config-write/apply seam ([`CONFIG_POST_ROUTES`]) and the
-/// deep-`verify` route ([`VERIFY_POST_ROUTE`]) are always admitted; the chat and
-/// wiki-generation routes are admitted **only under `agents`** (CR-078, ADR-60).
-/// In a listen-only `--features ui` build those routes are never mounted, so a
-/// `POST` to them stays GET-only (`405`) rather than reaching a handler.
+/// Is a `POST` to `path` admitted past [`method_guard`] by the core's own
+/// allow-list (every other method/path is `405`, unless an extension mounted it —
+/// [`ExtensionPosts`])? The config-write/apply seam ([`CONFIG_POST_ROUTES`]) and
+/// the deep-`verify` route ([`VERIFY_POST_ROUTE`]), in every build.
 fn post_route_admitted(path: &str) -> bool {
-    if CONFIG_POST_ROUTES.contains(&path) || path == VERIFY_POST_ROUTE {
-        return true;
-    }
-    #[cfg(feature = "agents")]
-    if path == CHAT_POST_ROUTE
-        || path == WORKSPACE_CHAT_POST_ROUTE
-        || is_thread_delete_route(CHAT_THREADS_ROUTE, path)
-        || is_thread_delete_route(WORKSPACE_CHAT_THREADS_ROUTE, path)
-        || path == WIKI_GENERATE_ROUTE
-    {
-        return true;
-    }
-    false
+    CONFIG_POST_ROUTES.contains(&path) || path == VERIFY_POST_ROUTE
 }
 
-/// Does `path` name the per-thread delete route under `threads` (`{threads}/{id}/delete`
-/// with an integer `{id}`)? This is the one mutating verb under
-/// [`CHAT_THREADS_ROUTE`] (S-209, [ADR-47]) — it replaced the global `/chat/clear`
-/// in the [`post_route_admitted`] allow-list — and under its workspace twin
-/// [`WORKSPACE_CHAT_THREADS_ROUTE`] (S-482). The `{id}` segment must parse as the
-/// `i64` rowid the handler extracts, so a malformed or extra-segment path is not
-/// admitted here (it stays `405`), never silently reaching the handler.
+/// The `POST` routes the active extensions mounted ([FR-DS-04], [ADR-74]) — their
+/// entries in [`method_guard`]'s allow-list, beside the core's
+/// [`post_route_admitted`]. A `POST` is admitted when the route the router
+/// matched it to ([`MatchedPath`]) is one of these patterns, so the guard admits
+/// exactly where an extension's `POST` handler is mounted — by the router's own
+/// matching, never a second matcher that could disagree with it.
 ///
-/// [ADR-47]: ../../../docs/specs/architecture/decisions/ADR-47.md
-#[cfg(feature = "agents")]
-fn is_thread_delete_route(threads: &str, path: &str) -> bool {
-    path.strip_prefix(threads)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .and_then(|rest| rest.strip_suffix("/delete"))
-        .is_some_and(|id| id.parse::<i64>().is_ok())
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+#[derive(Clone, Default)]
+struct ExtensionPosts(Arc<[&'static str]>);
+
+impl ExtensionPosts {
+    /// Was a `POST` routed to one of these patterns? `matched` is the route the
+    /// router matched the request to — `None` when it matched none.
+    fn admits(&self, matched: Option<&str>) -> bool {
+        matched.is_some_and(|route| self.0.contains(&route))
+    }
+}
+
+/// Mount the active extensions' `routes` on `router` ([FR-DS-04]), merging a
+/// path's `GET` and `POST` into one method router. They join the core table
+/// before the fallback and every guard layer is applied, so the whole guard
+/// stack covers them. A path that overlaps a core route (or another
+/// extension's) panics when the router is built, as axum does for any two
+/// overlapping routes — an extension can never silently shadow a core route.
+///
+/// A [`WebRoute::shell`] route is answered by this surface's own [`spa_shell`] —
+/// the intent-injected shell of the bundle this router serves — so an extension's
+/// view path that also takes a `POST` (chat's `/chat`, S-643) still serves the SPA
+/// on a browser navigation, exactly as the core's own such path does.
+///
+/// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+fn mount_extension_routes(router: Router<WebState>, routes: Vec<WebRoute>) -> Router<WebState> {
+    let mut by_path: Vec<(&'static str, axum::routing::MethodRouter<WebState>)> = Vec::new();
+    for route in routes {
+        let path = route.path();
+        // An extension's handler is already bound to its own state; giving it this
+        // router's state type is what lets it merge with the shell's method router.
+        let service = match route.into_service() {
+            Some(service) => service.with_state(()),
+            None => get(spa_shell),
+        };
+        match by_path.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, merged)) => *merged = std::mem::take(merged).merge(service),
+            None => by_path.push((path, service)),
+        }
+    }
+    // `Router::route`, not `router.route(`: the route-table scans that read this
+    // file (the census, the POST allow-list pin) take every `.route(` call for a
+    // core route, and these paths are the extensions', known only at run time.
+    by_path
+        .into_iter()
+        .fold(router, |router, (path, service)| Router::route(router, path, service))
 }
 
 /// Same-origin + per-session intent (CSRF) guard for the mutating surface
 /// (NFR-SE-06, ADR-31). Runs after [`method_guard`], so the only `POST`s it sees
-/// are already bounded to the enumerated config + chat `POST` routes; GET requests pass straight
+/// are already bounded to the enumerated and extension-mounted `POST` routes; GET requests pass straight
 /// through (the read views carry no intent token). A mutating `POST` is admitted
 /// only when **both** hold, else it is rejected `403` with no handler run (no
 /// write, no pipeline):
@@ -1491,7 +1100,7 @@ async fn not_found() -> Response {
 
 // ── The embedded SPA shell (CR-049, FR-UI-22, ADR-43, S-185) ──────────────────
 
-/// Serve the embedded client-side SPA shell at `/` with the per-session intent
+/// Serve the SPA shell of the injected bundle (the embedded one by default) at `/` with the per-session intent
 /// token injected as a `<meta name="logos-intent">` tag ([`spa::served_shell`],
 /// NFR-SE-06, ADR-31). The outer [`csp_headers`] layer stamps the **unchanged**
 /// self-only CSP, so the shell loads under the byte-identical policy; the SPA
@@ -1501,20 +1110,23 @@ async fn not_found() -> Response {
 /// A pure static read — it touches no `Engine` store, so a shell load mutates
 /// nothing (ADR-28). The masked chat key is never on this surface (NFR-SE-07): the
 /// token is the only secret-adjacent value, and it is the CSRF token by design.
-async fn spa_shell(State(intent): State<IntentToken>) -> Response {
-    render_shell(&intent)
+async fn spa_shell(
+    State(intent): State<IntentToken>,
+    State(assets): State<Arc<dyn SpaAssets>>,
+) -> Response {
+    render_shell(assets.as_ref(), &intent)
 }
 
-/// Render the intent-injected shell document, or an honest `500` if the bundle is
-/// somehow not embedded (a committed placeholder guarantees it is). Shared by the
+/// Render the intent-injected shell document, or an honest `500` if the bundle
+/// holds no shell (for the embedded bundle a committed placeholder guarantees it). Shared by the
 /// `/` route and the history fallback.
-fn render_shell(intent: &IntentToken) -> Response {
+fn render_shell(assets: &dyn SpaAssets, intent: &IntentToken) -> Response {
     // Consistency guard (CR-049 white-page trap): a binary built without a matching
     // `npm run build` embeds a shell that references hashed `/assets/*` it does not
     // carry — the browser then loads the shell `200` but `404`s on the JS bundle,
     // leaving a silent blank page. Detect that here and serve a loud, self-describing
     // diagnostic instead. Empty on a consistent bundle, so the happy path is unchanged.
-    let missing = spa::missing_shell_assets();
+    let missing = spa::missing_shell_assets(assets);
     if !missing.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1522,7 +1134,7 @@ fn render_shell(intent: &IntentToken) -> Response {
         )
             .into_response();
     }
-    match spa::served_shell(intent.as_str()) {
+    match spa::served_shell(assets, intent.as_str()) {
         Some(html) => Html(html).into_response(),
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1541,21 +1153,27 @@ fn render_shell(intent: &IntentToken) -> Response {
 /// server-rendered routes — every tab is an SPA client route, so all such HTML
 /// navigations resolve to the shell here.
 ///
-/// Before the HTML-navigation heuristic it resolves a **root-level** embedded SPA
-/// asset: a Vite build copies `web/ui/public/*` (e.g. the no-flash `theme-init.js`,
+/// Before the HTML-navigation heuristic it resolves a **root-level** SPA
+/// asset of the injected bundle: a Vite build copies `web/ui/public/*` (e.g. the no-flash `theme-init.js`,
 /// S-193/FR-UI-23) to the bundle root — not under `/assets/` — and the served
 /// shell references them by absolute path (`<script src="/theme-init.js">`). Those
 /// requests are classic-script/icon fetches (`Accept: */*`), so without this branch
 /// they would fall straight through to a `404`, silently disabling the no-flash
 /// theme bootstrap in a real release build. `index.html` is excluded — it is the
 /// shell, served via `/` (and the `wants_html` branch) so the intent token is
-/// always injected. Served byte-verbatim from the binary, so the offline/zero-egress
+/// always injected. Served byte-verbatim from the bundle (the binary, for the
+/// default), so the offline/zero-egress
 /// posture (NFR-SE-01) and the byte-identical self-only CSP (NFR-SE-06, stamped by
 /// the outer [`csp_headers`] layer) are unaffected.
-async fn spa_fallback(State(intent): State<IntentToken>, uri: Uri, headers: HeaderMap) -> Response {
+async fn spa_fallback(
+    State(intent): State<IntentToken>,
+    State(assets): State<Arc<dyn SpaAssets>>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     let tail = uri.path().trim_start_matches('/');
     if !tail.is_empty() && tail != "index.html" {
-        if let Some((mime, bytes)) = spa::asset(tail) {
+        if let Some((mime, bytes)) = spa::asset(assets.as_ref(), tail) {
             return (
                 [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-cache")],
                 bytes.into_owned(),
@@ -1568,7 +1186,7 @@ async fn spa_fallback(State(intent): State<IntentToken>, uri: Uri, headers: Head
         .and_then(|accept| accept.to_str().ok())
         .is_some_and(|accept| accept.contains("text/html"));
     if wants_html {
-        render_shell(&intent)
+        render_shell(assets.as_ref(), &intent)
     } else {
         not_found().await
     }
@@ -1682,220 +1300,57 @@ async fn config_save_secret(
     }
 }
 
-/// One conversation's list-row (S-209, [FR-UI-26], [ADR-47]): the exact
-/// contract the history rail reads — `id`, `title`, `updated_at`, and nothing
-/// else. Deliberately narrower than the store's [`ChatThread`](chat_agent::ChatThread)
-/// (it drops `created_at`) so the thread-list payload carries only what the rail
-/// renders and no secret ever rides it ([NFR-SE-07]).
-#[cfg(feature = "agents")]
-#[derive(serde::Serialize)]
-struct ThreadSummary {
-    /// The thread rowid (stable for the life of the store).
-    id: i64,
-    /// The auto-derived conversation title (S-208).
-    title: String,
-    /// Unix-seconds time of the most recent appended message (or creation) — the
-    /// most-recent-first sort key.
-    updated_at: i64,
-}
-
-/// `GET /api/v1/chat/threads` → the conversation list (S-209, [FR-UI-26],
-/// [ADR-47], [ADR-28]): every persisted thread as a [`ThreadSummary`],
-/// most-recent-first (the store's `ORDER BY updated_at DESC, id DESC`). A pure
-/// loopback, same-origin read carrying no secret ([NFR-SE-07]). Runs the blocking
-/// SQLite read on the pool through the [`bridge`] ([ADR-03]) — like every other
-/// read handler — so it also flows through the [ADR-13] `surface=web` telemetry
-/// chokepoint; a store fault is an honest `500` ([NFR-CC-04]). Member-scoped
-/// (S-250): the list is that member's `.logos/chat.db`.
-#[cfg(feature = "agents")]
-async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
-    threads_response(bridge(engine, "chat_threads", Surface::Web, move |e| list_threads_at(e.root())).await)
-}
-
-/// The thread list of the conversation store under `root` — the read the member
-/// and workspace thread lists share.
-#[cfg(feature = "agents")]
-fn list_threads_at(root: &std::path::Path) -> Result<Vec<chat_agent::ChatThread>> {
-    chat_agent::ChatStore::open(root)?.list_threads()
-}
-
-/// Render a thread-list read as the [`ThreadSummary`] rows the rail reads, or an
-/// honest `500` ([NFR-CC-04]).
-#[cfg(feature = "agents")]
-fn threads_response(result: Result<Vec<chat_agent::ChatThread>>) -> Response {
-    match result {
-        Ok(threads) => {
-            let summaries: Vec<ThreadSummary> = threads
-                .into_iter()
-                .map(|t| ThreadSummary {
-                    id: t.id,
-                    title: t.title,
-                    updated_at: t.updated_at,
+/// The honest setup-fault text for a chat-resolution read failure ([NFR-CC-04]),
+/// worded for `subject` (`"chat"` or `"wiki"`) and shared by both agents that
+/// read the core's `resolve_chat` seam: the `chat` extension (S-643) and the wiki
+/// generator (`wiki-agent`, S-644), which is why it is public.
+///
+/// A **parse** fault — of `secrets.toml` *or* `config.toml`, at either root — is
+/// reported by file and position only ([NFR-SE-07]): the TOML error's `Display`
+/// quotes the offending line, and its message may quote a value, so either could
+/// carry an `api_key = "…"` line (a key pasted into `config.toml` is exactly the
+/// line `deny_unknown_fields` rejects), and the frame is rendered verbatim. Only
+/// the leading `TOML parse error at line L, column C` line is kept. The other
+/// faults keep their detailed error: an I/O fault names the path and the OS error,
+/// and a validation fault names the key and its bound, never file content.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+pub fn config_resolution_fault(subject: &str, err: &ConfigError) -> String {
+    match err {
+        ConfigError::Parse { path, .. } => {
+            let what = if path.file_name().is_some_and(|name| name == "secrets.toml") {
+                "secret"
+            } else {
+                "configuration"
+            };
+            // The first line of the TOML error is its position; everything after
+            // it quotes the file.
+            let position = std::error::Error::source(err)
+                .map(ToString::to_string)
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .and_then(|line| {
+                    line.strip_prefix("TOML parse error at ")
+                        .map(|at| format!(" ({at})"))
                 })
-                .collect();
-            Json(summaries).into_response()
+                .unwrap_or_default();
+            format!(
+                "could not read the {subject} {what} — check that {} is valid TOML with only \
+                 known keys{position}",
+                path.display()
+            )
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
+        _ => format!("could not read the {subject} configuration: {err}"),
     }
 }
 
-/// `GET /api/v1/chat/threads/{id}` → one thread's ordered transcript (S-209,
-/// [FR-UI-26], [ADR-47], [ADR-28]): every message in stored `ordinal` order, each
-/// with its tool traces — the [`ChatMessage`](chat_agent::ChatMessage)s the rail
-/// hydrates on select. A GET carrying no secret ([NFR-SE-07]); a request for a
-/// thread that does not exist is an honest `404` (distinct from an empty-but-real
-/// thread), never a misleading empty `200` ([NFR-CC-04]). Runs on the pool through
-/// the [`bridge`] ([ADR-03], [ADR-13] telemetry); a store fault is a `500`.
-#[cfg(feature = "agents")]
-async fn chat_thread_messages(
-    MemberEngine(engine): MemberEngine,
-    axum::extract::Path(thread_id): axum::extract::Path<i64>,
-) -> Response {
-    messages_response(
-        bridge(engine, "chat_thread_messages", Surface::Web, move |e| {
-            thread_messages_at(e.root(), thread_id)
-        })
-        .await,
-    )
-}
-
-/// One thread's ordered messages in the store under `root`, or `None` when no
-/// thread has that id.
-#[cfg(feature = "agents")]
-fn thread_messages_at(
-    root: &std::path::Path,
-    thread_id: i64,
-) -> Result<Option<Vec<chat_agent::ChatMessage>>> {
-    let store = chat_agent::ChatStore::open(root)?;
-    // Distinguish "no such thread" (→ 404) from "a real thread with no
-    // messages" (→ an honest empty list) — `messages` alone cannot.
-    match store.thread(thread_id)? {
-        Some(_) => store.messages(thread_id).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// Render a messages read: the transcript, an honest `404` for an unknown
-/// thread, or a `500` ([NFR-CC-04]).
-#[cfg(feature = "agents")]
-fn messages_response(result: Result<Option<Vec<chat_agent::ChatMessage>>>) -> Response {
-    match result {
-        Ok(Some(messages)) => Json(messages).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
-    }
-}
-
-/// `POST /api/v1/chat/threads/{id}/delete` → per-thread delete (S-209,
-/// [FR-UI-26], [FR-UI-20], [ADR-47], [ADR-31]): the granular deletion that
-/// supersedes the global Clear-history. Backed by
-/// [`ChatStore::delete_thread`](chat_agent::ChatStore::delete_thread) (S-208) —
-/// one `DELETE FROM chat_threads WHERE id=?` whose live cascade wipes that
-/// thread's messages, scratchpad, and working memory (the S-168/S-175 FK
-/// contract), so no orphaned memory survives. Already proven same-origin +
-/// intentional by [`intent_guard`] (a forged or intent-less delete never reaches
-/// here, [NFR-SE-06]). A hit is `204 No Content`; a miss (`delete_thread ==
-/// false`, no thread had that id) is an idempotent `404`; a store fault is an
-/// honest `500` ([NFR-CC-04]). The blocking SQLite work runs on the pool through
-/// the [`bridge`] ([ADR-03], [ADR-13] telemetry), exactly like the other handlers.
-#[cfg(feature = "agents")]
-async fn chat_thread_delete(
-    MemberEngine(engine): MemberEngine,
-    axum::extract::Path(thread_id): axum::extract::Path<i64>,
-) -> Response {
-    delete_response(
-        bridge(engine, "chat_thread_delete", Surface::Web, move |e| {
-            delete_thread_at(e.root(), thread_id)
-        })
-        .await,
-    )
-}
-
-/// Delete one thread (and, by the store's cascade, its memory) from the store
-/// under `root`; `false` when no thread had that id.
-#[cfg(feature = "agents")]
-fn delete_thread_at(root: &std::path::Path, thread_id: i64) -> Result<bool> {
-    chat_agent::ChatStore::open(root)?.delete_thread(thread_id)
-}
-
-/// Render a delete: `204` on a hit, an idempotent `404` on a miss, a `500` on a
-/// store fault ([NFR-CC-04]).
-#[cfg(feature = "agents")]
-fn delete_response(result: Result<bool>) -> Response {
-    match result {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
-    }
-}
-
-/// `GET /api/v1/workspace/chat/threads` → the workspace chat's conversation list
-/// ([S-482]): [`chat_threads`] over `<workspace root>/.logos/chat.db`. The root
-/// holds no graph, so the read crosses on [`run_blocking`] with no engine, as the
-/// workspace config routes do; a single-root serve answers `404`.
+/// The `404` every workspace-only route answers under a single-root serve (this
+/// is not a workspace, [ADR-52]) — public so an extension's workspace routes (the
+/// workspace chat, S-643) answer it byte-for-byte as the core's do.
 ///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-#[cfg(feature = "agents")]
-async fn workspace_chat_threads(crate::member::WorkspaceRoot(root): crate::member::WorkspaceRoot) -> Response {
-    threads_response(
-        run_blocking("workspace_chat_threads", Surface::Web, move || {
-            if workspace_store_exists(&root) {
-                list_threads_at(&root)
-            } else {
-                Ok(Vec::new())
-            }
-        })
-        .await,
-    )
-}
-
-/// Whether the workspace chat's store exists yet. The workspace threads routes
-/// read through this rather than letting [`ChatStore::open`](chat_agent::ChatStore::open)
-/// create one: the workspace root holds no graph, and a read — or a delete of a
-/// conversation that cannot exist — must not leave a `chat.db` behind at a root
-/// nobody has chatted at (no conversations is the answer, not a fresh store).
-#[cfg(feature = "agents")]
-fn workspace_store_exists(root: &std::path::Path) -> bool {
-    chat_agent::db_path(root).exists()
-}
-
-/// `GET /api/v1/workspace/chat/threads/{id}` → one workspace conversation's
-/// transcript ([S-482]), as [`chat_thread_messages`].
-///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-#[cfg(feature = "agents")]
-async fn workspace_chat_thread_messages(
-    crate::member::WorkspaceRoot(root): crate::member::WorkspaceRoot,
-    axum::extract::Path(thread_id): axum::extract::Path<i64>,
-) -> Response {
-    messages_response(
-        run_blocking("workspace_chat_thread_messages", Surface::Web, move || {
-            if workspace_store_exists(&root) {
-                thread_messages_at(&root, thread_id)
-            } else {
-                Ok(None)
-            }
-        })
-        .await,
-    )
-}
-
-/// `POST /api/v1/workspace/chat/threads/{id}/delete` → delete one workspace
-/// conversation ([S-482]), as [`chat_thread_delete`] — intent-guarded like every
-/// mutating `POST`.
-///
-/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-#[cfg(feature = "agents")]
-async fn workspace_chat_thread_delete(
-    crate::member::WorkspaceRoot(root): crate::member::WorkspaceRoot,
-    axum::extract::Path(thread_id): axum::extract::Path<i64>,
-) -> Response {
-    delete_response(
-        run_blocking("workspace_chat_thread_delete", Surface::Web, move || {
-            Ok(workspace_store_exists(&root) && delete_thread_at(&root, thread_id)?)
-        })
-        .await,
-    )
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub fn not_a_workspace() -> Response {
+    api_v1::not_a_workspace()
 }
 
 /// The ADR-03 submit-and-await bridge: run one blocking `Engine` call on the
@@ -1935,8 +1390,15 @@ async fn workspace_chat_thread_delete(
 /// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
 /// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
 /// [FR-UI-34]: ../../docs/specs/requirements/FR-UI-34.md
+/// # Public, for an extension's handlers
+///
+/// An extension's web routes cross the same hop (the `chat` extension's thread
+/// handlers, S-643), so they get the same scope, pool and render log, and name
+/// their surface here like every core handler. The census below reads this
+/// crate's sources only: an extension crate pins its own sites' classification.
+///
 /// [NFR-OO-02]: ../../docs/specs/requirements/NFR-OO-02.md
-pub(crate) async fn bridge<T, F>(
+pub async fn bridge<T, F>(
     engine: Arc<Engine>,
     view: &'static str,
     surface: Surface,
@@ -1960,7 +1422,7 @@ where
 /// need none — on their own.)
 ///
 /// [ADR-03]: ../../docs/specs/architecture/decisions/ADR-03.md
-pub(crate) async fn run_blocking<T, F>(view: &'static str, surface: Surface, call: F) -> T
+pub async fn run_blocking<T, F>(view: &'static str, surface: Surface, call: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -1985,117 +1447,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The agent surfaces resolve their service against the request's member (S-250).
-    ///
-    /// The rule has two halves and both matter: the **default** engine must keep the
-    /// injected service (that is the S-170/S-178 mock seam the carve-out tests drive),
-    /// while a **scoped** engine must get a service bound to THAT member — otherwise the
-    /// Wiki tab, whose read-models are member-scoped, would launch a generation pass that
-    /// writes into the workspace default's `wiki.db` (a cross-member write, [NFR-RA-05]).
-    #[cfg(feature = "agents")]
-    #[test]
-    fn the_agent_services_follow_the_member_scope() {
-        use tempfile::TempDir;
-
-        let default_dir = TempDir::new().unwrap();
-        let other_dir = TempDir::new().unwrap();
-        let default = Arc::new(Engine::start(default_dir.path()).expect("default engine"));
-        let other = Arc::new(Engine::start(other_dir.path()).expect("member engine"));
-
-        let injected_chat: Arc<dyn chat::ChatService> =
-            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&default), None));
-        let injected_wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
-            wikigen::ConfiguredWikiRunService::new(Arc::clone(&default), None),
-        );
-
-        let single = Arc::new(Backing::Single(Arc::clone(&default)));
-
-        // Unscoped (or single-root): the injected service is used verbatim — the mock
-        // seam the chat/wiki carve-out tests inject is never bypassed.
-        assert!(Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&default), &single),
-            &injected_chat
-        ));
-        assert!(Arc::ptr_eq(
-            &wiki_for(&injected_wiki, &default, Arc::clone(&default), None),
-            &injected_wiki
-        ));
-
-        // Scoped to another member: a DIFFERENT service, bound to that member's engine —
-        // so the turn is answered from, and the wiki written into, the member on screen.
-        assert!(!Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&other), &single),
-            &injected_chat
-        ));
-        assert!(!Arc::ptr_eq(
-            &wiki_for(&injected_wiki, &default, Arc::clone(&other), None),
-            &injected_wiki
-        ));
-    }
-
-    /// [S-481]: under a federated backing the chat service is still the member chat —
-    /// the default member's (built in `make_state`) and a `?repo=`-scoped member's (built
-    /// in `chat_for`, bound to that member, not the injected default) — and neither is
-    /// handed any cross-service reach: `ConfiguredChatService` no longer takes a query
-    /// backing, so there is none to hand. Re-targeted from S-431's
-    /// `the_chat_service_gets_cross_service_reach_exactly_under_a_federated_backing`;
-    /// the reach itself moved to the workspace roster (`chat-agent`'s `WorkspaceRoster`),
-    /// which the workspace chat serves on its own route ([S-482]).
-    ///
-    /// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-    /// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
-    #[cfg(feature = "agents")]
-    #[test]
-    fn a_federated_backing_still_binds_each_member_chat_to_its_member() {
-        use logos_core::federation::{EngineRegistry, Federation, Member, RegistryMode};
-        use tempfile::TempDir;
-
-        let tmp = TempDir::new().unwrap();
-        let members: Vec<Member> = ["api", "web"]
-            .into_iter()
-            .map(|name| {
-                std::fs::create_dir_all(tmp.path().join(name)).unwrap();
-                Member { name: name.to_string(), root: tmp.path().join(name) }
-            })
-            .collect();
-        let federation = Federation {
-            name: "shop".to_string(),
-            root: tmp.path().to_path_buf(),
-            members,
-            default: None,
-            links: Vec::new(),
-            governance: Default::default(),
-            warm_concurrency: None,
-            member_kinds: Default::default(),
-        };
-        let federated: Arc<Backing<Engine>> = Arc::new(Backing::Federated(Box::new(
-            EngineRegistry::new(federation, RegistryMode::Lazy),
-        )));
-        let default = Arc::new(Engine::start(tmp.path().join("api")).expect("default engine"));
-        let other = Arc::new(Engine::start(tmp.path().join("web")).expect("member engine"));
-
-        let state = make_state(Arc::clone(&default), Arc::clone(&federated), IntentToken::generate());
-        assert!(Arc::ptr_eq(
-            &chat_for(&state.chat, &default, Arc::clone(&default), &federated),
-            &state.chat
-        ));
-        let scoped = chat_for(&state.chat, &default, other, &federated);
-        assert!(!Arc::ptr_eq(&scoped, &state.chat));
-
-        // [S-482]: the federated reach is the workspace chat's alone — minted once,
-        // beside the member chat, and never what `chat_for` hands a member turn.
-        let workspace = state.workspace_chat.clone().expect("a federated serve has a workspace chat");
-        for member in [&state.chat, &scoped] {
-            assert!(!Arc::ptr_eq(member, &workspace), "a member turn never gets the workspace chat");
-        }
-        let single = make_state(
-            Arc::clone(&default),
-            Arc::new(Backing::Single(Arc::clone(&default))),
-            IntentToken::generate(),
-        );
-        assert!(single.workspace_chat.is_none(), "a single root has no workspace chat");
-    }
 
     /// The [`bridge`] installs the boundary scope its caller names, and
     /// installs it **inside** the blocking closure — where the engine (and so
@@ -2139,18 +1490,22 @@ mod tests {
         );
     }
 
-    /// Every handler on this surface names a surface, exactly one names
-    /// [`Surface::Shell`], and that one is `status` ([CR-097], [BR-42]).
+    /// Every handler on this surface names a surface, exactly two name
+    /// [`Surface::Shell`], and they are `status` and `code_refs` — a closed set
+    /// of app-chrome handlers ([CR-097], [BR-42], HF-1).
     ///
     /// # Why a whitelist and not a search for `Shell`
     ///
     /// Three distinct regressions live on this boundary and only a whitelist
     /// catches all three:
     ///
-    /// 1. a **second** handler classified as shell chrome — its endpoint's
+    /// 1. a **third** handler classified as shell chrome — its endpoint's
     ///    reads would leave the usage figures with nothing failing, the
-    ///    [CR-091] closed-list defect one layer up;
-    /// 2. the shell classification **moving** off `status` to another handler;
+    ///    [CR-091] closed-list defect one layer up. Widening the set is an
+    ///    owner decision about whose question a route answers, and it is made
+    ///    here, in `CHROME_HANDLERS`, never by adding a bare `Surface::Shell`;
+    /// 2. the shell classification **moving** off one of the two to another
+    ///    handler;
     /// 3. a handler naming some **third** surface — `Surface::Cli` as a typo
     ///    books a web read against the CLI's adoption figures, which *adds* to
     ///    a bucket rather than excluding from one, so no exclusion test can
@@ -2249,42 +1604,6 @@ mod tests {
         panic!("unbalanced braces walking the body of `{header}`");
     }
 
-    /// The name of **any** `fn` enclosing `at` — `fn`, `async fn` and `pub fn`
-    /// alike.
-    ///
-    /// A deliberate sibling of [`enclosing_fn`] rather than a widening of it —
-    /// and **not** because widening would disturb today's attribution. Review
-    /// measured that claim and it is false: over the 36 `Surface::` sites the
-    /// census reads, the two walkers agree on 35 and differ on exactly one —
-    /// the wiki-generation site, where `enclosing_fn` yields the sentinel
-    /// `<no enclosing async fn>`. Substituting this function throughout would
-    /// be a no-op on every pre-existing site.
-    ///
-    /// They are kept apart for what each whitelist is *about*. The handler
-    /// census asks "which **handler** is classified how", and there
-    /// `<no enclosing async fn>` is the more useful answer than a helper's
-    /// name: it says the marker is not inside a handler at all. The
-    /// wiki-generation site genuinely is not — it is a `WikiRunService::
-    /// start_run` impl, a plain `fn` — so it is attributed by this function
-    /// instead, and its whitelist entry names the `fn` a reader can go and
-    /// find.
-    fn enclosing_any_fn(code: &str, at: usize) -> &str {
-        let mut cursor = &code[..at];
-        loop {
-            let Some(start) = cursor.rfind("fn ") else {
-                return "<no enclosing fn>";
-            };
-            if whole_identifier(cursor, start) {
-                let rest = &code[start + "fn ".len()..];
-                let end = rest
-                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .unwrap_or(rest.len());
-                return &rest[..end];
-            }
-            cursor = &cursor[..start];
-        }
-    }
-
     /// The name of the `async fn` enclosing `at` — how an occurrence is
     /// attributed to a handler without depending on line layout.
     fn enclosing_fn(code: &str, at: usize) -> &str {
@@ -2301,24 +1620,20 @@ mod tests {
     }
 
     #[test]
-    fn every_handler_names_its_surface_and_only_status_names_the_shell() {
-        // Three files cross an adapter boundary: the 23 `bridge`, 8
-        // `workspace_fan` + 1 `workspace_fan_try` sites and the 3 workspace-config
-        // `run_blocking` sites (S-450, no engine) in `api_v1.rs`, the 6 `bridge`
-        // sites in `lib.rs` (three of them `/api/v1/chat/*` routes), and the
-        // wiki-generation pass in `wikigen/configured.rs`, which crosses on a
-        // bare `spawn_blocking` and so names its surface directly ([CR-139]).
+    fn every_handler_names_its_surface_and_only_chrome_handlers_name_the_shell() {
+        // Two files cross an adapter boundary: the `bridge`, `workspace_fan` /
+        // `workspace_fan_try` and workspace-config `run_blocking` sites (S-450, no
+        // engine) in `api_v1.rs`, and the 3 config-write `bridge` sites in
+        // `lib.rs`. The `/api/v1/chat/*` sites moved with chat to its extension
+        // crate (S-643), and the wiki's read routes and its generation pass — the
+        // one `Surface::WikiGen` site ([CR-139]) — with the wiki to its extension
+        // and the `wiki-agent` (S-644); each pins its own.
         let sources = [
             ("api_v1.rs", production_code(include_str!("api_v1.rs"))),
             ("lib.rs", production_code(include_str!("lib.rs"))),
-            (
-                "wikigen/configured.rs",
-                production_code(include_str!("wikigen/configured.rs")),
-            ),
         ];
 
         let mut shell_sites: Vec<(&str, &str)> = Vec::new();
-        let mut wikigen_sites: Vec<(&str, &str)> = Vec::new();
         let mut web_sites = 0usize;
         for (file, code) in &sources {
             for (at, marker) in code.match_indices("Surface::") {
@@ -2328,10 +1643,6 @@ mod tests {
                     .unwrap_or(rest.len());
                 match &rest[..end] {
                     "Shell" => shell_sites.push((file, enclosing_fn(code, at))),
-                    // Attributed by ANY enclosing `fn`: the site is a
-                    // `WikiRunService::start_run` impl, not an `async fn`
-                    // handler.
-                    "WikiGen" => wikigen_sites.push((file, enclosing_any_fn(code, at))),
                     "Web" => web_sites += 1,
                     // The bare `use …::Surface;` import names no variant and
                     // does not reach here; anything else is a handler claiming
@@ -2348,48 +1659,17 @@ mod tests {
             }
         }
 
+        // The closed set of app-chrome handlers, each with the reason it is
+        // chrome: the app header's readout ([FR-UI-34]) and the chat's automatic
+        // lookup of its own answer's code refs ([FR-UI-47]) — neither answers a
+        // question a user asked ([BR-42]). Adding a handler here is the owner
+        // decision; a third `Surface::Shell` site fails the assertion below.
+        const CHROME_HANDLERS: [(&str, &str); 2] = [("api_v1.rs", "code_refs"), ("api_v1.rs", "status")];
+        shell_sites.sort_unstable();
         assert_eq!(
-            shell_sites.len(),
-            1,
-            "exactly one handler is shell chrome, got {shell_sites:?}"
-        );
-        assert_eq!(
-            shell_sites[0],
-            ("api_v1.rs", "status"),
-            "and it is the status handler ([FR-UI-34]), got {shell_sites:?}"
-        );
-        // The same whitelist shape, for the same three regressions, on the
-        // CR-139 surface: a SECOND site claiming to be Logos's own generator
-        // would put a developer's reads into the generator's figures, and the
-        // classification MOVING off the materialize call would put the
-        // generator's back into the developer's.
-        //
-        // Deliberately `== 1`, not the `web_sites >= 34` floor a few lines
-        // below, and the asymmetry is the point: a floor is right for the
-        // ORDINARY surface, where a new handler is routine, and wrong for a
-        // surface that claims to be somebody specific. This mirrors
-        // `shell_sites.len() == 1` directly above. Review raised `>= 1` as an
-        // alternative; it was rejected because it discards regression (1) —
-        // the second claimant — which is the whole reason a non-web surface
-        // gets a whitelist rather than a count.
-        //
-        // The cost is real and is recorded rather than removed: a legitimate
-        // second WikiGen site means editing TWO files, this whitelist and
-        // `web/tests/wikigen_enumeration.rs`'s `DECLARED_SITES`. That is
-        // intended — the two guards answer different questions (is the
-        // classification where we think it is / is every engine path declared)
-        // — but a maintainer meeting it for the first time should not have to
-        // rediscover why.
-        assert_eq!(
-            wikigen_sites.len(),
-            1,
-            "exactly one site is the wiki generation pass, got {wikigen_sites:?}"
-        );
-        assert_eq!(
-            wikigen_sites[0],
-            ("wikigen/configured.rs", "start_run"),
-            "and it is the run the generation trigger spawns ([FR-OB-13], \
-             [CR-139]), got {wikigen_sites:?}"
+            shell_sites, CHROME_HANDLERS,
+            "exactly the status and code_refs handlers are shell chrome ([FR-UI-34], \
+             [FR-UI-47]), got {shell_sites:?}"
         );
         // Every other boundary crossing is the plain web surface.
         //
@@ -2417,7 +1697,7 @@ mod tests {
     /// # Why a filesystem walk and not a third `include_str!`
     ///
     /// `include_str!` cannot glob, so
-    /// [`every_handler_names_its_surface_and_only_status_names_the_shell`]
+    /// [`every_handler_names_its_surface_and_only_chrome_handlers_name_the_shell`]
     /// embeds `api_v1.rs` and `lib.rs` by name — while `bridge` is
     /// `pub(crate)` across a crate with ten other source files. A new module
     /// naming `Surface::Cli`, or crossing the adapter boundary through `bridge`,
@@ -2454,22 +1734,19 @@ mod tests {
     /// reaches the engine inside a bare `spawn_blocking`, naming no `Surface`
     /// and calling none of the helpers.
     ///
-    /// `web/src/wikigen/configured.rs` was that shape, and [CR-139] closed it:
-    /// the pass now names [`Surface::WikiGen`], so the file is in `SCANNED`
-    /// above and its site is whitelisted by the census. The *class* is not
-    /// closed, only that instance. What covers `web/src/wikigen/` now is a
-    /// second, differently-shaped census — `web/tests/wikigen_enumeration.rs`
-    /// enumerates every engine-reaching site in that module from a directory
-    /// walk and compares it against a declared, classified table, so a marker
-    /// is not what makes a site visible there. This guard's reach is still
-    /// exactly "a `Surface`/`bridge`/`workspace_fan`/`run_blocking` marker in a file the
-    /// census does not read", and it is stated here so the next audit starts
-    /// from that rather than from an assumption.
+    /// The wiki generation pass was that shape until [CR-139] made it name
+    /// [`Surface::WikiGen`]; it left this crate with the wiki (S-644), and the
+    /// census that covers it — every engine-reaching site of the generator,
+    /// enumerated from its source and compared against a declared table — went
+    /// with it, to `wiki-agent/tests/wikigen_enumeration.rs`. This guard's reach
+    /// is exactly "a `Surface`/`bridge`/`workspace_fan`/`run_blocking` marker in a
+    /// file the census does not read", and it is stated here so the next audit
+    /// starts from that rather than from an assumption.
     ///
     /// [CR-139]: ../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
     #[test]
     fn no_other_source_under_web_src_carries_a_surface_marker() {
-        const SCANNED: [&str; 3] = ["api_v1.rs", "lib.rs", "wikigen/configured.rs"];
+        const SCANNED: [&str; 2] = ["api_v1.rs", "lib.rs"];
         const MARKERS: [&str; 4] = ["Surface::", "bridge(", "workspace_fan(", "run_blocking("];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -2497,7 +1774,7 @@ mod tests {
                 walked.push(rel.clone());
                 if SCANNED.contains(&rel.as_str()) {
                     seen_scanned.push(rel.clone());
-                    // NOT a blanket skip. The census reads these three through
+                    // NOT a blanket skip. The census reads these two through
                     // `production_code`, which truncates at the first
                     // `#[cfg(test)] mod tests {` — so the census covers a
                     // SCANNED file's production half and NOTHING after it,
@@ -2506,9 +1783,9 @@ mod tests {
                     // module read by NEITHER guard.
                     //
                     // That is not hypothetical and it is not inherited: adding
-                    // `wikigen/configured.rs` to SCANNED (S-435, CR-139) opened
-                    // exactly that hole in a file that HAS a test module, and a
-                    // `Surface::Cli` planted there passed the entire `web`
+                    // the wiki generator's file to SCANNED (S-435, CR-139) once
+                    // opened exactly that hole in a file that HAS a test module,
+                    // and a `Surface::Cli` planted there passed the entire `web`
                     // suite. It is the Sprint 72 appendix 5.9 false-green shape
                     // recreated by the commit that cites it. So the tail — the
                     // region the census provably cannot see — is scanned here.
@@ -2591,7 +1868,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "these sources carry a surface marker that \
-             `every_handler_names_its_surface_and_only_status_names_the_shell` never reads, \
+             `every_handler_names_its_surface_and_only_chrome_handlers_name_the_shell` never reads, \
              so whatever they classify is classified by nothing (FR-OB-09, BR-42). \
              Classify the site AND add its file to that census's `sources` list: {offenders:?}"
         );
@@ -2675,12 +1952,14 @@ mod tests {
         // The sibling that still wants the standalone verdict, and the reason
         // the pin above is scoped to one handler rather than to the file: the
         // seam re-points `latest_gate`/`latest_scan`, it does not remove them
-        // (CR-135 §3.2). A "fix" that deleted this caller would fail here.
+        // (CR-135 §3.2). A "fix" that deleted this caller would fail here. The
+        // Overview handler reads its bundle through `read_overview`.
         assert_eq!(
-            snapshot_reads(fn_body(&code, "async fn overview(")),
+            snapshot_reads(fn_body(&code, "fn read_overview(")),
             ["latest_gate"],
             "the Overview handler still reads the standalone verdict"
         );
+        assert_eq!(snapshot_reads(fn_body(&code, "async fn overview(")), Vec::<&str>::new());
     }
 
     /// Every route mounted with `post(` is admitted by [`method_guard`]'s own
@@ -2761,28 +2040,109 @@ mod tests {
             );
         }
 
-        // Under a listen-only build the agent routes are compiled out of the
-        // router AND out of the guard, so they are the one legitimate exception.
-        #[cfg(not(feature = "agents"))]
-        let agents_only = [
-            CHAT_POST_ROUTE,
-            "/api/v1/chat/threads/1/delete",
-            WORKSPACE_CHAT_POST_ROUTE,
-            "/api/v1/workspace/chat/threads/1/delete",
-            WIKI_GENERATE_ROUTE,
-        ];
-        #[cfg(feature = "agents")]
-        let agents_only: [&str; 0] = [];
-        let refused: Vec<&str> = posts
-            .iter()
-            .copied()
-            .filter(|path| !agents_only.contains(path) && !post_route_admitted(path))
-            .collect();
+        let refused: Vec<&str> = posts.iter().copied().filter(|path| !post_route_admitted(path)).collect();
         assert!(
             refused.is_empty(),
             "these routes are mounted with `post(` but the method guard refuses them \
              (405 before routing) — add each to CONFIG_POST_ROUTES or its own enumerated \
              constant: {refused:?}"
+        );
+    }
+
+    /// Each `#[cfg(feature = "agents")]` arm of `src`: the attribute and the item,
+    /// statement or field it gates — up to the `;` or `,` that ends it, or through
+    /// the braces of the block it opens. Parentheses are tracked so a signature's
+    /// commas do not end it early, and string literals are skipped so a brace or
+    /// a `;` inside one cannot move a boundary.
+    fn agents_arms(code: &str) -> Vec<&str> {
+        const ATTR: &str = "#[cfg(feature = \"agents\")]";
+        let mut arms = Vec::new();
+        for (at, _) in code.match_indices(ATTR) {
+            let bytes = code.as_bytes();
+            let (mut i, mut parens, mut braces, mut in_str) = (at + ATTR.len(), 0usize, 0usize, false);
+            let end = loop {
+                assert!(i < bytes.len(), "an agents arm at byte {at} never ends");
+                match bytes[i] {
+                    b'\\' if in_str => i += 1,
+                    b'"' => in_str = !in_str,
+                    _ if in_str => {}
+                    b'(' => parens += 1,
+                    b')' => parens = parens.saturating_sub(1),
+                    b'{' => braces += 1,
+                    b'}' => {
+                        braces -= 1;
+                        if braces == 0 && parens == 0 {
+                            break i + 1;
+                        }
+                    }
+                    b';' | b',' if braces == 0 && parens == 0 => break i + 1,
+                    _ => {}
+                }
+                i += 1;
+            };
+            arms.push(&code[at..end]);
+        }
+        arms
+    }
+
+    /// `web` names chat in no `agents` arm ([S-643]) — and, since [S-644], has no
+    /// `agents` arm at all: chat is the `chat` extension's, and the wiki-generation
+    /// surface, the last thing `web` kept behind `agents`, is the `wiki`
+    /// extension's. Both are composed in by a binary's `main`; this crate compiles
+    /// the same in every build and declares no `agents` feature.
+    ///
+    /// Read off the source because a compiled-out arm is invisible to every other
+    /// test in the default build, and an arm that came back would compile — that
+    /// is exactly how `web` used to carry chat and the generator. Every `.rs` file
+    /// under `src/` is read, not only `lib.rs`.
+    ///
+    /// [S-643]: ../../../docs/planning/journal.md#s-643-chat-is-a-registered-extension
+    /// [S-644]: ../../../docs/planning/journal.md#s-644-the-wiki-is-its-own-crate-and-a-registered-extension
+    #[test]
+    fn no_agents_arm_names_chat() {
+        // The matcher probed with the shapes it must bound: a field, a block, a
+        // statement, and a signature whose commas sit inside parentheses — so an
+        // empty scan below is a clean crate, not a broken matcher.
+        let probe = "#[cfg(feature = \"agents\")]\n    wiki: W,\n    chat: C,\n\
+                     #[cfg(feature = \"agents\")]\nfn f(a: A, b: B) { chat(); }\n\
+                     #[cfg(feature = \"agents\")]\nlet r = r.route(\"/x;\", g);\nlet chat = 1;";
+        assert_eq!(
+            agents_arms(probe),
+            [
+                "#[cfg(feature = \"agents\")]\n    wiki: W,",
+                "#[cfg(feature = \"agents\")]\nfn f(a: A, b: B) { chat(); }",
+                "#[cfg(feature = \"agents\")]\nlet r = r.route(\"/x;\", g);",
+            ]
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let (mut read, mut arms) = (0usize, Vec::new());
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a readable source directory") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    read += 1;
+                    let source = std::fs::read_to_string(&path).expect("a readable source file");
+                    arms.extend(
+                        agents_arms(&production_code(&source))
+                            .into_iter()
+                            .map(|arm| format!("{}: {arm}", path.display())),
+                    );
+                }
+            }
+        }
+        assert!(read > 5, "the walk read only {read} source files");
+        assert!(
+            arms.is_empty(),
+            "`web` has no `agents` arm since S-644 — chat (S-643) and the wiki generator \
+             (S-644) are extensions a binary's `main` composes: {arms:#?}"
+        );
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            !manifest.lines().any(|line| line.trim_start().starts_with("agents")),
+            "`web` declares no `agents` feature"
         );
     }
 
@@ -2815,5 +2175,53 @@ mod tests {
         ] {
             assert!(!is_loopback_host(bad), "{bad} must be rejected");
         }
+    }
+
+    /// The router the serve loop serves is built over the SPA provider and the
+    /// host `serve_surfaces_with_assets` was handed — not the embedded bundle.
+    #[tokio::test]
+    async fn the_serve_loops_router_serves_the_injected_provider_and_host() {
+        use std::borrow::Cow;
+        use tower::ServiceExt;
+
+        struct Injected;
+        impl SpaAssets for Injected {
+            fn get(&self, path: &str) -> Option<Cow<'static, [u8]>> {
+                (path == "index.html").then_some(Cow::Borrowed(
+                    b"<html><head></head><body>private-bundle-marker-7f3a</body></html>".as_slice(),
+                ))
+            }
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(Engine::start(tmp.path()).expect("engine"));
+        let backing = Arc::new(Backing::Single(engine));
+        let router = serving_router(backing, &ExtensionHost::new(), Arc::new(Injected))
+            .expect("the serving router builds");
+        let response = router
+            .oneshot(
+                Request::get("/")
+                    .header(header::HOST, "127.0.0.1:4983")
+                    .header(header::ACCEPT, "text/html")
+                    .body(axum::body::Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("a body");
+        assert!(String::from_utf8_lossy(&body).contains("private-bundle-marker-7f3a"), "the injected shell is served");
+    }
+
+    /// The extensions' `POST` allow-list admits a request only when the router
+    /// matched it to one of their `POST` patterns (FR-DS-04, NFR-SE-06).
+    #[test]
+    fn an_extension_post_is_admitted_only_by_its_matched_route() {
+        let posts = ExtensionPosts(Arc::from(["/api/v1/ext/save", "/api/v1/ext/:id/delete"]));
+        assert!(posts.admits(Some("/api/v1/ext/save")));
+        assert!(posts.admits(Some("/api/v1/ext/:id/delete")));
+        assert!(!posts.admits(Some("/api/v1/ext/:id")), "a GET route's pattern is not on the list");
+        assert!(!posts.admits(Some("/config/save")), "the core allow-list is not the extensions'");
+        assert!(!posts.admits(None), "a request no route matched is never admitted");
+        assert!(!ExtensionPosts::default().admits(Some("/api/v1/ext/save")), "no extension, no entry");
     }
 }

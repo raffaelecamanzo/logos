@@ -253,8 +253,10 @@ tracing-subscriber = { workspace = true }
 # The agent carve-out marker (CR-078, ADR-60, FR-OB-10). It adds NO dependency:
 # its only effect is to declare `observability::Surface::Chat`, the override-only
 # surface the in-process chat agent attributes its engine calls to. `agent-core`
-# turns it on, and `agent-core` itself reaches the binary only through `web`'s
-# own `agents` feature — so in a build without agents the variant is **absent**
+# turns it on, and `agent-core` itself reaches the binary only through the
+# `chat` extension and the wiki generator, which the `logos` binary links only
+# under its `agents` feature (S-643, S-644; `web` has no `agents` feature and no
+# edge to `agent-core`) — so in a build without agents the variant is **absent**
 # rather than present-and-never-emitted, which is what FR-OB-10 asks for. The
 # no-network fitness function is unaffected: no crate enters the graph here.
 agents = []

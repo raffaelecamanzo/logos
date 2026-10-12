@@ -326,7 +326,7 @@ fn method_router_constructor_hands_off_its_handler() {
 fn chained_method_router_setters_hand_off_every_handler() {
     // `route(path, get(a).post(b))` — the chained `.post(b)` setter is a method
     // call, so the walk recurses through the chain and roots BOTH `a` and `b`
-    // (the `web/src/lib.rs` `get(spa_shell).post(chat_turn)` shape).
+    // (the `web/src/lib.rs` `get(spa_shell).post(wiki_generate)` shape).
     let got = handoffs("fn r() { app.route(\"/c\", get(shell).post(submit)); }");
     assert_eq!(got, vec!["shell".to_string(), "submit".to_string()]);
 }

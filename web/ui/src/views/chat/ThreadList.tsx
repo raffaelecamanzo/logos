@@ -2,7 +2,8 @@
  * The chat history rail (S-210/S-211, CR-053, FR-UI-26, FR-UI-20, ADR-47, ADR-45) —
  * the left sub-rail listing durable conversations most-recent-first over the merged
  * S-209 `GET /api/v1/chat/threads`, with select-to-restore, a "+ New chat" reset,
- * and a per-conversation delete behind a confirmation step.
+ * a per-conversation delete behind a confirmation step, and an inline rename
+ * (S-623, FR-UI-48).
  *
  * Presentation only: it owns no transport and no thread state — the multi-thread
  * runtime (`chatRuntime.tsx`) supplies the list, the active id, and the actions, so
@@ -10,17 +11,18 @@
  * token; no inline style, so the self-only CSP stays byte-identical — NFR-SE-06).
  * No secret ever rides a thread summary (NFR-SE-07).
  *
- * The one piece of state it DOES own is which row is awaiting confirmation: that is
- * ephemeral presentation, scoped to the rendered list, and it must not survive a
- * conversation switch or outlive the rail.
+ * The state it DOES own is which row is awaiting confirmation and which row is being
+ * renamed, with the name being typed: ephemeral presentation, scoped to the rendered
+ * list. A pending confirm must not survive a conversation switch or outlive the rail.
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { Button } from "../../components/index.ts";
-import { IconPlus } from "../../components/icons.tsx";
-import type { ThreadSummary } from "./chatModel.ts";
+import { IconPencil, IconPlus, IconTrash } from "../../components/icons.tsx";
+import { normalizeThreadTitle, THREAD_TITLE_MAX, type ThreadSummary } from "./chatModel.ts";
 import styles from "./Chat.module.css";
+import railStyles from "./ThreadList.module.css";
 
 export interface ThreadListProps {
   /** The conversation list, most-recent-first (the server's sort). */
@@ -34,7 +36,10 @@ export interface ThreadListProps {
   /** Delete a conversation and its per-thread memory. Called ONLY after the user
    *  has confirmed on the row (S-211 AC-1). */
   onDelete: (id: number) => void;
-  /** An honest note when the list could not be read (or a delete failed), else `null`. */
+  /** Rename a conversation (S-623, FR-UI-48), called with the new name already
+   *  normalized and never empty. Absent, the rail offers no rename. */
+  onRename?: (id: number, title: string) => void;
+  /** An honest note when the list could not be read (or a delete or rename failed), else `null`. */
   error?: string | null;
   /** What an empty rail says — the member chat's default sentence unless the chat
    *  has more to say about where else conversations live (the Workspace Chat names
@@ -43,14 +48,20 @@ export interface ThreadListProps {
 }
 
 /** The conversation-history rail: a "+ New chat" action over a most-recent-first
- *  list of auto-titled conversations, the open one marked `aria-current`, each with
- *  a confirm-gated delete. */
+ *  list of titled conversations, the open one marked `aria-current`, each with an
+ *  inline rename and a confirm-gated delete.
+ *
+ *  S-619 ([FR-UI-45], CR-204 L6) took it out of its card: it sits on the page surface,
+ *  each row LINE (title, pencil, trash) is the unit the filled pill and the active row's red
+ *  leading marker ride on, and the delete affordance is a trash glyph the stylesheet
+ *  shows on row hover, row focus and the active row only. */
 export function ThreadList({
   threads,
   activeThreadId,
   onSelect,
   onNewChat,
   onDelete,
+  onRename,
   error,
   emptyNote = "No conversations yet — your chats will appear here.",
 }: ThreadListProps) {
@@ -66,6 +77,47 @@ export function ThreadList({
   // without re-establishing that intent. The rail is not unmounted by either action,
   // so nothing else would clear it.
   useEffect(() => setConfirmingId(null), [activeThreadId]);
+
+  // The row being renamed and the name typed so far (S-623, [FR-UI-48]). One row
+  // at a time, and never beside an armed delete: each disarms the other.
+  const [renaming, setRenaming] = useState<{ id: number; draft: string; refused: boolean } | null>(
+    null,
+  );
+  // Focus the field when it opens, with the old name selected so typing replaces
+  // it. A stable callback, so it runs once per opened field, not on every keystroke.
+  const focusField = useCallback((el: HTMLInputElement | null) => {
+    el?.focus();
+    el?.select();
+  }, []);
+  const startRename = (t: ThreadSummary) => {
+    setConfirmingId(null);
+    setRenaming({ id: t.id, draft: t.title, refused: false });
+  };
+  // Enter saves, Esc cancels, an empty name is refused — the field stays open and
+  // says so, and nothing is sent. An unchanged name closes the field with no write.
+  const onRenameKey = (e: KeyboardEvent<HTMLInputElement>, t: ThreadSummary) => {
+    if (!renaming) return;
+    // A key that confirms or cancels an IME composition (Japanese, Chinese,
+    // Korean input) belongs to the IME, not to the rename.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    if (e.key === "Escape") {
+      // Esc here cancels the rename only — it must not also reach a view-wide
+      // handler (e.g. one that stops a running turn).
+      e.preventDefault();
+      e.stopPropagation();
+      setRenaming(null);
+      return;
+    }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const title = normalizeThreadTitle(renaming.draft);
+    if (title == null) {
+      setRenaming({ ...renaming, refused: true });
+      return;
+    }
+    setRenaming(null);
+    if (title !== t.title) onRename?.(t.id, title);
+  };
 
   return (
     <nav className={styles.rail} aria-label="Conversations">
@@ -101,17 +153,48 @@ export function ThreadList({
           {threads.map((t) => {
             const active = t.id === activeThreadId;
             const confirming = t.id === confirmingId;
+            const editing = renaming?.id === t.id ? renaming : null;
             return (
               <li key={t.id} className={styles.threadRow}>
-                <div className={styles.threadLine}>
-                  <button
-                    type="button"
-                    className={active ? `${styles.threadItem} ${styles.threadActive}` : styles.threadItem}
-                    aria-current={active ? "true" : undefined}
-                    onClick={() => onSelect(t.id)}
-                  >
-                    {t.title}
-                  </button>
+                <div className={active ? `${styles.threadLine} ${styles.threadLineActive}` : styles.threadLine}>
+                  {editing ? (
+                    <input
+                      className={railStyles.renameInput}
+                      aria-label={`Rename conversation “${t.title}”`}
+                      aria-invalid={editing.refused ? "true" : undefined}
+                      aria-describedby={editing.refused ? `rename-refused-${t.id}` : undefined}
+                      value={editing.draft}
+                      maxLength={THREAD_TITLE_MAX}
+                      ref={focusField}
+                      onChange={(e) => setRenaming({ ...editing, draft: e.target.value, refused: false })}
+                      onKeyDown={(e) => onRenameKey(e, t)}
+                      // Leaving the field cancels: only Enter commits a rename.
+                      onBlur={() => setRenaming(null)}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className={active ? `${styles.threadItem} ${styles.threadActive}` : styles.threadItem}
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => onSelect(t.id)}
+                      onDoubleClick={onRename ? () => startRename(t) : undefined}
+                    >
+                      {t.title}
+                    </button>
+                  )}
+                  {onRename && !editing && (
+                    // The rail's icon-action look (`threadDelete`): hidden on an idle
+                    // row, shown on hover, focus and the active row.
+                    <button
+                      type="button"
+                      className={styles.threadDelete}
+                      aria-label={`Rename conversation “${t.title}”`}
+                      onClick={() => startRename(t)}
+                    >
+                      <IconPencil width={16} height={16} />
+                    </button>
+                  )}
+                  {!editing && (
                   <button
                     type="button"
                     className={styles.threadDelete}
@@ -121,9 +204,16 @@ export function ThreadList({
                     aria-expanded={confirming}
                     onClick={() => setConfirmingId(confirming ? null : t.id)}
                   >
-                    ✕
+                    <IconTrash width={16} height={16} />
                   </button>
+                  )}
                 </div>
+
+                {editing?.refused && (
+                  <p id={`rename-refused-${t.id}`} className={railStyles.renameRefused} role="status">
+                    A conversation needs a name.
+                  </p>
+                )}
 
                 {confirming && (
                   <div className={styles.threadConfirm} role="group" aria-label={`Confirm deleting “${t.title}”`}>

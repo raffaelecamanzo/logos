@@ -23,6 +23,9 @@ lang-all  = ["logos-core/lang-all"]
 
 [dependencies]
 logos-core = { path = "../logos-core", default-features = false }
+# The extension host (CR-213, ADR-74): `LogosMcp` composes the active
+# extensions' tools from it. A contract crate, never an extension crate.
+logos-ext  = { path = "../logos-ext" }
 anyhow     = { workspace = true }
 rmcp       = { workspace = true }
 serde      = { workspace = true }
@@ -38,6 +41,9 @@ tracing-subscriber = { workspace = true }
 # In-process MCP client driving the server over a tokio duplex pipe — the
 # protocol-level acceptance tests (UAT-MC-01/03/04) need both roles.
 rmcp     = { workspace = true, features = ["client"] }
+# The stub extension the extension-tool tests compose (S-639) — dev-only, so it
+# never reaches a shipped binary.
+logos-ext = { path = "../logos-ext", features = ["test-support"] }
 tokio    = { workspace = true, features = ["rt-multi-thread", "io-util", "process", "time"] }
 tempfile = { workspace = true }
 

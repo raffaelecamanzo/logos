@@ -33,7 +33,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 async fn boot(engine: Engine) -> (Client, tokio::task::JoinHandle<()>) {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::new(engine).serve(server_io).await {
+        if let Ok(running) = LogosMcp::new(engine, &logos_ext::ExtensionHost::new()).serve(server_io).await {
             let _ = running.waiting().await;
         }
     });

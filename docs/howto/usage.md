@@ -598,9 +598,10 @@ Reports calls per tool split by surface (`cli`/`mcp`), latency percentiles,
 and an estimate of file reads (and tokens) saved by graph navigation versus
 raw file reading. Stats read only `telemetry.db` — they work even before (or
 without) an index. **Self-referential reads are excluded from every figure** —
-`stats` reading the telemetry store, and the dashboard shell's own `status`
-readout — because counting them would measure the measurement, not the tool's
-value. A graph query a person issues *through* the dashboard counts normally
+`stats` reading the telemetry store and the dashboard shell's own `status`
+readout, because counting them would measure the measurement, not the tool's
+value; the chat's automatic code-refs lookup is excluded too, as app overhead
+that no person asked for. A graph query a person issues *through* the dashboard counts normally
 (see [commands.md § `stats`](commands.md#stats)).
 
 ## The web UI dashboard
@@ -650,9 +651,10 @@ self-only `Content-Security-Policy` on every response. Every non-GET request is
 answered `405` **except** a `POST` to one of a small, enumerated set of mutating
 routes — the config-write/apply routes (`/config/save`, `/config/apply`,
 `/config/secret`), the Chat turn route (`/chat`), and the per-conversation
-delete (`/api/v1/chat/threads/{id}/delete`) — in a workspace serve with `agents`,
-also the workspace chat's `/workspace/chat` and
-`/api/v1/workspace/chat/threads/{id}/delete`; those — and only
+delete, rename and truncate (`/api/v1/chat/threads/{id}/delete`, `…/rename`,
+`…/truncate`) — in a workspace serve with `agents`, also the workspace chat's
+`/workspace/chat` and the same three under `/api/v1/workspace/chat/threads/{id}/`;
+those — and only
 those — are additionally gated by a same-origin + per-session intent (CSRF)
 guard, so a request missing the `x-logos-intent` token or arriving cross-origin
 is rejected `403` before any handler runs. The whole React app — its hashed
@@ -700,7 +702,8 @@ selector and the theme toggle survive to the narrowest supported viewport; the b
 subtitle gives way below 768px. Widening the window brings the readout back with the
 figures from the last navigation. The request itself is unaffected — the header still
 reads `/api/v1/status` on navigation at every width, and those reads are classified as
-shell chrome, so they never enter the tool-usage figures.
+shell chrome, so they never enter the tool-usage figures. The chat's automatic
+`/api/v1/code-refs` lookup of a finalized answer's backticks is classified the same way.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
@@ -1071,12 +1074,25 @@ byte-identical. The endpoints are: `/api/v1/overview`, `/api/v1/health`,
 optional `depth`), `/api/v1/precedent` (`target=<symbol|path>`, optional
 `limit`), `/api/v1/branch-overlap` (repeatable `ref=<git-ref>`, optional `base`
 and `merge`), `/api/v1/node`,
-`/api/v1/search`, `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
+`/api/v1/search`, `/api/v1/code-refs` (repeatable `ref=<span>`, at most 24
+resolved — the chat's code-reference check, below), `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
 `/api/v1/coverage`, `/api/v1/status` (the index-health projection the app
 header reads — see below), `/api/v1/wiki`, `/api/v1/wiki/nav`,
 `/api/v1/wiki/search`, `/api/v1/wiki/page/*slug`, `/api/v1/wiki/asset/*path`
-(same-origin, read-only, path-sandboxed doc-image serving — CR-064), and
-`/api/v1/config`.
+(same-origin, read-only, path-sandboxed doc-image serving — CR-064),
+`/api/v1/config`, and `/api/v1/extensions`.
+
+`GET /api/v1/extensions` states which extensions the running server composes
+(CR-213, FR-UI-51): `{"extensions": [...]}`, one entry per **active** extension
+— its `id` and the `ui` manifest it contributes (`nav`, `views`,
+`config_panels`; `null` for an extension with no UI). The single-page app reads
+it once on boot to decide what to mount (S-642), so an extension that goes
+inactive mid-session leaves the shell at the next load. The default build lists
+`wiki`; a build with `agents` lists `chat`, then `wiki`; a build that composes no
+extension (`--no-default-features --features lang-all,ui`) answers
+`{"extensions": []}`. Like every read route it is `GET`-only, loopback-only and
+same-origin, and it reads the server's composition, not the index — it records
+no telemetry.
 
 `GET /api/v1/graph` returns the bounded graph-elements read-model
 (`nodes`/`edges` plus `total_*`/`elided_*` counts and `warnings`) that backs the
@@ -1368,7 +1384,7 @@ rail**: it runs the full height of the view, and a full-size **+ New chat**
 control stays pinned above the scrolling list. On the right, the conversation
 sits inside the application's shared **card**, which has the red accent edge and
 fills its column. The assistant turn is a flat block with no card of its own, and
-your own turns are right-aligned bubbles. Below 1024px wide the two panes stack,
+your own turns are right-aligned rounded bubbles. Below 1024px wide the two panes stack,
 and a toggle shows or hides the rail. A **planner**
 decomposes the question, dispatches
 specialized read-only **subagents** over the existing Logos tools, and streams
@@ -1434,14 +1450,17 @@ first turn, gitignored, never in the default binary).
    the Workspace Chat, so accepting one never accepts another, and a conversation
    number from one chat is never reopened in another.
 
-   After you acknowledge, a **CHAT status band** takes the banner's place at the
-   top of the view. The configure state, the consent banner and the band share that
+   After you acknowledge, a one-line **CHAT chip** takes the banner's place at the
+   top of the view (for example `CHAT openai · openrouter.ai · z-ai/glm-5.2 ·
+   budget 24/8/3`). The configure state, the consent banner and the chip share that
    one slot, so the view always opens with a single verdict line, as Health and Wiki
-   do. The band names the **provider**, **endpoint host** and **model**, and the
-   turn's **budget tree**: tool calls, the per-subagent cap and replans. It stays
-   visible after your first message, so the budget is on screen during a long turn.
-   A value you have not configured is shown as not configured, never as an invented
-   default. The chat key never appears on the page.
+   do. The chip names the **provider**, **endpoint host** and **model**, and the
+   turn's **budget tree** in short: tool calls, the per-subagent cap and replans.
+   Click it to expand the full **status band**, which spells the budget out and
+   lists any extra read roots. The chip says "extra read roots" when there are
+   some. It stays visible after your first message, so the budget is on screen
+   during a long turn. A value you have not configured is shown as not configured,
+   never as an invented default. The chat key never appears on the page.
 
    **Symlinked docs.** The Source-Reader reads only inside the project root, so docs
    kept in a sibling repo behind a symlink (`docs/planning → ../logos-docs/planning`)
@@ -1457,8 +1476,17 @@ first turn, gitignored, never in the default binary).
    inherited workspace table's roots are
    marked as relative to the workspace root. A declared root that does not exist
    fails the turn with a message naming it.
-4. **Ask a question.** Type into the composer at the bottom and **Send**. The
-   answer streams in over SSE. The planner's plan and every subagent step live in
+4. **Ask a question.** Type into the composer, the rounded field pinned to the
+   bottom of the conversation card, and press the round **Send** button inside it.
+   Send turns red once there is something to send and becomes **Stop** while a
+   turn runs. The field grows with your text up to eight lines, then scrolls. A muted
+   hint under it names the two keys that matter there: **Enter** sends and
+   **Shift+Enter** starts a new line. At
+   desktop widths the chat fills the window: only the conversation scrolls, so the
+   composer never leaves the screen. If you scroll up through a long conversation, a
+   round **↓ Scroll to bottom** button floats above the composer. Click it and the
+   conversation returns to its end and follows the answer as it streams again. At
+   the bottom the button is not on the page at all. The answer streams in over SSE. The planner's plan and every subagent step live in
    one **Activity** disclosure above the answer — a native fold that is **open
    while the turn streams** and **auto-collapses once the answer is finalized**,
    leaving a one-line summary with a census (`3 steps`). Re-open it and it stays
@@ -1485,24 +1513,127 @@ first turn, gitignored, never in the default binary).
    copy control on a table. A table wider than the column scrolls sideways inside
    its own block, so the page never scrolls sideways and cells never break
    mid-word. A table in an **Activity** step result looks and scrolls the same
-   way. A
+   way.
+
+   A fenced block tagged with a language is **syntax-highlighted**: the languages
+   Logos indexes plus common config, shell and patch formats (`toml`, `yaml`,
+   `json`, `sh`/`bash`, a `shell` console session, `diff`, `xml`/`html`, `css`). A
+   block with no tag, or a tag the bundle does not carry (Terraform among them),
+   renders as plain text. The colours follow the light or dark theme.
+
+   Once an answer is final, its backticked **file paths** (`web/src/lib.rs`, also
+   with a `:42` or `:42-57` line suffix) and **symbol names** (`build_router`,
+   `parse()`) are checked against the graph in one request
+   (`GET /api/v1/code-refs`, at most 24 spans per answer). A span becomes a link
+   only when the graph confirms it: a path that is an indexed source file opens the
+   Graph view at the file tier focused on that file, and a name exactly one node
+   carries opens the Graph view focused on that node. A name several nodes share,
+   a path the graph does not have, a qualified name such as `Engine::node`, and a
+   config or documentation file stay plain code. In the Workspace Chat the check
+   runs against the member selected in the shell.
+
+   A
    ` ```mermaid ` fence renders as an **interactive diagram** rather than source —
    see [Mermaid diagrams in chat](#mermaid-diagrams-in-chat) below. While a
    turn streams you can **Stop** it (the in-flight request is aborted — and is also
    aborted automatically if you leave the Chat tab mid-stream); a finished turn
-   offers **Copy** (the whole answer) and **Regenerate** (drops the prior assistant
-   turn and re-runs your message — never a duplicate). The turn runs under the
+   offers two small icon buttons under the answer, **Copy** (the whole answer; the
+   icon turns into a check for a moment once it has copied) and **Regenerate**
+   (asks your question again in place of that answer). Each has a tooltip and a
+   name for a screen reader.
+
+   **Edit** — the pencil under each of your own messages — opens the message in
+   place. Change it and press **Resend** (or Enter) to ask the edited question
+   instead; **Cancel** (or Esc) leaves it as it was, and resending the text
+   unchanged just closes the box. The pencil is hidden while a turn runs. An edit
+   does not branch the conversation: everything after the edited message is
+   dropped, and the edited question is asked as the next turn. It runs under the
+   conversation's preset, as any send does.
+
+   **Regenerate and Edit change what is stored, not just what is shown.** Both
+   first cut the conversation back to before the question in `.logos/chat.db` —
+   that question, every later message and the agent memory written after it are
+   deleted together — and then ask it. A reloaded or restored conversation
+   therefore shows each turn once, with only its latest answer. (Before this, a
+   regenerated answer replaced the old one on screen only, and a reload showed
+   both.) If the cut fails — say the conversation was deleted in another tab — the
+   turn is not re-run, and the message under it says why. The cut is an
+   intent-guarded `POST …/chat/threads/{id}/truncate` with a `user_turn` form field
+   (the 0-based index among the conversation's stored questions), on the Chat and
+   the Workspace Chat alike. The turn runs under the
    budget tree ([configuration.md](configuration.md#the-budget-tree)) — the
    tool-call ceiling, the per-subagent cap, and the replan limit are shown in the
-   CHAT status band (step 3). The empty log shows only a hint about what to ask.
-5. **Delete a conversation.** Each row in the history rail carries a **delete**
-   affordance. Clicking it *arms* an inline confirmation naming what will go
+   CHAT status band (step 3).
+
+   An empty conversation **greets** you with a few **suggestion chips** under it.
+   Each is a fixed question with one slot, filled from what Logos already knows
+   about the project, so a chip names a real file: *Why is `<top hotspot>` the top
+   hotspot, and what depends on it?*, *What would it take to cover `<riskiest
+   untested file>`…?*, *Give me a tour of this project's `<N>` indexed files.* They
+   come from the Files read-model (`GET /api/v1/files`, the ranked hotspot board
+   and its untested view), which only reads what is already stored — no model writes
+   a chip, and nothing is sent to the provider until you send. A chip whose fact is
+   not there (no index yet, no git history, a failed read) shows a generic question
+   instead and never names anything. In the **Workspace Chat** the chips come from
+   the roster the Workspace view already holds, with no extra request and no
+   member store opened: how many members the workspace has, and the member you
+   have selected in the shell. The chips are greyed out until you accept the notice above; after that, clicking one
+   sends its text as your first message, exactly as if you had typed it, and the
+   chips go away.
+5. **Delete a conversation.** Each row in the history rail carries a **trash**
+   button, shown when you hover or focus the row and always on the open
+   conversation. Clicking it *arms* an inline confirmation naming what will go
    ("Delete this conversation and its memory?"); only **Delete** in that panel
    removes anything, and **Cancel** leaves the conversation untouched. A confirmed
    delete removes that conversation **and** its per-thread agent memory from
    `.logos/chat.db` by cascade — no orphaned memory. Deletion is always **per
    conversation**: there is no clear-all, and the old global "Clear history"
    control (and its route) no longer exist. This is irreversible.
+
+   The button above the rail (**Hide conversations** / **Show conversations**)
+   collapses the rail at any width, so the conversation gets the room. On a wide
+   window each chat remembers the choice in this browser. On a narrow window the
+   rail always starts collapsed above the conversation, and picking a conversation
+   closes it again.
+
+**Presets.** The **+** button at the left of the composer opens a menu of four
+built-in presets, each with a one-line description. A preset steers how the turn is
+planned and how the answer is written. It changes only the planner's and the
+Synthesizer's instructions. The tools, the subagents, the budget bounds and the
+read-only sandbox are the same under every preset, and no extra request is sent.
+
+| Preset | Steers the turn toward |
+|---|---|
+| **Default** | The question as asked. This is the plain chat. |
+| **Impact analysis** | What a change to the code in question would reach, nearest first, and what would need re-testing. |
+| **Onboarding** | An orientation for someone new to the code: the big picture, the terms, and where to start reading. |
+| **Troubleshooting** | A diagnosis: likely causes ranked by the evidence, where each would occur, and the next check to run. |
+
+A preset belongs to the conversation. Pick one in a conversation and every later
+turn in it runs under that preset, Regenerate and Retry included. Each
+conversation remembers its own preset in this browser, across a reload, and the
+Chat and the Workspace Chat keep separate choices. A new chat starts at Default. A preset picked before the first message stays with the conversation
+that message creates. While a conversation runs under a preset other than Default,
+a small chip in the composer names it. Its **×** clears it back to Default. In the
+menu, **↑** / **↓**, **Home** and **End** move, **Enter** picks, and **Esc** closes
+the menu without stopping a running turn. The turn route takes the preset as the
+form field `preset` (`default`, `impact_analysis`, `onboarding` or
+`troubleshooting`; absent means `default`). Any other value is refused with a `400`
+and runs no turn.
+
+**Keyboard shortcuts.** They work the same in the Chat and the Workspace Chat.
+
+| Key | Does |
+|---|---|
+| **Enter** | Sends the message in the composer. |
+| **Shift+Enter** | Inserts a new line in the message instead of sending. |
+| **Esc** | Stops the turn that is running, exactly as the round **Stop** button does. With no turn running it does nothing. While the preset menu is open, it closes the menu instead; while a message is open for editing, it cancels the edit instead — in neither case does it stop a running turn. |
+| **⌘K** (macOS) · **Ctrl+K** (everywhere else) | Starts a new chat, as **+ New chat** does. |
+
+⌘K / Ctrl+K and Esc work from the page, the conversation and the rail's buttons.
+They are left alone when the key is pressed in a text field outside the
+conversation (another view's field, or one in the app shell), so a browser or
+field shortcut that uses the same keys still works there.
 
 **Honest states (never a fabricated answer):**
 
@@ -1515,6 +1646,32 @@ first turn, gitignored, never in the default binary).
   n)` code) from an **auth** failure, instead of an opaque flattened string. A
   dropped connection or a turn that closes without producing an answer is likewise
   shown as an explicit error line, never a silently empty turn.
+- **A silent stream is reported, not left on "Working…".** While a turn is open,
+  the server writes an SSE comment line, `: keepalive`, every **15 seconds**. This
+  applies to both the Chat and the Workspace Chat. A comment is not an event, so
+  the event stream any client reads is unchanged. The Chat tab counts **any**
+  received byte, event or keepalive, as proof the connection is alive. After **45
+  seconds** with nothing received, the turn's "Working…" line is replaced by *"No
+  response from the server for 45 s. The connection may be lost."* with two
+  controls:
+  - **Retry** re-runs the question in place, like Regenerate. On the first turn of
+    a new chat, the server had already filed the stalled attempt as a
+    conversation, so the history rail keeps it as its own unanswered entry. The
+    chat continues in the conversation the retry creates.
+  - **Stop** ends the turn.
+
+  A byte arriving later clears the notice by itself. A slow subagent step never
+  trips it, because the keepalive keeps arriving while the step works; only a
+  connection that has gone quiet does. Both intervals are fixed constants, not
+  settings: 45 s is three missed keepalives.
+
+  The notice is for a connection that stays open but carries nothing, such as a
+  frozen server or a stalled network path. A server that **exits** closes the
+  connection, and the browser reports that at once as the dropped-connection error
+  line above, with **Regenerate**. After restarting `logos serve --ui`, **reload
+  the page** before re-running a turn: each server process issues a fresh intent
+  token, and the page holds the old one, so a re-run is refused (`403`) until
+  then.
 - **Configuration preflight.** Before a turn opens any connection, a preflight
   validates the chat config — base_url well-formed and present, key present, model
   set — and on a problem returns an **actionable message** naming the specific
@@ -1525,7 +1682,8 @@ transcript from `.logos/chat.db` — both your **user** questions and the assist
 final **answers**, in send order. Each turn's answer is persisted to the conversation
 when (and only when) the turn actually produced one; a turn that halted honestly or
 faulted persists no assistant message, so the restored transcript never shows an
-answer the assistant did not give. The ephemeral plan / subagent-activity side-channel
+answer the assistant did not give. A turn you regenerated or edited is restored
+once, with its latest answer: the earlier one was deleted from the store. The ephemeral plan / subagent-activity side-channel
 (streamed live over SSE) is not part of the durable transcript — a restored assistant
 turn shows the answer with **Copy**/**Regenerate**, not the intermediate step chatter.
 This is also why a restored turn grows no empty **Activity** fold: there is no
@@ -1557,6 +1715,9 @@ with these differences:
   engine.
 - **Its history rail lists workspace conversations only.** An empty rail says so, and
   that a member's conversations are available in a `--standalone` serve of that member.
+- **Its presets steer the workspace planner and Synthesizer.** The same four presets
+  apply to the workspace chat's own instructions, with its tools and budget unchanged.
+  Its preset choices are remembered apart from the member chat's.
 
 **Where each chat's history lives:**
 
@@ -1608,8 +1769,8 @@ Non-mermaid code blocks are unaffected and keep their existing copy control.
 
 Every route is **read-only except the explicit, intent-guarded mutating
 routes**: the config-write/apply routes (`/config/save`, `/config/apply`,
-`/config/secret`), the Chat routes (`/chat` and the per-conversation delete
-`/api/v1/chat/threads/{id}/delete`), and the Wiki
+`/config/secret`), the Chat routes (`/chat` and the per-conversation delete,
+rename and truncate under `/api/v1/chat/threads/{id}/`), and the Wiki
 generation trigger (`/wiki/generate`). Serving any read
 page — the Dashboard, Health, the analytics views, the Wiki, the Chat tab itself
 — reads the latest persisted snapshot through dedicated read-model accessors and
@@ -1773,7 +1934,8 @@ and why it matters (CR-203):
    dogfood metric), clearly labeled as *estimates*, not measured truth.
 2. A **daily-activity line** — calls per UTC day over the window.
 3. A **top-tools / by-surface** ranking bar. Self-referential reads — the tab's
-   own `stats` request and the shell's `status` readout — are excluded per event,
+   own `stats` request, the shell's `status` readout and the chat's automatic code-refs
+   lookup — are excluded per event,
    so opening this tab never inflates its own numbers; a graph query issued
    through the dashboard is counted like any other.
 4. A **dev-vs-`main` split** — usage attributed by `origin` (a worktree's branch

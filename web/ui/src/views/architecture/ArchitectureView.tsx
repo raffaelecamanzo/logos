@@ -18,7 +18,7 @@
 
 import { fetchArchitecture } from "../../api/client.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
-import type { ArchitectureModel, DsmReport } from "../../api/types.ts";
+import type { ArchitectureModel, DsmReport, GraphGranularity } from "../../api/types.ts";
 import {
   Callout,
   DataTable,
@@ -31,6 +31,7 @@ import type { Column } from "../../components/index.ts";
 import { cycles, dependencyMatrix } from "../../copy/architecture.copy.ts";
 import { plural as pluralWord } from "../../copy/types.ts";
 import { navigate } from "../../router.tsx";
+import { graphSeedHref } from "../graph/graphModel.ts";
 import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
   backEdges,
@@ -110,6 +111,9 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
       />
     );
   }
+  // A DSM row is a key of the rollup view it was built at, so the focus link
+  // seeds the Graph view at that same tier (S-622).
+  const tier: GraphGranularity = report.granularity === "file" ? "file" : "module";
   const rows: CycleRow[] = edges.map(([i, j]) => ({
     from: rowName(report, i),
     to: rowName(report, j),
@@ -121,14 +125,14 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
       header: "From",
       mono: true,
       sortValue: (r) => r.from,
-      cell: (r) => <FocusLink name={r.from} />,
+      cell: (r) => <FocusLink name={r.from} tier={tier} />,
     },
     {
       key: "to",
       header: "To",
       mono: true,
       sortValue: (r) => r.to,
-      cell: (r) => <FocusLink name={r.to} />,
+      cell: (r) => <FocusLink name={r.to} tier={tier} />,
     },
     {
       key: "count",
@@ -164,15 +168,16 @@ function CyclesCard({ report, edges }: { report: DsmReport; edges: BackEdge[] })
 }
 
 /** A cycle participant rendered as a focus link into the Graph tab. A real module
- *  name client-navigates to `/graph?seed=<name>`; the `"?"` unresolved placeholder
- *  stays inert mono text. */
-function FocusLink({ name }: { name: string }) {
+ *  name client-navigates to `/graph?seed=<name>&granularity=<tier>`, which opens
+ *  the Graph view focused on it; the `"?"` unresolved placeholder stays inert mono
+ *  text. */
+function FocusLink({ name, tier }: { name: string; tier: GraphGranularity }) {
   if (name === "?") return <span>?</span>;
   return (
     <button
       type="button"
       className={styles.focusLink}
-      onClick={() => navigate(`/graph?seed=${encodeURIComponent(name)}`)}
+      onClick={() => navigate(graphSeedHref(name, tier))}
     >
       {name}
     </button>

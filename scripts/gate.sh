@@ -39,10 +39,12 @@
 #
 # Usage:
 #   bash scripts/gate.sh probe    # resolve paths + counts, run no gates
-#   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch
-#                                 (skips the two timing suites; `full` does not)
-#   bash scripts/gate.sh full     # pre-handoff: every package, deny, agents, ui,
-#                                 the ui-e2e browser leg (full only, never fast)
+#   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch,
+#                                 public terms (skips the two timing suites;
+#                                 `full` does not)
+#   bash scripts/gate.sh full     # pre-handoff: every package, deny, agents, the
+#                                 no-extension build, public terms, ui, the ui-e2e
+#                                 browser leg (full only, never fast)
 #
 # `full` RESUMES: a gate that already passed for this exact tree is not re-run,
 # so a run killed by memory pressure continues where it stopped when invoked
@@ -72,10 +74,12 @@ usage: bash scripts/gate.sh {probe|fast|full}
   probe  resolve the evidence path, the tree id and the per-package expected
          test-binary counts, then exit. Runs no gates and writes no evidence.
   fast   clippy + the packages the working tree touches + the architecture
-         gate. Emits tier "fast", which is never sufficient for handoff.
-  full   all packages, cargo-deny, the agents feature legs, and the web/ui
-         gates, including the ui-e2e browser leg (never run by fast). Emits
-         tier "full", which is what verify-evidence.sh requires.
+         gate + the public-terms gate. Emits tier "fast", which only
+         `verify-evidence.sh --tier fast` accepts.
+  full   all packages, cargo-deny, the agents feature legs, the no-extension
+         build's leg, the public-terms gate, and the web/ui gates, including
+         the ui-e2e browser leg (never run by fast). Emits tier "full", which
+         is what verify-evidence.sh requires.
 EOF
     exit 2
 }
@@ -241,8 +245,8 @@ UNITS=""
 
 reset_units() { UNITS=""; }
 
-add_unit() { # name expected floor started finished passed failed ignored exit verdict truncation
-    UNITS="${UNITS}${1}	${2}	${3}	${4}	${5}	${6}	${7}	${8}	${9}	${10}	${11}
+add_unit() { # name expected floor started finished passed failed ignored exit verdict truncation argv
+    UNITS="${UNITS}${1}	${2}	${3}	${4}	${5}	${6}	${7}	${8}	${9}	${10}	${11}	${12-}
 "
 }
 
@@ -276,6 +280,9 @@ if os.path.exists(units_path):
                 "exit_code": int(f[8]),
                 "verdict": f[9],
                 "truncation": f[10],
+                # The exact cargo command this unit ran: the gate-level argv is a
+                # template, and only this field shows which package got which flags.
+                "argv": f[11] if len(f) > 11 else "",
             })
 doc = {
     "schema": 1,
@@ -368,12 +375,56 @@ record() { # gate verdict [display-note]
 #                           the OOM-kill signature
 #   finished <  expected     truncation (only reachable if --no-fail-fast is lost)
 #   failed   >  0            genuine failures
-run_test_unit() { # gate pkg expected floor use_agents -> sets UNIT_VERDICT
-    local gate="$1" pkg="$2" expected="$3" floor="$4" use_agents="$5"
+#
+# The build a unit tests is its FLAVOR: `default`, `agents` (the release build), or
+# `noext` — the build that composes no extension (S-645, FR-DS-05): `--no-default-
+# features --features lang-all,ui`, the dashboard without the `wiki` or `agents`
+# feature, so `cli/src/composition.rs` registers nothing. Its suite
+# (`cli/tests/no_extension_surface.rs`) compiles to nothing in any other build.
+#
+# The one mapping from a flavor to its cargo flags, so the command a leg runs and
+# the argv its evidence records cannot drift apart. An unknown flavor is a usage
+# error: silently testing the default build under another gate's name would be the
+# exact false assurance this script exists to remove.
+flavor_features() { # flavor -> sets FEAT
+    case "$1" in
+        default) FEAT=() ;;
+        agents) FEAT=(--features agents) ;;
+        noext) FEAT=(--no-default-features --features lang-all,ui) ;;
+        *)
+            echo "gate.sh: unknown test flavor '$1'" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# The flags ONE package's test run takes: its flavor's, plus whatever that package
+# needs on top. `web` needs `lang-all` (CR-167): two of its `workspace_api` tests
+# are `#[cfg(feature = "lang-all")]`, and CI runs them only because
+# `cargo test --workspace` unifies `lang-all` in from other members (cli forwards
+# `web?/lang-all`). A per-package `cargo test -p web` has no such neighbour, so
+# without the flag those tests are compiled out and the gate passes a suite
+# smaller than CI's. Per-package on purpose: every other package's argv is
+# unchanged, and the `noext` flavor already names `lang-all` (not repeated).
+# Sets FEAT.
+pkg_features() { # flavor pkg -> sets FEAT
+    flavor_features "$1"
+    if [ "$2" = web ]; then
+        case " ${FEAT[*]+${FEAT[*]}} " in
+            *lang-all*) ;;
+            *) FEAT=(${FEAT[@]+"${FEAT[@]}"} --features lang-all) ;;
+        esac
+    fi
+}
+
+run_test_unit() { # gate pkg expected floor flavor -> sets UNIT_VERDICT
+    local gate="$1" pkg="$2" expected="$3" floor="$4" flavor="$5"
     local log="$EVID/$gate--$pkg.log" rc started finished p f g trunc verdict
     local -a feat
-    feat=()
-    if [ "$use_agents" = "yes" ]; then feat=(--features agents); fi
+    local argv
+    pkg_features "$flavor" "$pkg"
+    feat=(${FEAT[@]+"${FEAT[@]}"})
+    argv="cargo test -p $pkg --jobs 2 --no-fail-fast${feat[*]:+ ${feat[*]}} -- --test-threads=2 ${SKIPS[*]:-}"
 
     # `--jobs 2` bounds the COMPILE, which is what exhausts memory here — not the
     # test run. Measured on a 16 GiB machine with ~8 GB of swap already in use: an
@@ -427,15 +478,21 @@ EOF
     fi
 
     add_unit "$pkg" "$expected" "$floor" "$started" "$finished" \
-        "$p" "$f" "$g" "$rc" "$verdict" "$trunc"
+        "$p" "$f" "$g" "$rc" "$verdict" "$trunc" "$argv"
     UNIT_VERDICT="$verdict"
     printf '    %-12s %s  %s/%s binaries, %s passed, %s failed%s\n' \
         "$pkg" "$verdict" "$finished" "$expected" "$p" "$f" \
         "$([ "$trunc" = none ] || echo "  [$trunc]")"
+    # Only a package whose flags differ from its flavor's earns a reproduce line;
+    # one per unit would bury the signal under logos-core's and the rest.
+    flavor_features "$flavor"
+    if [ "${feat[*]+${feat[*]}}" != "${FEAT[*]+${FEAT[*]}}" ]; then
+        printf '      reproduce: %s\n' "$argv"
+    fi
 }
 
-gate_tests() { # gate_name use_agents pkg...
-    local gate="$1" use_agents="$2"
+gate_tests() { # gate_name flavor pkg...
+    local gate="$1" flavor="$2"
     shift 2
     if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
     local pkg expected floor worst=pass ex=0
@@ -444,20 +501,32 @@ gate_tests() { # gate_name use_agents pkg...
     for pkg in "$@"; do
         expected="$(pkg_field "$pkg" 2)"
         floor="$(floor_for "$pkg")"
-        if [ "$use_agents" = "yes" ] && [ "$(pkg_field "$pkg" 5)" != "yes" ]; then
+        if [ "$flavor" = "agents" ] && [ "$(pkg_field "$pkg" 5)" != "yes" ]; then
             # Passing --features to a package without it exits 101 having run
             # nothing. Refusing to ask is the fix, not recording the 101.
             continue
         fi
-        run_test_unit "$gate" "$pkg" "$expected" "$floor" "$use_agents"
+        run_test_unit "$gate" "$pkg" "$expected" "$floor" "$flavor"
         if [ "$UNIT_VERDICT" != "pass" ]; then
             worst=fail
             ex=1
         fi
     done
     cat "$EVID/$gate"--*.log >"$EVID/$gate.log" 2>/dev/null
+    flavor_features "$flavor"
+    # `web` takes `--features lang-all` on top of the flavor's flags (pkg_features);
+    # the gate-level argv is a template, so it names that rather than hiding it.
+    # Each unit's own `argv` in the evidence is the per-package ground truth.
+    local webnote=""
+    for pkg in "$@"; do
+        if [ "$pkg" = web ] && { [ "$flavor" != agents ] || [ "$(pkg_field web 5)" = yes ]; }; then
+            pkg_features "$flavor" web
+            webnote="; web: ${FEAT[*]}"
+        fi
+    done
+    flavor_features "$flavor"
     write_evidence "$gate" \
-        "cargo test -p <pkg> --jobs 2 --no-fail-fast$([ "$use_agents" = yes ] && echo ' --features agents') -- --test-threads=2 ${SKIPS[*]:-}" \
+        "cargo test -p <pkg> --jobs 2 --no-fail-fast${FEAT[*]:+ ${FEAT[*]}} -- --test-threads=2 ${SKIPS[*]:-}${webnote}" \
         "$ex" "$worst" none
     record "$gate" "$worst"
 }
@@ -469,14 +538,24 @@ gate_clippy() {
     reset_units
     # --jobs 4 is compile-only work: it does not hit the rayon-pool-per-test
     # oversubscription that bounds the test gate, but it does bound memory on a
-    # 16 GiB machine. -D warnings mirrors CI exactly.
+    # 16 GiB machine. -D warnings, and both invocations, mirror CI exactly.
+    local argv="cargo clippy --workspace --all-targets --jobs 4 -- -D warnings"
     CARGO_TERM_COLOR=never cargo clippy --workspace --all-targets --jobs 4 -- -D warnings \
         >"$log" 2>&1
     rc=$?
+    # The FULL tier also lints the no-extension build (S-645), as CI does: its suite
+    # (`cli/tests/no_extension_surface.rs`) and any `not(feature = "wiki")` code
+    # compile to nothing in the workspace pass above, so without this a lint there
+    # passes a green full gate and reddens CI. ~20 s once the `test-noext` leg's
+    # crates are checked; the fast tier skips it, like that leg.
+    if [ "$TIER" = "full" ] && [ $rc -eq 0 ]; then
+        argv="$argv && cargo clippy -p logos --no-default-features --features lang-all,ui --all-targets --jobs 4 -- -D warnings"
+        CARGO_TERM_COLOR=never cargo clippy -p logos --no-default-features --features lang-all,ui \
+            --all-targets --jobs 4 -- -D warnings >>"$log" 2>&1
+        rc=$?
+    fi
     if [ $rc -eq 0 ]; then verdict=pass; else verdict=fail; fi
-    write_evidence clippy \
-        "cargo clippy --workspace --all-targets --jobs 4 -- -D warnings" \
-        "$rc" "$verdict" none
+    write_evidence clippy "$argv" "$rc" "$verdict" none
     record clippy "$verdict"
 }
 
@@ -529,6 +608,64 @@ gate_arch() {
     esac
     write_evidence arch "logos check --json" "$rc" "$verdict" "$trunc"
     record arch "$verdict"
+}
+
+# --------------------------------------------------------------- public terms
+#
+# scripts/check-public-terms.sh (S-716, NFR-CR-04): no term from its hashed list
+# in a text file of the tree being certified, outside the reviewed allowlist.
+# Both tiers run it: it reads files and builds nothing (~7 s on this repository).
+#
+# Its denominator is the walk, recorded as one unit: started = finished =
+# expected = the text files read, so a walk that read none is `started == 0`,
+# which verify-evidence.sh rejects from the counters alone; failed = hits outside
+# the allowlist; ignored = hits the allowlist admitted. Exit 3 is that empty walk
+# and is recorded `no_binaries` (nothing was evaluated), like `logos check`'s 4.
+gate_public_terms() {
+    local gate=public-terms
+    local log="$EVID/$gate.log" rc verdict trunc=none
+    local tracked untracked scanned binary skipped hits allowed
+    local argv="bash scripts/check-public-terms.sh"
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
+    reset_units
+    if ! command -v perl >/dev/null 2>&1; then
+        echo "perl is not installed" >"$log"
+        write_evidence "$gate" "$argv" 127 fail no_binaries
+        record "$gate" fail "(perl missing)"
+        return
+    fi
+    # Exactly $argv: gate.sh runs from $ROOT, the script's default root.
+    bash scripts/check-public-terms.sh >"$log" 2>&1
+    rc=$?
+    # The script's last line, keyed by name so a reordering cannot shift a count.
+    read -r tracked untracked scanned binary skipped hits allowed <<EOF
+$(awk '/^public-terms: / {
+         for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+       }
+       END {
+         printf "%d %d %d %d %d %d %d\n", v["tracked"], v["untracked"], v["scanned"],
+           v["binary"], v["skipped"], v["hits"], v["allowlisted"]
+       }' "$log")
+EOF
+    case $rc in
+        0) verdict=pass ;;
+        1) verdict=fail ;;
+        3)
+            verdict=fail
+            trunc=no_binaries
+            ;;
+        *)
+            verdict=fail
+            trunc=usage_error
+            ;;
+    esac
+    add_unit files "$scanned" 1 "$scanned" "$scanned" "$scanned" "$hits" "$allowed" \
+        "$rc" "$verdict" "$trunc" "$argv"
+    write_evidence "$gate" "$argv" "$rc" "$verdict" "$trunc"
+    record "$gate" "$verdict" "($scanned text files scanned of $tracked tracked + $untracked untracked; $binary binary, $skipped skipped; $hits hits, $allowed allowlisted$([ "$trunc" = none ] || echo "; $trunc"))"
+    if [ "$verdict" != pass ]; then
+        awk '!/^public-terms: / && n++ < 20 { print "    " $0 }' "$log"
+    fi
 }
 
 # ------------------------------------------------------------------- web/ui
@@ -623,19 +760,23 @@ gate_ui_e2e() {
     # The binary must embed a real SPA build: build the bundle, then the binary,
     # then restore the tracked dist placeholder (rust-embed's debug-embed has
     # already copied the bundle into the binary, so the restore cannot undo it).
+    # The binary is the release feature set (`agents`, cli/Cargo.toml's dist
+    # metadata): the specs drive the shipped surface, and since S-643 chat is an
+    # extension only an `agents` build's `main` composes — a default build serves
+    # no chat view for the chat specs to open.
     {
         echo "== npm run build"
         (cd "$ui" && npm run build)
     } >"$log" 2>&1
     rc=$?
     if [ $rc -eq 0 ]; then
-        echo "== cargo build -p logos --bin logos" >>"$log"
-        CARGO_TERM_COLOR=never cargo build -p logos --bin logos --jobs 4 >>"$log" 2>&1
+        echo "== cargo build -p logos --bin logos --features agents" >>"$log"
+        CARGO_TERM_COLOR=never cargo build -p logos --bin logos --features agents --jobs 4 >>"$log" 2>&1
         rc=$?
     fi
     git checkout -- web/ui/dist 2>/dev/null
     if [ $rc -ne 0 ]; then
-        write_evidence "$gate" "npm run build && cargo build -p logos" "$rc" fail build_error
+        write_evidence "$gate" "npm run build && cargo build -p logos --features agents" "$rc" fail build_error
         record "$gate" fail "(build failed)"
         return
     fi
@@ -663,7 +804,7 @@ EOF
         verdict=fail trunc=classifier_error listed=0 ran=0 passed=0 failed=0 skipped=0
     fi
     add_unit playwright "$listed" 1 "$ran" "$ran" "$passed" "$failed" "$skipped" \
-        "$rc" "$verdict" "$trunc"
+        "$rc" "$verdict" "$trunc" "npm run test:e2e"
     write_evidence "$gate" "npm run test:e2e" "$rc" "$verdict" "$trunc"
     record "$gate" "$verdict" "($passed passed, $failed failed, $skipped skipped of $listed$([ "$trunc" = none ] || echo "; $trunc"))"
 }
@@ -735,7 +876,7 @@ case "$TIER" in
         TOUCHED="$(touched_packages)"
         if [ -n "$TOUCHED" ]; then
             # shellcheck disable=SC2086
-            gate_tests test no $TOUCHED
+            gate_tests test default $TOUCHED
         else
             echo "test: no package sources changed; nothing to run"
             reset_units
@@ -744,6 +885,7 @@ case "$TIER" in
             record test pass
         fi
         gate_arch
+        gate_public_terms
         if git diff --name-only "$(gate_base)" 2>/dev/null | grep -q '^web/ui/'; then
             gate_ui ui-typecheck typecheck
             gate_ui ui-test test
@@ -752,11 +894,21 @@ case "$TIER" in
     full)
         gate_clippy
         # shellcheck disable=SC2086
-        gate_tests test no $(pkg_names)
+        gate_tests test default $(pkg_names)
         # shellcheck disable=SC2086
-        gate_tests test-agents yes $(pkg_names)
+        gate_tests test-agents agents $(pkg_names)
+        # The no-extension build (S-645): the `logos` package, the one whose
+        # composition that build changes, with every test target, so its CLI suites
+        # run there too and not only the fitness tests (S-644's review found four of
+        # them red in that build behind clippy-only coverage). FULL tier only: it
+        # recompiles logos-core, mcp, web and the cli in a feature set no other leg
+        # builds. Measured on the reference machine: a cold `--no-run` build of that
+        # feature set takes 64 s (`--jobs 4`); the leg as run here, those crates then
+        # built, 99 s (20 binaries, 210 tests). ~2.5 min the fast loop does not carry.
+        gate_tests test-noext noext logos
         gate_deny
         gate_arch
+        gate_public_terms
         gate_ui ui-typecheck typecheck
         gate_ui ui-test test
         gate_ui ui-build build

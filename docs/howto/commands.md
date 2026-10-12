@@ -1,7 +1,9 @@
 # Command Reference
 
-All subcommands of the `logos` binary (38 top-level commands, including the
-Sprint-55 `xservice` and `workspace` federation groups). Every command accepts
+All subcommands of the `logos` binary (39 top-level commands in the default
+build, including the Sprint-55 `xservice` and `workspace` federation groups and
+the `wiki` extension's `wiki` group — absent from a build without it, see
+[Source wiki](#source-wiki)). Every command accepts
 the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 [usage.md](usage.md#global-flags-and-exit-codes) for those and for the
 `0/1/2/3` exit-code contract.
@@ -43,6 +45,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`verify`](#verify) | ✅ | Deep reindex-diff consistency check; exit 1 on drift |
 | [`coverage refresh`](#coverage-refresh) | ✅ | Run the configured `refresh_cmd` and ingest what it produced |
 | [`quality-report`](#quality-report---hook-json) | ✅ | Non-blocking quality readout — writes nothing, always exits 0 (CLI-only) |
+| [`hook --emit`](#hook---emit---force) | ✅ | Install the Claude Code session-start quality-report hook (CLI-only; `wiki hook --emit` is its hidden alias) |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
 | [`dsm`](#dsm---granularity-g) | ✅ | Dependency-structure-matrix clusters |
 | [`doc-gaps`](#doc-gaps---limit-n) | ✅ | Undocumented exported symbols |
@@ -57,7 +60,6 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`wiki materialize`](#wiki-materialize) | ✅ | Deterministically present the authored `docs/specs/**` + `docs/howto/**` as wiki pages (SRS mode); no LLM/network |
 | [`wiki delete`](#wiki-delete) | ✅ | Explicitly delete a page by slug (CLI-only) |
 | [`wiki skill --emit`](#wiki-skill---emit-dir---force) | ✅ | Materialize the embedded wiki-generation skill (CLI-only) |
-| [`wiki hook --emit`](#wiki-hook---emit---force) | ✅ | Install the Claude Code session-start quality-report hook (CLI-only) |
 
 ---
 
@@ -886,7 +888,7 @@ otherwise be indistinguishable from the person using the surface it runs inside:
 | `web` | process | The `serve --ui` dashboard — a query a person issued through the SPA |
 | `chat` | process | The chat agent's own tool calls |
 | `watcher` | override | The debounced filesystem watcher, which runs inside the `serve --mcp` process |
-| `shell` | override | The dashboard's own chrome — the app header re-reads the graph-state readout on every client-side navigation, so its events are requests your navigation caused incidentally rather than asked for |
+| `shell` | override | The dashboard's own chrome — the app header re-reads the graph-state readout on every client-side navigation, and the chat resolves the backticked code references of every finalized answer against the graph (`GET /api/v1/code-refs`), so its events are requests the app made incidentally rather than ones you asked for |
 | `wikigen` | override | Logos's own wiki generation pass, which runs inside the `serve --ui` process |
 
 The override-only distinction is the point: without it, `"Logos's own agent
@@ -909,12 +911,16 @@ rather than being folded into an arbitrary session (S-307, CR-091). **Self-refer
 from every figure** — totals, per-tool, daily series, origin split, latency, and
 the estimate — because a request whose subject is Logos's own state (`stats`
 reading the telemetry store, the shell's `status` readout) measures the
-measurement, not tool value. The exclusion is per *event* and keyed on two axes — the
+measurement, not tool value, and a request the application's own chrome makes
+(the chat's automatic code-refs lookup) is app overhead rather than a question
+anyone asked. The exclusion is per *event* and keyed on two axes — the
 **tool**, so it applies on every surface (a CLI `logos stats` is no less
 self-referential than a dashboard render, while a graph query issued *through*
 the dashboard counts normally), and the **surface**, for a read whose caller is
 the application's own chrome rather than a person (the app header's `status`
-readout, which navigation re-issues and nobody asks for).
+readout, which navigation re-issues and nobody asks for, and the chat's code-refs
+lookup, which resolves each finalized answer's backticks and fires up to 24 `node` /
+`graph_elements` reads per answer that nobody asked for).
 
 **Attribution: which tools, from where, of what kind.** `--json` carries two
 further projections:
@@ -1022,9 +1028,12 @@ build time and embedded in the binary, so a page load fetches nothing from the
 network, and it binds `127.0.0.1` only with a self-only CSP on every response. It
 is read-only except the intent-guarded mutating routes — the config-write/apply
 routes (`/config/save`, `/config/apply`, `/config/secret`) and the Chat routes
-(`/chat` and the per-conversation delete `/api/v1/chat/threads/{id}/delete`;
-in a workspace serve with `agents`, also the workspace chat's `/workspace/chat` and
-`/api/v1/workspace/chat/threads/{id}/delete`);
+(`/chat` and the per-conversation delete `/api/v1/chat/threads/{id}/delete`,
+rename `/api/v1/chat/threads/{id}/rename` and truncate
+`/api/v1/chat/threads/{id}/truncate`; in a workspace serve with `agents`, also
+the workspace chat's `/workspace/chat`, `/api/v1/workspace/chat/threads/{id}/delete`,
+`/api/v1/workspace/chat/threads/{id}/rename` and
+`/api/v1/workspace/chat/threads/{id}/truncate`);
 every other non-GET request is answered `405`. Combined
 `--mcp --ui` runs both on one engine and one watcher: stdout stays JSON-RPC-clean
 for the MCP host while the web surface logs to stderr.
@@ -2285,7 +2294,7 @@ the recorded rule violations. Always exits 0 — it reports, it never gates. Use
 It **writes nothing**, which is the whole reason it exists as its own command.
 Both [`scan`](#scan) and [`gate`](#gate---save---threshold-n---label-l) persist a metric snapshot on every run,
 so a readout on an automatic, frequent trigger — the
-[session-start hook](#wiki-hook---emit---force) fires at startup, at every
+[session-start hook](#hook---emit---force) fires at startup, at every
 resume and at every `/clear` — would fill your
 [`evolution`](#evolution) series with "someone opened an editor" entries and
 contend for the graph write lock with a running `serve`. `quality-report`
@@ -2507,6 +2516,82 @@ diagnosing it is what `health` is for — but the process exit says so too, so a
 CI step or a shell script notices. Payload-identical with the `health` MCP tool
 (MCP has no exit codes; only the projection is CLI-side).
 
+### `hook --emit [--force]`
+
+```bash
+logos hook --emit          # install the Claude Code quality-report hook (no-op if present)
+logos hook --emit --force  # re-emit, replacing the managed entry
+```
+
+`logos wiki hook --emit [--force]` is the hidden alias of this command: it
+writes byte-identical output, exits with the same codes, and is absent from
+`logos wiki --help`. The hook is a core command, not a wiki one — it installs
+the same with or without the wiki.
+
+Installs the **session-start quality-report** hook
+([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
+`.claude/settings.json` under `hooks.SessionStart` with the source matcher
+`startup|resume|clear` — when a session starts, resumes, or is reopened by
+`/clear` it surfaces the current signal, the blessed baseline and their delta,
+and the recorded rule violations as a non-blocking readout; always exits 0. The
+readout is emitted as one JSON object on stdout: `systemMessage` for you,
+`hookSpecificOutput.additionalContext` for the agent. Set
+`LOGOS_QUALITY_REPORT_DISABLE=1` in the environment to silence it without
+uninstalling the hook.
+
+The installed script is a **launcher**: it runs
+[`logos quality-report --hook-json`](#quality-report---hook-json) and passes the
+output through. It builds nothing itself, so there is no shell JSON assembly to
+get wrong, and it swallows the command's failure — a `logos` on `PATH` older
+than the emitted script degrades to silence rather than to a visible failed
+hook.
+
+**Why session start and not session end.** The readout used to ride a
+SessionEnd hook and never worked, for two reasons in the agent host's contract
+(observed against Claude Code 2.1.220 — undocumented internals a future release
+may change; see [CR-095](../requests/CR-095-session-start-quality-readout.md)):
+a SessionEnd hook's exit-0 output is **discarded** — the host renders it only on
+a *failing* hook, and hook stdio is piped, never inherited — and SessionEnd
+hooks are capped at **1500 ms** against 600 s for every other event, so a
+readout costing seconds was cancelled on every firing and surfaced as
+`SessionEnd hook [...] failed: Hook cancelled`, including on `/clear`. Every
+emit therefore also **sweeps** the retired SessionEnd entry and its orphaned
+`logos-quality-report.sh`, so upgrading stops the error with no hand-editing;
+the sweep is bounded by Logos' own ownership marker, and a foreign SessionEnd
+entry sharing that array is left untouched.
+
+The merge is **non-clobbering**: an existing managed entry that already matches
+is left byte-identical, a foreign/unparseable config is never overwritten, and
+the merge is idempotent. `logos init -i` installs it **default-on** alongside
+the embedded skill. Installing or running the hook performs no LLM call and
+opens no outbound connection inside the binary — the offline boundary holds.
+CLI-only. (The PostToolUse wiki-augmentation hook this command once also
+installed was retired — [CR-070](../requests/CR-070-retire-wiki-augment-hook.md).)
+
+`--json` reports what the emit did as `action`, distinguishing the two ways an
+existing entry can be rewritten:
+
+| `action` | Meaning |
+|---|---|
+| `created` | Nothing of ours was there; the script and the entry were written. |
+| `reconciled` | Our entry was there and Logos rewrote it **without** `--force` — its shape had drifted from the current spec (an older emit's `timeout`, a hand edit), or a retirement needed sweeping. Nothing of yours was discarded. |
+| `forced` | `--force` re-materialized an existing artifact, **overwriting local edits**. Only this value implies a destructive write. |
+| `skipped` | Nothing was written. `notice` disambiguates: absent means "already current"; present means a foreign config was left alone, with the reason. |
+
+`reconciled` exists because `forced` was previously reported for both of the
+middle two cases, telling a consumer local edits had been overwritten when the
+caller had passed no flag and nothing of theirs was touched
+([CR-095](../requests/CR-095-session-start-quality-readout.md) §3.5). The same
+`action` field on [`wiki skill --emit`](#wiki-skill---emit-dir---force) never
+takes `reconciled`: the skill is strictly skip-if-present, so it only ever
+writes on a first install or under `--force`.
+
+There is no headless SessionEnd wiki-autogen hook and no `claude -p`
+invocation anymore ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md)):
+`ui` builds regenerate drifted wiki pages in-process when the Wiki tab is
+opened; non-`ui` builds regenerate manually in the user's own Claude Code via
+the materialized `logos-wiki` skill ([`wiki skill --emit`](#wiki-skill---emit-dir---force)).
+
 ### `session-start` / `session-end`
 
 ```bash
@@ -2649,6 +2734,14 @@ Dependency-structure-matrix view: a square coupling matrix between directories
 order (from `rules.toml`); unassigned files appear last. High off-diagonal
 values identify coupling hotspots and layering violations.
 
+At module granularity, Go files are grouped into **one row per package**, named
+`go:<directory>:<package>`. The row is keyed by the file's directory plus its
+`package` clause, so `package store` and `package store_test` in one directory
+are two rows. A Go file whose clause cannot be read becomes a `go:<directory>`
+row, and the JSON `notes` say so. Edges inside a package are not counted, just as
+a module's edges to itself are not. File granularity is unchanged: every Go file
+is its own row.
+
 ### `doc-gaps [--limit <N>]`
 
 ```bash
@@ -2776,6 +2869,12 @@ zero.
 ---
 
 ## Source wiki
+
+> **Build note.** The wiki is the `wiki` extension (S-644): the default and release
+> builds compose it (the default-on `wiki` cargo feature), and a build without it —
+> the slim `--no-default-features --features lang-all` build, for one — has no
+> `logos wiki`, no `wiki_*` MCP tool and no Wiki view, and never opens an existing
+> `.logos/wiki.db`. In-app generation from the Wiki tab joins it under `agents`.
 
 A **gate-immune** store of generated, human-readable pages about the codebase,
 anchored to the symbols and files they describe. It lives in its own store,
@@ -2990,74 +3089,3 @@ Materializes the **embedded wiki-generation skill** — the canonical
 `logos init -i` offers to materialize; run it standalone to install or, with
 `--force`, restore the skill after an upgrade. Without `--force` an existing
 install is left untouched (local edits survive). CLI-only.
-
-### `wiki hook --emit [--force]`
-
-```bash
-logos wiki hook --emit          # install the Claude Code quality-report hook (no-op if present)
-logos wiki hook --emit --force  # re-emit, replacing the managed entry
-```
-
-Installs the **session-start quality-report** hook
-([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
-`.claude/settings.json` under `hooks.SessionStart` with the source matcher
-`startup|resume|clear` — when a session starts, resumes, or is reopened by
-`/clear` it surfaces the current signal, the blessed baseline and their delta,
-and the recorded rule violations as a non-blocking readout; always exits 0. The
-readout is emitted as one JSON object on stdout: `systemMessage` for you,
-`hookSpecificOutput.additionalContext` for the agent. Set
-`LOGOS_QUALITY_REPORT_DISABLE=1` in the environment to silence it without
-uninstalling the hook.
-
-The installed script is a **launcher**: it runs
-[`logos quality-report --hook-json`](#quality-report---hook-json) and passes the
-output through. It builds nothing itself, so there is no shell JSON assembly to
-get wrong, and it swallows the command's failure — a `logos` on `PATH` older
-than the emitted script degrades to silence rather than to a visible failed
-hook.
-
-**Why session start and not session end.** The readout used to ride a
-SessionEnd hook and never worked, for two reasons in the agent host's contract
-(observed against Claude Code 2.1.220 — undocumented internals a future release
-may change; see [CR-095](../requests/CR-095-session-start-quality-readout.md)):
-a SessionEnd hook's exit-0 output is **discarded** — the host renders it only on
-a *failing* hook, and hook stdio is piped, never inherited — and SessionEnd
-hooks are capped at **1500 ms** against 600 s for every other event, so a
-readout costing seconds was cancelled on every firing and surfaced as
-`SessionEnd hook [...] failed: Hook cancelled`, including on `/clear`. Every
-emit therefore also **sweeps** the retired SessionEnd entry and its orphaned
-`logos-quality-report.sh`, so upgrading stops the error with no hand-editing;
-the sweep is bounded by Logos' own ownership marker, and a foreign SessionEnd
-entry sharing that array is left untouched.
-
-The merge is **non-clobbering**: an existing managed entry that already matches
-is left byte-identical, a foreign/unparseable config is never overwritten, and
-the merge is idempotent. `logos init -i` installs it **default-on** alongside
-the embedded skill. Installing or running the hook performs no LLM call and
-opens no outbound connection inside the binary — the offline boundary holds.
-CLI-only. (The PostToolUse wiki-augmentation hook this command once also
-installed was retired — [CR-070](../requests/CR-070-retire-wiki-augment-hook.md).)
-
-`--json` reports what the emit did as `action`, distinguishing the two ways an
-existing entry can be rewritten:
-
-| `action` | Meaning |
-|---|---|
-| `created` | Nothing of ours was there; the script and the entry were written. |
-| `reconciled` | Our entry was there and Logos rewrote it **without** `--force` — its shape had drifted from the current spec (an older emit's `timeout`, a hand edit), or a retirement needed sweeping. Nothing of yours was discarded. |
-| `forced` | `--force` re-materialized an existing artifact, **overwriting local edits**. Only this value implies a destructive write. |
-| `skipped` | Nothing was written. `notice` disambiguates: absent means "already current"; present means a foreign config was left alone, with the reason. |
-
-`reconciled` exists because `forced` was previously reported for both of the
-middle two cases, telling a consumer local edits had been overwritten when the
-caller had passed no flag and nothing of theirs was touched
-([CR-095](../requests/CR-095-session-start-quality-readout.md) §3.5). The same
-`action` field on [`wiki skill --emit`](#wiki-skill---emit-dir---force) never
-takes `reconciled`: the skill is strictly skip-if-present, so it only ever
-writes on a first install or under `--force`.
-
-There is no headless SessionEnd wiki-autogen hook and no `claude -p`
-invocation anymore ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md)):
-`ui` builds regenerate drifted wiki pages in-process when the Wiki tab is
-opened; non-`ui` builds regenerate manually in the user's own Claude Code via
-the materialized `logos-wiki` skill (`wiki skill --emit`, above).

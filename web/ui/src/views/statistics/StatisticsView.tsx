@@ -252,8 +252,8 @@ function ToolsWidget({
 
       <h4 className={styles.subhead}>By surface</h4>
       <p className={styles.capNote}>
-        Self-referential reads — the tab's own stats request and the shell's status readout —
-        are excluded per event, so opening this tab never inflates its own numbers; a graph query
+        Self-referential reads — the tab's own stats request, the shell's status readout and the
+        chat's automatic code-refs lookup — are excluded per event, so opening this tab never inflates its own numbers; a graph query
         issued through the dashboard is counted like any other.
       </p>
       {surfaces.length === 0 ? (

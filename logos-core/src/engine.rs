@@ -91,19 +91,20 @@ pub struct Engine {
     /// [S-020]: ../../../docs/planning/journal.md#s-020-governance-engine-and-quality-gate
     /// [FR-GV-01]: ../../../docs/specs/requirements/FR-GV-01.md
     governance: crate::governance::GovernanceState,
-    /// The native (extracted) wiki tier's render cache ([FR-WK-10], [ADR-32]),
-    /// memoized by the persisted graph revision ([FR-SY-09]): `Some((revision,
-    /// native))` when a render at `revision` is cached. A call at the same
-    /// revision is an O(1) hit; a revision advance is a miss that re-renders. The
-    /// native tier has no store — this in-memory cache is the entire memoization,
-    /// nothing is persisted to `wiki.db`. `Mutex` because the web surface shares
-    /// the engine behind `Arc` across request tasks ([web-surface]).
+    /// The in-memory state extensions keep per engine ([FR-DS-04], [ADR-74]),
+    /// one value per type, created on first use ([`Engine::extension_state`]).
+    /// An extension works over `&Engine` and cannot add a field here, so a
+    /// per-engine memo it owns — the wiki's native-tier render, memoized by the
+    /// graph revision — lives in this slot instead. `Mutex` because the web
+    /// surface shares the engine behind `Arc` across request tasks
+    /// ([web-surface]).
     ///
+    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
     /// [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
-    native_wiki: std::sync::Mutex<Option<(u64, crate::wiki::NativeWiki)>>,
+    extension_state: std::sync::Mutex<ExtensionState>,
     /// `status`'s per-language call residue ([FR-RS-09], CR-201), memoized by
-    /// [`ResidueKey`] the way [`native_wiki`](Self::native_wiki) is memoized by
-    /// the revision: `Some((key, residues))` when the walk at `key` is cached. A
+    /// [`ResidueKey`]: `Some((key, residues))` when the walk at `key` is cached. A
     /// `status` at the same key is one point read; anything that moves the key
     /// re-walks. In memory only — the residue is computed, never stored.
     ///
@@ -116,6 +117,12 @@ pub struct Engine {
 
 /// The per-language call residue, keyed by language name.
 type ResidueByLanguage = std::collections::BTreeMap<String, crate::models::CallResidue>;
+
+/// What [`Engine::extension_state`] holds: one shared value per type.
+type ExtensionState = std::collections::HashMap<
+    std::any::TypeId,
+    std::sync::Arc<dyn std::any::Any + Send + Sync>,
+>;
 
 /// What [`Engine::call_residue`]'s memo is keyed on (CR-201): every input of
 /// the walk that can change while an engine lives.
@@ -274,7 +281,7 @@ impl Engine {
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
-            native_wiki: std::sync::Mutex::new(None),
+            extension_state: std::sync::Mutex::default(),
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
         }
@@ -538,7 +545,7 @@ impl Engine {
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
-            native_wiki: std::sync::Mutex::new(None),
+            extension_state: std::sync::Mutex::default(),
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
         };
@@ -720,7 +727,7 @@ impl Engine {
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
-            native_wiki: std::sync::Mutex::new(None),
+            extension_state: std::sync::Mutex::default(),
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
         };
@@ -745,6 +752,28 @@ impl Engine {
     /// [S-013]: ../../../docs/planning/journal.md#s-013-navigation-service-and-the-eight-tools
     pub fn runtime(&self) -> Option<&Runtime> {
         self.runtime.as_ref()
+    }
+
+    /// This engine's instance of the extension state `T` ([FR-DS-04],
+    /// [ADR-74]), created with `T::default()` on first use and shared by every
+    /// later call on the same engine.
+    ///
+    /// An extension works over `&Engine` and owns no field on it, so a memo it
+    /// keeps per engine — the wiki's native-tier render, keyed by the graph
+    /// revision — lives here, and lives exactly as long as the engine does. A
+    /// type is a slot: two extensions that want separate state declare
+    /// separate types.
+    ///
+    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+    pub fn extension_state<T: Default + Send + Sync + 'static>(&self) -> std::sync::Arc<T> {
+        let mut slots = self.extension_state.lock().expect("extension-state lock");
+        let slot = slots
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| std::sync::Arc::new(T::default()));
+        std::sync::Arc::clone(slot)
+            .downcast::<T>()
+            .unwrap_or_else(|_| unreachable!("an extension-state slot is keyed by its own type"))
     }
 
     /// Spawn the debounced filesystem watcher over this engine's root
@@ -869,6 +898,24 @@ impl Engine {
     /// Returns an error if `.logos/` cannot be created, the store cannot be
     /// opened/migrated, or a Logos-owned artifact cannot be written.
     pub fn init_with(root: impl AsRef<Path>, options: &InitOptions) -> Result<InitResult> {
+        Self::init_with_contributions(root, options, &[])
+    }
+
+    /// [`Engine::init_with`] plus the `contributions` an extension host supplies
+    /// ([FR-DS-04], [ADR-74]): each runs after the core steps, against the same
+    /// resolved root and options, and its rows join [`InitResult::steps`].
+    /// With none it is exactly [`Engine::init_with`].
+    ///
+    /// # Errors
+    /// As [`Engine::init_with`], plus a contribution's own I/O failure.
+    ///
+    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
+    pub fn init_with_contributions(
+        root: impl AsRef<Path>,
+        options: &InitOptions,
+        contributions: &[std::sync::Arc<dyn crate::init::InitContribution>],
+    ) -> Result<InitResult> {
         crate::observability::traced(Tool::Init, || {
             // Resolve the hint exactly as `start` will ([ADR-15], [FR-WT-01]) so
             // the reported paths match where the store actually lands.
@@ -877,7 +924,10 @@ impl Engine {
             let db_path = logos_dir.join("logos.db");
             let existed = db_path.exists();
             drop(Self::start(root)?);
-            let steps = crate::init::run(root, options)?;
+            let mut steps = crate::init::run(root, options)?;
+            for contribution in contributions {
+                steps.extend(contribution.run(root, options)?);
+            }
             Ok(InitResult {
                 logos_dir: logos_dir.display().to_string(),
                 db_path: db_path.display().to_string(),
@@ -2371,307 +2421,12 @@ impl Engine {
         })
     }
 
-    // ── Source wiki (S-052, CR-008, ADR-24) ──────────────────────────────────
-
-    /// Upsert a wiki page by slug ([FR-WK-02]): byte-verbatim body (1 MiB cap),
-    /// write-time anchor resolution to content hashes, write-time HEAD tag, and a
-    /// mandatory non-empty generator label, with loud rejection of an unknown
-    /// anchor / empty generator / over-cap body (store left byte-identical).
-    ///
-    /// Anchors are the `"<kind>:<key>"` wire form — `file:<repo-relative-path>`
-    /// or `symbol:<canonical symbol>`. They are resolved against whatever graph
-    /// currently exists **without** forcing an index ([nav_runtime_no_prologue]):
-    /// file anchors resolve by hashing the file on disk, symbol anchors by
-    /// resolving the node in the graph. `wiki.db` is never `ATTACH`-ed to
-    /// `logos.db` and never gated ([BR-29]).
-    ///
-    /// # Errors
-    /// Returns an error (the surface maps to a non-zero exit, store unchanged) on
-    /// an invalid slug, an empty generator, an over-cap body, or an unknown
-    /// anchor; or for a transient [`Engine::open`] engine (no read-only pool).
-    ///
-    /// [FR-WK-02]: ../../../docs/specs/requirements/FR-WK-02.md
-    /// [BR-29]: ../../../docs/specs/software-spec.md#324-source-wiki
-    pub fn wiki_write(
-        &self,
-        slug: &str,
-        title: &str,
-        body: &str,
-        anchors: &[String],
-        generator: &str,
-    ) -> Result<crate::wiki::WriteSummary> {
-        crate::observability::traced(Tool::WikiWrite, || {
-            let runtime = self.nav_runtime_no_prologue()?;
-            let head = crate::wiki::head_sha(&self.root).unwrap_or_default();
-            let mut conn = crate::wiki::open(&self.root)?;
-            runtime.submit_read(|store| {
-                // Capture the persisted graph revision the page is built at, so
-                // the two-tier view can later derive its freshness with no write
-                // on the page view ([FR-WK-12], [FR-SY-09], [ADR-32]).
-                let built_at_revision = store.graph_revision()?;
-                let draft = crate::wiki::PageDraft {
-                    slug,
-                    title,
-                    body,
-                    anchors,
-                    generator,
-                    written_head: &head,
-                    built_at_revision,
-                };
-                let resolver = crate::wiki::GraphAnchorResolver::new(store, &self.root);
-                crate::wiki::write(&mut conn, &resolver, &draft)
-            })
-        })
-    }
-
-    /// Read a wiki page by slug with mandatory provenance and read-time per-anchor
-    /// freshness ([FR-WK-03], [FR-WK-04]).
-    ///
-    /// Freshness is computed against the **current working tree** (no `sync`
-    /// required, the [ADR-23] precedent): an edited anchor reads stale, a gone
-    /// anchor reads missing. The orphan lifecycle runs here ([FR-WK-07]): a page
-    /// whose every anchor is gone is auto-deleted and logged, and this read
-    /// returns `Ok(None)`. A page with at least one surviving anchor is returned
-    /// with the missing ones flagged.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure, or for a transient
-    /// [`Engine::open`] engine.
-    ///
-    /// [FR-WK-03]: ../../../docs/specs/requirements/FR-WK-03.md
-    /// [FR-WK-04]: ../../../docs/specs/requirements/FR-WK-04.md
-    /// [FR-WK-07]: ../../../docs/specs/requirements/FR-WK-07.md
-    /// [ADR-23]: ../../../docs/specs/architecture/decisions/ADR-23.md
-    pub fn wiki_read(&self, slug: &str) -> Result<Option<crate::wiki::WikiPage>> {
-        crate::observability::traced(Tool::WikiRead, || {
-            let runtime = self.nav_runtime_no_prologue()?;
-            let mut conn = crate::wiki::open(&self.root)?;
-            runtime.submit_read(|store| {
-                let resolver = crate::wiki::GraphAnchorResolver::new(store, &self.root);
-                crate::wiki::read(&mut conn, &resolver, slug)
-            })
-        })
-    }
-
-    /// Explicitly delete a wiki page by slug ([FR-WK-07], CLI-only surface).
-    ///
-    /// # Errors
-    /// Returns an error when no page with that slug exists — a non-zero exit so a
-    /// typo'd delete is loud, never a silent no-op.
-    pub fn wiki_delete(&self, slug: &str) -> Result<()> {
-        crate::observability::traced(Tool::WikiDelete, || {
-            let conn = crate::wiki::open(&self.root)?;
-            crate::wiki::delete(&conn, slug)
-        })
-    }
-
-    /// The recorded auto-deletions ([FR-WK-07]), newest first — the durable trace
-    /// the `wiki status` work-list (S-053) surfaces.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure.
-    pub fn wiki_pruned_log(&self) -> Result<Vec<crate::wiki::PrunedPage>> {
-        crate::observability::traced(Tool::WikiPrunedLog, || {
-            let conn = crate::wiki::open(&self.root)?;
-            crate::wiki::pruned_log(&conn)
-        })
-    }
-
-    /// FTS5 bm25 search over wiki page titles + bodies, or enumerate every page
-    /// in `list` mode ([FR-WK-05]). Each hit carries its staleness flag and
-    /// provenance summary, computed against the current tree (no `sync`, the
-    /// [ADR-23] precedent). The `logos wiki search` subcommand and the
-    /// `wiki_search` MCP twin share this one `api` entrypoint byte-for-byte
-    /// ([FR-WK-09], [NFR-CC-01]); a pure read that never prunes.
-    ///
-    /// The FTS5 index lives inside `wiki.db`, so search survives a full `index`
-    /// like the pages it indexes; `wiki.db` is never `ATTACH`-ed to `logos.db`
-    /// and never gated ([BR-29]).
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure, or for a transient
-    /// [`Engine::open`] engine.
-    ///
-    /// [FR-WK-05]: ../../../docs/specs/requirements/FR-WK-05.md
-    /// [FR-WK-09]: ../../../docs/specs/requirements/FR-WK-09.md
-    /// [ADR-23]: ../../../docs/specs/architecture/decisions/ADR-23.md
-    /// [BR-29]: ../../../docs/specs/software-spec.md#324-source-wiki
-    pub fn wiki_search(&self, query: &str, list: bool) -> Result<Vec<crate::wiki::WikiHit>> {
-        crate::observability::traced(Tool::WikiSearch, || {
-            let runtime = self.nav_runtime_no_prologue()?;
-            let conn = crate::wiki::open(&self.root)?;
-            runtime.submit_read(|store| {
-                // The current persisted graph revision ([FR-SY-09]) each hit's
-                // built-at revision is compared against, so the search "State"
-                // carries the same "stale — regeneration pending" verdict the
-                // page view shows ([FR-WK-12], [CR-039]); `0` (no `index` yet)
-                // yields no pending verdict. The exact seam `wiki_status` uses.
-                let revision = store.graph_revision()?;
-                let resolver = crate::wiki::GraphAnchorResolver::new(store, &self.root);
-                crate::wiki::search(&conn, &resolver, query, list, revision)
-            })
-        })
-    }
-
-    /// The wiki store summary + regeneration work-list ([FR-WK-06]): page/stale
-    /// counts and the freshness fraction, the pruned-orphan log ([FR-WK-07]), and
-    /// the work-list — stale pages, missing-anchor pages, and page-worthy
-    /// entities that no page anchors yet (currently none: modules, top-level
-    /// files, and the typed Requirement/Adr/Story nodes are all excluded,
-    /// [CR-034]/[CR-056]), plus the agent-tier structured sections that are
-    /// absent or revision-stale ([FR-WK-06] as modified by [CR-027], [FR-WK-12],
-    /// [CR-056] — the six Overview prose children and the present consolidated
-    /// documentation categories; per-file objectives are no longer seeded and
-    /// the native tier is never listed). The `logos wiki status` subcommand and
-    /// the `wiki_status` MCP twin share this one `api` entrypoint byte-for-byte
-    /// ([FR-WK-09], [NFR-CC-01]); a deterministic function of `wiki.db` + the
-    /// current graph/tree ([NFR-RA-06]), and a pure read that never prunes.
-    /// Structured-section re-queue cadence is dampened by the configurable
-    /// `[wiki].revision_stale_threshold` ([FR-WK-17]); `revision_stale_count`
-    /// stays truthful regardless — dampening never masks reporting.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure, or for a transient
-    /// [`Engine::open`] engine.
-    ///
-    /// [FR-WK-06]: ../../../docs/specs/requirements/FR-WK-06.md
-    /// [FR-WK-07]: ../../../docs/specs/requirements/FR-WK-07.md
-    /// [FR-DG-07]: ../../../docs/specs/requirements/FR-DG-07.md
-    /// [FR-WK-09]: ../../../docs/specs/requirements/FR-WK-09.md
-    /// [FR-WK-17]: ../../../docs/specs/requirements/FR-WK-17.md
-    pub fn wiki_status(&self) -> Result<crate::wiki::WikiStatus> {
-        crate::observability::traced(Tool::WikiStatus, || {
-            let runtime = self.nav_runtime_no_prologue()?;
-            let conn = crate::wiki::open(&self.root)?;
-            // The revision-stale re-queue dampening threshold ([FR-WK-17],
-            // [`WikiConfig::effective_revision_stale_threshold`]) — a plain
-            // local `config.toml` read, no LLM/network call ([NFR-SE-01]).
-            let threshold = crate::config::load_config_from_root(&self.root)?
-                .wiki
-                .effective_revision_stale_threshold();
-            runtime.submit_read(|store| {
-                // The current persisted graph revision ([FR-SY-09]) seeds the
-                // agent-tier structured sections: a page built at an older
-                // revision is "stale — regeneration pending"; `0` (no `index`
-                // yet) yields no structured work, so `init` is never blocked
-                // ([FR-WK-12], [ADR-32]).
-                let revision = store.graph_revision()?;
-                let resolver = crate::wiki::GraphAnchorResolver::new(store, &self.root);
-                let status = crate::wiki::status(&conn, &resolver, &resolver, revision, threshold)?;
-                Ok(status)
-            })
-        })
-    }
-
-    /// Format the `wiki status` work-list ([FR-WK-06]) into the ordered, offline
-    /// **generation queue** ([FR-WK-13]) — the ready-to-run plan that drives the
-    /// connected agent's off-request generation loop ([ADR-33]): the six Overview
-    /// prose children, then the present consolidated documentation categories,
-    /// then unanchored page-worthy entities (currently always empty, [CR-056]),
-    /// then stale/missing existing-page refreshes, each carrying its target slug
-    /// and a runnable `wiki write` skeleton; the deterministic native tier
-    /// ([FR-WK-10]) is never queued. The `logos wiki generate` subcommand renders
-    /// this as a human prompt block by default and the serialized queue under
-    /// `--json`.
-    ///
-    /// A **pure read of `wiki.db` + the current graph revision**, sharing the
-    /// exact [`wiki_status`](Self::wiki_status) read path: it performs no
-    /// `wiki.db` write, no LLM call, and no network call ([NFR-SE-01]) — Logos
-    /// drives the loop, the agent synthesizes the prose off the request path. A
-    /// deterministic function of `wiki.db` + the revision ([NFR-RA-06]), so the
-    /// `--json` queue is byte-identical for a fixed store + revision; an empty
-    /// work-list yields an empty queue (the honest "nothing to generate",
-    /// [NFR-CC-04]). One instrumented façade span — it dispatches the *inner*
-    /// `wiki::status` read, never the already-traced public `wiki_status`, so it
-    /// emits exactly one telemetry record and never nests a façade span
-    /// ([NFR-CC-01]).
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure, or for a transient
-    /// [`Engine::open`] engine.
-    ///
-    /// [FR-WK-06]: ../../../docs/specs/requirements/FR-WK-06.md
-    /// [FR-WK-13]: ../../../docs/specs/requirements/FR-WK-13.md
-    /// [FR-WK-10]: ../../../docs/specs/requirements/FR-WK-10.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [ADR-33]: ../../../docs/specs/architecture/decisions/ADR-33.md
-    pub fn wiki_generate(&self) -> Result<crate::wiki::WikiGenerationQueue> {
-        crate::observability::traced(Tool::WikiGenerate, || {
-            let runtime = self.nav_runtime_no_prologue()?;
-            let conn = crate::wiki::open(&self.root)?;
-            // Same dampening threshold `wiki_status` resolves ([FR-WK-17]) — the
-            // queue is a pure reformatting of the same work-list ([FR-WK-13]).
-            let threshold = crate::config::load_config_from_root(&self.root)?
-                .wiki
-                .effective_revision_stale_threshold();
-            let status = runtime.submit_read(|store| {
-                let revision = store.graph_revision()?;
-                let resolver = crate::wiki::GraphAnchorResolver::new(store, &self.root);
-                crate::wiki::status(&conn, &resolver, &resolver, revision, threshold)
-            })?;
-            Ok(crate::wiki::generation_queue(&status))
-        })
-    }
-
-    /// The **native (extracted) wiki tier** ([FR-WK-10], [ADR-32]): the three
-    /// deterministic sections live-rendered from the graph — Codebase structure,
-    /// the Files view, and the dependency Mermaid diagram —
-    /// carrying the "extracted — live from graph @revision N" provenance label.
-    ///
-    /// **Memoized by the persisted graph revision** ([FR-SY-09]): the first call
-    /// at a revision renders from the graph and caches the result; subsequent
-    /// calls at the same revision return the cached value (a cache hit is O(1),
-    /// [NFR-PE-01]); a revision advance (after `index`/`sync`) is a cache miss
-    /// that re-renders. **Nothing is ever written to `wiki.db`** — the native
-    /// tier has no store ([ADR-32]); the render performs no second file walk and
-    /// no LLM/network call ([NFR-SE-01]), so it is safe on the write-free-on-read
-    /// GET path ([ADR-28], [BR-35]) and is never read by the gated metric path
-    /// ([BR-29]).
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure, or for a transient
-    /// [`Engine::open`] engine (no read-only pool).
-    ///
-    /// [FR-WK-10]: ../../../docs/specs/requirements/FR-WK-10.md
-    /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
-    /// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
-    /// [BR-29]: ../../../docs/specs/software-spec.md#324-source-wiki
-    pub fn wiki_native(&self) -> Result<crate::wiki::NativeWiki> {
-        crate::observability::traced(Tool::WikiNative, || {
-            let runtime = self.nav_runtime_no_prologue()?;
-            let revision = runtime.submit_read(|store| store.graph_revision())?;
-
-            // Cache hit: the render at this revision is already memoized.
-            {
-                let cache = self.native_wiki.lock().expect("native-wiki cache lock");
-                if let Some((cached_revision, native)) = cache.as_ref() {
-                    if *cached_revision == revision {
-                        return Ok(native.clone());
-                    }
-                }
-            }
-
-            // Cache miss: re-render from the graph at the current revision and
-            // memoize. Nothing is written to `wiki.db` ([ADR-32]).
-            let native =
-                runtime.submit_read(|store| crate::wiki::render_native(store, revision))?;
-            let mut cache = self.native_wiki.lock().expect("native-wiki cache lock");
-            *cache = Some((revision, native.clone()));
-            Ok(native)
-        })
-    }
-
     /// The per-language call residue `status` reports ([FR-RS-09]), walked at
     /// most once per graph revision, schema version and `[resolution]` section
     /// (CR-201, [`ResidueKey`]).
     ///
-    /// Follows [`wiki_native`](Self::wiki_native): read the key, answer a hit
+    /// The revision-keyed memo shape the wiki's native tier also follows (now
+    /// in the `logos-wiki` crate): read the key, answer a hit
     /// from the memo, and on a miss run
     /// [`call_residue_by_language`](crate::resolve::call_residue_by_language) on
     /// the read-only pool and keep its answer. The key is read **before** the
@@ -2725,217 +2480,6 @@ impl Engine {
         self.call_residue_walks.load(Ordering::Relaxed)
     }
 
-    /// Whether the `docs/` source file(s) for a consolidated documentation
-    /// category ([`DocCategory`](crate::wiki::DocCategory), [CR-034]) exist under
-    /// the project root — the presence signal the wiki menu's **Specs** tier uses
-    /// to decide whether to show the optional **Frontend Design** entry
-    /// ([FR-WK-11] as modified, S-133). Rendered against the **same fixed slug
-    /// contract** the generation work-list ([FR-WK-06]) seeds, so the menu and the
-    /// producer can never disagree on which category pages exist.
-    ///
-    /// A pure local-filesystem read (one `is_file`/`read_dir`) — no graph/store
-    /// read, no `wiki.db` write, no LLM, and no network ([NFR-SE-01]) — so it is
-    /// safe on the write-free-on-read GET path ([ADR-28]) and never moves the
-    /// quality signal (the wiki store is gate-immune). Infallible by design: a
-    /// missing directory reads as "absent", never an error.
-    ///
-    /// [FR-WK-11]: ../../../docs/specs/requirements/FR-WK-11.md
-    /// [FR-WK-06]: ../../../docs/specs/requirements/FR-WK-06.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    pub fn wiki_doc_category_present(&self, category: crate::wiki::DocCategory) -> bool {
-        // Through the single observability chokepoint ([ADR-13], [NFR-CC-01]) like
-        // every other Engine accessor — `traced_infallible` because the presence
-        // check cannot fail (a missing directory reads as `false`), matching the
-        // `languages()` infallible-accessor precedent.
-        crate::observability::traced_infallible(Tool::WikiDocCategoryPresent, || {
-            category.present_under(&self.root)
-        })
-    }
-
-    /// The **SRS-mode gate** ([FR-WK-21], [ADR-57]): `true` (Case 1 — SRS present)
-    /// when the project carries both load-bearing swe-skills artifacts —
-    /// `docs/specs/architecture.md` **and** at least one `FR-*`/`NFR-*`/`UAT-*`
-    /// file under `docs/specs/requirements/` — else `false` (Case 2). This is the
-    /// façade half of the predicate the wiki work-list ([FR-WK-06]) / generation
-    /// queue ([FR-WK-13]) branch on: in Case 1 the Design/Specs pages are produced
-    /// by the deterministic presented tier ([FR-WK-20]) and the agent queue is
-    /// restricted to the Summary tier; in Case 2 the agent infers the full set
-    /// from the code graph. It is the surface accessor the CLI/MCP/hook/UI
-    /// (wired later) consult to choose presentation over inference.
-    ///
-    /// A pure local-filesystem read (a handful of `is_file`/`read_dir`) — no
-    /// graph/store read, no `wiki.db` write, no LLM, and no network ([NFR-SE-01]) —
-    /// so it is safe on the write-free-on-read GET path ([ADR-28]) and never moves
-    /// the quality signal. Infallible by design: a missing file/directory reads as
-    /// Case 2, never an error; a deterministic function of the on-disk layout
-    /// ([NFR-RA-06]).
-    ///
-    /// [FR-WK-21]: ../../../docs/specs/requirements/FR-WK-21.md
-    /// [FR-WK-06]: ../../../docs/specs/requirements/FR-WK-06.md
-    /// [FR-WK-13]: ../../../docs/specs/requirements/FR-WK-13.md
-    /// [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [ADR-57]: ../../../docs/specs/architecture/decisions/ADR-57.md
-    pub fn wiki_srs_mode(&self) -> bool {
-        // `traced_infallible` like `wiki_doc_category_present` — the gate is a pure
-        // local-FS read that cannot fail (a missing artifact reads as Case 2).
-        crate::observability::traced_infallible(Tool::WikiSrsMode, || {
-            crate::wiki::wiki_srs_mode(&self.root)
-        })
-    }
-
-    /// The **User Guide** tier's page set ([FR-WK-23], [FR-WK-11]) — one
-    /// `(slug, title)` pair per `docs/howto/*.md` file, in the same order
-    /// [`Engine::wiki_materialize`] writes them (`README.md` first, at
-    /// `guide/overview`). The web menu ([FR-UI-06]) uses this to render (and
-    /// gate the presence of) the User Guide tier without a fixed enum like
-    /// [`DocCategory`](crate::wiki::DocCategory) — the guide file set is
-    /// per-project. **Gated on [`Engine::wiki_srs_mode`]** — empty in Case 2
-    /// even when `docs/howto/` has files, since `wiki_materialize` never writes
-    /// a Case-2 guide page and a Case-2 menu listing would be a permanent,
-    /// un-fulfillable "not yet generated" placeholder. Also empty when
-    /// `docs/howto/` has no `*.md` file, so the tier is simply absent rather
-    /// than an empty group ([FR-WK-11]).
-    ///
-    /// A pure local-filesystem read (a `read_dir` + per-file read) — no
-    /// graph/store read, no `wiki.db` write, no LLM, and no network
-    /// ([NFR-SE-01]) — so it is safe on the write-free-on-read GET path
-    /// ([ADR-28]) and never moves the quality signal. Infallible by design: a
-    /// missing directory reads as an empty tier, never an error.
-    ///
-    /// [FR-WK-23]: ../../../docs/specs/requirements/FR-WK-23.md
-    /// [FR-WK-11]: ../../../docs/specs/requirements/FR-WK-11.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    pub fn wiki_guide_pages(&self) -> Vec<(String, String)> {
-        crate::observability::traced_infallible(Tool::WikiGuidePages, || {
-            crate::wiki::wiki_guide_pages(&self.root)
-        })
-    }
-
-    /// The reconciliation sweep ([FR-WK-22]): bulk-purge any stored page whose
-    /// slug falls outside the active-mode valid set — the five Overview/Summary
-    /// slugs ∪ the present consolidated-category slugs — logging each removal to
-    /// the pruned-log ([`Engine::wiki_pruned_log`] surfaces the trace). Retires
-    /// orphaned pages left by a prior or superseded generation run that are
-    /// unreachable from the menu ([FR-WK-11]) and un-regenerable by the work-list
-    /// ([FR-WK-06]) — the lazy all-anchors-gone orphan lifecycle ([FR-WK-07])
-    /// never reaches them, since it fires only on read.
-    ///
-    /// Idempotent: once every stored slug is valid, a re-run purges nothing. A
-    /// pure store + local-FS operation — no LLM, no network call ([NFR-SE-01]).
-    /// Runs at the end of the [FR-WK-20] `wiki materialize` path (S-262); exposed
-    /// as its own façade operation so it is independently callable and testable
-    /// ahead of that wiring.
-    ///
-    /// Returns the purged slugs, in slug order.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store failure.
-    ///
-    /// [FR-WK-22]: ../../../docs/specs/requirements/FR-WK-22.md
-    /// [FR-WK-11]: ../../../docs/specs/requirements/FR-WK-11.md
-    /// [FR-WK-06]: ../../../docs/specs/requirements/FR-WK-06.md
-    /// [FR-WK-07]: ../../../docs/specs/requirements/FR-WK-07.md
-    /// [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    pub fn wiki_reconcile(&self) -> Result<Vec<String>> {
-        crate::observability::traced(Tool::WikiReconcile, || {
-            let mut conn = crate::wiki::open(&self.root)?;
-            crate::wiki::reconcile(&mut conn, &self.root)
-        })
-    }
-
-    /// The deterministic **presented tier** ([FR-WK-20], [ADR-57], [CR-062]): in
-    /// SRS mode (Case 1, [`Engine::wiki_srs_mode`]) assemble each present
-    /// Design/Specs category — glob → sorted section-per-source-document
-    /// consolidated Markdown — the single-file Architecture page
-    /// (`docs/specs/architecture.md` → the `overview/architecture` slug), **and**
-    /// the **User Guide** tier's per-file pages ([FR-WK-23]) — one page per
-    /// `docs/howto/*.md` file, `README.md` → `guide/overview`, rendered
-    /// verbatim — directly from the project's authored `docs/specs/**`/
-    /// `docs/howto/**` sources, upsert each into `wiki.db` with `generator =
-    /// "logos:doc-present"`, one source-file anchor per document, and the
-    /// current built-at revision, then run the [FR-WK-22] reconciliation sweep
-    /// so orphaned prior-run pages (including a `guide/*` page whose source file
-    /// was deleted) are purged in the same operation. A category whose source
-    /// glob matches no file, or an absent `docs/howto/`, yields no page.
-    ///
-    /// In **Case 2** (no authored SRS) it is a no-op returning the empty summary:
-    /// presentation is reserved for projects carrying the load-bearing
-    /// `architecture.md` + a requirement; the connected agent infers the full set
-    /// from the code graph as before ([FR-WK-21]).
-    ///
-    /// Deterministic and offline — pure local-FS reads + `wiki.db` writes, no LLM
-    /// and no network ([NFR-SE-01]); re-running with unchanged sources is
-    /// byte-identical ([FR-WK-20]). This relaxes the [ADR-24] "binary never writes
-    /// the store" property for faithful presentation while preserving the
-    /// prose-authoring ban ([ADR-57]): the binary copies authored docs verbatim, it
-    /// never *authors* prose.
-    ///
-    /// # Errors
-    /// Returns an error on a write-path rejection or an unexpected store failure,
-    /// or for a transient [`Engine::open`] engine (no read-only pool).
-    ///
-    /// [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
-    /// [FR-WK-21]: ../../../docs/specs/requirements/FR-WK-21.md
-    /// [FR-WK-22]: ../../../docs/specs/requirements/FR-WK-22.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [ADR-24]: ../../../docs/specs/architecture/decisions/ADR-24.md
-    /// [ADR-57]: ../../../docs/specs/architecture/decisions/ADR-57.md
-    /// [CR-062]: ../../../docs/requests/CR-062-wiki-present-authored-docs.md
-    pub fn wiki_materialize(&self) -> Result<crate::wiki::MaterializeSummary> {
-        crate::observability::traced(Tool::WikiMaterialize, || {
-            // Case 2: presentation is a Case-1 operation — write nothing, sweep
-            // nothing, so the agent-inference path is untouched ([FR-WK-21]).
-            if !crate::wiki::wiki_srs_mode(&self.root) {
-                return Ok(crate::wiki::MaterializeSummary {
-                    srs_mode: false,
-                    materialized: Vec::new(),
-                    pruned: Vec::new(),
-                });
-            }
-            let runtime = self.nav_runtime_no_prologue()?;
-            let head = crate::wiki::head_sha(&self.root).unwrap_or_default();
-            let mut conn = crate::wiki::open(&self.root)?;
-            // Capture the built-at revision from the same read the resolver uses,
-            // so a presented page's freshness derives from one revision ([FR-SY-09]).
-            let materialized = runtime.submit_read(|store| {
-                let built_at_revision = store.graph_revision()?;
-                let resolver = crate::wiki::GraphAnchorResolver::new(store, &self.root);
-                crate::wiki::materialize(&mut conn, &resolver, &self.root, &head, built_at_revision)
-            })?;
-            // Sweep orphaned prior-run pages once the present set is written
-            // ([FR-WK-22]); the valid set includes the just-written slugs.
-            let pruned = crate::wiki::reconcile(&mut conn, &self.root)?;
-            Ok(crate::wiki::MaterializeSummary { srs_mode: true, materialized, pruned })
-        })
-    }
-
-    /// Materialize the embedded wiki-generation skill ([FR-WK-08], CLI-only
-    /// surface) into `dir` (or the project root when `None`), restoring the
-    /// embedded content when `force` is set and skipping an existing install
-    /// otherwise. Pure local filesystem I/O — no network ([NFR-SE-01]).
-    ///
-    /// This is the post-install / post-upgrade refresh path behind
-    /// `logos wiki skill --emit [dir] [--force]`; the `init -i` materialization
-    /// runs the same engine through [`crate::init`].
-    ///
-    /// [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    pub fn wiki_skill_emit(
-        &self,
-        dir: Option<&Path>,
-        force: bool,
-    ) -> Result<crate::wiki::EmitSummary> {
-        crate::observability::traced(Tool::WikiSkillEmit, || {
-            crate::wiki::materialize_skill(dir.unwrap_or(&self.root), force)
-        })
-    }
-
     /// Materialize the Claude Code **session-start** quality-report hook
     /// ([FR-IN-07], [FR-GV-02], [FR-GV-05], [ADR-49], [CR-095], CLI-only
     /// surface): a marker-tagged hook script plus a non-clobbering merge into the
@@ -2945,8 +2489,9 @@ impl Engine {
     /// the blessed baseline and their delta, and the last recorded rule
     /// violations as a non-blocking readout ([FR-GV-05]); `force` re-emits it.
     ///
-    /// Pure local filesystem I/O behind `logos wiki hook --emit [--force]` (the
-    /// `init -i` step runs the same engine through [`crate::init`]). Installing
+    /// Pure local filesystem I/O behind `logos hook --emit [--force]` and its
+    /// hidden alias `logos wiki hook --emit [--force]` (the `init -i` step runs
+    /// the same engine through [`crate::init`]). Installing
     /// the hook performs **no** LLM call and opens **no** network connection
     /// ([NFR-SE-01]) — it only shells out to `logos quality-report`, whose
     /// read-model is computed without persisting a snapshot
@@ -2958,9 +2503,9 @@ impl Engine {
     /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
     /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
     /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
-    pub fn wiki_quality_report_hook_emit(&self, force: bool) -> Result<crate::wiki::HookEmitSummary> {
+    pub fn quality_report_hook_emit(&self, force: bool) -> Result<crate::hooks::HookEmitSummary> {
         crate::observability::traced(Tool::WikiQualityReportHookEmit, || {
-            crate::wiki::materialize_quality_report_hook(&self.root, force)
+            crate::hooks::materialize_quality_report_hook(&self.root, force)
         })
     }
 
@@ -3191,11 +2736,15 @@ impl Engine {
 
     /// The navigation runtime *without* the auto-index prologue — for `status`
     /// (which must report an unindexed graph, not silently build one) and for
-    /// follow-up reads inside a tool that already ran the prologue.
+    /// follow-up reads inside a tool that already ran the prologue. Public for
+    /// the extensions that read the graph over `&Engine` without forcing an
+    /// index — the wiki's anchor resolution ([FR-DS-04]).
     ///
     /// # Errors
     /// Returns an error for a transient [`Engine::open`] engine (no RO pool).
-    pub(crate) fn nav_runtime_no_prologue(&self) -> Result<&Runtime> {
+    ///
+    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    pub fn nav_runtime_no_prologue(&self) -> Result<&Runtime> {
         self.runtime.as_ref().ok_or_else(|| {
             anyhow!(
                 "navigation requires a long-lived engine (Engine::start); a transient \
@@ -3829,5 +3378,46 @@ mod tests {
         assert!(docker.artifact, "listed as the artifact class");
         assert_eq!(docker.extensions, ["dockerfile"], "extension claim listed");
         assert_eq!(docker.filenames, ["Dockerfile"], "filename claim listed");
+    }
+
+    /// One extension's per-engine state, for the [`Engine::extension_state`]
+    /// tests: a counter that shows which instance a caller was handed.
+    #[derive(Default)]
+    struct Tally(AtomicU64);
+
+    /// A second, unrelated extension's state.
+    #[derive(Default)]
+    struct OtherTally(AtomicU64);
+
+    /// [`Engine::extension_state`] hands every caller on one engine the same
+    /// value for a type — the memo an extension keeps there survives between
+    /// its calls — keeps a second type's value apart, and gives another engine
+    /// its own (S-644: the wiki's native-tier memo moved into this slot from an
+    /// `Engine` field, so it must stay per engine, not per process).
+    #[test]
+    fn extension_state_is_one_value_per_type_per_engine() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let engine = Engine::open(tmp.path());
+
+        engine.extension_state::<Tally>().0.fetch_add(3, Ordering::Relaxed);
+        let again = engine.extension_state::<Tally>();
+        assert_eq!(again.0.load(Ordering::Relaxed), 3, "a later call sees the first call's value");
+        assert!(
+            std::sync::Arc::ptr_eq(&again, &engine.extension_state::<Tally>()),
+            "one shared value per type"
+        );
+
+        assert_eq!(
+            engine.extension_state::<OtherTally>().0.load(Ordering::Relaxed),
+            0,
+            "a second type is a second slot"
+        );
+
+        let other = Engine::open(tmp.path());
+        assert_eq!(
+            other.extension_state::<Tally>().0.load(Ordering::Relaxed),
+            0,
+            "another engine starts from its own default"
+        );
     }
 }

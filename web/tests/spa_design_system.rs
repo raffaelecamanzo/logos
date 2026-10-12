@@ -887,18 +887,34 @@ fn centred_measure_detector_admits_every_spelling_and_rejects_its_near_misses() 
 fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
 
-    // (1) No selector anywhere in the chat stylesheet — its declarations gathered
+    // (1) No selector anywhere in the chat stylesheets — its declarations gathered
     // from every rule and rung that names it — centres a measure, and none is a
     // container that centres its children (the parent-side spelling of the same
     // column). The retired measure token is gone rather than left dormant.
-    for (selector, body) in aggregated_rules(&css) {
+    for (file, selector, body) in chat_stylesheets()
+        .into_iter()
+        .flat_map(|(file, css)| aggregated_rules(&css).into_iter().map(move |(s, b)| (file.clone(), s, b)))
+    {
+        // A control box bounded to ≤ 40×40px (S-619's round in-pill buttons, the rail
+        // toggle and trash) centres a GLYPH, never a reading measure: it has no room
+        // for one. Its own bound is what exempts it, so it cannot grow into a column
+        // and keep the exemption.
+        let small_control = ["width", "height"]
+            .iter()
+            .all(|d| declared(&body, d).as_deref().and_then(length_px).is_some_and(|px| px <= 40.0));
         assert!(
             !centres_a_measure(&body),
             "`{selector}` centres a capped reading measure. The chat view fills its card \
              (FR-UI-33): a centred measure is what left the 172px void beside the rail",
         );
+        // The welcome (S-621, FR-UI-46) is the centred empty state of a region with no
+        // content, which FR-UI-40 permits: its greeting and its chip row centre their
+        // children, and they are gone the moment a message exists. Exempt by NAME, so a
+        // new rule cannot borrow the exemption — and a centred column anywhere else, the
+        // transcript included, still fails.
+        let empty_state = file == "Chat.module.css" && (selector == ".welcome" || selector == ".chips");
         assert!(
-            !centres_its_children(&body),
+            small_control || empty_state || !centres_its_children(&body),
             "`{selector}` centres its children on the inline axis — a capped child inside it \
              is a centred reading measure by another route (FR-UI-33)",
         );
@@ -970,10 +986,13 @@ fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
         "`.log` cancels its own inline padding ({inline_pad}) with an equal negative inline margin, \
          so the turns align on the card's content edge with the composer",
     );
-    for selector in [".main", ".threadRoot", ".composer"] {
+    // The pill composer (S-619) is the one exception on the padding side: its inset is
+    // the pill's own, INSIDE its border — the border itself still sits on the card's
+    // content edge, so it is held to the margin half only.
+    for (selector, props) in [(".main", "padding|margin"), (".threadRoot", "padding|margin"), (".composer", "margin")] {
         let body = rule_body(&css, selector);
         for (n, v) in declarations_of(&body) {
-            let inline_inset = (n.starts_with("padding") || n.starts_with("margin"))
+            let inline_inset = props.split('|').any(|p| n.starts_with(p))
                 && !n.contains("block") && !n.ends_with("top") && !n.ends_with("bottom")
                 && css_values(&v).iter().any(|t| t != "0");
             assert!(
@@ -994,6 +1013,61 @@ fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
         rule_body(&css, ".userBubble").contains("background: var(--surface-2)"),
         "the bubble treatment lives on the inner .userBubble element",
     );
+
+    // (5) S-619 ([FR-UI-45], CR-204 L2): answer prose IS capped — at `--measure-prose`,
+    // and LEFT-anchored. The cap lives on `.final`, the answer's prose wrapper and the
+    // element carrying the 16px chat size its `ch` is measured in; exactly one rule
+    // consumes the token, so the measure cannot quietly spread to the transcript or
+    // the card (which would re-open the void beside the rail).
+    let measured: Vec<String> = aggregated_rules(&css)
+        .into_iter()
+        .filter(|(_, body)| declarations_of(body).iter().any(|(_, v)| v.contains("--measure-prose")))
+        .map(|(selector, _)| selector)
+        .collect();
+    assert_eq!(measured, vec![".final".to_string()], "only the answer prose (`.final`) takes the reading measure");
+    let fin = aggregated_rules(&css)
+        .into_iter()
+        .find(|(s, _)| s == ".final")
+        .map(|(_, b)| b)
+        .expect("`.final` is styled");
+    assert_eq!(
+        declared(&fin, "max-width").as_deref(),
+        Some("var(--measure-prose)"),
+        "answer prose is capped by `--measure-prose` (FR-UI-45)",
+    );
+    // Left-anchored: nothing pushes the capped box off the transcript's left content
+    // edge — no auto/non-zero left margin on it, no self-alignment, and no container
+    // between it and the transcript that aligns its children anywhere but the start.
+    for (n, v) in declarations_of(&fin) {
+        // The LEFT margin each spelling resolves to: the shorthand's 1–4 value forms,
+        // `margin-inline`'s start, and the longhands. Anything but zero moves the box.
+        let vals = css_values(&v);
+        let left = match (n.as_str(), vals.len()) {
+            ("margin", 4) => vals.get(3).cloned(),
+            ("margin", 2 | 3) => vals.get(1).cloned(),
+            ("margin" | "margin-inline" | "margin-left" | "margin-inline-start", _) => vals.first().cloned(),
+            _ => None,
+        };
+        assert!(
+            left.as_deref().is_none_or(|l| l == "0" || l == "0px"),
+            "`.final` declares `{n}: {v}` — the measure starts on the content edge (BR-39)",
+        );
+        assert!(
+            !(matches!(n.as_str(), "align-self" | "justify-self" | "place-self") && v != "stretch" && v != "start" && v != "flex-start"),
+            "`.final` self-aligns (`{n}: {v}`) — the measure is left-anchored (FR-UI-45)",
+        );
+    }
+    for container in [".log", ".assistant", ".answer"] {
+        let body = rule_body(&css, container);
+        for p in ["align-items", "place-items", "justify-items"] {
+            let v = declared(&body, p);
+            assert!(
+                v.as_deref().is_none_or(|v| matches!(v, "stretch" | "normal" | "start" | "flex-start")),
+                "`{container}` aligns its children with `{p}: {v:?}` — the prose measure must start on \
+                 the transcript's left content edge (FR-UI-45)",
+            );
+        }
+    }
 }
 
 /// The two-pane grid is the WIKI's (S-308, [FR-UI-33]): the chat layout reads its
@@ -1112,19 +1186,81 @@ fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
 /// The transcript stays a BOUNDED scroll box inside the card (FR-UI-33, CR-092
 /// §3.2). It is assistant-ui's thread viewport, which follows the stream by driving
 /// its own `scrollTop`; an unbounded box would silently stop auto-follow on the app's
-/// only streaming surface and walk the composer off-screen mid-answer. The floor
-/// keeps a short transcript from collapsing to its content.
+/// only streaming surface and walk the composer off-screen mid-answer.
+///
+/// S-619 ([FR-UI-45], CR-204 L2) changed WHAT bounds it: no longer a `60vh` cap but
+/// the card's height. At desktop widths the transcript is the card's `flex: 1`
+/// scroller, size-contained so a 200-message thread never asks the page for more
+/// than the viewport, with a floor; every link from the view down to it may shrink,
+/// and the view fills the shell's content box. Below the breakpoint the panes stack,
+/// the view takes its content height, and the transcript is the floor-and-cap box it
+/// was. Whether the page then really does not scroll is the `chat-layout` Playwright
+/// spec's to measure; this pins the declarations that make it so.
 #[test]
 fn chat_transcript_is_a_bounded_scroll_box_inside_the_card() {
-    let log = rule_body(&strip_comments(&read("src/views/chat/Chat.module.css")), ".log");
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let log = rule_body(&css, ".log");
     let get = |p: &str| declared(&log, p);
     assert_eq!(get("overflow-y").as_deref(), Some("auto"), "the transcript scrolls internally");
     assert!(
-        get("max-height").is_some_and(|v| v != "none") || get("height").is_some_and(|v| v != "auto"),
-        "the transcript declares a height bound — without one it grows with the conversation \
-         and assistant-ui has no scroll box to follow the stream in",
+        get("flex").is_some_and(|v| css_values(&v).first().is_some_and(|g| g != "0")),
+        "the transcript is the card's `flex: 1` scroller — it takes the height the card has          left (found `flex: {:?}`)",
+        get("flex"),
+    );
+    assert!(
+        get("contain").is_some_and(|v| v.contains("size")),
+        "the transcript is size-contained, so a long thread is never the page's height (FR-UI-45)",
     );
     assert!(get("min-height").is_some_and(|v| v != "0"), "the transcript has a floor");
+    for p in ["max-height", "height"] {
+        assert!(
+            get(p).is_none_or(|v| !["vh", "vb", "vmin", "vmax"].iter().any(|u| v.contains(u))),
+            "the desktop transcript's bound is the card, not a viewport fraction (found `{p}: {:?}`)",
+            get(p),
+        );
+    }
+
+    // The chain from the view down to the transcript: the view fills the shell's
+    // content box, and every flex link between them may shrink below its content.
+    assert_eq!(declared(&rule_body(&css, ".view"), "height").as_deref(), Some("100%"), "the view fills its content box");
+    for selector in [".chat", ".layout", ".main", ".conversation", ".threadRoot"] {
+        let body = rule_body(&css, selector);
+        assert_eq!(
+            declared(&body, "min-height").as_deref(),
+            Some("0"),
+            "`{selector}` may shrink below its content, or the transcript above it can never              be the one that scrolls (FR-UI-45)",
+        );
+    }
+    for selector in [".chat", ".layout", ".conversation", ".threadRoot"] {
+        let flex = declared(&rule_body(&css, selector), "flex");
+        assert!(
+            flex.as_deref().is_some_and(|v| css_values(v).first().is_some_and(|g| g != "0")),
+            "`{selector}` grows into the height its parent gives it (found `flex: {flex:?}`)",
+        );
+    }
+    // The composer is pinned under the transcript: it never grows or shrinks.
+    assert_eq!(declared(&rule_body(&css, ".composer"), "flex").as_deref(), Some("none"), "the composer is pinned");
+
+    // Stacked (≤1023px) the chain is released and the old bounded box returns.
+    let narrow: Vec<(String, String)> = top_level_rules(&css)
+        .into_iter()
+        .filter(|(at, _)| at == "@media (max-width: 1023px)")
+        .flat_map(|(_, body)| top_level_rules(&body))
+        .collect();
+    let rung = |selector: &str| {
+        narrow
+            .iter()
+            .find(|(s, _)| s == selector)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_else(|| panic!("the ≤1023px rung restyles `{selector}`"))
+    };
+    assert_eq!(declared(&rung(".view"), "height").as_deref(), Some("auto"), "stacked, the view takes its content height");
+    let narrow_log = rung(".log");
+    assert_eq!(declared(&narrow_log, "contain").as_deref(), Some("none"), "stacked, the transcript is measured by its content");
+    assert!(
+        declared(&narrow_log, "max-height").is_some_and(|v| v != "none"),
+        "stacked, the transcript carries a height cap again — there is no card height to fill",
+    );
 }
 
 #[test]
@@ -1176,8 +1312,10 @@ fn chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes() {
              ({card_fill}), which is what the pairs below are measured against",
         );
     }
-    let rail_fill = var_token(&rule_body(&css, ".rail"), "background")
-        .expect("the rail declares a `background: var(--…)` fill");
+    // The rail renders no card since S-619: its notes sit on the page fill `body`
+    // paints, which is what `.railError`'s edge is measured against below.
+    let rail_fill = var_token(&rule_body(&strip_comments(&read("src/styles/base.css")), "body"), "background")
+        .expect("`body` declares a `background: var(--…)` page fill");
 
     // (a′) The other half of (a): the hue those rules keep OFF their ink must still
     // be ON them, as the left edge — relocated, never dropped (FR-UI-33). Resolved in
@@ -1277,11 +1415,736 @@ fn chat_activity_status_glyphs_carry_badge_chip_geometry() {
     }
 }
 
+// ── S-618 (CR-204 L1/L7/L8, FR-UI-45): chat tokens, prose scale, calmer red ────
+
+/// The theme-independent chat scale tokens (L8) and the value each must resolve to in
+/// BOTH themes. `--elevation-composer` is the one THEMED chat token and is asserted
+/// separately below. Every later CR-204 story consumes these by name, so a rename or a
+/// silent value drift fails here rather than in a downstream story's layout.
+const CHAT_SCALE_TOKENS: &[(&str, &str)] = &[
+    ("--radius-3", "24px"),
+    ("--measure-prose", "72ch"),
+    ("--text-chat", "1rem"),
+    ("--leading-chat", "1.75"),
+    ("--tracking-heading", "-0.025em"),
+];
+
+#[test]
+fn chat_tokens_resolve_in_both_themes_and_are_declared_once() {
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+    let dark = declarations(&block_after(&tokens, ":root[data-theme=\"dark\"]"));
+    let themes = [("dark", theme_map(&base, Some(&dark))), ("light", theme_map(&base, Some(&light)))];
+
+    for (theme, map) in &themes {
+        for (name, value) in CHAT_SCALE_TOKENS {
+            assert_eq!(
+                map.get(*name).map(String::as_str),
+                Some(*value),
+                "{theme}: `{name}` resolves to `{value}` (CR-204 L8)",
+            );
+        }
+        assert!(map.contains_key("--elevation-composer"), "{theme}: `--elevation-composer` resolves");
+    }
+    // The composer's lift is THEMED: a shadow tuned for dark would be a smudge on the
+    // white light surface. Each of the four blocks that declares it is pinned to its
+    // theme's exact value — including the first-visit `prefers-color-scheme: light`
+    // flip, which is what a light-OS user with no stored choice actually gets and which
+    // a resolved-theme map never reads (it inherits only `:root` and the explicit
+    // blocks).
+    const DARK_LIFT: &str = "0 4px 16px rgba(0, 0, 0, 0.45)";
+    const LIGHT_LIFT: &str = "0 4px 16px rgba(61, 57, 53, 0.12)";
+    let first_visit_light = declarations(&block_after(&tokens, ":root:not([data-theme])"));
+    for (block, map, want) in [
+        (":root", &base, DARK_LIFT),
+        (":root[data-theme=\"dark\"]", &dark, DARK_LIFT),
+        (":root[data-theme=\"light\"]", &light, LIGHT_LIFT),
+        ("@media (prefers-color-scheme: light) :root:not([data-theme])", &first_visit_light, LIGHT_LIFT),
+    ] {
+        assert_eq!(
+            map.get("--elevation-composer").map(String::as_str),
+            Some(want),
+            "`{block}` declares the composer lift tuned for its theme",
+        );
+    }
+
+    // "Defined once": a scale token is declared in exactly one place (the `:root` scale
+    // layer), the themed shadow once per theme block (`:root`, the first-visit
+    // light flip, explicit light, explicit dark) — and never restated in a module.
+    for (name, _) in CHAT_SCALE_TOKENS {
+        assert_eq!(tokens.matches(&format!("{name}:")).count(), 1, "`{name}` is declared exactly once in tokens.css");
+    }
+    assert_eq!(
+        tokens.matches("--elevation-composer:").count(),
+        4,
+        "`--elevation-composer` is declared once per theme block",
+    );
+    let chat = strip_comments(&read("src/views/chat/Chat.module.css"));
+    for name in CHAT_SCALE_TOKENS.iter().map(|(n, _)| *n).chain(["--elevation-composer"]) {
+        assert!(!chat.contains(&format!("{name}:")), "Chat.module.css consumes `{name}`, never declares it");
+    }
+
+    // The chat scale is chat-scoped: the app-wide base size is untouched.
+    assert_eq!(base.get("--text-base").map(String::as_str), Some("0.9375rem"), "`--text-base` stays 15px");
+    assert!(
+        strip_comments(&read("src/styles/base.css")).contains("font-size: var(--text-base)"),
+        "the document still sets its size from `--text-base`",
+    );
+}
+
+#[test]
+fn chat_answer_prose_runs_on_the_chat_scale_and_headings_track_tight() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    // Aggregated, not `rule_body`: the leading is declared on a grouped list
+    // (`.final .markdown p, … ol`), which `rule_body`'s exact full-selector match never
+    // finds, and `aggregated_rules` splits it into one entry per selector.
+    let rules = aggregated_rules(&css);
+    let value = |selector: &str, prop: &str| {
+        rules.iter().find(|(s, _)| s == selector).and_then(|(_, body)| declared(body, prop))
+    };
+    let must = |selector: &str, prop: &str| {
+        value(selector, prop).unwrap_or_else(|| panic!("`{selector}` declares no `{prop}`"))
+    };
+
+    // 16px / 28px, scoped to the ANSWER: `.final` carries the size (it reaches every
+    // prose child by inheritance), the prose blocks carry the 1.75 leading.
+    assert_eq!(must(".final", "font-size"), "var(--text-chat)");
+    for selector in [".final .markdown p", ".final .markdown ul", ".final .markdown ol"] {
+        assert_eq!(must(selector, "line-height"), "var(--leading-chat)", "`{selector}` leading");
+    }
+    // …and NOT on the renderer itself: `.markdown` also draws the Activity fold's step
+    // results (`.activityResult`, `--text-sm`), and a size declared on it would override
+    // the fold's and grow the quiet context block to answer size.
+    assert_eq!(value(".markdown", "font-size"), None, "`.markdown` declares no size of its own");
+    // No prose child is re-sized or re-leaded by a rule of its own, which would defeat
+    // the inherited 16px / 28px: the descendants must not name `font-size`, and `li`
+    // (which inherits its leading from the list) must not name `line-height`.
+    for scope in [".markdown", ".final .markdown"] {
+        for tag in ["p", "ul", "ol", "li"] {
+            let selector = format!("{scope} {tag}");
+            assert_eq!(value(&selector, "font-size"), None, "`{selector}` must inherit the chat size");
+        }
+        assert_eq!(value(&format!("{scope} li"), "line-height"), None, "`{scope} li` inherits the list's leading");
+    }
+    // The streamed-text wrapper's leading is the base one: the 1.75 is the prose blocks'.
+    assert_eq!(must(".final", "line-height"), "var(--leading-base)");
+    // The user's text sits on the same scale as the answer.
+    assert_eq!(must(".userBubble", "font-size"), "var(--text-chat)");
+    assert_eq!(must(".userBubble", "line-height"), "var(--leading-chat)");
+
+    // h2 → h4: weight 600, tightened tracking, the tight heading leading and the rem
+    // ladder; h5/h6 never fall below the prose they sit among.
+    for (tag, size) in [
+        ("h2", "1.875rem"),
+        ("h3", "1.5rem"),
+        ("h4", "1.25rem"),
+        ("h5", "var(--text-chat)"),
+        ("h6", "var(--text-chat)"),
+    ] {
+        let selector = format!(".final .markdown {tag}");
+        assert_eq!(must(&selector, "font-weight"), "var(--weight-semibold)", "`{selector}` weight");
+        assert_eq!(must(&selector, "letter-spacing"), "var(--tracking-heading)", "`{selector}` tracking");
+        assert_eq!(must(&selector, "line-height"), "var(--leading-tight)", "`{selector}` leading");
+        assert_eq!(must(&selector, "font-size"), size, "`{selector}` size");
+    }
+}
+
+/// Every custom property that IS the signal red: `--so-red` itself and each token that
+/// resolves to it through `var()` aliases (`--color-accent`, `--card-accent`,
+/// `--focus-ring`, …), read off `tokens.css` rather than hand-listed so a new alias
+/// cannot slip a red fill past the guard below. `--color-accent-warm` is `--so-orange`,
+/// a different hue, and is not in the set.
+fn signal_red_tokens(base: &BTreeMap<String, String>) -> Vec<String> {
+    let mut red = vec!["--so-red".to_string()];
+    loop {
+        let before = red.len();
+        for (name, value) in base {
+            let aliased = value.trim().strip_prefix("var(").and_then(|v| v.strip_suffix(')'));
+            let target = aliased.map(|t| t.split(',').next().unwrap_or("").trim());
+            if !red.contains(name) && target.is_some_and(|t| red.iter().any(|r| r == t)) {
+                red.push(name.clone());
+            }
+        }
+        if red.len() == before {
+            return red;
+        }
+    }
+}
+
+/// Whether a declared value paints the signal red: it names one of `red` as a `var()` —
+/// alone, with a fallback, or inside a gradient, and with or without whitespace inside
+/// the parentheses. The name must END at `)` or `,`, so `--color-accent-warm` (a
+/// different hue) and a hypothetical `--so-red-hover` are not mistaken for it.
+fn paints_signal_red(value: &str, red: &[String]) -> bool {
+    let compact: String = value.split_whitespace().collect();
+    red.iter().any(|name| {
+        let prefix = format!("var({name}");
+        compact.match_indices(&prefix).any(|(i, _)| {
+            matches!(compact[i + prefix.len()..].chars().next(), Some(')' | ','))
+        })
+    })
+}
+
+#[test]
+fn signal_red_fill_detector_admits_every_spelling_and_rejects_its_near_misses() {
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let red = signal_red_tokens(&declarations(&block_after(&tokens, ":root")));
+    // The aliases are DERIVED: each of these resolves to `--so-red` in tokens.css.
+    for alias in ["--so-red", "--color-accent", "--card-accent", "--focus-ring"] {
+        assert!(red.iter().any(|r| r == alias), "`{alias}` is a signal-red alias (derived: {red:?})");
+    }
+    for hue in ["--color-accent-warm", "--so-orange", "--color-pass", "--surface-2", "--text-1"] {
+        assert!(!red.iter().any(|r| r == hue), "`{hue}` is not the signal red");
+    }
+    for painted in [
+        "var(--so-red)",
+        "var(--color-accent)",
+        "var(--card-accent)",
+        "var(--focus-ring)",
+        "var( --so-red )",
+        "var(--so-red )",
+        "var(--color-accent, #f00)",
+        "var(--so-red) no-repeat",
+        "linear-gradient(var(--so-red), transparent)",
+    ] {
+        assert!(paints_signal_red(painted, &red), "`{painted}` paints the signal red");
+    }
+    for not_red in [
+        "var(--color-accent-warm)",
+        "var(--so-red-hover)",
+        "var(--so-orange)",
+        "var(--surface-2)",
+        "var(--text-1)",
+        "transparent",
+    ] {
+        assert!(!paints_signal_red(not_red, &red), "`{not_red}` is not the signal red");
+    }
+}
+
+/// The chat rules that fill with the signal red, and why each is allowed: a small
+/// signal, never a large control. CR-204 L7: `--so-red` is a small signal in the chat —
+/// the focus ring, hover borders, the 3px notice edges (`.threadConfirm`, `.railError`,
+/// `.error`), the sendable Send and the rail's active marker. This list is the coverage
+/// contract: the test below fails on any other chat rule that paints a red
+/// `background`, and on a listed rule that does not bound its own box to ≤ 40×40px.
+///
+/// S-619 reconciled S-618's sendable dot with the round in-pill Send: the 2rem circle
+/// IS the sendable signal now, so the dot is gone — one signal, not two.
+const RED_FILL_COVERAGE: &[(&str, &str)] = &[
+    (".workingPulse", "the 0.5rem 'working' dot"),
+    (".send:not(:disabled)", "the 2rem round Send, red only while there is something to send"),
+    (".threadLineActive::before", "the rail's 3px × 1rem active-row marker"),
+];
+
+#[test]
+fn no_chat_rule_fills_a_control_larger_than_40px_with_the_signal_red() {
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let red = signal_red_tokens(&declarations(&block_after(&tokens, ":root")));
+    // Every chat stylesheet: a red fill in a sibling module is the same chat control.
+    let red_fills: Vec<(String, String)> = chat_style_rules(&chat_stylesheets())
+        .into_iter()
+        .map(|(_, selector, body)| (selector, body))
+        .filter(|(_, body)| {
+            declarations_of(body).iter().any(|(n, v)| n.starts_with("background") && paints_signal_red(v, &red))
+        })
+        .collect();
+    for (selector, body) in &red_fills {
+        assert!(
+            RED_FILL_COVERAGE.iter().any(|(s, _)| s == selector),
+            "`{selector}` fills with the signal red but is not in `RED_FILL_COVERAGE`. A chat \
+             control larger than 40×40px takes a NEUTRAL fill (CR-204 L7, FR-UI-45): \
+             `--so-red` is a small signal only",
+        );
+        for dimension in ["width", "height"] {
+            let px = declared(body, dimension).as_deref().and_then(length_px);
+            assert!(
+                px.is_some_and(|px| px <= 40.0),
+                "`{selector}` is a red fill, so it must bound its own `{dimension}` to ≤ 40px \
+                 (declared: {:?})",
+                declared(body, dimension),
+            );
+        }
+    }
+    // …and the list cannot rot: a classified rule that no longer paints red is stale.
+    for (selector, note) in RED_FILL_COVERAGE {
+        assert!(
+            red_fills.iter().any(|(s, _)| s == selector),
+            "`{selector}` ({note}) is classified but no longer fills with the signal red — drop it",
+        );
+    }
+}
+
+#[test]
+fn start_chatting_is_the_neutral_secondary_button_not_the_red_primary() {
+    let view = strip_tsx_comments(&read("src/views/chat/ChatView.tsx"));
+    let label = view.find("Start chatting").expect("the consent banner renders 'Start chatting'");
+    let button = opening_tags(&view, "Button")
+        .into_iter()
+        .filter(|&i| i < label)
+        .max()
+        .expect("'Start chatting' is a `<Button>`'s label");
+    let tag = &view[button..label];
+    assert!(
+        tag.contains("variant=\"secondary\"") && !tag.contains("primary"),
+        "'Start chatting' is a neutral `secondary` button — the red `primary` fill is for small \
+         signals only in the chat (CR-204 L7): {tag}",
+    );
+}
+
+// ── S-619 (CR-204 L3/L6/C8, FR-UI-45): pill composer, cardless rail, consent chip ──
+
+/// A resolved colour token as straight sRGB channels plus alpha: a `#hex` is opaque,
+/// an `rgba(r, g, b, a)` carries its alpha. The rail's pill tints are translucent
+/// (`--tint-hover`, `--tint-selected`), so their contrast is only meaningful once
+/// composited over the surface they sit on.
+fn token_rgba(name: &str, map: &BTreeMap<String, String>, base: &BTreeMap<String, String>) -> ((u8, u8, u8), f64) {
+    let raw = map.get(name).or_else(|| base.get(name)).unwrap_or_else(|| panic!("token `{name}` missing"));
+    let value = resolve(raw, map, base);
+    if let Some(inner) = value.strip_prefix("rgba(").and_then(|v| v.strip_suffix(')')) {
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        assert_eq!(parts.len(), 4, "`{name}` is `rgba(r, g, b, a)`: {value}");
+        let channel = |i: usize| parts[i].parse::<u8>().unwrap_or_else(|_| panic!("`{name}` channel {i}: {value}"));
+        let alpha: f64 = parts[3].parse().unwrap_or_else(|_| panic!("`{name}` alpha: {value}"));
+        ((channel(0), channel(1), channel(2)), alpha)
+    } else {
+        (hex_rgb(&value), 1.0)
+    }
+}
+
+/// `top` at `alpha` composited over the opaque `under` (straight-alpha "over").
+fn composite((r, g, b): (u8, u8, u8), alpha: f64, (ur, ug, ub): (u8, u8, u8)) -> (u8, u8, u8) {
+    let mix = |t: u8, u: u8| (alpha * t as f64 + (1.0 - alpha) * u as f64).round() as u8;
+    (mix(r, ur), mix(g, ug), mix(b, ub))
+}
+
+#[test]
+fn tint_compositing_reads_alpha_and_hex_alike() {
+    // Opaque white at 6% over black is a 15/255 grey — the dark hover tint's arithmetic.
+    assert_eq!(composite((255, 255, 255), 0.06, (0, 0, 0)), (15, 15, 15));
+    // Fully opaque replaces; fully transparent leaves the surface.
+    assert_eq!(composite((218, 41, 28), 1.0, (15, 18, 22)), (218, 41, 28));
+    assert_eq!(composite((218, 41, 28), 0.0, (15, 18, 22)), (15, 18, 22));
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let light = theme_map(&base, Some(&declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"))));
+    // Dark: an rgba literal. Light: an alias to an opaque hex (`--so-merlin-50`).
+    assert_eq!(token_rgba("--tint-hover", &base, &base), ((255, 255, 255), 0.06));
+    assert_eq!(token_rgba("--tint-hover", &light, &base), ((0xf4, 0xf4, 0xf2), 1.0));
+}
+
+/// The cardless rail (S-619, [FR-UI-45], CR-204 L6): the rail sits on the page surface
+/// with no card of its own; a row's LINE is a filled pill on hover, focus and when
+/// open; the open row's signal is a small red marker on its leading edge and never an
+/// outline; and the trash glyph is hidden on an idle row and revealed on row hover,
+/// row focus, the open row and while its confirm is open. Every ink a row carries
+/// clears its floor over the composited pill tints, in both themes.
+#[test]
+fn chat_rail_is_cardless_with_a_red_marker_and_a_hidden_idle_trash() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let rules = aggregated_rules(&css);
+    let body_of = |selector: &str| {
+        rules
+            .iter()
+            .find(|(s, _)| s == selector)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_else(|| panic!("`{selector}` is styled"))
+    };
+
+    // (1) No card: no fill, border, radius, shadow or inset on the rail itself.
+    for (n, v) in declarations_of(&body_of(".rail")) {
+        assert!(
+            !(n.starts_with("background") || n.starts_with("border") || n == "box-shadow" || n.starts_with("padding")),
+            "the rail declares `{n}: {v}` — it renders no card (FR-UI-45)",
+        );
+    }
+
+    // (2) The row line is the pill, filled by the two tints.
+    assert_eq!(declared(&body_of(".threadLine"), "border-radius").as_deref(), Some("var(--radius-pill)"));
+    for (selector, tint) in [
+        (".threadLine:hover", "var(--tint-hover)"),
+        (".threadLine:focus-within", "var(--tint-hover)"),
+        (".threadLineActive", "var(--tint-selected)"),
+        (".threadLineActive:hover", "var(--tint-selected)"),
+    ] {
+        assert_eq!(declared(&body_of(selector), "background").as_deref(), Some(tint), "`{selector}` fills the pill");
+    }
+
+    // (3) The open row carries the marker, and NO red outline or border anywhere on
+    // a row — the confirm panel's 3px destructive edge is the one red edge, and it
+    // is the panel's, not the row's.
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let red = signal_red_tokens(&base);
+    let marker = body_of(".threadLineActive::before");
+    assert!(declared(&marker, "background").is_some_and(|v| paints_signal_red(&v, &red)), "the active marker is red");
+    assert_eq!(declared(&marker, "left").as_deref(), Some("0"), "the marker sits on the row's LEADING edge");
+    for (selector, body) in &rules {
+        let row = [".threadLine", ".threadItem", ".threadActive", ".threadDelete", ".threadRow"]
+            .iter()
+            .any(|r| selector.starts_with(r));
+        if !row {
+            continue;
+        }
+        for (n, v) in declarations_of(body) {
+            assert!(
+                !((n.starts_with("border") || n.starts_with("outline")) && paints_signal_red(&v, &red)),
+                "`{selector}` draws `{n}: {v}` — the active row carries a marker, not a red outline \
+                 (FR-UI-45)",
+            );
+        }
+    }
+
+    // (4) The trash is hidden on an idle row and revealed by exactly these states.
+    // The top-level rule, not the aggregate: the `(hover: none)` rung shows the trash
+    // always on a device that cannot hover, and is the deliberate exception.
+    assert_eq!(declared(&rule_body(&css, ".threadDelete"), "opacity").as_deref(), Some("0"), "an idle row's trash is hidden");
+    for reveal in [
+        ".threadLine:hover .threadDelete",
+        ".threadLine:focus-within .threadDelete",
+        ".threadLineActive .threadDelete",
+        ".threadDelete[aria-expanded=\"true\"]",
+    ] {
+        assert_eq!(declared(&body_of(reveal), "opacity").as_deref(), Some("1"), "`{reveal}` reveals the trash");
+    }
+    // (4b) The collapse toggle is shown at EVERY width (FR-UI-45): no rule in any rung
+    // that names the toggle or the column holding it takes it off the page — at
+    // ≤1023px the rail starts collapsed, so a hidden toggle there would leave the
+    // conversation list unreachable.
+    for (selector, body) in all_style_rules(&css) {
+        if !(selector.contains(".railToggle") || selector.contains(".railColumn")) {
+            continue;
+        }
+        assert!(
+            !hides_element(&body),
+            "`{selector}` hides the rail's collapse toggle — it is shown at every width (FR-UI-45)",
+        );
+    }
+
+    // Hidden by opacity, never taken out of the tab order.
+    assert!(
+        !declarations_of(&body_of(".threadDelete"))
+            .iter()
+            .any(|(n, v)| (n == "visibility" && v == "hidden") || (n == "display" && v == "none")),
+        "the hidden trash stays reachable by keyboard",
+    );
+
+    // (5) Inks over the composited tints. The page fill is `body`'s; a row's title is
+    // text (4.5:1), its trash and the toggle are glyphs (the 3:1 non-text floor).
+    let base_css = strip_comments(&read("src/styles/base.css"));
+    let page = var_token(&rule_body(&base_css, "body"), "background").expect("`body` paints the page fill");
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+    for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
+        let under = token_rgb(&page, &map, &base);
+        for tint in ["--tint-hover", "--tint-selected"] {
+            let (rgb, alpha) = token_rgba(tint, &map, &base);
+            let fill = composite(rgb, alpha, under);
+            for (selector, floor) in [(".threadItem", 4.5), (".threadDelete", 3.0), (".railToggle:hover", 3.0)] {
+                let ink = color_token(&body_of(selector)).unwrap_or_else(|| panic!("`{selector}` inks a token"));
+                let c = contrast(token_rgb(&ink, &map, &base), fill);
+                assert!(
+                    c >= floor,
+                    "{theme}: `{selector}` ({ink}) is {c:.2}:1 on the page under {tint}, below {floor}:1",
+                );
+            }
+        }
+    }
+}
+
+/// The turns' last layer (S-620, [FR-UI-45], [FR-UI-46], CR-204 L4/C10): the user
+/// bubble takes the 24px chat radius and a 10px × 20px inset; the action bar is two
+/// 24px icon buttons that fill with `--tint-hover` on hover AND keyboard focus; the
+/// floating ↓ control is a round neutral button inside the 40×40px a control may take
+/// without the signal red, and the muted hint under the pill is a quiet ink.
+///
+/// This lives here rather than in Vitest because the SPA tests run with `css: false`
+/// (the module is a proxy there): the radius, the box and the tint only exist in the
+/// stylesheet. The assistant turn staying flat is
+/// `chat_assistant_turn_carries_no_card_chrome`, which this story leaves untouched.
+#[test]
+fn chat_turns_are_bubbles_with_an_icon_action_bar_and_a_scroll_control() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let rules = aggregated_rules(&css);
+    let body_of = |selector: &str| {
+        rules
+            .iter()
+            .find(|(s, _)| s == selector)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_else(|| panic!("`{selector}` is styled"))
+    };
+
+    // (1) The user bubble: the token (24px, asserted by the S-618 token guard), not a
+    // literal that could drift from it, and the 10px × 20px inset.
+    let bubble = body_of(".userBubble");
+    assert_eq!(declared(&bubble, "border-radius").as_deref(), Some("var(--radius-3)"), "the bubble takes the 24px chat radius");
+    assert_eq!(declared(&bubble, "padding").as_deref(), Some("10px 20px"), "the bubble's inset is 10px × 20px");
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    assert_eq!(base.get("--radius-3").map(String::as_str), Some("24px"), "`--radius-3` is the 24px chat radius");
+
+    // (2) The icon action bar: a 24px box (1.5rem at the 16px root), a ghost until
+    // hovered or keyboard-focused, then the shared hover tint. Both states.
+    let icon = body_of(".actionIcon");
+    assert_eq!(declared(&icon, "width").as_deref(), Some("1.5rem"), "24px wide");
+    assert_eq!(declared(&icon, "height").as_deref(), Some("1.5rem"), "24px tall");
+    assert_eq!(declared(&icon, "background").as_deref(), Some("transparent"), "a ghost at rest");
+    for state in [".actionIcon:hover", ".actionIcon:focus-visible"] {
+        assert_eq!(
+            declared(&body_of(state), "background").as_deref(),
+            Some("var(--tint-hover)"),
+            "`{state}` takes the --tint-hover fill",
+        );
+    }
+    // Copy's visually-hidden "Copied" status is absolutely positioned (`.sr-only`); the
+    // action bar must be its containing block, or it resolves to the conversation card —
+    // outside the transcript's scroller — and the page grows by the thread's height.
+    assert_eq!(
+        declared(&body_of(".actions"), "position").as_deref(),
+        Some("relative"),
+        "`.actions` contains the hidden status, keeping it inside the transcript's scroller",
+    );
+    // A control that small cannot be the signal red.
+    let red = signal_red_tokens(&base);
+    for (selector, body) in &rules {
+        if selector.starts_with(".actionIcon") || selector.starts_with(".scrollToBottom") {
+            for (n, v) in declarations_of(body) {
+                assert!(
+                    !(n.starts_with("background") && paints_signal_red(&v, &red)),
+                    "`{selector}` fills `{v}` — these small controls stay neutral (FR-UI-45)",
+                );
+            }
+        }
+    }
+    // …and its glyph still reads over the composited tint, in both themes: the hover
+    // ink is a text colour on a translucent fill over the card.
+    let card = strip_comments(&read("src/components/Card.module.css"));
+    let card_fill = var_token(&rule_body(&card, ".card"), "background").expect("the card paints a fill");
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+    for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
+        let (rgb, alpha) = token_rgba("--tint-hover", &map, &base);
+        let fill = composite(rgb, alpha, token_rgb(&card_fill, &map, &base));
+        for selector in [".actionIcon:hover", ".actionIcon[data-copied]"] {
+            let ink = color_token(&body_of(selector)).unwrap_or_else(|| panic!("`{selector}` inks a token"));
+            let c = contrast(token_rgb(&ink, &map, &base), fill);
+            assert!(c >= 4.5, "{theme}: `{selector}` ({ink}) is {c:.2}:1 on the card under --tint-hover, below 4.5:1");
+        }
+    }
+
+    // (3) The ↓ control: round, 2rem, bounded where it is declared, floating on its
+    // sticky anchor rather than taking a place in the flow.
+    let down = body_of(".scrollToBottom");
+    assert_eq!(declared(&down, "border-radius").as_deref(), Some("var(--radius-pill)"), "round");
+    assert_eq!(declared(&down, "width").as_deref(), Some("2rem"), "bounded to 32px wide");
+    assert_eq!(declared(&down, "height").as_deref(), Some("2rem"), "bounded to 32px tall");
+    assert_eq!(declared(&down, "position").as_deref(), Some("absolute"), "it floats");
+    let anchor = body_of(".scrollAnchor");
+    assert_eq!(declared(&anchor, "height").as_deref(), Some("0"), "its anchor takes no height of its own");
+    assert_eq!(declared(&anchor, "position").as_deref(), Some("sticky"), "the anchor rides the scroller's visible bottom");
+    assert_eq!(declared(&anchor, "bottom").as_deref(), Some("0"), "…at its bottom edge");
+    // It adds zero height only because its negative top margin takes back exactly the
+    // flex gap the transcript puts between its children — two declarations that must move
+    // together, so the coupling is pinned rather than left to a layout spec to notice.
+    let gap = declared(&rule_body(&css, ".log"), "gap").expect("the transcript declares its inter-turn gap");
+    assert_eq!(
+        declared(&anchor, "margin-top").as_deref(),
+        Some(format!("calc(-1 * {gap})").as_str()),
+        "the anchor's negative margin must equal `.log`'s gap ({gap})",
+    );
+}
+
+/// The pill composer (S-619, [FR-UI-45], CR-204 L3): one container with the pill
+/// radius, a hairline and the composer lift; its focus ring drawn on the container
+/// (`:focus-within`) in the global ring's token, and the input drawing none of its
+/// own; an input that grows to a capped height and then scrolls; and round in-pill
+/// buttons that stay inside the 40×40px a red fill may take.
+#[test]
+fn chat_composer_is_one_pill_with_its_ring_on_the_container() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let pill = rule_body(&css, ".composer");
+    assert_eq!(declared(&pill, "border-radius").as_deref(), Some("var(--radius-pill)"), "the composer is a pill");
+    assert_eq!(declared(&pill, "box-shadow").as_deref(), Some("var(--elevation-composer)"), "it takes the composer lift");
+    // A visible NEUTRAL hairline: 1px solid in a neutral token — never transparent
+    // (no edge at all) and never the signal red, which FR-UI-45 keeps off the pill at
+    // rest (its red is the focus ring and the sendable Send).
+    let border = css_values(&declared(&pill, "border").expect("the pill declares its border"));
+    assert_eq!(border.get(..2).map(|v| v.join(" ")).as_deref(), Some("1px solid"), "a hairline border: {border:?}");
+    let edge = border.get(2).cloned().unwrap_or_default();
+    let pill_tokens = strip_comments(&read("src/styles/tokens.css"));
+    let pill_red = signal_red_tokens(&declarations(&block_after(&pill_tokens, ":root")));
+    assert!(
+        edge.starts_with("var(--border-") && !paints_signal_red(&edge, &pill_red),
+        "the pill's edge is a neutral border token, not `{edge}`",
+    );
+
+    let ring = rule_body(&css, ".composer:focus-within");
+    let outline = declared(&ring, "outline").expect("the pill draws the focus ring");
+    assert!(outline.starts_with("2px solid") && outline.contains("var(--focus-ring)"), "the global ring's geometry and token: {outline}");
+    assert_eq!(
+        declared(&rule_body(&css, ".input:focus-visible"), "outline").as_deref(),
+        Some("none"),
+        "the input draws no second ring inside the pill's",
+    );
+
+    let input = rule_body(&css, ".input");
+    assert_eq!(declared(&input, "overflow-y").as_deref(), Some("auto"), "a capped input scrolls");
+    assert_eq!(declared(&input, "resize").as_deref(), Some("none"), "the pill sizes the input, not a drag handle");
+    for p in ["border", "background"] {
+        assert!(
+            declared(&input, p).is_some_and(|v| v == "0" || v == "transparent"),
+            "the input has no `{p}` of its own — the pill is the field (found {:?})",
+            declared(&input, p),
+        );
+    }
+    // The cap: the primitive grows the textarea to a bounded number of lines.
+    let view = strip_tsx_comments(&read("src/views/chat/ChatView.tsx"));
+    let composer = &view[view.find("function Composer(").expect("`Composer` is defined")..];
+    let input_tag = &composer[composer.find("<ComposerPrimitive.Input").expect("the composer renders its input")..];
+    let input_tag = &input_tag[..input_tag.find("/>").expect("the input tag closes")];
+    let rows = |prop: &str| {
+        input_tag
+            .split(&format!("{prop}={{"))
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .and_then(|n| n.trim().parse::<u32>().ok())
+    };
+    assert_eq!(rows("minRows"), Some(1), "the input starts at ONE line (FR-UI-45)");
+    assert!(!input_tag.contains("rows={"), "no fixed `rows` competes with the growth bounds");
+    let max_rows = rows("maxRows");
+    assert!(max_rows.is_some_and(|n| (2..=12).contains(&n)), "the input grows to a capped height (maxRows: {max_rows:?})");
+
+    // Round, small buttons; Send neutral until sendable (the red half is
+    // `RED_FILL_COVERAGE`'s).
+    let buttons = rule_body(&css, ".composerMenu, .send, .stop");
+    assert_eq!(declared(&buttons, "border-radius").as_deref(), Some("var(--radius-pill)"), "the in-pill buttons are round");
+    for dimension in ["width", "height"] {
+        let px = declared(&buttons, dimension).as_deref().and_then(length_px);
+        assert!(px.is_some_and(|px| px <= 40.0), "the in-pill buttons bound their `{dimension}` to ≤ 40px ({px:?})");
+    }
+    // Each rounded chat control keeps its own radius on keyboard focus: the global
+    // `:focus-visible` ring (`styles/base.css`) sets `--radius-sm` and is emitted after
+    // this module at the same specificity, so a control that does not restate its
+    // radius under `:focus-visible` squares off while focused.
+    let base_css = strip_comments(&read("src/styles/base.css"));
+    assert!(
+        declared(&rule_body(&base_css, ":focus-visible"), "border-radius").is_some(),
+        "the global ring sets a radius — if it stops, this check can go",
+    );
+    let rules = aggregated_rules(&css);
+    let radius_of = |selector: &str| {
+        rules.iter().find(|(s, _)| s == selector).and_then(|(_, b)| declared(b, "border-radius"))
+    };
+    for control in [".threadItem", ".threadDelete", ".composerMenu", ".send", ".stop", ".railToggle"] {
+        let own = radius_of(control).unwrap_or_else(|| panic!("`{control}` declares its radius"));
+        assert_eq!(
+            radius_of(&format!("{control}:focus-visible")),
+            Some(own.clone()),
+            "`{control}` restates its radius ({own}) under `:focus-visible`, or the global ring squares it",
+        );
+    }
+
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let red = signal_red_tokens(&declarations(&block_after(&tokens, ":root")));
+    assert!(
+        declared(&rule_body(&css, ".send"), "background").is_some_and(|v| !paints_signal_red(&v, &red)),
+        "an empty composer's Send is neutral",
+    );
+    assert!(
+        declared(&rule_body(&css, ".send:not(:disabled)"), "background").is_some_and(|v| paints_signal_red(&v, &red)),
+        "a sendable Send is the signal red",
+    );
+    assert!(
+        !all_style_rules(&css).iter().any(|(s, _)| s.starts_with(".send") && s.contains("::before")),
+        "the sendable signal is the round button's own fill — S-618's dot is gone (one signal, not two)",
+    );
+}
+
+/// The consent chip (S-619, CR-204 C8): after consent the lead is ONE line — the chip
+/// never wraps, and its long line ellipsises instead of growing a second row.
+#[test]
+fn chat_consent_chip_holds_to_one_line() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    assert_eq!(declared(&rule_body(&css, ".statusChip"), "white-space").as_deref(), Some("nowrap"), "the chip never wraps");
+    let line = rule_body(&css, ".statusLine");
+    assert_eq!(declared(&line, "text-overflow").as_deref(), Some("ellipsis"), "a long line ellipsises");
+    assert_eq!(declared(&line, "overflow").as_deref(), Some("hidden"));
+    assert_eq!(declared(&line, "min-width").as_deref(), Some("0"), "the line may shrink inside the chip");
+}
+
 /// The house's signal hues — the tokens that mean something (danger, in-progress,
 /// done) rather than the neutral inks (`--text-1`/`--text-2`, asserted against every
 /// surface in `text_and_signal_contrast_meets_wcag_aa_in_both_themes`) and the
 /// on-fill inks (`--ink-on-*`, asserted against their hues in `badge_ink_meets_…`).
 /// Carrying one of these as `color:` is the decision this module polices.
+/// The chat view's stylesheets — `Chat.module.css` and every module beside it
+/// (S-622's `CodeBlock.module.css`, S-623's `ThreadList.module.css`) — as
+/// `(file name, comment-stripped css)`, ENUMERATED from the directory rather than
+/// listed. The chat guards walk all of them: a rule split out of the shared
+/// stylesheet, or born beside it, is the same chat UI. When S-623 moved the rail's
+/// rename styling into its own module, every chat guard that read only
+/// `Chat.module.css` went blind to it — the closed-list failure one level up.
+fn chat_stylesheets() -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    collect_module_css(&ui_dir().join("src/views/chat"), &mut files);
+    files.sort();
+    let sheets: Vec<(String, String)> = files
+        .iter()
+        .map(|path| {
+            let name = path.file_name().and_then(|n| n.to_str()).expect("a UTF-8 file name").to_string();
+            let css = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            (name, strip_comments(&css))
+        })
+        .collect();
+    assert!(
+        sheets.iter().any(|(name, _)| name == "Chat.module.css"),
+        "the walk finds the shared chat stylesheet",
+    );
+    sheets
+}
+
+/// Every style rule across the chat stylesheets — rungs included — with its file.
+fn chat_style_rules(sheets: &[(String, String)]) -> Vec<(String, String, String)> {
+    sheets
+        .iter()
+        .flat_map(|(file, css)| all_style_rules(css).into_iter().map(move |(sel, body)| (file.clone(), sel, body)))
+        .collect()
+}
+
+/// Every rule body across the chat stylesheets whose full selector list is exactly
+/// `selector`, in source order: the top-level rule, a later duplicate and a rung
+/// override alike, so a measurement covers each rule that can win the cascade, not
+/// just the first. CSS Modules scope a class to its file, so one name in two chat
+/// stylesheets is two different classes — refused here rather than guessed.
+fn chat_rules_named(sheets: &[(String, String)], selector: &str) -> Vec<String> {
+    let found: Vec<(String, String, String)> =
+        chat_style_rules(sheets).into_iter().filter(|(_, sel, _)| sel == selector).collect();
+    assert!(!found.is_empty(), "rule `{selector}` not found in any chat stylesheet");
+    let file = found[0].0.clone();
+    assert!(
+        found.iter().all(|(f, _, _)| *f == file),
+        "`{selector}` is declared in more than one chat stylesheet — they are different classes, \
+         so classify the one this entry means",
+    );
+    found.into_iter().map(|(_, _, body)| body).collect()
+}
+
+/// The fill a selector's own rules paint: the LAST `background: var(--…)` across
+/// them (the cascade's winner), or `None` when it paints none of its own.
+fn chat_own_fill(sheets: &[(String, String)], selector: &str) -> Option<String> {
+    chat_rules_named(sheets, selector).iter().rev().find_map(|body| var_token(body, "background"))
+}
+
+/// A `color:` value in a rule body that is not a token. A chat ink must be a
+/// `var(--…)` (or a keyword that paints no colour of its own) for the
+/// classifications to measure it: a literal escapes every contrast check.
+fn literal_color(body: &str) -> Option<String> {
+    const KEYWORDS: [&str; 6] = ["inherit", "currentColor", "currentcolor", "transparent", "initial", "unset"];
+    declarations_of(body)
+        .into_iter()
+        .filter(|(name, _)| name == "color")
+        .map(|(_, value)| value.trim().to_string())
+        .find(|value| !value.starts_with("var(") && !KEYWORDS.contains(&value.as_str()))
+}
+
 const SIGNAL_HUES: &[&str] = &[
     "--color-accent",
     "--color-accent-warm",
@@ -1318,7 +2181,6 @@ const SIGNAL_HUES: &[&str] = &[
 /// it declares one (the test checks the two agree), else the fill it sits on — the
 /// view card's `--surface-1` for the transcript (S-308).
 const SIGNAL_INK_COVERAGE: &[(&str, &str, &str)] = &[
-    (".threadDelete:hover, .threadDelete:focus-visible", "--surface-2", "UiAffordance: rail ✕ icon button"),
     (".streaming::after", "--surface-1", "UiAffordance: streaming caret glyph on the card fill"),
 ];
 
@@ -1333,10 +2195,11 @@ const SIGNAL_INK_COVERAGE: &[(&str, &str, &str)] = &[
 /// to be CLASSIFIED, so the omission fails loudly instead of passing silently.
 #[test]
 fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
-    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let sheets = chat_stylesheets();
     // Rungs included: a signal ink re-introduced inside a `@media` block is just as
-    // much a signal ink, and a top-level-only walk would never see it.
-    for (selector, body) in all_style_rules(&css) {
+    // much a signal ink, and a top-level-only walk would never see it. Every chat
+    // stylesheet, not only the shared one.
+    for (_, selector, body) in chat_style_rules(&sheets) {
         let Some(token) = color_token(&body) else { continue };
         if !SIGNAL_HUES.contains(&token.as_str()) {
             continue;
@@ -1360,30 +2223,32 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
     let base = declarations(&block_after(&tokens, ":root"));
     let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
     for (selector, surface, note) in SIGNAL_INK_COVERAGE {
-        let body = rule_body(&css, selector);
-        let token = color_token(&body).unwrap_or_else(|| {
-            panic!("`{selector}` is classified ({note}) but declares no `color: var(--…)`")
-        });
-        assert!(
-            SIGNAL_HUES.contains(&token.as_str()),
-            "`{selector}` is classified as a signal-hue ink ({note}) but now inks \
-             `{token}`, which is not a signal hue — drop it from `SIGNAL_INK_COVERAGE`",
-        );
+        // Every rule that inks it — a later duplicate or a rung override can win the
+        // cascade, so each one is measured, not only the first.
+        let inks: Vec<String> = chat_rules_named(&sheets, selector).iter().filter_map(|b| color_token(b)).collect();
+        assert!(!inks.is_empty(), "`{selector}` is classified ({note}) but declares no `color: var(--…)`");
         // A classified affordance still has to BE one: ≥3:1 against what it is painted
         // on, in both themes. The surface is the rule's own fill when it declares one.
-        if let Some(own) = var_token(&body, "background") {
+        if let Some(own) = chat_own_fill(&sheets, selector) {
             assert_eq!(
                 own, *surface,
                 "`{selector}` paints its own `{own}` fill; classify it against that surface",
             );
         }
-        for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
-            let c = contrast(token_rgb(&token, &map, &base), token_rgb(surface, &map, &base));
+        for token in &inks {
             assert!(
-                c >= 3.0,
-                "{theme}: `{selector}` ({note}) inks {token} at {c:.2}:1 on {surface}, below the \
-                 3:1 non-text floor a UI affordance must clear",
+                SIGNAL_HUES.contains(&token.as_str()),
+                "`{selector}` is classified as a signal-hue ink ({note}) but now inks \
+                 `{token}`, which is not a signal hue — drop it from `SIGNAL_INK_COVERAGE`",
             );
+            for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
+                let c = contrast(token_rgb(token, &map, &base), token_rgb(surface, &map, &base));
+                assert!(
+                    c >= 3.0,
+                    "{theme}: `{selector}` ({note}) inks {token} at {c:.2}:1 on {surface}, below the \
+                     3:1 non-text floor a UI affordance must clear",
+                );
+            }
         }
     }
 }
@@ -1410,7 +2275,7 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
 /// OWN fill, not one of these shared ones — by list (b) two tests above.
 #[test]
 fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
-    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let sheets = chat_stylesheets();
     let card = strip_comments(&read("src/components/Card.module.css"));
     let callout = strip_comments(&read("src/components/Callout.module.css"));
     let tokens = strip_comments(&read("src/styles/tokens.css"));
@@ -1419,16 +2284,60 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
 
     let card_fill = var_token(&rule_body(&card, ".card"), "background")
         .expect("the shared `.card` declares a `background: var(--…)` fill");
-    let rail_fill = var_token(&rule_body(&css, ".rail"), "background")
-        .expect("`.rail` declares a `background: var(--…)` fill");
-    let raised_fill = var_token(&rule_body(&css, ".codeHeader"), "background")
+    // The rail renders no card since S-619 (CR-204 L6): it sits on the PAGE surface,
+    // the fill `body` paints (`styles/base.css`), and declares none of its own.
+    let base_css = strip_comments(&read("src/styles/base.css"));
+    let page_fill = var_token(&rule_body(&base_css, "body"), "background")
+        .expect("`body` declares a `background: var(--…)` page fill");
+    assert_eq!(chat_own_fill(&sheets, ".rail"), None, "the cardless rail declares no fill");
+    let rail_fill = page_fill;
+    let composer_fill = chat_own_fill(&sheets, ".composer")
+        .expect("`.composer` declares a `background: var(--…)` fill");
+    let chip_fill = chat_own_fill(&sheets, ".statusChip")
+        .expect("`.statusChip` declares a `background: var(--…)` fill");
+    let sendable_fill = chat_own_fill(&sheets, ".send:not(:disabled)")
+        .expect("`.send:not(:disabled)` declares a `background: var(--…)` fill");
+    let trash_hover_fill = chat_own_fill(&sheets, ".threadDelete:hover, .threadDelete:focus-visible")
+        .expect("the hovered trash declares a `background: var(--…)` fill");
+    let raised_fill = chat_own_fill(&sheets, ".codeHeader")
         .expect("`.codeHeader` declares a `background: var(--…)` fill");
-    let accent_fill = var_token(&rule_body(&css, ".send"), "background")
+    // S-618 (CR-204 L7): neither is the signal red any more — a text-sized control is
+    // never a red fill. The destructive confirm is an INVERTED neutral (`--text-1`
+    // fill), and Send a raised neutral; each is still measured against ITS OWN fill.
+    // The delete confirmation is its own raised panel, and Cancel a button with its
+    // own fill inside it — neither sits on the page the rail does.
+    let confirm_fill = chat_own_fill(&sheets, ".threadConfirm")
+        .expect("`.threadConfirm` declares a `background: var(--…)` fill");
+    let cancel_fill = chat_own_fill(&sheets, ".threadConfirmCancel")
+        .expect("`.threadConfirmCancel` declares a `background: var(--…)` fill");
+    let stop_fill = chat_own_fill(&sheets, ".stop").expect("`.stop` declares a `background: var(--…)` fill");
+    // S-623: the inline rename field paints its own fill inside the row pill.
+    let rename_fill = chat_own_fill(&sheets, ".renameInput")
+        .expect("`.renameInput` declares a `background: var(--…)` fill");
+    let delete_fill = chat_own_fill(&sheets, ".threadConfirmDelete")
+        .expect("`.threadConfirmDelete` declares a `background: var(--…)` fill");
+    let send_fill = chat_own_fill(&sheets, ".send")
         .expect("`.send` declares a `background: var(--…)` fill");
-    let viewport_fill = var_token(&rule_body(&css, ".mermaidViewport"), "background")
+    let scroll_fill = chat_own_fill(&sheets, ".scrollToBottom")
+        .expect("`.scrollToBottom` declares a `background: var(--…)` fill");
+    // S-625: the preset menu's rows sit on the menu's fill, or on the raised fill when
+    // checked or hovered; the chip and its clear control on the chip's own fill.
+    let menu_fill = chat_own_fill(&sheets, ".presetMenu")
+        .expect("`.presetMenu` declares a `background: var(--…)` fill");
+    let row_fill = chat_own_fill(&sheets, ".presetItem[aria-checked=\"true\"]")
+        .expect("the checked preset row declares a `background: var(--…)` fill");
+    let preset_chip_fill = chat_own_fill(&sheets, ".presetChip")
+        .expect("`.presetChip` declares a `background: var(--…)` fill");
+    let viewport_fill = chat_own_fill(&sheets, ".mermaidViewport")
         .expect("`.mermaidViewport` declares a `background: var(--…)` fill");
     let callout_fill = var_token(&rule_body(&callout, ".callout"), "background")
         .expect("the shared `.callout` declares a `background: var(--…)` fill");
+    // S-621: a welcome chip is a pill with a fill of its own — enabled, and greyed
+    // out before consent. The greeting line sits on the card, like `.empty`.
+    let welcome_chip_fill = chat_own_fill(&sheets, ".chip")
+        .expect("`.chip` declares a `background: var(--…)` fill");
+    let welcome_chip_disabled_fill = chat_own_fill(&sheets, ".chip:disabled")
+        .expect("`.chip:disabled` declares a `background: var(--…)` fill");
 
     // The classification: selector → the fill token it visually sits on, traced
     // against the component tree (`ChatView.tsx`, `MermaidBlock.tsx`) rather than
@@ -1439,15 +2348,26 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
         (".markdown a", card_fill.as_str()),
         (".railEmpty, .railError", rail_fill.as_str()),
         (".railError", rail_fill.as_str()),
-        (".railToggle", raised_fill.as_str()), // own fill
+        // S-619: the toggle is a ghost on the page; its hover tint and the rows'
+        // pill tints are translucent, measured composited in
+        // `chat_rail_is_cardless_with_a_red_marker_and_a_hidden_idle_trash`.
+        (".railToggle", rail_fill.as_str()),
+        (".railToggle:hover", rail_fill.as_str()),
         (".threadItem", rail_fill.as_str()),
         (".threadDelete", rail_fill.as_str()),
-        (".threadConfirmText", raised_fill.as_str()), // `.threadConfirm`'s own fill
-        (".threadConfirmDelete", accent_fill.as_str()), // own fill
-        (".threadConfirmCancel", rail_fill.as_str()),   // own fill (== --surface-1)
+        (".threadDelete:hover, .threadDelete:focus-visible", trash_hover_fill.as_str()), // own fill
+        (".threadConfirmText", confirm_fill.as_str()), // `.threadConfirm`'s own fill
+        (".threadConfirmDelete", delete_fill.as_str()), // own fill
+        (".threadConfirmCancel", cancel_fill.as_str()), // own fill
         (".providerLine", callout_fill.as_str()),       // the shared `Callout`'s own fill
-        (".budgetLine", callout_fill.as_str()),         // S-309 status band, inside the same `Callout`
+        (".budgetLine", callout_fill.as_str()),         // the consent `Callout`, and the chip's band (== --surface-2)
+        (".statusChip", chip_fill.as_str()),            // own fill (S-619 consent chip)
+        (".statusLabel", chip_fill.as_str()),
+        (".statusLine", chip_fill.as_str()),
         (".empty", card_fill.as_str()),
+        (".welcomeTitle", card_fill.as_str()),
+        (".chip", welcome_chip_fill.as_str()), // own fill
+        (".chip:disabled", welcome_chip_disabled_fill.as_str()), // own fill
         (".activitySummary", card_fill.as_str()),
         (".activityLabel", card_fill.as_str()),
         (".activityMeta", card_fill.as_str()),
@@ -1468,9 +2388,31 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
         (".mermaidFallback", viewport_fill.as_str()), // sibling of `.mermaidScale` INSIDE `.mermaidViewport`, not `.codeHeader`
         (".action", card_fill.as_str()),
         (".action:hover", card_fill.as_str()),
-        (".input", rail_fill.as_str()), // own fill (== --surface-1)
-        (".send", accent_fill.as_str()), // own fill
-        (".stop", raised_fill.as_str()), // own fill (== --surface-2)
+        // S-620: the icon action bar. Its hover/focus fill is a translucent tint,
+        // measured composited in `chat_turns_are_bubbles_with_an_icon_action_bar_and_a_scroll_control`.
+        (".actionIcon", card_fill.as_str()),
+        (".actionIcon:hover, .actionIcon:focus-visible", card_fill.as_str()),
+        (".actionIcon[data-copied]", card_fill.as_str()),
+        (".scrollToBottom", scroll_fill.as_str()), // own fill
+        (".composerHint", card_fill.as_str()),     // under the pill, on the card
+        (".input", composer_fill.as_str()), // no fill of its own: the pill's (S-619)
+        (".composerMenu", composer_fill.as_str()),
+        (".send", send_fill.as_str()),   // own fill: neutral while there is nothing to send
+        (".send:not(:disabled)", sendable_fill.as_str()), // own fill: the signal red, white ink
+        (".stop", stop_fill.as_str()), // own fill
+        // S-625: a row is measured on both fills it can sit on — the menu's own, and
+        // the checked / hovered row's.
+        (".presetItem", menu_fill.as_str()),
+        (".presetItem", row_fill.as_str()),
+        (".presetDescription", menu_fill.as_str()),
+        (".presetDescription", row_fill.as_str()),
+        (".presetChip", preset_chip_fill.as_str()), // own fill
+        (".presetChipClear", preset_chip_fill.as_str()),
+        (".presetChipClear:hover", preset_chip_fill.as_str()),
+        // S-623 (`ThreadList.module.css`): the rename field, and its refusal note
+        // under the row on the page.
+        (".renameInput", rename_fill.as_str()), // own fill
+        (".renameRefused", rail_fill.as_str()),
     ];
 
     // Every top-level rule (rungs included) that inks a NEUTRAL colour must be
@@ -1482,17 +2424,29 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
     const MERMAID_SVG_LABEL_SELECTOR: &str = ".mermaidScale :global(.mermaid .label), \
         .mermaidScale :global(.mermaid .label text), .mermaidScale :global(.mermaid .label span), \
         .mermaidScale :global(.mermaid .cluster-label text), .mermaidScale :global(.mermaid .cluster-label span)";
-    for (selector, body) in all_style_rules(&css) {
-        if selector == MERMAID_SVG_LABEL_SELECTOR || selector == ".activityRunning" || selector == ".activityDone" {
+    for (file, selector, body) in chat_style_rules(&sheets) {
+        // An ink that is not a token cannot be measured by any list here, so it is
+        // refused outright rather than skipped.
+        if let Some(literal) = literal_color(&body) {
+            panic!("`{selector}` ({file}) inks the literal `{literal}` — chat inks are `var(--…)` tokens");
+        }
+        if file == "Chat.module.css"
+            && (selector == MERMAID_SVG_LABEL_SELECTOR || selector == ".activityRunning" || selector == ".activityDone")
+        {
             continue;
         }
         let Some(token) = color_token(&body) else { continue };
         if SIGNAL_HUES.contains(&token.as_str()) {
             continue;
         }
+        // The highlighter's `--syntax-*` palette in its own module is measured on the
+        // code-block fill by `syntax_tokens_clear_wcag_aa_on_the_code_block_fill_in_every_theme_block`.
+        if file == "CodeBlock.module.css" && token.starts_with("--syntax-") {
+            continue;
+        }
         assert!(
             coverage.iter().any(|(sel, _)| *sel == selector),
-            "`{selector}` inks the neutral colour `{token}` but is not classified in \
+            "`{selector}` ({file}) inks the neutral colour `{token}` but is not classified in \
              `every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa`'s \
              `coverage` — name the fill it sits on so a new rule cannot ship its text past \
              the AA floor unmeasured",
@@ -1502,22 +2456,35 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
     // …and the reverse: a classified selector that no longer declares a `color:` —
     // or now inks a signal hue instead — is stale and must be dropped or moved.
     for (selector, surface) in &coverage {
-        let body = rule_body(&css, selector);
-        let token = color_token(&body).unwrap_or_else(|| {
-            panic!("`{selector}` is classified but declares no `color: var(--…)`")
-        });
-        assert!(
-            !SIGNAL_HUES.contains(&token.as_str()),
-            "`{selector}` is classified as a neutral ink but now inks the signal hue \
-             `{token}` — move it to `SIGNAL_INK_COVERAGE` instead",
-        );
-        for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
-            let c = contrast(token_rgb(&token, &map, &base), token_rgb(surface, &map, &base));
+        // Every rule that inks it — a later duplicate or a rung override can win the
+        // cascade, so each one is measured, not only the first.
+        let inks: Vec<String> = chat_rules_named(&sheets, selector).iter().filter_map(|b| color_token(b)).collect();
+        assert!(!inks.is_empty(), "`{selector}` is classified but declares no `color: var(--…)`");
+        // A rule that paints its own OPAQUE fill is measured on that fill: the entry
+        // cannot name the surface around it instead (a translucent tint is measured
+        // composited over its surface by the tests named beside those entries).
+        if let Some(own) = chat_own_fill(&sheets, selector) {
+            let opaque = [theme_map(&base, None), theme_map(&base, Some(&light))]
+                .iter()
+                .all(|map| token_rgba(&own, map, &base).1 >= 1.0);
+            if opaque {
+                assert_eq!(own, *surface, "`{selector}` paints its own `{own}` fill; classify it against that surface");
+            }
+        }
+        for token in &inks {
             assert!(
-                c >= 4.5,
-                "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on {surface}, below the 4.5:1 \
-                 AA body minimum",
+                !SIGNAL_HUES.contains(&token.as_str()),
+                "`{selector}` is classified as a neutral ink but now inks the signal hue \
+                 `{token}` — move it to `SIGNAL_INK_COVERAGE` instead",
             );
+            for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
+                let c = contrast(token_rgb(token, &map, &base), token_rgb(surface, &map, &base));
+                assert!(
+                    c >= 4.5,
+                    "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on {surface}, below the 4.5:1 \
+                     AA body minimum",
+                );
+            }
         }
     }
 }
@@ -2501,4 +3468,92 @@ fn every_module_style_key_a_view_uses_is_defined_in_the_stylesheet_it_imports() 
         stale.len(),
         if stale.len() == 1 { "y" } else { "ies" },
     );
+}
+
+// ── Syntax-highlight palette (S-622, CR-204 C4, FR-UI-47) ────────────────────
+
+/// Every syntax colour the code-block module consumes is a `--syntax-*` token
+/// declared in ALL FOUR theme blocks, and each clears WCAG 2.1 AA (4.5:1, body
+/// text) on the code-block fill in every one of them. The fill is READ from the
+/// block chrome rule in `Chat.module.css` rather than assumed, so a later restyle
+/// of the block re-measures the palette instead of passing on a stale pairing.
+/// No syntax colour is the signal red, which stays signal-only (ADR-44).
+#[test]
+fn syntax_tokens_clear_wcag_aa_on_the_code_block_fill_in_every_theme_block() {
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let blocks = [
+        (":root (dark default)", theme_map(&base, None)),
+        (":root[data-theme=\"dark\"]", theme_map(&base, Some(&declarations(&block_after(&tokens, ":root[data-theme=\"dark\"]"))))),
+        (":root[data-theme=\"light\"]", theme_map(&base, Some(&declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"))))),
+        (
+            "@media (prefers-color-scheme: light) :root:not([data-theme])",
+            theme_map(&base, Some(&declarations(&block_after(&tokens, ":root:not([data-theme])")))),
+        ),
+    ];
+
+    // The fill: whatever `.codeBlock`'s own background token is.
+    let chat = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let fill = aggregated_rules(&chat)
+        .into_iter()
+        .filter(|(sel, _)| sel == ".codeBlock")
+        .find_map(|(_, body)| var_token(&body, "background"))
+        .expect("`.codeBlock` declares its background as a token");
+
+    // The palette: every token the code-block module consumes.
+    let module = strip_comments(&read("src/views/chat/CodeBlock.module.css"));
+    let mut consumed: Vec<String> = module
+        .match_indices("var(--")
+        .map(|(at, _)| {
+            let rest = &module[at + "var(".len()..];
+            rest[..rest.find([')', ',']).unwrap()].trim().to_string()
+        })
+        .filter(|name| name.starts_with("--syntax-"))
+        .collect();
+    consumed.sort();
+    consumed.dedup();
+    assert_eq!(consumed.len(), 7, "the module colours from the seven syntax tokens: {consumed:?}");
+    let declared_once_per_block: Vec<String> = base.keys().filter(|k| k.starts_with("--syntax-")).cloned().collect();
+    assert_eq!(declared_once_per_block, consumed, "tokens.css declares exactly the syntax tokens the module consumes");
+    for name in &consumed {
+        assert_eq!(tokens.matches(&format!("{name}:")).count(), 4, "`{name}` is declared once per theme block");
+    }
+
+    let red = hex_rgb(base.get("--so-red").expect("--so-red"));
+    for (block, map) in &blocks {
+        let surface = token_rgb(&fill, map, &base);
+        for name in &consumed {
+            let ink = token_rgb(name, map, &base);
+            let ratio = contrast(ink, surface);
+            println!("{block}: {name} on {fill} = {ratio:.2}:1");
+            assert!(ratio >= 4.5, "{block}: {name} on the code-block fill {fill} is {ratio:.2}:1, below 4.5:1 AA");
+            assert_ne!(ink, red, "{block}: {name} is the signal red, which stays signal-only");
+        }
+    }
+}
+
+/// Most contrast guards in this file measure two theme blocks — `:root` (the dark
+/// default) and `:root[data-theme="light"]` — while `tokens.css` declares four: the
+/// explicit `[data-theme="dark"]` and the first-visit `@media (prefers-color-scheme:
+/// light) :root:not([data-theme])` too. That is sound only while the other two are
+/// copies: the first-visit block IS the light block, and the explicit dark block
+/// overrides exactly the light block's tokens with `:root`'s own values. Pinned here,
+/// once, so a value that drifts in one block cannot pass every two-block measurement.
+#[test]
+fn the_four_theme_blocks_agree_so_two_block_measurements_cover_all_four() {
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let dark = declarations(&block_after(&tokens, ":root[data-theme=\"dark\"]"));
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+    let first_visit = declarations(&block_after(&tokens, ":root:not([data-theme])"));
+    assert!(!light.is_empty(), "the light block declares its overrides");
+    assert_eq!(first_visit, light, "the first-visit light block is the explicit light block, token for token");
+    assert_eq!(
+        dark.keys().collect::<Vec<_>>(),
+        light.keys().collect::<Vec<_>>(),
+        "the explicit dark block overrides exactly the tokens the light block does",
+    );
+    for (name, value) in &dark {
+        assert_eq!(base.get(name), Some(value), "`{name}` in the explicit dark block equals `:root`'s dark default");
+    }
 }

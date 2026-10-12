@@ -49,6 +49,20 @@
 //! `logos init -i` surfaces this as its optional "install git hooks" step —
 //! [`install`] is the seam that story calls; this module owns the mechanism.
 //!
+//! # The Claude Code session-start hook ([S-638], [FR-IN-07], [ADR-49])
+//!
+//! A different hook for a different host, kept here because it is hook
+//! installation and not because it shares code with the git hooks: the
+//! `quality_report` submodule materializes the Claude
+//! Code `SessionStart` quality-report hook (`logos hook --emit`, and `logos init
+//! -i`'s step). It lives in the core, outside the wiki, so it survives the wiki
+//! leaving the public build; [`EmitAction`](crate::hooks::EmitAction) — the
+//! outcome vocabulary it shares with the wiki's skill emit — is defined here for
+//! the same reason.
+//!
+//! [S-638]: ../../../docs/planning/journal.md#s-638-the-quality-report-hook-is-a-core-command-outside-the-wiki
+//! [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+//! [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
 //! [S-022]: ../../../docs/planning/journal.md#s-022-incremental-sync-hardening-with-watcher-and-git-hooks
 //! [FR-SY-05]: ../../../docs/specs/requirements/FR-SY-05.md
 //! [FR-SY-06]: ../../../docs/specs/requirements/FR-SY-06.md
@@ -65,8 +79,54 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+mod quality_report;
+
 #[cfg(test)]
 mod tests;
+
+pub use quality_report::{
+    materialize_quality_report as materialize_quality_report_hook, HookEmitSummary,
+    QUALITY_REPORT_HOOK_SCRIPT_REL, SETTINGS_REL,
+};
+
+/// What materialization did to a Logos-managed artifact — the session-start
+/// hook ([FR-IN-07]) and, sharing the shape for a uniform CLI JSON surface, the
+/// wiki skill ([FR-WK-08]).
+///
+/// The four variants partition on the two questions a consumer actually asks:
+/// *was something already there* and *did the user ask for it to be replaced*.
+/// [`Self::Forced`] answers "yes and yes" and is the only variant that implies
+/// local edits were discarded — so a write neither the user forced nor a fresh
+/// install must not report it ([CR-095]).
+///
+/// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
+/// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmitAction {
+    /// Nothing was present; the artifact was written for the first time.
+    Created,
+    /// An artifact was already present and `--force` re-materialized it,
+    /// **overwriting local edits**.
+    Forced,
+    /// An artifact was already present and was rewritten *without* `--force`,
+    /// because Logos itself needed it changed — a drifted managed entry
+    /// reconciled to the current spec, or a retirement swept ([CR-095]).
+    ///
+    /// Distinct from [`Self::Forced`] because no local edit was discarded and
+    /// the user asked for nothing: reporting `forced` here told a consumer a
+    /// destructive overwrite had happened when none had ([CR-095]). Emitted only
+    /// by the hook materializer — the skill's skip-if-present means an unforced
+    /// re-emit never reaches its write path.
+    Reconciled,
+    /// An artifact was already present and `--force` was not given — left
+    /// untouched, preserving local edits (skip-if-present, [FR-IN-02]
+    /// idempotence).
+    ///
+    /// [FR-IN-02]: ../../../docs/specs/requirements/FR-IN-02.md
+    Skipped,
+}
 
 /// The hooks directory, relative to the project root. Inside `.logos/` so the
 /// scripts travel with the policy directory and stay out of the user's way;

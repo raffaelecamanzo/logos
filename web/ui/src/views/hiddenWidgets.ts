@@ -23,6 +23,8 @@
  * assumed.
  */
 
+import { routeOwns } from "../routeOwns.ts";
+
 /** Every widget the register knows how to hide. Declared apart from the
  *  register's entries so removing an entry leaves every call site compiling —
  *  the widget simply renders again. */
@@ -129,9 +131,9 @@ export function isWidgetHidden(id: HideableWidget): boolean {
 }
 
 /** Does `pathname` resolve to the hidden view `view` — its route, or a sub-path
- *  of it? The same whole-segment rule `navItemMatches` spells for the sidebar. */
+ *  of it? The same whole-segment rule the sidebar's `navItemMatches` applies. */
 function inView(view: HiddenView, pathname: string): boolean {
-  return pathname === view.path || pathname.startsWith(`${view.path}/`);
+  return routeOwns(view.path, pathname);
 }
 
 /** Whether the register hides the view whose route is `path` (its sidebar entry

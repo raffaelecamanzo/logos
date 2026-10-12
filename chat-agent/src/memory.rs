@@ -40,7 +40,9 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{ensure_db_dir, open_migrated, ChatMessage, ChatRole, ChatStore};
+use crate::db::{
+    ensure_db_dir, open_migrated, ChatMessage, ChatRole, ChatStore, WRITTEN_AT_ORDINAL_SQL,
+};
 use crate::orchestrator::{
     ConversationWindow, EventSink, OrchestratorEvent, PlanStep, PriorTurn, StepRole,
     SynthesizerGrounding,
@@ -160,7 +162,11 @@ impl MemoryStore {
     /// Record one scratchpad entry at the next `ordinal` within `(thread, turn)`.
     ///
     /// The ordinal is assigned in-SQL as the turn's current max + 1, so entry
-    /// order is stable and the write is a single statement under the lock.
+    /// order is stable and the write is a single statement under the lock. The
+    /// entry is stamped with the thread's newest message ordinal (migration 3's
+    /// `written_at_ordinal`) — its question's, since a turn's scratchpad is written
+    /// before its answer is appended — which is what lets
+    /// [`ChatStore::truncate_after`] delete exactly the memory written after a cut.
     ///
     /// # Errors
     /// Returns an error if the entry cannot be serialized or the insert fails
@@ -169,13 +175,16 @@ impl MemoryStore {
         let payload = serde_json::to_string(entry).context("serializing a scratchpad entry")?;
         self.lock()
             .execute(
-                "INSERT INTO chat_scratchpad (thread_id, turn, ordinal, kind, payload, created_at)
-                 VALUES (
-                     ?1, ?2,
-                     (SELECT COALESCE(MAX(ordinal) + 1, 0)
-                        FROM chat_scratchpad WHERE thread_id = ?1 AND turn = ?2),
-                     ?3, ?4, unixepoch()
-                 )",
+                &format!(
+                    "INSERT INTO chat_scratchpad
+                         (thread_id, turn, ordinal, kind, payload, created_at, written_at_ordinal)
+                     VALUES (
+                         ?1, ?2,
+                         (SELECT COALESCE(MAX(ordinal) + 1, 0)
+                            FROM chat_scratchpad WHERE thread_id = ?1 AND turn = ?2),
+                         ?3, ?4, unixepoch(), {WRITTEN_AT_ORDINAL_SQL}
+                     )"
+                ),
                 rusqlite::params![thread_id, turn, entry.kind(), payload],
             )
             .with_context(|| {
@@ -331,6 +340,8 @@ impl MemoryStore {
     /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
     ///
     /// One row per thread (PK = `thread_id`); a second call replaces the summary.
+    /// Each write stamps the thread's newest message ordinal (migration 3), so a
+    /// summary written after a [`ChatStore::truncate_after`] cut goes with it.
     ///
     /// # Errors
     /// Returns an error if the upsert fails (e.g. the thread does not exist — the
@@ -338,10 +349,13 @@ impl MemoryStore {
     pub fn set_working_memory(&self, thread_id: i64, summary: &str) -> Result<()> {
         self.lock()
             .execute(
-                "INSERT INTO chat_working_memory (thread_id, summary, updated_at)
-                 VALUES (?1, ?2, unixepoch())
-                 ON CONFLICT(thread_id)
-                 DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at",
+                &format!(
+                    "INSERT INTO chat_working_memory (thread_id, summary, updated_at, written_at_ordinal)
+                     VALUES (?1, ?2, unixepoch(), {WRITTEN_AT_ORDINAL_SQL})
+                     ON CONFLICT(thread_id)
+                     DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at,
+                                   written_at_ordinal = excluded.written_at_ordinal"
+                ),
                 rusqlite::params![thread_id, summary],
             )
             .with_context(|| format!("setting working memory for thread {thread_id}"))?;
@@ -387,18 +401,24 @@ impl MemoryStore {
 /// `messages` is the thread **before** the current question is appended; `question`
 /// is that question. A turn is a user message plus the assistant answer that
 /// follows it (system and tool rows are not conversation). Two rules keep the
-/// window honest about regeneration:
+/// window honest about a question asked again over an uncut thread:
 ///
 /// - a user message that repeats the one before it **replaces** that earlier turn
-///   (a regenerate re-runs the user message, so the thread holds
-///   `U1, A1, U1, A1′` — only `U1, A1′` is the conversation; if the repeat was
-///   never answered, `A1` stands rather than leaving the turn blank);
-/// - a `question` that repeats the last stored user message is a regenerate **in
+///   (re-asking appends, so the thread holds `U1, A1, U1, A1′` — only `U1, A1′` is
+///   the conversation; if the repeat was never answered, `A1` stands rather than
+///   leaving the turn blank);
+/// - a `question` that repeats the last stored user message is a re-ask **in
 ///   progress**: the predecessor it is about to replace is left out.
+///
+/// Since [S-624] the chat's Regenerate and Edit cut the thread back before the
+/// question first ([`ChatStore::truncate_after`]), so they no longer leave such
+/// repeats; the rules still read a thread regenerated before that, and a client
+/// that re-asks without cutting (the no-JS form).
 ///
 /// An empty `messages` (a first turn, a deleted or unknown thread) yields no turns.
 ///
 /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+/// [S-624]: ../../docs/planning/journal.md#s-624-a-user-message-can-be-edited-and-resent-and-regenerate-truncates-in-the-store
 /// [FR-UI-20]: ../../docs/specs/requirements/FR-UI-20.md
 pub fn prior_turns(messages: &[ChatMessage], question: &str) -> Vec<PriorTurn> {
     let mut turns: Vec<PriorTurn> = Vec::new();
@@ -523,6 +543,9 @@ impl EventSink for ScratchpadSink<'_> {
             // A streamed answer chunk is a transient live preview; the authoritative
             // full text is persisted once, from `FinalAnswer` ([FR-UI-19]).
             OrchestratorEvent::AnswerDelta { .. } => Ok(()),
+            // A title belongs to the conversation, not to the turn's scratchpad: the
+            // chat surface writes it to `chat_threads.title` ([FR-UI-48]).
+            OrchestratorEvent::ThreadTitle { .. } => Ok(()),
         };
         if let Err(err) = result {
             self.capture(err);

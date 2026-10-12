@@ -15,7 +15,7 @@
 //! `…TOOLS.len()`. Registering a tool therefore means adding its name here —
 //! once — and the guards follow (S-361, [FR-CL-06]).
 //!
-//! The complementary CLI-side check lives in `cli/src/main.rs::surface_parity`,
+//! The complementary CLI-side check lives in `cli/src/lib.rs::surface_parity`,
 //! which reconciles this roster against the shipped clap definition so a tool
 //! cannot land on one surface only.
 //!
@@ -66,17 +66,6 @@ pub const TEMPORAL_TOOLS: &[&str] = &["hotspots"];
 pub const COVERAGE_TOOLS: &[&str] =
     &["coverage_ingest", "coverage_status", "coverage_refresh"];
 
-/// The wiki twins wired to the wiki store (S-053, CR-008, FR-WK-09;
-/// `wiki_materialize` added by S-263/CR-062, FR-WK-20). `wiki delete`/`wiki
-/// skill` are CLI-only — destructive/install ops off the agent surface.
-pub const WIKI_TOOLS: &[&str] = &[
-    "wiki_write",
-    "wiki_read",
-    "wiki_search",
-    "wiki_status",
-    "wiki_materialize",
-];
-
 /// The cross-service tools the **federated** backing adds on top of the
 /// single-root roster (S-248/CR-061 FR-WS-05; `workspace_reachability` by
 /// S-257, FR-WS-12; `workspace_check` by S-258, FR-WS-13; `xservice_build_deps`
@@ -95,11 +84,12 @@ pub const XSERVICE_TOOLS: &[&str] = &[
 ];
 
 /// How many tools the single-root backing registers — derived, never written.
-pub const SINGLE_ROOT: usize = NAV_TOOLS.len()
-    + QUALITY_TOOLS.len()
-    + TEMPORAL_TOOLS.len()
-    + COVERAGE_TOOLS.len()
-    + WIKI_TOOLS.len();
+///
+/// The core's own roster: the `wiki` extension's five `wiki_*` tools join it
+/// through the extension host since S-644, and are rostered with the extension
+/// (`logos-wiki/tests/wiki_parity.rs`).
+pub const SINGLE_ROOT: usize =
+    NAV_TOOLS.len() + QUALITY_TOOLS.len() + TEMPORAL_TOOLS.len() + COVERAGE_TOOLS.len();
 
 /// How many tools the federated backing registers — the single-root roster
 /// plus the cross-service family.

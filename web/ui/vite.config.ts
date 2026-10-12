@@ -28,9 +28,26 @@ import react from "@vitejs/plugin-react";
 // `logos serve --ui`; HMR/inline only ever exist in dev and never ship.
 // /assets is NOT proxied: the vendored Mermaid bundle lives in public/assets/vendor/
 // (S-196) and is served directly by Vite in dev mode.
+//
+// `virtual:logos-extensions` (S-642, FR-UI-51, CR-213) is the build-time module extension
+// UI code enters through: a default export of the `ExtensionUi` registrations the
+// build composes (`src/extensions/registry.ts`). Here it is aliased to the composed
+// entry, which registers the `chat` extension's code (S-643) — inert until a server
+// reports chat active, so the one bundle serves a build with or without `agents`; a
+// build that composes other extensions points the alias at its own entry.
+// `src/extensions/virtual.d.ts` types it for `tsc -b`, and `vitest.config.ts` carries
+// the same alias.
+// `URL.pathname` is percent-encoded (a checkout path with a space becomes `%20`, a file
+// Vite cannot find), and this config is typechecked without Node's types, so
+// `fileURLToPath` is not available: decode the one thing that differs.
+export const EXTENSIONS_ENTRY = decodeURIComponent(
+  new URL("./src/extensions/composed.ts", import.meta.url).pathname,
+);
+
 export default defineConfig({
   plugins: [react()],
   base: "/",
+  resolve: { alias: { "virtual:logos-extensions": EXTENSIONS_ENTRY } },
   // Drop bundled dependencies' inline legal/license banner comments (e.g. ECharts/
   // zrender, which embed a `github.com` license URL). The bundle must name NO
   // external origin — the no-egress fitness test (web/tests/spa_bundle.rs) forbids

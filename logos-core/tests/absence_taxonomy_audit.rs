@@ -121,6 +121,15 @@
 //! scope; the net removal is [`HF1_REMOVAL`]. Run by the hotfix itself, since
 //! the session's `fast` tier does not reach this suite for a web-only change.
 //!
+//! **Addendum, 2026-10-10 ([S-639]) — 0 rows, 0 occurrences; a move, no
+//! correction.** The CLI became a library: every line of `cli/src/main.rs` —
+//! `report_check`'s two absence lines and `surface_parity`'s two test-scope
+//! wordings among them — moved verbatim to `cli/src/lib.rs`, and `main.rs` is now
+//! the three-line composition root. The four `cli` rows name `lib.rs`; their
+//! counts and verdicts are unchanged, and the S-444 addendum above, which names
+//! `main.rs`, is left as it was written. Caught by this suite on the move itself.
+//!
+//! [S-639]: ../../docs/planning/journal.md#s-639-an-extension-host-composes-optional-capabilities-at-one-composition-root
 //! [CR-203]: ../../docs/requests/CR-203-every-web-widget-explains-itself.md
 //! [CR-206]: ../../docs/requests/CR-206-the-widget-frame-drops-the-action-line.md
 //! [S-615]: ../../docs/planning/journal.md#s-615-health-explains-its-gate-and-signal-and-gives-each-of-the-ten-dimensions-a-widget
@@ -644,7 +653,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
     ),
     (
         "cli",
-        "cli/src/main.rs",
+        "cli/src/lib.rs",
         "no rules contract",
         1,
         0,
@@ -652,7 +661,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
     ),
     (
         "cli",
-        "cli/src/main.rs",
+        "cli/src/lib.rs",
         "no-resolved-edges",
         0,
         1,
@@ -660,7 +669,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
     ),
     (
         "cli",
-        "cli/src/main.rs",
+        "cli/src/lib.rs",
         "nothing was evaluated",
         1,
         0,
@@ -668,7 +677,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
     ),
     (
         "cli",
-        "cli/src/main.rs",
+        "cli/src/lib.rs",
         "same-file-only",
         0,
         1,

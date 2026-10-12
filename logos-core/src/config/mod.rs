@@ -38,6 +38,7 @@ mod admission;
 mod chat;
 mod discovery;
 mod error;
+mod ownership;
 // `pub(crate)`: `federation::enable::candidates_for_approval` reuses
 // `globs::compile` for `--exclude` matching (FR-WS-02) rather than
 // hand-rolling a second `GlobSet` compiler.
@@ -61,6 +62,10 @@ pub use discovery::{
     DiscoveryReport, DocSymlinkDrop, OversizeSkip, UnindexedDocSymlink, ZeroAdmissionDiagnostic,
 };
 pub use error::ConfigError;
+pub use ownership::{
+    register_extension_config, SecretClaim, TableClaim, TableValidator, TomlValue,
+    RESERVED_SECRETS, RESERVED_TABLES,
+};
 /// The validated glob compiler, shared with the annotation engine's layer
 /// matching (S-014, [FR-AN-03]) so layer globs obey the same containment
 /// rules ([NFR-SE-04]) as include/exclude patterns.
@@ -138,18 +143,36 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 /// as a file the CLI loads — no second validation path is invented.
 ///
 /// # Errors
-/// [`ConfigError::Parse`] on invalid TOML or an unknown key ([FR-CF-01]), or
+/// [`ConfigError::Parse`] on invalid TOML or an unknown key ([FR-CF-01]),
 /// [`ConfigError::BadGlob`] / [`ConfigError::EscapingPattern`] if an
-/// include/exclude glob is invalid.
+/// include/exclude glob is invalid, or [`ConfigError::InvalidValue`] when an
+/// active extension rejects a table it owns ([FR-CF-09]).
 ///
 /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
+/// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
 /// [FR-UI-12]: ../../../docs/specs/requirements/FR-UI-12.md
 /// [ADR-31]: ../../../docs/specs/architecture/decisions/ADR-31.md
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
-    let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    // Each top-level table goes to the core or to the extension that claims it;
+    // a reserved table nobody claims is ignored and reported once ([FR-CF-09]).
+    let claims = ownership::registered();
+    let routed = ownership::route_config::<Config>(text, path, &claims)?;
+    ownership::report_ignored(path, &routed.ignored);
+    let mut config = routed.value;
+    // `[chat]` is the policy half of the `resolve_chat` seam, so the core reads it
+    // whoever owns it (S-643): validated by the `chat` extension when it claims the
+    // table, else by the core's own parse, exactly as before the move.
+    config.chat = if claims.owns_table("chat") {
+        ChatConfig::from_claimed(routed.reserved.get("chat"))
+    } else {
+        ChatConfig::from_document(text, path)?
+    };
+    // `[wiki]` is the `wiki` extension's (S-644): read from the table its owner
+    // validated, else — no extension claims it — ignored like any reserved table,
+    // and the core reads the defaults ([FR-CF-09]).
+    config.wiki = WikiConfig::from_claimed(
+        routed.reserved.get("wiki").filter(|_| claims.owns_table("wiki")),
+    );
     config.validate()?;
     Ok(config)
 }

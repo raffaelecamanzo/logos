@@ -1,0 +1,27 @@
+/*
+ * The rail's inline rename (S-623, FR-UI-48, CR-204 C3) — local to ThreadList so
+ * the shared chat stylesheet stays untouched. The field takes the title button's
+ * place in the row pill and keeps its size and type, so the row does not jump when
+ * a rename starts; the refusal note sits under the row like the delete confirm.
+ * Its focus ring is the global `:focus-visible` one. Every value is a token.
+ */
+.renameInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  padding: calc(var(--space-2) - 1px) calc(var(--space-3) - 1px);
+}
+.renameInput[aria-invalid="true"] {
+  border-color: var(--color-accent);
+}
+.renameRefused {
+  margin: 0;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}

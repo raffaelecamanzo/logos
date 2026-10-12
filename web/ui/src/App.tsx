@@ -9,7 +9,8 @@
  * silently redirected to `/` and `/architecture` (replaceState — no extra history
  * entry, bookmarks survive). A view the hidden-widget register hides (CR-208 —
  * the Architecture view) lands where its register entry says, `/dsm` included,
- * by the same silent redirect.
+ * by the same silent redirect. So does a route an extension owns while the server
+ * does not report that extension active (S-642, FR-UI-51): it lands on the Dashboard.
  *
  * S-250 (CR-061, FR-UI-29) wraps the shell in the WorkspaceProvider and keys the
  * mounted view on the workspace cache key — the member. Switching members remounts
@@ -43,6 +44,8 @@
 import { useEffect } from "react";
 
 import { AppShell, LoadingState, ToastProvider } from "./components/index.ts";
+import { extensionDecisionPending, inactiveExtensionLanding } from "./extensions/landing.ts";
+import { useExtensions } from "./extensions/registry.ts";
 import { isAppLevelPath, workspaceReplacementPath } from "./nav.ts";
 import { usePathname, redirect } from "./router.tsx";
 import { Header } from "./shell/Header.tsx";
@@ -79,8 +82,15 @@ function Shell() {
   // A retired route's target may itself be a view the hidden-widget register hides
   // (`/dsm` → `/architecture`, CR-208), so the register is asked about the path the
   // migration produced, and the one redirect goes straight to where it lands.
+  //
+  // A route of an extension the server does not report active lands the same way
+  // (`inactiveExtensionLanding`, S-642): the Dashboard. Subscribing re-renders this
+  // shell when the boot read of `GET /api/v1/extensions` settles, which is what moves
+  // such a route from "wait" to either its view or the Dashboard.
+  useExtensions();
   const migrated = retiredRouteTarget(rawPathname);
-  const retiredTo = hiddenViewLanding(migrated ?? rawPathname) ?? migrated;
+  const retiredTo =
+    hiddenViewLanding(migrated ?? rawPathname) ?? inactiveExtensionLanding(migrated ?? rawPathname) ?? migrated;
   useEffect(() => {
     if (retiredTo !== null) {
       redirect(`${retiredTo}${window.location.search}${window.location.hash}`);
@@ -125,7 +135,7 @@ function Shell() {
           on the mode flip — two full read-model passes per page load, the first of
           them against a member the user did not choose. The wait is one loopback
           round-trip against an engine-free endpoint. */}
-      {mode === "loading" ? (
+      {mode === "loading" || extensionDecisionPending(pathname) ? (
         <LoadingState label="Starting…" />
       ) : unknownMember !== null ? (
         /* INSTEAD of the view, never beside it — for EVERY path, app-level ones

@@ -1,0 +1,48 @@
+{
+  "extensions": [
+    {
+      "id": "wire-probe",
+      "ui": {
+        "nav": [
+          {
+            "id": "wire-probe",
+            "label": "Wire probe",
+            "path": "/wire-probe",
+            "group": "B",
+            "scope": "member",
+            "replaced_in_workspace_by": "wire-probe-workspace"
+          },
+          {
+            "id": "wire-probe-workspace",
+            "label": "Wire probe (workspace)",
+            "path": "/wire-probe-workspace",
+            "group": "C",
+            "scope": "app"
+          }
+        ],
+        "views": [
+          "/wire-probe",
+          "/wire-probe-workspace",
+          "/wire-probe-detail"
+        ],
+        "config_panels": [
+          {
+            "id": "wire-probe-config",
+            "label": "Wire probe",
+            "table": "wire_probe"
+          }
+        ],
+        "dashboard_cards": [
+          {
+            "id": "wire-probe-card",
+            "label": "Wire probe"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wire-headless",
+      "ui": null
+    }
+  ]
+}

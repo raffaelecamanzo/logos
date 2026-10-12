@@ -28,7 +28,15 @@ dist = true
 # as before CR-078 carved the egress client out of `ui`.
 features = ["agents"]
 
-# The single `logos` binary target (ADR-16, NFR-PC-01).
+# The CLI as a library (CR-213, ADR-74): `logos_cli::run(ExtensionHost)` is the
+# entry a binary's `main` — the composition root — calls with its extensions.
+# Named `logos_cli` so it does not collide with the binary below.
+[lib]
+name = "logos_cli"
+path = "src/lib.rs"
+
+# The single `logos` binary target (ADR-16, NFR-PC-01): the composition root, a
+# thin `main` that registers the extensions its build includes.
 [[bin]]
 name = "logos"
 path = "src/main.rs"
@@ -45,30 +53,46 @@ path = "src/main.rs"
 # tree instead (`--no-default-features --features lang-all`, S-288) — a plain
 # `cargo build`/`cargo install` ships the dashboard, and the offline-by-default
 # invariant (NFR-SE-01) is enforced over the slim build rather than this one.
-default   = ["lang-all", "ui"]
+default   = ["lang-all", "ui", "wiki"]
 # The `web?/lang-*` weak-forward lines reach the web adapter's logos-core path
 # only when the `ui` feature has pulled it in, keeping the grammar set unified
 # across every seam (the mcp pattern, extended to the third adapter, CR-012).
 lang-rust = ["logos-core/lang-rust", "mcp/lang-rust", "web?/lang-rust"]
-lang-all  = ["logos-core/lang-all", "mcp/lang-all", "web?/lang-all"]
+lang-all  = ["logos-core/lang-all", "mcp/lang-all", "web?/lang-all", "logos-wiki?/lang-markdown"]
 # CR-012/ADR-27, re-layered by CR-078/ADR-60: the localhost web UI. Enabling it
 # links the axum web surface into the binary (`serve --ui`/`--port`); since
 # CR-078/ADR-60 it is default and egress-free — it carries NO agent crate and
 # NO `rig`/`reqwest` egress client (those live behind `agents`). The slim,
 # listener-free build stays reachable via `--no-default-features --features
 # lang-all` (no `--ui`, no axum/hyper in the dependency tree, NFR-SE-01).
-ui        = ["dep:web"]
+ui        = ["dep:web", "logos-wiki?/web"]
+# CR-213/S-644: the source wiki, the `wiki` extension (`logos-wiki`) — default-on.
+# The binary's `main` registers it (src/composition.rs); the library never names
+# it. With `ui` it also mounts its read routes and Dashboard card; the in-app
+# generator joins it under `agents`. Off — the slim build, or a no-extension build
+# — there is no `logos wiki`, no `wiki_*` tool, no wiki route or view, and
+# `.logos/wiki.db` is never opened (an existing one is left untouched).
+wiki      = ["dep:logos-wiki"]
 # CR-078/ADR-60: the consent-gated LLM egress surface. A strict SUPERSET of `ui`
-# — it turns on the dashboard AND the chat + in-app wiki-generation agent surface
-# (and, through `web/agents`, `rig` + its `reqwest` HTTP client). `--features ui`
-# alone stays egress-free; `--features agents` restores today's full dashboard.
+# and `wiki` — it turns on the dashboard AND the chat + in-app wiki-generation
+# agent surface (and, through `agent-core`, `rig` + its `reqwest` HTTP client).
+# `--features ui` alone stays egress-free; `--features agents` restores today's
+# full dashboard.
 # Release artifacts enable `agents` via the cargo-dist metadata (S-287) so the
 # shipped binary keeps chat/wiki generation. Egress remains user-initiated and
 # consent-gated at runtime (ADR-40) — this feature only gates compilation.
-agents    = ["ui", "web/agents"]
+# Chat is the `chat` extension (`logos-chat`, S-643) and the in-app generator is
+# the `wiki-agent`'s, handed to the `wiki` extension (S-644): `agents` links both,
+# and the binary's `main` registers them (src/composition.rs) — the library never
+# names either. `web` itself carries no `agents` feature any more.
+agents    = ["ui", "wiki", "dep:logos-chat", "dep:wiki-agent", "wiki-agent/web"]
 
 [dependencies]
 logos-core = { path = "../logos-core", default-features = false }
+# The extension host (CR-213, ADR-74): the library composes the active
+# extensions' subcommands and init steps from it and hands it to every surface.
+# A contract crate, never an extension crate — only `main` names extensions.
+logos-ext  = { path = "../logos-ext" }
 # The rmcp stdio server behind `logos serve --mcp` (S-017 service contract:
 # the serve arm calls `mcp::serve_stdio(root)` and maps Err → exit 3). Grammar
 # features stay controlled by this crate's feature lines above.
@@ -79,12 +103,29 @@ mcp        = { path = "../mcp", default-features = false }
 # guard the slim tree instead (`--no-default-features --features lang-all`,
 # S-288), the same scope cargo-deny's default-features graph now covers.
 web        = { path = "../web", default-features = false, optional = true }
+# The `chat` extension (S-643, CR-213, ADR-74) — optional, behind `agents`. Only
+# the binary target's composition root names it (src/composition.rs); the
+# `logos_cli` library in this same package does not, and must not (ADR-74 §3).
+# Cargo dependencies are per package, so that rule is the code's to keep (the
+# Sprint 96 deferral #13; S-645's dependency fitness test reads it).
+logos-chat = { path = "../logos-chat", optional = true }
+# The `wiki` extension (S-644, CR-213, ADR-74) — optional, behind the default-on
+# `wiki` feature, and named only by the composition root like `logos-chat`. Its
+# markdown reference rewriter follows the core's markdown grammar (`lang-all`
+# above), and its web surface the `ui` feature.
+logos-wiki = { path = "../logos-wiki", default-features = false, optional = true }
+# The in-app wiki generator (CR-047, ADR-42), behind `agents`: its configured run
+# service is what `main` hands the `wiki` extension (S-644).
+wiki-agent = { path = "../wiki-agent", optional = true }
 anyhow     = { workspace = true }
 clap       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# The stub extension the composition-root tests drive through `logos_cli::run_from`
+# (S-639) — dev-only, so it never reaches the shipped binary.
+logos-ext  = { path = "../logos-ext", features = ["test-support"] }
 # End-to-end binary tests (tests/cli_surface.rs and the S-019 binary-level
 # stdout-safety test, NFR-RA-01): throwaway project fixtures — dev-only,
 # never enters the shipped binary graph.
@@ -106,3 +147,6 @@ axum           = "0.7"
 tower          = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tokio          = { workspace = true, features = ["rt", "macros"] }
+# tests/extension_host.rs (S-644): a real, older-schema `.logos/wiki.db` a build
+# without the wiki must leave untouched. Test-only.
+rusqlite       = { workspace = true }

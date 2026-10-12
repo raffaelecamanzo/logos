@@ -6,7 +6,10 @@
 //! `[wiki]` is an **optional** `config.toml` section parsed under the same
 //! `#[serde(deny_unknown_fields)]` discipline as the rest of the policy
 //! ([FR-CF-01]): its keys are optional, and an unknown key (or an out-of-range
-//! value) fails loud at load (exit 2). There is **no** separate wiki
+//! value) fails loud at load (exit 2). Since S-644 the table is the `wiki`
+//! extension's: it claims it and validates it with [`WikiConfig::validate_table`],
+//! and in a build without the extension the table is ignored and reported like
+//! any unclaimed extension table ([FR-CF-09]). There is **no** separate wiki
 //! `provider`, endpoint, or secret — [`WikiConfig::resolve`] inherits all three
 //! from [`ChatConfig`]/[`Secrets`] ([FR-CF-06]) verbatim, so configuring a wiki
 //! model needs no additional secret handling.
@@ -14,6 +17,7 @@
 //! [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
 //! [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
 //! [FR-CF-07]: ../../../docs/specs/requirements/FR-CF-07.md
+//! [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
 //! [FR-WK-17]: ../../../docs/specs/requirements/FR-WK-17.md
 //! [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
 
@@ -75,7 +79,55 @@ pub struct WikiConfig {
     pub revision_stale_threshold: Option<u64>,
 }
 
+/// Register the `wiki` extension's claim on `[wiki]` with this test process, as
+/// the composition root registers it for the shipped binary (S-644) — what a test
+/// that reads `[wiki]` through the public load path needs. Idempotent, and the
+/// claim is the production one (owner `wiki`, validated by
+/// [`WikiConfig::validate_table`]), so it can never conflict with another test's.
+#[cfg(test)]
+pub(crate) fn claim_wiki_for_tests() {
+    super::register_extension_config(
+        &[super::TableClaim::new("wiki", "wiki", WikiConfig::validate_table)],
+        &[],
+    )
+    .expect("the wiki claim registers");
+}
+
 impl WikiConfig {
+    /// The `[wiki]` table of a `config.toml` whose table the `wiki` extension
+    /// claims — the routed value ([`Routed::reserved`](super::ownership::Routed)'s
+    /// `wiki` entry), or `None` when the document declares no `[wiki]` (S-644).
+    ///
+    /// Its owner has already validated `value` with exactly this parse
+    /// ([`validate_table`](Self::validate_table)), so it is read as written; were
+    /// it somehow not valid, the defaults are read rather than a value no
+    /// validator accepted. Unclaimed — a build without the `wiki` extension — the
+    /// table is ignored and reported like any reserved table ([FR-CF-09]), and
+    /// the core reads the defaults.
+    ///
+    /// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
+    pub(crate) fn from_claimed(value: Option<&toml::Value>) -> WikiConfig {
+        value.and_then(|value| Self::parse_table(value).ok()).unwrap_or_default()
+    }
+
+    /// Validate `value` as a `[wiki]` table: its schema (an unknown key, a value of
+    /// the wrong type) and its bounds ([`validate`](Self::validate)) — the checks
+    /// the core ran while it owned the table, and the ones its owner runs now
+    /// (the `wiki` extension's `validate_config_table`, [FR-CF-09], S-644). `Err`
+    /// says what is wrong, naming the key inside the table.
+    ///
+    /// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
+    pub fn validate_table(value: &toml::Value) -> Result<(), String> {
+        Self::parse_table(value).map(drop)
+    }
+
+    /// `value` as a valid [`WikiConfig`] — the one parse behind
+    /// [`validate_table`](Self::validate_table) and
+    /// [`from_claimed`](Self::from_claimed).
+    fn parse_table(value: &toml::Value) -> Result<WikiConfig, String> {
+        super::chat::parse_claimed_table(value, WikiConfig::validate)
+    }
+
     /// Validate the `[wiki]` section: a present `model` must be non-blank (a
     /// blank override resolves to nothing meaningful, mirroring
     /// [`ChatConfig::base_url`]'s non-empty check); a present
@@ -274,15 +326,15 @@ impl std::fmt::Debug for EffectiveWikiModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
-    /// [FR-CF-07] AC: an absent `[wiki]` section is all-defaults (`model: None`).
+    /// [FR-CF-07] AC: an absent `[wiki]` section is all-defaults (`model: None`) —
+    /// read through the claimed path the loader takes (S-644).
     #[test]
     fn absent_wiki_section_is_all_defaults() {
-        let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.wiki, WikiConfig::default());
-        assert!(cfg.wiki.model.is_none());
-        assert!(cfg.wiki.revision_stale_threshold.is_none());
+        let wiki = WikiConfig::from_claimed(None);
+        assert_eq!(wiki, WikiConfig::default());
+        assert!(wiki.model.is_none());
+        assert!(wiki.revision_stale_threshold.is_none());
     }
 
     /// [FR-WK-17] AC: an absent `revision_stale_threshold` resolves to the
@@ -330,14 +382,13 @@ mod tests {
     }
 
     /// `#[serde(deny_unknown_fields)]`: an unknown `[wiki]` key fails loud
-    /// ([FR-CF-07] AC, the [FR-CF-01] discipline).
+    /// ([FR-CF-07] AC, the [FR-CF-01] discipline) — in the table's own validation,
+    /// which its owner runs (S-644), naming the keys the table does take.
     #[test]
     fn unknown_wiki_key_is_rejected() {
-        let err = toml::from_str::<Config>("[wiki]\nbogus = 1\n").unwrap_err();
-        assert!(
-            err.to_string().contains("bogus") || err.to_string().contains("unknown"),
-            "unknown key error should name the field: {err}"
-        );
+        let err = WikiConfig::validate_table(&toml::Value::Table(toml::toml! { bogus = 1 })).unwrap_err();
+        assert!(err.contains("unknown field"), "{err}");
+        assert!(err.contains("expected `model` or `revision_stale_threshold`"), "{err}");
     }
 
     /// A blank `model` is a load-time `InvalidValue` (exit 2) naming
@@ -458,6 +509,7 @@ mod tests {
 
     impl Estate {
         fn new() -> Self {
+            super::claim_wiki_for_tests();
             let dir = tempfile::tempdir().unwrap();
             let workspace = dir.path().to_path_buf();
             let member = workspace.join("svc");

@@ -41,20 +41,41 @@
  * the configured body receives only the EFFECTIVE `[chat]` policy and the two
  * origins, and the runtime adapter only ever sends the user message.
  *
+ * S-619 (CR-204 L2/L3/L6/C8, [FR-UI-45]) then made the card fill the view's height
+ * with the transcript as its ONLY scroller, turned the composer into one pill pinned
+ * to the card's bottom edge (a leading "+" slot, a trailing round Send / Stop), took
+ * the rail out of its card behind a collapse toggle remembered per scope, and folded
+ * the post-consent status band into a one-line chip that expands to it.
+ *
+ * S-620 (CR-204 L4/C1/C2/C10, [FR-UI-45], [FR-UI-46]) then gave the turns their last
+ * layer: the user bubble a 24px radius, the action bar two 24px icon buttons (Copy
+ * shows a check for 1.5 s), a floating ↓ control that appears when the reader has
+ * scrolled away and resumes follow-the-stream, and four keyboard shortcuts — Enter,
+ * Shift+Enter (the composer), Esc (stop) and ⌘K / Ctrl+K (new chat) — named in a
+ * muted hint under the composer.
+ *
+ * S-621 (CR-204 C1, [FR-UI-46]) then replaced the empty thread's one-line hint with a
+ * welcome — a greeting and 2–4 suggestion chips filled from the read-models
+ * (`Welcome.tsx`, `suggestionChips.ts`); a chip sends through the same `append` path
+ * the composer uses.
+ *
  * Whether chat is usable is not decided here. `chatReadiness` (`chatModel.ts`,
  * S-452) reads it off the read-model's effective-chat origins — the resolution the
  * turn path dials — and this file renders the verdict.
  */
 
-import { useCallback, useState } from "react";
-import type { MouseEvent, ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent, ReactNode } from "react";
 import {
   ActionBarPrimitive,
   AssistantRuntimeProvider,
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useAui,
+  useAuiState,
   useMessage,
+  useThreadViewport,
 } from "@assistant-ui/react";
 
 import {
@@ -64,10 +85,24 @@ import {
 } from "../../api/chatClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import { Button, Callout, Widget, WidgetStack } from "../../components/index.ts";
+import {
+  IconArrowDown,
+  IconArrowUp,
+  IconChevronDown,
+  IconPanelLeft,
+  IconPencil,
+  IconPlus,
+  IconRefresh,
+  IconStop,
+} from "../../components/icons.tsx";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
+import { CopyControl } from "./CopyControl.tsx";
 import { MarkdownAnswer } from "./MarkdownAnswer.tsx";
 import { ThreadList } from "./ThreadList.tsx";
+import { Welcome } from "./Welcome.tsx";
 import { useChatRuntime } from "./chatRuntime.tsx";
+import { CHAT_PRESETS, DEFAULT_PRESET, presetOf, type ChatPresetId } from "./presets.ts";
+import { useRailDisclosure } from "./useThreadRail.ts";
 import {
   chatReadiness,
   chatScope,
@@ -80,6 +115,7 @@ import {
   modelLabel,
   rememberConsent,
   roleLabel,
+  STALL_NOTICE,
   turnEndedEmpty,
   workspaceConfigRepairHref,
   WORKSPACE_CONFIG_FILE,
@@ -238,12 +274,24 @@ export function ChatConfigured({
   // chat's own consent (S-485): another scope's acceptance does not carry over.
   const entries = consentEntries(disclosure);
   const [consented, setConsented] = useState<boolean>(() => hasConsent(storageScope, entries));
-  // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
-  // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
-  // is inert there — it only gates the narrow-viewport disclosure.
-  const [railOpen, setRailOpen] = useState(false);
-  const { runtime, threads, activeThreadId, selectThread, newChat, deleteThread, threadsError } =
-    useChatRuntime(consented, routes, storageScope);
+  // The rail's collapse toggle (S-619, [FR-UI-45]): shown at every width. Beside a
+  // desktop conversation the reader's choice is remembered per scope (open until
+  // collapsed); above a narrow one the rail starts collapsed and a pick closes it,
+  // as before (S-210 AC-3).
+  const rail = useRailDisclosure(storageScope);
+  const { closeIfStacked } = rail;
+  const {
+    runtime,
+    threads,
+    activeThreadId,
+    selectThread,
+    newChat,
+    deleteThread,
+    renameThread,
+    threadsError,
+    preset,
+    choosePreset,
+  } = useChatRuntime(consented, routes, storageScope);
 
   // The entries are re-derived each render; their joined form is the stable dep.
   const entriesKey = JSON.stringify(entries);
@@ -257,18 +305,18 @@ export function ChatConfigured({
   const onDelete = useCallback((id: number) => void deleteThread(id), [deleteThread]);
 
   // Selecting or starting a conversation closes the narrow-viewport rail so the
-  // restored thread is in view (a no-op at ≥1024px, where the rail stays open).
+  // restored thread is in view (a no-op at ≥1024px, where the rail sits beside it).
   const onSelect = useCallback(
     (id: number) => {
       void selectThread(id);
-      setRailOpen(false);
+      closeIfStacked();
     },
-    [selectThread],
+    [selectThread, closeIfStacked],
   );
   const onNewChat = useCallback(() => {
     newChat();
-    setRailOpen(false);
-  }, [newChat]);
+    closeIfStacked();
+  }, [newChat, closeIfStacked]);
 
   // One stack (S-617, FR-UI-40): the lead callout, then the two panes.
   return (
@@ -279,7 +327,7 @@ export function ChatConfigured({
           than inside `.main`, it leads the view at every width — below ~1023px the
           panes stack and the rail toggle and list come before `.main`. */}
       {consented ? (
-        <StatusBand ready={ready} disclosure={disclosure} />
+        <StatusChip ready={ready} disclosure={disclosure} />
       ) : (
         <ConsentBanner
           ready={ready}
@@ -289,49 +337,59 @@ export function ChatConfigured({
         />
       )}
 
-      <div className={styles.layout}>
-        <button
-          type="button"
-          className={styles.railToggle}
-          aria-expanded={railOpen}
-          aria-controls="chat-rail"
-          onClick={() => setRailOpen((open) => !open)}
-        >
-          {railOpen ? "Hide conversations" : "Conversations"}
-        </button>
+      <div className={rail.open ? styles.layout : `${styles.layout} ${styles.layoutCollapsed}`}>
+        {/* The rail column: the collapse toggle over the rail itself. The toggle stays
+            when the rail is hidden, so the column narrows to it and the conversation
+            takes the freed width. */}
+        <div className={styles.railColumn}>
+          <button
+            type="button"
+            className={styles.railToggle}
+            aria-expanded={rail.open}
+            aria-controls="chat-rail"
+            aria-label={rail.open ? "Hide conversations" : "Show conversations"}
+            title={rail.open ? "Hide conversations" : "Show conversations"}
+            onClick={rail.toggle}
+          >
+            <IconPanelLeft />
+          </button>
 
-        <aside
-          id="chat-rail"
-          className={railOpen ? `${styles.railPane} ${styles.railPaneOpen}` : styles.railPane}
-        >
-          <ThreadList
-            threads={threads}
-            activeThreadId={activeThreadId}
-            onSelect={onSelect}
-            onNewChat={onNewChat}
-            onDelete={onDelete}
-            error={threadsError}
-            emptyNote={emptyRailNote}
-          />
-        </aside>
+          <aside id="chat-rail" className={styles.railPane} hidden={!rail.open}>
+            <ThreadList
+              threads={threads}
+              activeThreadId={activeThreadId}
+              onSelect={onSelect}
+              onNewChat={onNewChat}
+              onDelete={onDelete}
+              onRename={renameThread}
+              error={threadsError}
+              emptyNote={emptyRailNote}
+            />
+          </aside>
+        </div>
 
         <div className={styles.main}>
           {/* The view's ONE card (S-308, [FR-UI-33]): it wraps the whole transcript
               and the composer, never a turn — the turns inside stay flat, so the
               signal-red edge appears once per view, not once per answer. Since
-              S-617 it is the `chatConversation` tool panel. The viewport inside
-              stays a bounded scroll box; assistant-ui drives its `scrollTop` to
-              follow the stream. */}
-          <Widget panel="chatConversation" title="Conversation">
+              S-617 it is the `chatConversation` tool panel. Since S-619 it fills the
+              view's height: the transcript is its `flex: 1` scroller — the page's
+              only one — which assistant-ui drives to follow the stream, and the pill
+              composer is pinned under it. */}
+          <Widget panel="chatConversation" title="Conversation" className={styles.conversation}>
             <AssistantRuntimeProvider runtime={runtime}>
-              <ThreadPrimitive.Root className={styles.threadRoot}>
+              <ThreadPrimitive.Root className={styles.threadRoot} {...{ [THREAD_ROOT_ATTR]: "" }}>
+                <ChatShortcuts onNewChat={onNewChat} />
                 <ThreadPrimitive.Viewport className={styles.log}>
                   <ThreadPrimitive.Empty>
-                    <EmptyHint />
+                    <Welcome consented={consented} surface={surface} restoring={activeThreadId !== null} />
                   </ThreadPrimitive.Empty>
-                  <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+                  <ThreadPrimitive.Messages
+                    components={{ UserMessage, UserEditComposer, AssistantMessage }}
+                  />
+                  <ScrollToBottom />
                 </ThreadPrimitive.Viewport>
-                <Composer consented={consented} />
+                <Composer consented={consented} preset={preset} onChoosePreset={choosePreset} />
               </ThreadPrimitive.Root>
             </AssistantRuntimeProvider>
           </Widget>
@@ -387,7 +445,9 @@ function ConsentBanner({
       <p className={styles.providerLine}>
         {chat.provider} · {endpointHost(chat)} · {chat.model}
       </p>
-      <Button variant="primary" onClick={onAccept}>
+      {/* Neutral, not the red primary: a control this size never fills with the
+          signal red (CR-204 L7, FR-UI-45). */}
+      <Button variant="secondary" onClick={onAccept}>
         Start chatting
       </Button>
     </Callout>
@@ -396,30 +456,71 @@ function ConsentBanner({
 
 /**
  * The persistent status band (S-309, [FR-UI-33], CR-092's third §4.13
- * lead-callout state — specified but never built until now): once configured
- * and consented, names the provider, endpoint host and model, plus the turn's
- * budget-tree bounds, giving Chat the leading verdict element every other view
- * opens with (frontend-design §9, e.g. Health's `GATE · PASS`, Wiki's `WIKI ·
- * STALE`). It reads the same effective `[chat]` policy the configured body
- * already receives, so the masked key never reaches it ([NFR-SE-07]); an
- * undeclared model is named honestly rather than defaulted ([NFR-CC-04],
- * {@link modelLabel}). The bounds used to live only in the empty-thread hint
- * and vanish after the first message ({@link EmptyHint}) — they now persist
- * here instead, moved rather than duplicated.
+ * lead-callout state): once configured and consented, names the provider, endpoint
+ * host and model, plus the turn's budget-tree bounds, giving Chat the leading verdict
+ * element every other view opens with (frontend-design §9, e.g. Health's `GATE ·
+ * PASS`, Wiki's `WIKI · STALE`). It reads the same effective `[chat]` policy the
+ * configured body already receives, so the masked key never reaches it
+ * ([NFR-SE-07]); an undeclared model is named honestly rather than defaulted
+ * ([NFR-CC-04], {@link modelLabel}). The bounds used to live only in the
+ * empty-thread hint and vanish after the first message — they
+ * persist here instead, moved rather than duplicated.
+ *
+ * S-619 (CR-204 C8, [FR-UI-45]) folds it into a ONE-LINE CHIP: the chip names the
+ * provider, host, model and the bounds in short (`budget 24/8/3`), so the bounds stay
+ * visible after the first message as [FR-UI-33] requires, and a click expands it to
+ * the band's sentences — the bounds spelled out and any extra read roots. The chip
+ * says when read roots are disclosed inside, so collapsing never hides that more
+ * than the project is read. The consent banner before it is unchanged.
  */
-function StatusBand({ ready, disclosure }: { ready: ChatReady; disclosure: ReadRootsDisclosure }) {
+function StatusChip({ ready, disclosure }: { ready: ChatReady; disclosure: ReadRootsDisclosure }) {
+  const [open, setOpen] = useState(false);
+  const bandId = useId();
+  const chat = ready.policy;
+  const hasReadRoots = disclosure.groups.length > 0 || disclosure.unreadable.length > 0;
+  return (
+    <section className={styles.status} aria-label="Chat status">
+      <button
+        type="button"
+        className={styles.statusChip}
+        aria-expanded={open}
+        aria-controls={bandId}
+        onClick={() => setOpen((was) => !was)}
+      >
+        <span className={styles.statusLabel}>CHAT</span>
+        <span className={styles.statusLine}>
+          {chat.provider} · {endpointHost(chat)} · {modelLabel(chat)} · budget {chat.max_tool_calls}/
+          {chat.max_subagent_tool_calls}/{chat.max_replans}
+          {hasReadRoots && " · extra read roots"}
+        </span>
+        <IconChevronDown className={styles.statusChevron} width={16} height={16} />
+      </button>
+      <StatusBand id={bandId} hidden={!open} ready={ready} disclosure={disclosure} />
+    </section>
+  );
+}
+
+/** The expanded chip: the band's sentences under the chip's one line. */
+function StatusBand({
+  id,
+  hidden,
+  ready,
+  disclosure,
+}: {
+  id: string;
+  hidden: boolean;
+  ready: ChatReady;
+  disclosure: ReadRootsDisclosure;
+}) {
   const chat = ready.policy;
   return (
-    <Callout label="CHAT" tone="muted" className={styles.status}>
-      <p className={styles.providerLine}>
-        {chat.provider} · {endpointHost(chat)} · {modelLabel(chat)}
-      </p>
+    <div id={id} className={styles.statusBand} hidden={hidden}>
       <p className={styles.budgetLine}>
         Budget tree: {chat.max_tool_calls} tool calls, {chat.max_subagent_tool_calls} per
         subagent, {chat.max_replans} replans.
       </p>
       <ReadRootsNote disclosure={disclosure} />
-    </Callout>
+    </div>
   );
 }
 
@@ -477,29 +578,74 @@ function readRootQualifier(group: ReadRootsDisclosure["groups"][number]): string
   return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
 }
 
-/** The empty-thread hint: what to ask. The turn's budget bounds used to live here
- *  and vanished after the first message — they now persist in the {@link
- *  StatusBand} above instead (S-309). */
-function EmptyHint() {
-  return (
-    <p className={styles.empty}>
-      No messages yet. Ask a question to start a turn — the planner&apos;s steps and each
-      subagent&apos;s activity appear as the answer streams.
-    </p>
-  );
-}
-
 /** A user turn: the message text in a bubble hugging the RIGHT edge of the
  *  transcript (S-300, [FR-UI-31]). The root spans the transcript's width so both
  *  roles share one alignment line inside the card (S-308, [FR-UI-33]); the bubble
  *  is the inner element, so it right-aligns within that line rather than against
- *  the viewport. */
+ *  the viewport.
+ *
+ *  Under the bubble, its action bar (S-624, [FR-UI-46]): one 24px Edit icon, the
+ *  answer bar's grammar, hidden while a turn runs. Edit swaps the turn for
+ *  {@link UserEditComposer}. */
 function UserMessage() {
   return (
     <MessagePrimitive.Root className={styles.user}>
       <div className={styles.userBubble}>
         <MessagePrimitive.Parts />
       </div>
+      <ActionBarPrimitive.Root
+        hideWhenRunning
+        autohide="never"
+        className={`${styles.actions} ${styles.userActions}`}
+      >
+        <ActionBarPrimitive.Edit className={styles.actionIcon} aria-label="Edit message" title="Edit message">
+          <IconPencil />
+        </ActionBarPrimitive.Edit>
+      </ActionBarPrimitive.Root>
+    </MessagePrimitive.Root>
+  );
+}
+
+/**
+ * A user turn opened for editing (S-624, [FR-UI-46]): its text in place, in a box
+ * drawn like the composer pill, with Cancel and Resend. Resend (or Enter) hands the
+ * edited text to the runtime's `onEdit`, which cuts the conversation back to before
+ * this question — in the store, memory included — and re-runs it; an unchanged text
+ * just closes the box. There is no branching.
+ *
+ * **Esc** cancels the edit and goes no further. It is handled HERE, the way the
+ * rail's rename field handles it (S-623): the keystroke is claimed and stopped, so
+ * the chat's document-level Esc ({@link ChatShortcuts}, which stops a running turn)
+ * never sees it. The input's own document-level Esc (`cancelOnEscape`) is switched
+ * off so there is one handler, not two. A key that confirms or cancels an IME
+ * composition belongs to the IME.
+ */
+function UserEditComposer() {
+  const aui = useAui();
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== "Escape" || e.nativeEvent.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    e.stopPropagation();
+    aui.composer().cancel();
+  };
+  return (
+    <MessagePrimitive.Root className={styles.user}>
+      <ComposerPrimitive.Root className={styles.userEdit}>
+        <ComposerPrimitive.Input
+          className={styles.input}
+          aria-label="Edit your message"
+          minRows={1}
+          maxRows={8}
+          submitMode="enter"
+          cancelOnEscape={false}
+          autoFocus
+          onKeyDown={onKeyDown}
+        />
+        <div className={`${styles.actions} ${styles.userActions}`}>
+          <ComposerPrimitive.Cancel className={styles.action}>Cancel</ComposerPrimitive.Cancel>
+          <ComposerPrimitive.Send className={styles.action}>Resend</ComposerPrimitive.Send>
+        </div>
+      </ComposerPrimitive.Root>
     </MessagePrimitive.Root>
   );
 }
@@ -513,12 +659,16 @@ function UserMessage() {
  *  raw HTML). */
 function AssistantMessage() {
   const turn = useMessage((m) => m.metadata.custom.turn as TurnState | undefined);
+  const stalled = useMessage((m) => m.metadata.custom.stalled === true);
   if (!turn) return null;
   return (
     <MessagePrimitive.Root className={styles.assistant}>
       <ActivityDisclosure turn={turn} />
       <div className={styles.answer}>
-        {!turn.answer && !turn.halt && !turn.error && (
+        {/* The pulse claims progress, so it shows only while the turn is genuinely
+            in flight and not silent: never on a stalled stream (the notice below
+            replaces it) nor on a turn Stopped before any answer arrived. */}
+        {!turn.answer && !turn.halt && !turn.error && !turn.finalized && !stalled && (
           <p className={styles.working} role="status">
             <span className={styles.workingPulse} aria-hidden="true" />
             Working…
@@ -531,9 +681,43 @@ function AssistantMessage() {
         )}
         {turn.halt && <p className={styles.halt}>{turn.halt}</p>}
         {turn.error && <p className={styles.error}>{turn.error}</p>}
+        {stalled && <StalledNotice />}
       </div>
-      <MessageActions />
+      <MessageActions answer={turn.answer} />
     </MessagePrimitive.Root>
+  );
+}
+
+/**
+ * The stalled-stream notice (S-626, [FR-UI-50]): an open turn's stream has carried
+ * no byte — not even the server's 15 s keepalive comment — for 45 s. It replaces
+ * the "Working…" pulse, which would otherwise claim progress nobody can see, and
+ * names only what was observed: silence ([NFR-CC-04]). The runtime clears it when a
+ * byte arrives or the turn ends.
+ *
+ * **Retry** re-runs this turn's question in place — the same replace-not-append
+ * reload Regenerate uses ([FR-UI-20]), which first aborts the silent stream.
+ * **Stop** ends the turn, as the composer's Stop does. Both go through the runtime
+ * rather than the action-bar primitives, which assistant-ui disables while a turn is
+ * running — and a stalled turn is still running.
+ *
+ * Styled from existing classes only: the halt note's warm rule (a possible loss,
+ * not yet an error), the answer column's spacing, and the action-bar buttons.
+ */
+function StalledNotice() {
+  const aui = useAui();
+  return (
+    <div role="alert" className={`${styles.halt} ${styles.answer}`}>
+      <span>{STALL_NOTICE}</span>
+      <div className={styles.actions}>
+        <button type="button" className={styles.action} onClick={() => aui.message().reload()}>
+          Retry
+        </button>
+        <button type="button" className={styles.action} onClick={() => aui.thread().cancelRun()}>
+          Stop
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -731,42 +915,358 @@ function ActivitySteps({ chips }: { chips: TurnState["chips"] }) {
   );
 }
 
-/** The per-turn action bar: copy the answer, and regenerate the turn (a replace,
- *  not an append — [FR-UI-20]). Hidden while the turn is running. */
-function MessageActions() {
+/** The per-turn action bar (S-620, CR-204 C10, [FR-UI-45]): two 24px ICON buttons —
+ *  Copy the answer (a check for 1.5 s once copied, {@link CopyControl}) and Regenerate
+ *  the turn (a replace, not an append — [FR-UI-20]: the store is cut back to before the
+ *  question and it is re-run, S-624). Each carries its accessible name and a tooltip,
+ *  and takes the `--tint-hover` fill on hover and keyboard focus. Hidden while the
+ *  turn is running. */
+function MessageActions({ answer }: { answer: string }) {
   return (
     <ActionBarPrimitive.Root hideWhenRunning autohide="never" className={styles.actions}>
-      <ActionBarPrimitive.Copy className={styles.action} aria-label="Copy answer">
-        Copy
-      </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload className={styles.action} aria-label="Regenerate answer">
-        Regenerate
+      <CopyControl variant="icon" text={answer} label="Copy answer" />
+      <ActionBarPrimitive.Reload
+        className={styles.actionIcon}
+        aria-label="Regenerate answer"
+        title="Regenerate answer"
+      >
+        <IconRefresh />
       </ActionBarPrimitive.Reload>
     </ActionBarPrimitive.Root>
   );
 }
 
-/** The composer: the message input, a Send control (gated on consent via the
- *  runtime's `isDisabled`), and a Stop control while a turn is in flight
- *  ([FR-UI-19]). */
-function Composer({ consented }: { consented: boolean }) {
+/** The marker the shortcut scope is read from: the conversation (transcript and
+ *  composer) carries it, so a text field INSIDE it is the chat's own. */
+const THREAD_ROOT_ATTR = "data-chat-thread";
+
+/** Whether a key event came from somewhere text is being typed. */
+function isTextField(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+}
+
+/** The platform's command key: ⌘ on macOS, Ctrl elsewhere ([FR-UI-46]). */
+function isCommandKey(event: KeyboardEvent): boolean {
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  return mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+}
+
+/**
+ * The chat's two document-level shortcuts (S-620, [FR-UI-46]): **Esc** stops a running
+ * turn and **⌘K / Ctrl+K** starts a new chat. (Enter and Shift+Enter are the composer
+ * input's own.)
+ *
+ * Esc goes through the pill's Stop — `aui.composer().cancel()`, the very call the
+ * round Stop button makes, enabled by the same `canCancel` — so a stop has ONE path
+ * to the runtime's `onCancel`, whoever asks for it. ⌘K calls the `onNewChat` the
+ * rail's "+ New chat" uses.
+ *
+ * Scope: the keys are heard on the document, so they work from the transcript, the
+ * rail's buttons and the page body — but a keystroke from a text field OUTSIDE the
+ * conversation is not the chat's: another view's field, the shell's, the rail's
+ * rename box. It is left alone, and the browser's own binding for it stands. A
+ * keystroke some other handler already claimed (`defaultPrevented`), an IME
+ * composition and a held key are ignored.
+ */
+function ChatShortcuts({ onNewChat }: { onNewChat: () => void }) {
+  const aui = useAui();
+  // The pill shows Stop only while a turn runs (`ThreadPrimitive.If running`); the
+  // composer's `canCancel` alone is true whenever the runtime CAN cancel, running or not.
+  const canStop = useAuiState((s) => s.thread.isRunning && s.composer.canCancel);
+  // The listener is bound once per mount; it reads the latest of these at call time.
+  const latest = useRef({ aui, canStop, onNewChat });
+  latest.current = { aui, canStop, onNewChat };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.repeat) return;
+      const target = event.target;
+      if (isTextField(target) && !(target as HTMLElement).closest(`[${THREAD_ROOT_ATTR}]`)) return;
+      const { aui: runtime, canStop: running, onNewChat: newChat } = latest.current;
+      if (event.key === "Escape" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+        if (!running) return;
+        event.preventDefault();
+        runtime.composer().cancel();
+      } else if (event.key.toLowerCase() === "k" && !event.shiftKey && !event.altKey && isCommandKey(event)) {
+        // Claimed even where the browser binds it (Ctrl+K focuses the search box in some).
+        event.preventDefault();
+        newChat();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+  return null;
+}
+
+/**
+ * The floating ↓ control (S-620, [FR-UI-46]): once the reader has scrolled away from
+ * the bottom of the transcript, a round button floats over its bottom edge, just above
+ * the composer (a zero-height sticky anchor at the end of the transcript, so it stays
+ * on the visible bottom while the turns scroll beneath it); activating it
+ * scrolls to the bottom and the thread follows the stream again. At the bottom it is NOT
+ * RENDERED — absent from the accessibility tree, not merely invisible — so there is no
+ * dead control to tab to.
+ *
+ * "At the bottom" is the viewport's own `isAtBottom`, the same flag assistant-ui's
+ * follow-the-stream reads: when it is false the transcript is not being followed, and
+ * `ScrollToBottom` sets the scroll that makes it true again. One source of truth for
+ * both halves. Activating it also hands focus to the composer, because the control
+ * unmounts at the bottom and would otherwise drop a keyboard user's focus on `<body>`.
+ */
+function ScrollToBottom() {
+  // The control unmounts the moment the transcript is back at the bottom. Activated
+  // from the keyboard it would take focus with it (to `<body>`), so focus goes to the
+  // composer — where the reader is heading anyway.
+  const returnFocusToComposer = (event: MouseEvent<HTMLElement>) => {
+    event.currentTarget
+      .closest(`[${THREAD_ROOT_ATTR}]`)
+      ?.querySelector<HTMLTextAreaElement>("textarea:not(:disabled)")
+      ?.focus({ preventScroll: true });
+  };
+  const atBottom = useThreadViewport((s) => s.isAtBottom);
   return (
-    <ComposerPrimitive.Root className={styles.composer}>
-      <ComposerPrimitive.Input
-        className={styles.input}
-        rows={3}
-        aria-label="Your message"
-        disabled={!consented}
-        placeholder="Ask about this project — e.g. what's the riskiest untested code and who calls it?"
-      />
-      <div className={styles.composerActions}>
+    <div className={styles.scrollAnchor}>
+      {!atBottom && (
+        <ThreadPrimitive.ScrollToBottom
+          className={styles.scrollToBottom}
+          aria-label="Scroll to bottom"
+          title="Scroll to bottom"
+          onClick={returnFocusToComposer}
+        >
+          <IconArrowDown />
+        </ThreadPrimitive.ScrollToBottom>
+      )}
+    </div>
+  );
+}
+
+/** The composer (S-619, CR-204 L3, [FR-UI-45]): ONE pill pinned to the card's bottom
+ *  edge, whose focus ring is drawn on the pill itself. Inside it, a leading "+" menu,
+ *  the message input — one line, growing to a capped height and then scrolling — and
+ *  a trailing round button: Send, gated on consent via the runtime's `isDisabled` and
+ *  neutral until there is something to send, then Stop while a turn is in flight
+ *  ([FR-UI-19]).
+ *
+ *  S-625 ([FR-UI-49]): the "+" opens the preset menu ({@link PresetMenu}), and while
+ *  the conversation runs under a preset other than Default a clearable chip names it
+ *  beside the input ({@link PresetChip}). Like the input, both wait for consent.
+ *
+ *  S-620 ([FR-UI-46]): Enter sends and Shift+Enter inserts a newline (the input's
+ *  `submitMode="enter"`, stated rather than left to the library's default), and a
+ *  muted hint UNDER the pill names both — the input's `aria-describedby`. Esc and ⌘K
+ *  are {@link ChatShortcuts}'s. */
+function Composer({
+  consented,
+  preset,
+  onChoosePreset,
+}: {
+  consented: boolean;
+  preset: ChatPresetId;
+  onChoosePreset: (preset: ChatPresetId) => void;
+}) {
+  const hintId = useId();
+  return (
+    <>
+      <ComposerPrimitive.Root className={styles.composer}>
+        <PresetMenu disabled={!consented} preset={preset} onChoose={onChoosePreset} />
+        {preset !== DEFAULT_PRESET && (
+          <PresetChip preset={preset} onClear={() => onChoosePreset(DEFAULT_PRESET)} />
+        )}
+        <ComposerPrimitive.Input
+          className={styles.input}
+          minRows={1}
+          maxRows={8}
+          aria-label="Your message"
+          aria-describedby={hintId}
+          submitMode="enter"
+          disabled={!consented}
+          placeholder="Ask about this project — e.g. what's the riskiest untested code and who calls it?"
+        />
         <ThreadPrimitive.If running={false}>
-          <ComposerPrimitive.Send className={styles.send}>Send</ComposerPrimitive.Send>
+          <ComposerPrimitive.Send className={styles.send} aria-label="Send" title="Send">
+            <IconArrowUp />
+          </ComposerPrimitive.Send>
         </ThreadPrimitive.If>
         <ThreadPrimitive.If running>
-          <ComposerPrimitive.Cancel className={styles.stop}>Stop</ComposerPrimitive.Cancel>
+          <ComposerPrimitive.Cancel className={styles.stop} aria-label="Stop" title="Stop">
+            <IconStop />
+          </ComposerPrimitive.Cancel>
         </ThreadPrimitive.If>
-      </div>
-    </ComposerPrimitive.Root>
+      </ComposerPrimitive.Root>
+      <p id={hintId} className={styles.composerHint}>
+        <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+      </p>
+    </>
+  );
+}
+
+/** The composer's message input, from any control inside the pill — where focus goes
+ *  when a pill control that held it closes or unmounts. */
+function composerInputOf(el: HTMLElement | null): HTMLTextAreaElement | null {
+  return el?.closest("form")?.querySelector<HTMLTextAreaElement>("textarea:not(:disabled)") ?? null;
+}
+
+/**
+ * The "+" preset menu (S-625, [FR-UI-49], CR-204 C7): a menu button over the four
+ * built-in presets, each a `menuitemradio` with its one-line description, the
+ * conversation's own checked. Picking one sets the open conversation's preset; the
+ * next turn — however it is sent — runs under it.
+ *
+ * Keyboard: the menu opens on the checked item; ↑ / ↓ (wrapping), Home and End move;
+ * Enter or Space picks; Esc closes and returns focus to the "+". Esc stops at the menu
+ * (`stopPropagation`, and `preventDefault` for any listener before it), so it never
+ * also reaches {@link ChatShortcuts}' document-level Esc-stops-the-turn. Tab, or a
+ * pointer down outside, closes it.
+ */
+function PresetMenu({
+  disabled,
+  preset,
+  onChoose,
+}: {
+  disabled: boolean;
+  preset: ChatPresetId;
+  onChoose: (preset: ChatPresetId) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuId = useId();
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Open on the conversation's own preset, so the reader starts where they are.
+  useEffect(() => {
+    if (open) menuRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+  }, [open]);
+
+  // A pointer down anywhere outside the menu and its button closes it.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!anchorRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  // A consent withdrawn while the menu is open (another scope's banner) closes it.
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  const closeToButton = () => {
+    setOpen(false);
+    buttonRef.current?.focus();
+  };
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [],
+    );
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const focusAt = (i: number) => items[(i + items.length) % items.length]?.focus();
+    switch (event.key) {
+      case "Escape":
+        event.preventDefault();
+        event.stopPropagation();
+        closeToButton();
+        break;
+      case "ArrowDown":
+        event.preventDefault();
+        focusAt(at + 1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        focusAt(at - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusAt(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusAt(items.length - 1);
+        break;
+      case "Tab":
+        setOpen(false);
+        break;
+    }
+  };
+
+  return (
+    <div ref={anchorRef} className={styles.presetAnchor}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className={styles.composerMenu}
+        aria-label="Composer options"
+        title="Choose a preset"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        disabled={disabled}
+        onClick={() => setOpen((was) => !was)}
+      >
+        <IconPlus />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          id={menuId}
+          role="menu"
+          aria-label="Preset"
+          className={styles.presetMenu}
+          onKeyDown={onMenuKeyDown}
+        >
+          {CHAT_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={p.id === preset}
+              aria-labelledby={`${menuId}-${p.id}-label`}
+              aria-describedby={`${menuId}-${p.id}-description`}
+              tabIndex={-1}
+              className={styles.presetItem}
+              onClick={() => {
+                onChoose(p.id);
+                closeToButton();
+              }}
+            >
+              <span id={`${menuId}-${p.id}-label`} className={styles.presetLabel}>
+                {p.label}
+              </span>
+              <span id={`${menuId}-${p.id}-description`} className={styles.presetDescription}>
+                {p.description}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The non-Default preset's chip (S-625, [FR-UI-49]): names the preset the open
+ *  conversation runs under, and clears it back to Default. Clearing unmounts the chip,
+ *  so focus moves on to the message input rather than dropping to `<body>`. */
+function PresetChip({ preset, onClear }: { preset: ChatPresetId; onClear: () => void }) {
+  const { label } = presetOf(preset);
+  return (
+    <span className={styles.presetChip}>
+      <span className={styles.presetChipLabel}>{label}</span>
+      <button
+        type="button"
+        className={styles.presetChipClear}
+        aria-label={`Clear the ${label} preset`}
+        title="Back to Default"
+        onClick={(event) => {
+          composerInputOf(event.currentTarget)?.focus();
+          onClear();
+        }}
+      >
+        <IconPlus />
+      </button>
+    </span>
   );
 }

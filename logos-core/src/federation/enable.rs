@@ -618,7 +618,7 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
                 // `.with_context(...)` (e.g. "writing .logos/config.toml"),
                 // so the bare Display would show only that wrapper and drop
                 // the actual underlying cause (permission denied, disk
-                // full, …) — the same convention `cli/src/main.rs` uses.
+                // full, …) — the same convention `cli/src/lib.rs` uses.
                 Err(err) => MemberOutcome::Degraded {
                     reason: format!("{err:#}"),
                 },
@@ -1126,7 +1126,7 @@ mod tests {
     /// root clean. Root-anchored for the reason the credential entry is: a
     /// DB-only member's own `.logos/chat.db` is its own managed ignore's
     /// business, not this one's. (The end-to-end twin — a real workspace turn
-    /// through the real store — is `web/tests/workspace_chat.rs`.)
+    /// through the real store — is `logos-chat/tests/workspace_chat.rs`.)
     ///
     /// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
     #[test]

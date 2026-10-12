@@ -1,0 +1,73 @@
+[
+  {
+    "id": "overview",
+    "label": "Dashboard",
+    "path": "/",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "health",
+    "label": "Health",
+    "path": "/health",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "graph",
+    "label": "Graph",
+    "path": "/graph",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "chat",
+    "label": "Chat",
+    "path": "/chat",
+    "group": "A",
+    "scope": "member",
+    "replacedInWorkspaceBy": "workspace-chat"
+  },
+  {
+    "id": "wiki",
+    "label": "Wiki",
+    "path": "/wiki",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "files",
+    "label": "Files & Risk",
+    "path": "/files",
+    "group": "B",
+    "scope": "member"
+  },
+  {
+    "id": "gaps",
+    "label": "Rule findings",
+    "path": "/gaps",
+    "group": "B",
+    "scope": "member"
+  },
+  {
+    "id": "coverage",
+    "label": "Coverage",
+    "path": "/coverage",
+    "group": "B",
+    "scope": "member"
+  },
+  {
+    "id": "statistics",
+    "label": "Statistics",
+    "path": "/statistics",
+    "group": "C",
+    "scope": "member"
+  },
+  {
+    "id": "config",
+    "label": "Config",
+    "path": "/config",
+    "group": "C",
+    "scope": "member"
+  }
+]

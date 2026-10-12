@@ -1,0 +1,34 @@
+{
+  "extensions": [
+    {
+      "id": "wiki",
+      "ui": {
+        "nav": [
+          {
+            "id": "wiki",
+            "label": "Wiki",
+            "path": "/wiki",
+            "group": "A",
+            "scope": "member"
+          }
+        ],
+        "views": [
+          "/wiki"
+        ],
+        "config_panels": [
+          {
+            "id": "wiki",
+            "label": "Wiki",
+            "table": "wiki"
+          }
+        ],
+        "dashboard_cards": [
+          {
+            "id": "project-overview",
+            "label": "Project Overview"
+          }
+        ]
+      }
+    }
+  ]
+}

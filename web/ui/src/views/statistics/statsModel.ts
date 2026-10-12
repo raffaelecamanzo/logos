@@ -121,10 +121,10 @@ export interface SurfaceRow {
 
 /** Usage aggregated by recording surface (e.g. `cli`, `mcp`, `watcher`, `web`,
  *  `shell`, `wikigen`, `chat`), ranked desc. Self-referential reads — the tab's
- *  own `stats` request and the shell's `status` readout — are excluded per
- *  event, so opening this tab never inflates its own numbers ([FR-OB-09]); a
- *  graph query issued through the dashboard is counted like any other, so a
- *  `web` row can appear. */
+ *  own `stats` request, the shell's `status` readout and the chat's automatic
+ *  code-refs lookup — are excluded per event, so opening this tab never
+ *  inflates its own numbers ([FR-OB-09]); a graph query issued through the
+ *  dashboard is counted like any other, so a `web` row can appear. */
 export function bySurface(stats: Pick<UsageProjections, "calls_by_tool">): SurfaceRow[] {
   const totals = new Map<string, number>();
   for (const u of stats.calls_by_tool) {

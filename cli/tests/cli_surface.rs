@@ -19,6 +19,12 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+/// The binary's composition, compiled from the file `main` composes from
+/// — so a roster read in-process here is the shipped binary's, its extensions'
+/// tools included (S-644), as `surface_snapshots.rs` reads it.
+#[path = "../src/composition.rs"]
+mod composition;
+
 /// Run the built `logos` binary with `args` against `project` via the global
 /// `--project` flag (so tests never depend on the harness cwd).
 fn logos(project: &Path, args: &[&str]) -> Output {
@@ -128,6 +134,7 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["coverage", "status"],
     &["coverage", "ingest", "coverage.lcov", "--format", "lcov"],
     &["coverage", "refresh"],
+    #[cfg(feature = "wiki")]
     &[
         "wiki",
         "write",
@@ -140,13 +147,21 @@ const REPRESENTATIVE: &[&[&str]] = &[
         "file:src/a.rs",
         "the body",
     ],
+    #[cfg(feature = "wiki")]
     &["wiki", "read", "guide/a"],
+    #[cfg(feature = "wiki")]
     &["wiki", "search", "phrase"],
+    #[cfg(feature = "wiki")]
     &["wiki", "search", "--list"],
+    #[cfg(feature = "wiki")]
     &["wiki", "status"],
+    #[cfg(feature = "wiki")]
     &["wiki", "generate"],
+    #[cfg(feature = "wiki")]
     &["wiki", "materialize"],
+    #[cfg(feature = "wiki")]
     &["wiki", "hook", "--emit"],
+    #[cfg(feature = "wiki")]
     &["wiki", "delete", "guide/a"],
     &["stats", "--window", "30"],
     &["languages"],
@@ -573,6 +588,30 @@ fn a_missing_index_exits_three_with_an_actionable_message() {
         stderr.contains("logos index"),
         "the error names the remedy (NFR-UX-02): {stderr}"
     );
+}
+
+/// The `wiki` extension's subcommands keep the core's guard (S-644): over a root
+/// with no index each exits 3 naming the remedy, and none creates a store — the
+/// guard is shared (`logos_ext::cli::CliContext::engine`), not re-spelled per arm.
+#[cfg(feature = "wiki")]
+#[test]
+fn a_wiki_subcommand_without_an_index_exits_three_and_creates_no_store() {
+    let commands: [&[&str]; 6] = [
+        &["wiki", "status"],
+        &["wiki", "read", "overview/project-overview"],
+        &["wiki", "search", "anything"],
+        &["wiki", "generate"],
+        &["wiki", "materialize"],
+        &["wiki", "delete", "overview/project-overview"],
+    ];
+    for args in commands {
+        let tmp = TempDir::new().unwrap();
+        let out = logos(tmp.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(exit_code(&out), 3, "`logos {}` without an index: {stderr}", args.join(" "));
+        assert!(stderr.contains("logos index"), "`logos {}` names the remedy: {stderr}", args.join(" "));
+        assert!(!tmp.path().join(".logos").exists(), "`logos {}` created no store", args.join(" "));
+    }
 }
 
 /// FR-GV-03 / UAT-CL-02: a repo violating its checked-in contract exits 1
@@ -1129,10 +1168,13 @@ fn interactive_init_non_tty_applies_safe_defaults() {
         "CLAUDE.md step ran: {targets:?}"
     );
     // The wiki-skill materialization is also a non-TTY `-i` default (FR-WK-08):
-    // confirm the CLI's init_options wiring enables it through the binary.
-    assert!(
+    // confirm the CLI's init_options wiring enables it through the binary. It is
+    // the `wiki` extension's init step (S-644), so a build without the extension
+    // runs none — the skill is not materialized there.
+    assert_eq!(
         targets.contains(&".agents/skills/logos-wiki"),
-        "wiki skill step ran: {targets:?}"
+        cfg!(feature = "wiki"),
+        "the wiki skill step runs exactly when the wiki is composed: {targets:?}"
     );
     assert!(
         !targets.contains(&".logos/hooks"),
@@ -1140,11 +1182,12 @@ fn interactive_init_non_tty_applies_safe_defaults() {
     );
     assert!(tmp.path().join(".mcp.json").is_file());
     assert!(tmp.path().join("CLAUDE.md").is_file());
-    assert!(
+    assert_eq!(
         tmp.path()
             .join(".agents/skills/logos-wiki/SKILL.md")
             .is_file(),
-        "wiki skill materialized on non-TTY -i"
+        cfg!(feature = "wiki"),
+        "wiki skill materialized on non-TTY -i exactly when the wiki is composed"
     );
     assert!(!tmp.path().join(".logos/hooks").exists());
 }
@@ -1316,10 +1359,11 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
     // git merged the identical edits without a conflict. `list_tools` reads the
     // static tool attrs, so the throwaway engine needs no index — this asserts
     // that the SHIPPED BINARY's stdio server registers the same roster the
-    // in-process router declares, which is the half a spawned process can hide.
+    // in-process router declares over the binary's own composition, which is the
+    // half a spawned process can hide.
     let registered = mcp::LogosMcp::new(logos_core::Engine::open(
         TempDir::new().expect("tempdir").path(),
-    ))
+    ), &composition::host())
     .list_tools()
     .len();
     assert_eq!(
@@ -1695,6 +1739,7 @@ fn a_db_less_worktree_seeds_instead_of_refusing() {
 /// `--json` emits the machine-readable summary; an unforced re-emit skips,
 /// `--force` restores (UAT-WK-04). Run through the real binary so the offline
 /// path (NFR-SE-01) and exit codes are exactly as CI sees them.
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_skill_emit_materializes_and_is_idempotent() {
     let tmp = TempDir::new().unwrap();
@@ -1756,6 +1801,7 @@ fn wiki_skill_requires_emit() {
 /// page (a pure read), and the queue carries the agent-tier sections with
 /// runnable `wiki write` skeletons — never any native-tier (Configuration)
 /// content (FR-WK-13, NFR-RA-06, NFR-SE-01).
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_generate_emits_a_deterministic_offline_queue() {
     let tmp = fixture();
@@ -1829,6 +1875,7 @@ fn wiki_generate_emits_a_deterministic_offline_queue() {
 /// An empty project still surfaces the five Overview sections after `index`, so
 /// the empty path is reached by writing those five (zero-anchor) pages at the
 /// current revision — they then drop off the work-list, leaving nothing to do.
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_generate_on_an_empty_work_list_reports_nothing_to_generate() {
     // An empty project (no source files) → after index, the only work is the
@@ -1882,6 +1929,7 @@ fn wiki_generate_on_an_empty_work_list_reports_nothing_to_generate() {
 /// page and the present Design/Specs categories from `docs/specs/**` into
 /// `wiki.db` — a pure deterministic write, no LLM/network — and re-running is
 /// byte-identical (FR-WK-20, NFR-SE-01).
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_materialize_presents_design_specs_pages_in_srs_mode() {
     let tmp = fixture();
@@ -1924,6 +1972,7 @@ fn wiki_materialize_presents_design_specs_pages_in_srs_mode() {
 
 /// Outside SRS mode (Case 2, no `docs/specs/architecture.md`), `wiki
 /// materialize` is a no-op: the empty summary, no `wiki.db` write (FR-WK-21).
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_materialize_is_a_no_op_outside_srs_mode() {
     let tmp = fixture();
@@ -1952,6 +2001,7 @@ fn wiki_materialize_is_a_no_op_outside_srs_mode() {
 
 /// Run `logos wiki write <args> --body-file -` with `body` piped on stdin — the
 /// external-agent write surface ([FR-WK-19]).
+#[cfg(feature = "wiki")]
 fn wiki_write_via_stdin(project: &Path, slug: &str, title: &str, body: &str) -> Output {
     use std::io::Write as _;
     use std::process::Stdio;
@@ -1977,6 +2027,7 @@ fn wiki_write_via_stdin(project: &Path, slug: &str, title: &str, body: &str) -> 
 /// A garbage body (a `<tool_call>` dump) piped via stdin is rejected with a
 /// non-zero exit and leaves no page behind — the CLI `wiki write` stdin path is
 /// the same guard the in-process run goes through ([FR-WK-19]).
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_write_rejects_a_garbage_body_piped_via_stdin() {
     let tmp = TempDir::new().unwrap();
@@ -2009,6 +2060,7 @@ fn wiki_write_rejects_a_garbage_body_piped_via_stdin() {
 /// read-back body is compared byte-for-byte, not just checked for presence,
 /// so a stdin-path bug that truncated or mangled the piped body would fail
 /// this test rather than slip through on a bare exit-code/null check.
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_write_accepts_a_well_formed_body_piped_via_stdin() {
     let tmp = TempDir::new().unwrap();
@@ -2035,6 +2087,7 @@ fn wiki_write_accepts_a_well_formed_body_piped_via_stdin() {
 /// `--force` re-emits without duplicating, and a foreign settings file is
 /// never overwritten (FR-IN-07). Run through the real binary so the offline
 /// path (NFR-SE-01) and exit codes are exactly as CI sees them.
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_hook_emit_installs_and_is_idempotent() {
     let tmp = TempDir::new().unwrap();
@@ -2125,6 +2178,7 @@ fn wiki_hook_requires_emit() {
 /// [CR-095] replaced one hook with one hook — and produces no augmentation
 /// script or PostToolUse entry (the retired [FR-WK-14] hook), and no retired
 /// SessionEnd quality-report entry.
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_hook_emit_installs_only_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
@@ -2191,6 +2245,7 @@ fn wiki_hook_emit_installs_only_the_quality_report_hook() {
 /// references a `claude -p` invocation or the retired autogen hook script, no
 /// augmentation script is written, and no `.claude/settings.local.json` is
 /// ever written (FR-WK-14, FR-WK-16, NFR-SE-01).
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn no_autogen_hook_or_claude_p_reference_remains() {
     let tmp = TempDir::new().unwrap();
@@ -2222,6 +2277,7 @@ fn no_autogen_hook_or_claude_p_reference_remains() {
 /// in its `--json` summary, and leaves a foreign SessionEnd entry untouched.
 /// Without the sweep an existing install keeps emitting `SessionEnd hook [...]
 /// failed: Hook cancelled` on every exit and every `/clear`.
+#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
     let tmp = TempDir::new().unwrap();
@@ -2512,7 +2568,7 @@ fn branch_overlap_without_git_on_path_still_exits_zero() {
 
 // ── S-361 / FR-CL-06: the session-gate CLI twins, through the real binary ────
 //
-// `cli/src/main.rs::surface_parity` proves the three commands EXIST on both
+// `cli/src/lib.rs::surface_parity` proves the three commands EXIST on both
 // surfaces and are declared with a reason where they do not. That is a
 // registration contract; it says nothing about what they do. These tests cover
 // the half a roster cannot: the exit-code projection and the read-model each

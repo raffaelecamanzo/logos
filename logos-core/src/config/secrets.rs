@@ -4,7 +4,11 @@
 //! This is the **first secret Logos stores**. Unlike the checked-in policy files
 //! (`config.toml`/`rules.toml`) it is **gitignored** — it does not travel into
 //! worktrees ([`logos init`](crate::init) adds it to `.gitignore`) — and it
-//! holds **only** the chat API key, never any non-secret policy.
+//! holds **only** secrets, never any non-secret policy: the core's chat API
+//! key, and the keys active extensions own ([FR-CF-09], routed by
+//! `super::ownership`).
+//!
+//! [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
 //!
 //! # The never-echo invariant ([NFR-SE-07])
 //! The raw key is loadable here (the agent needs it at egress time) but must
@@ -28,6 +32,7 @@
 //! [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
 //! [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -50,19 +55,37 @@ const LAST_N: usize = 4;
 /// gitignored file. `#[serde(deny_unknown_fields)]` keeps a typo'd secret key
 /// loud rather than silently dropped.
 ///
-/// The derived `Serialize`/`Deserialize` are used only for at-rest TOML I/O
-/// (the gitignored file legitimately holds the raw key); the **`Debug` is
-/// hand-written** so no diagnostic path leaks it ([NFR-SE-07]).
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Only `Deserialize` is derived: the type is read from the at-rest file and
+/// never serialised — [`write_secret`](super::write_secret) edits the stored
+/// document itself, so every other table survives. The **`Debug` is
+/// hand-written** so no diagnostic path leaks a key ([NFR-SE-07]).
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Secrets {
-    /// The chat secrets (`[chat]`).
-    #[serde(default)]
+    /// The chat secrets (`[chat]`). **Not in the core's own parse** (`skip`): the
+    /// `chat.api_key` key may be claimed by the `chat` extension ([FR-CF-09],
+    /// S-643), so it is routed before the core's parse, and [`parse_secrets`]
+    /// fills this field — from the key the extension validated, or, with no
+    /// extension claiming it, by the core's own `[chat]` parse, exactly as before.
+    /// The core reads it either way: it is the credential half of the
+    /// `resolve_chat` seam. Never listed among the extensions' secrets: the masked
+    /// chat key keeps its own read-model field.
+    #[serde(skip)]
     pub chat: ChatSecrets,
+
+    /// The active extensions' secrets, `table.key` → value ([FR-CF-09]):
+    /// routed to their owners before the core's parse, so they never meet its
+    /// `deny_unknown_fields`. **`pub(crate)`** for the reason
+    /// [`ChatSecrets::api_key`] is: outside the crate a value is reachable only
+    /// through [`Secrets::extension_secret`] or masked.
+    ///
+    /// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
+    #[serde(skip)]
+    pub(crate) extension: BTreeMap<String, String>,
 }
 
 /// The `[chat]` table of `secrets.toml`: the API key only ([FR-CF-06]).
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSecrets {
     /// The chat API key. `None` when unset (no `[chat]` table, or no `api_key`).
@@ -72,9 +95,9 @@ pub struct ChatSecrets {
     /// the key is reachable only through [`Secrets::chat_api_key`] (the trimmed
     /// value, for the agent that dials) or [`Secrets::chat_key_masked`] (the
     /// presence + last-4 the surface renders) — never the bare field. The
-    /// derived `Serialize` exists for the at-rest TOML write only; the type is
-    /// never placed in a surface read-model (those carry [`MaskedSecret`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// type has no `Serialize` and is never placed in a surface read-model
+    /// (those carry [`MaskedSecret`]).
+    #[serde(default)]
     pub(crate) api_key: Option<String>,
 }
 
@@ -97,12 +120,35 @@ impl Secrets {
     pub fn chat_key_masked(&self) -> MaskedSecret {
         MaskedSecret::from_key(self.chat_api_key())
     }
+
+    /// The extension secret `key` (`table.key`), if present and non-empty —
+    /// for the extension that owns it, at egress time ([FR-CF-09]).
+    ///
+    /// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
+    pub fn extension_secret(&self, key: &str) -> Option<&str> {
+        self.extension
+            .get(key)
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+    }
+
+    /// Every extension secret, masked as [`Secrets::chat_key_masked`] masks the
+    /// chat key ([NFR-SE-07]).
+    pub fn extension_secrets_masked(&self) -> BTreeMap<String, MaskedSecret> {
+        self.extension
+            .keys()
+            .map(|key| (key.clone(), MaskedSecret::from_key(self.extension_secret(key))))
+            .collect()
+    }
 }
 
 /// `Debug` that **redacts** the key ([NFR-SE-07]) — presence + last-4 only.
 impl fmt::Debug for Secrets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Secrets").field("chat", &self.chat).finish()
+        f.debug_struct("Secrets")
+            .field("chat", &self.chat)
+            .field("extension", &self.extension_secrets_masked())
+            .finish()
     }
 }
 
@@ -161,12 +207,50 @@ impl MaskedSecret {
 /// # Errors
 /// [`ConfigError::Parse`] on invalid TOML or an unknown key
 /// (`#[serde(deny_unknown_fields)]`), **redacted** ([NFR-SE-07]): see
-/// [`redact_parse_error`].
+/// [`redact_parse_error`]. [`ConfigError::InvalidValue`] — naming the table or
+/// a claimed key, never a value or an unclaimed key's name — for an
+/// extension's table holding a key no active extension owns, or a value that is
+/// not a string ([FR-CF-09]).
+///
+/// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
 pub(crate) fn parse_secrets(text: &str, path: &Path) -> Result<Secrets, ConfigError> {
-    toml::from_str(text).map_err(|source| ConfigError::Parse {
-        path: path.to_path_buf(),
-        source: redact_parse_error(&source, text),
-    })
+    // Each table goes to the core or to the extensions whose keys it holds; a
+    // reserved secret nobody claims is ignored and reported once ([FR-CF-09]).
+    let claims = super::ownership::registered();
+    let routed = super::ownership::route_secrets::<Secrets>(text, path, &claims, |source| {
+        redact_parse_error(source, text)
+    })?;
+    super::ownership::report_ignored(path, &routed.ignored);
+    let mut secrets = routed.value;
+    secrets.extension = routed.extension;
+    // `chat.api_key` (S-643): validated by the `chat` extension when it claims the
+    // key, else by the core's own `[chat]` parse — today's errors, redacted.
+    secrets.chat = match secrets.extension.remove(CHAT_API_KEY) {
+        Some(key) => ChatSecrets { api_key: Some(key) },
+        None if claims.owns_secret_table("chat") => ChatSecrets::default(),
+        None => {
+            toml::from_str::<CoreChatSecrets>(text)
+                .map_err(|source| ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    source: redact_parse_error(&source, text),
+                })?
+                .chat
+        }
+    };
+    Ok(secrets)
+}
+
+/// The secret key the `chat` extension owns (S-643), `table.key`.
+const CHAT_API_KEY: &str = "chat.api_key";
+
+/// `secrets.toml`'s `[chat]` table alone, as the core parses it when no extension
+/// claims `chat.api_key` — every other table is the routed parse's, so this one
+/// tolerates them, while [`ChatSecrets`]' own `deny_unknown_fields` keeps a typo'd
+/// key inside `[chat]` loud.
+#[derive(Deserialize)]
+struct CoreChatSecrets {
+    #[serde(default)]
+    chat: ChatSecrets,
 }
 
 /// The identifiers `secrets.toml` legitimately declares — the only quoted
@@ -181,7 +265,7 @@ const SCHEMA_NAMES: [&str; 2] = ["chat", "api_key"];
 /// that is the key. The rebuilt error keeps the line and column and the
 /// message with every quoted token elided except the schema's own names, and
 /// carries no source text, so neither `Display` nor `Debug` can echo it.
-fn redact_parse_error(source: &toml::de::Error, text: &str) -> toml::de::Error {
+pub(crate) fn redact_parse_error(source: &toml::de::Error, text: &str) -> toml::de::Error {
     let at = source
         .span()
         .map(|span| {

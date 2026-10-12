@@ -40,8 +40,8 @@
 //! markdown body never hits argv limits), and S-054's `wiki skill --emit [dir]
 //! [--force]` arm (FR-WK-08, one `Engine::wiki_skill_emit` call) with the `-i`
 //! wiki-skill materialization prompt (the materialization logic itself lives in
-//! `logos_core::wiki`) — all one-Engine-call delegations, no logic in the
-//! adapter. Combined Iteration-2 budget 395→500.
+//! `logos_core::wiki`, since S-644 the `logos-wiki` crate) — all one-Engine-call
+//! delegations, no logic in the adapter. Combined Iteration-2 budget 395→500.
 //!
 //! Uses `include_str!` so the check is hermetic (no filesystem I/O at runtime)
 //! and the count is stable across machines.
@@ -49,14 +49,18 @@
 // NOTE: this guard sums adapter production lines across ALL `cli/src/*.rs` files
 // so the thin-surface invariant (NFR-MA-02) covers the whole crate, not just the
 // entry point. When a new `cli/src/*.rs` module is added, `include_str!` it here
-// and add it to `adapter_lines` below. Current modules: `main.rs` (parse + setup
-// + output/exit-code helpers), `dispatch.rs` (per-domain subcommand routing,
+// and add it to `adapter_lines` below. Current modules: `lib.rs` (parse + setup
+// + extension composition + output/exit-code helpers — `main.rs` until S-639
+// split the CLI into a library), `main.rs` (the composition root) and
+// `composition.rs` (the host it composes, which the surface snapshots also read), `dispatch.rs` (per-domain subcommand routing,
 // extracted from `run` to keep each function under the max_cc/max_fn_lines gates),
 // `workspace_init.rs` (the `logos init --workspace` enablement flow, S-244), and
 // `xservice.rs` (the S-248 cross-service query routing). The latter two were
 // added without being registered here (a guard blind spot); S-248 wires them in
 // so the whole crate is measured, per the invariant above.
+const CLI_LIB: &str = include_str!("../src/lib.rs");
 const CLI_MAIN: &str = include_str!("../src/main.rs");
+const CLI_COMPOSITION: &str = include_str!("../src/composition.rs");
 const CLI_DISPATCH: &str = include_str!("../src/dispatch.rs");
 const CLI_WORKSPACE_INIT: &str = include_str!("../src/workspace_init.rs");
 const CLI_XSERVICE: &str = include_str!("../src/xservice.rs");
@@ -76,7 +80,9 @@ fn file_lines(source: &str) -> usize {
 
 /// Total adapter production lines across every `cli/src/*.rs` module.
 fn adapter_lines() -> usize {
-    file_lines(CLI_MAIN)
+    file_lines(CLI_LIB)
+        + file_lines(CLI_MAIN)
+        + file_lines(CLI_COMPOSITION)
         + file_lines(CLI_DISPATCH)
         + file_lines(CLI_WORKSPACE_INIT)
         + file_lines(CLI_XSERVICE)
@@ -424,12 +430,122 @@ fn adapter_lines() -> usize {
 /// [CR-168]: ../../docs/requests/CR-168-an-index-never-silently-empties.md
 /// [FR-EH-05]: ../../docs/specs/requirements/FR-EH-05.md
 /// [FR-CL-03]: ../../docs/specs/requirements/FR-CL-03.md
+///
+/// **S-639/CR-213 908→1007** for the extension host's composition root
+/// ([FR-DS-04], [ADR-74]): measured 907→1004 (+97), 3 lines of headroom. The CLI
+/// became a library (`lib.rs`) with a thin `main.rs`, and this guard read only
+/// `main.rs` — after the move it would have measured a 3-line file and passed
+/// on nothing. `lib.rs` is registered above.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `fn main` removed from the library (its fdlimit raise, parse and panic boundary moved into `run_from`) | **−13** |
+/// | `run(host)`: the composition root's one call, flushing before `process::exit` | **+7** |
+/// | `run_from(host, args)`: parse, register the extensions' telemetry tools, the unchanged panic boundary | **+30** |
+/// | `command(host)`: the composed clap command | **+3** |
+/// | `Composed`/`Invocation`: compose extension subcommands, route a parse | **+39** |
+/// | `clash`: asked of the built command — names, aliases, clap's own `help`, the global flags — so an extension can neither shadow a command nor panic clap (the story's review) | **+14** |
+/// | `run_extension`: an extension subcommand over the core's root and output flags | **+11** |
+/// | `Output::print` delegates to the one printing rule extensions share | **−5** |
+/// | imports (`OsString`, the clap traits, `logos_ext`) | **+3** |
+/// | `main.rs`: the public composition root | **+4** |
+/// | `composition.rs`: the public host, in the one file `main` and the surface snapshots both compile (the story's review) | **+3** |
+/// | `dispatch.rs`: the `ExtensionHost` import (the signature stays one line) | **+1** |
+/// | | **+97** |
+///
+/// Composition, not logic: an extension's subcommand is clap wiring the core
+/// cannot own (it names no CLI type), and its handler — the only part that
+/// computes anything — is the extension's. The printing rule moved the other
+/// way, into `logos_ext::cli`, so the core subcommands and every extension's
+/// print through one function rather than a twin.
+///
+/// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
+///
+/// **S-638/[FR-IN-07] 1007→1012** for the session-start hook becoming a core
+/// command (`logos hook --emit [--force]`, [ADR-49]): measured 1004→1010 (+6), 2
+/// lines of headroom. The two spellings — the public `hook` and the hidden
+/// `wiki hook` alias — share one argument struct and one dispatch function, so
+/// the alias costs less than the old stand-alone variant did.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `Commands::Hook(HookArgs)` | **+1** |
+/// | `WikiCommands::Hook` shares the args and gains `hide = true` (6 lines → 2) | **−4** |
+/// | `HookArgs`: the one `--emit`/`--force` definition | **+7** |
+/// | `dispatch.rs`: the `Commands::Hook` arm | **+1** |
+/// | `dispatch.rs`: the `wiki hook` arm (5 lines → 1) | **−4** |
+/// | `dispatch.rs`: `hook_emit`, the one body both spellings call | **+5** |
+/// | | **+6** |
+///
+/// Routing, not logic: `hook_emit` is one `Engine::quality_report_hook_emit`
+/// call and one `print`; the materializer lives in `logos_core::hooks`.
+///
+/// [FR-IN-07]: ../../docs/specs/requirements/FR-IN-07.md
+/// [ADR-49]: ../../docs/specs/architecture/decisions/ADR-49.md
+///
+/// **S-643/[FR-DS-04] 1012→1015** for the public composition registering its
+/// first extension, `chat`, under `agents` ([S-643]): measured 1010→1013 (+3), 2
+/// lines of headroom, as before.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `composition.rs`: `host()` binds the host, registers `logos_chat::ChatExtension` under `#[cfg(feature = "agents")]`, returns it (1 line → 4) | **+3** |
+/// | | **+3** |
+///
+/// Composition, not logic: the registration is the one line the composition root
+/// exists for; everything chat does is the extension crate's, outside this budget.
+///
+/// [S-643]: ../../docs/planning/journal.md#s-643-chat-is-a-registered-extension
+///
+/// **S-644 T1 1012→1016** for the wiki leaving `logos-core` for the
+/// `logos-wiki` crate ([ADR-74]): measured 1010→1014 (+4), 2 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `dispatch.rs`: `use logos_wiki::WikiEngine as _` — the `wiki_*` calls are the crate's trait methods now | **+1** |
+/// | `dispatch.rs`: `init_steps`, the wiki's `-i` skill step (no longer a core step) ahead of the host's | **+3** |
+/// | `workspace_init.rs`: the fallback `init` passes `init_steps(host)` instead of `host.init_steps()` | **0** |
+/// | | **+4** |
+///
+/// Composition, not logic: the step itself is `logos_wiki::SkillInit`, and one
+/// list feeds both `init` paths so they cannot disagree. Interim: T2 registers
+/// the wiki as an extension, its step arrives through `host.init_steps()`, and
+/// all four lines go.
+///
+/// [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
+///
+/// **Sprint 97 merge, 1015/1016 → 1019**: [S-643] (+3) and S-644 T1 (+4)
+/// raised the same 1012 budget on parallel branches, each over its own tree.
+/// Merged, the two deltas add: measured 1010→1017 (+7), 2 lines of headroom.
+///
+/// **S-644 T2 1019→938** for the wiki becoming the `wiki` extension ([ADR-74]):
+/// `logos wiki` is the extension's subcommand, its `-i` skill step arrives through
+/// `host.init_steps()`, and the four interim T1 lines go. Measured 1017→936
+/// (−81); the budget is lowered to the measurement plus the usual 2 lines, so the
+/// guard keeps its grip rather than carrying 81 lines of slack.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Commands::Wiki` variant | **−4** |
+/// | `lib.rs`: the `WikiCommands` enum — moved verbatim to `logos-wiki/src/cli.rs` | **−38** |
+/// | `lib.rs`: `read_wiki_body` — moved with it | **−15** |
+/// | `lib.rs`: `engine()` delegates its index guard to `logos_ext::cli::indexed_engine`, the one body extension subcommands share | **−5** |
+/// | `lib.rs`: `EXTENSION_SLOT_AFTER` + `place_extensions` — extension subcommands listed after `coverage` in `--help`, where `wiki` stood | **+16** |
+/// | `dispatch.rs`: the `wiki` dispatch function, its arm and the `logos_wiki` import | **−38** |
+/// | `dispatch.rs`: T1's interim `init_steps` (the four lines go) | **−3** |
+/// | `composition.rs`: registers the `wiki` extension under `wiki`, with the `wiki-agent` generator under `agents` | **+6** |
+/// | | **−81** |
+///
+/// Composition, not logic: the wiki's commands and their handlers are the
+/// extension's, outside this budget; what is left here is the one registration
+/// and the one help-placement rule every extension's subcommand shares.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 908,
-        "cli adapter exceeds the 908 production-LOC budget (NFR-MA-02): \
+        lines <= 938,
+        "cli adapter exceeds the 938 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

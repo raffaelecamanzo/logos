@@ -12,7 +12,7 @@
 //! and credential — the member's own, or the workspace's where the member leaves
 //! that half undeclared, and the workspace's key alone under an inherited policy
 //! (a member key never reaches a workspace endpoint, [ADR-67] §2). It mirrors the
-//! chat surface's provider bridge (`web/src/chat/configured.rs`): a missing model or key is the
+//! chat surface's provider bridge (`logos-chat/src/service/configured.rs`): a missing model or key is the
 //! honest **configure-first** state ([FR-UI-18], [NFR-CC-04]) — not a crash — and
 //! the deterministic pre-send preflight ([FR-UI-24]) catches a malformed endpoint
 //! before any connection opens. All agent logic lives in [`WikiAgent`] ([ADR-01]);
@@ -107,7 +107,7 @@ pub async fn run_configured(
 
     // The embedded skill body is the single source of page-shaping guidance
     // ([FR-WK-08]) — the wiki-agent's system prompt.
-    let preamble = logos_core::wiki::rendered_skill();
+    let preamble = logos_wiki::rendered_skill();
 
     // Resolve the provider config (provider/base_url inherited from `[chat]`,
     // [FR-CF-07]), then run the deterministic pre-send preflight ([FR-UI-24]): a

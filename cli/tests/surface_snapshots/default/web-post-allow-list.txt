@@ -1,0 +1,7 @@
+/api/v1/verify
+/api/v1/workspace/config/save
+/api/v1/workspace/config/secret
+/api/v1/workspace/manifest/save
+/config/apply
+/config/save
+/config/secret

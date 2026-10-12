@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { GraphElementEdge, GraphElementNode } from "../../api/types.ts";
 import {
+  graphSeedFromSearch,
+  graphSeedHref,
+  withoutGraphSeed,
   activeEdgeTypesParam,
   activeLayersParam,
   adjacencySet,
@@ -168,5 +171,35 @@ describe("palettes & sizing", () => {
     expect(nodeSize(0, false)).toBe(12);
     expect(nodeSize(0, true)).toBe(26);
     expect(nodeSize(100, false)).toBe(34); // capped at NODE_MAX
+  });
+});
+
+describe("the /graph?seed= deep link (S-622, FR-UI-47)", () => {
+  it("round-trips a symbol seed at the default tier and a file seed at the file tier", () => {
+    const symbol = "logos . . . src/`lib.rs`/f().";
+    expect(graphSeedHref(symbol)).not.toContain("granularity");
+    expect(graphSeedFromSearch(graphSeedHref(symbol).split("?")[1])).toEqual({ seed: symbol, granularity: "symbol" });
+    expect(graphSeedHref("src/a.rs", "file")).toBe("/graph?seed=src%2Fa.rs&granularity=file");
+    expect(graphSeedFromSearch("?seed=src%2Fa.rs&granularity=file")).toEqual({ seed: "src/a.rs", granularity: "file" });
+    expect(graphSeedFromSearch("?seed=m&granularity=module")).toEqual({ seed: "m", granularity: "module" });
+  });
+
+  it("reads no seed and an unknown tier as the whole graph at the symbol tier", () => {
+    expect(graphSeedFromSearch("")).toEqual({ seed: null, granularity: "symbol" });
+    expect(graphSeedFromSearch("?seed=")).toEqual({ seed: null, granularity: "symbol" });
+    expect(graphSeedFromSearch("?seed=%20%20")).toEqual({ seed: null, granularity: "symbol" });
+    expect(graphSeedFromSearch("?seed=a&granularity=files")).toEqual({ seed: "a", granularity: "symbol" });
+    expect(graphSeedFromSearch("?seeds=a")).toEqual({ seed: null, granularity: "symbol" });
+  });
+});
+
+describe("withoutGraphSeed — the deep link is consumed once (S-622)", () => {
+  it("drops seed and granularity, keeping the member, other params and the fragment", () => {
+    expect(withoutGraphSeed("/graph?seed=a&granularity=file&repo=api#x")).toBe("/graph?repo=api#x");
+    expect(withoutGraphSeed("/graph?repo=api&seed=a")).toBe("/graph?repo=api");
+    expect(withoutGraphSeed("/graph?seed=a")).toBe("/graph");
+    expect(withoutGraphSeed("/graph")).toBe("/graph");
+    // A param that merely ends in `seed` is not the deep link.
+    expect(withoutGraphSeed("/graph?reseed=1&seed=a")).toBe("/graph?reseed=1");
   });
 });

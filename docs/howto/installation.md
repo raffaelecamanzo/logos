@@ -151,7 +151,63 @@ cargo build -p logos --release --no-default-features --features lang-rust
 ```
 
 `logos languages` on such a build lists only the compiled-in grammars. The
-full set returns with the default `lang-all` feature.
+full set returns with the default `lang-all` feature. A `--no-default-features`
+build also leaves out the web dashboard (`ui`) and the source wiki (`wiki`);
+add them back by name — `--features lang-rust,wiki` keeps `logos wiki` and the
+`wiki_*` MCP tools in a Rust-only build.
+
+### A build without extensions (contributors)
+
+Chat and the source wiki are extensions. A build with the dashboard but neither
+of them composes no extension at all:
+
+```bash
+cargo build -p logos --release --no-default-features --features lang-all,ui
+```
+
+It serves no chat or wiki route, MCP tool, command, sidebar entry or config
+panel, and `GET /api/v1/extensions` lists none. It still starts on a project
+whose `config.toml` has `[chat]` or `[wiki]` tables and whose `secrets.toml`
+holds `chat.api_key`: `[wiki]` is reported once as ignored, and `[chat]` is
+still read by the core. Like the default build, it can listen on loopback but
+links no outbound HTTP client.
+
+`cargo test -p logos --no-default-features --features lang-all,ui` checks all
+of that (`cli/tests/no_extension_surface.rs`). `bash scripts/gate.sh full` runs
+it as its `test-noext` leg, and CI runs it too. The fast tier skips it, because
+that feature set recompiles the core crates, which adds about two and a half
+minutes.
+
+### The local gate and CI (contributors)
+
+`bash scripts/gate.sh fast` and `full` run the `web` tests with
+`--features lang-all`. That matches what `cargo test --workspace` in CI turns on
+for `web` through the `cli` crate's defaults, so tests gated on `lang-all` run
+locally too. Each test unit's evidence records the exact `cargo` command it ran.
+
+Both tiers also run a `public-terms` leg, `scripts/check-public-terms.sh`. It
+reads every text file `git ls-files` lists, plus the untracked files `git add -A`
+would take, and fails naming `file:line:term` when a line holds a listed word or
+pair of adjacent words. Matching is whole-word and case-insensitive. Punctuation
+and camelCase humps separate words.
+
+- **The list.** It is stored only as SHA-256 digests, in
+  `scripts/public-terms.sha256`. To add a term, append
+  `printf '%s' 'word' | shasum -a 256`.
+- **Exceptions.** `scripts/public-terms.allow` admits reviewed lines by path and a
+  digest of the whole line, so an entry lapses when its line changes.
+  `--emit-allow` prints candidate entries for the current hits.
+- **Failures.** A walk that reads no file fails.
+
+The leg prints the files it scanned. `scripts/verify-evidence.sh` refuses fast-
+and full-tier evidence without it, and CI runs it first on the checkout.
+
+The shell scripts' own suites are not part of any gate tier. Run them by hand
+after changing anything under `scripts/`:
+
+```bash
+for t in scripts/tests/test-*.sh; do bash "$t" || echo "FAILED: $t"; done
+```
 
 ## Smoke test
 

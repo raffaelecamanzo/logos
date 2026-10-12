@@ -72,22 +72,38 @@ good_unit() {
     printf '"verdict":"pass","truncation":"none"}]'
 }
 
-# Lay down a full, valid evidence set, then let each case corrupt one thing.
+# The public-terms gate's one unit (gate.sh's gate_public_terms): the text files
+# its walk read, and the term hits outside the allowlist as its failures.
+# Args: files-read hits
+files_unit() {
+    printf '[{"unit":"files","expected":%d,"floor":1,"started":%d,"finished":%d,' "$1" "$1" "$1"
+    printf '"passed":%d,"failed":%d,"ignored":5,"exit_code":0,' "$1" "$2"
+    printf '"verdict":"pass","truncation":"none"}]'
+}
+
+# Lay down a valid evidence set at a tier (default full), then let each case
+# corrupt one thing.
 seed_all_valid() {
+    local tier="${1:-full}"
     rm -rf "$EVID"
     local g
-    for g in clippy test test-agents deny arch ui-typecheck ui-test ui-build ui-e2e; do
+    for g in clippy test test-agents test-noext deny arch public-terms ui-typecheck ui-test ui-build ui-e2e; do
         case "$g" in
-            test | test-agents) write_gate "$g" full pass "$TREE" "$(good_unit)" ;;
-            *) write_gate "$g" full pass "$TREE" "[]" ;;
+            test | test-agents | test-noext) write_gate "$g" "$tier" pass "$TREE" "$(good_unit)" ;;
+            public-terms) write_gate "$g" "$tier" pass "$TREE" "$(files_unit 1044 0)" ;;
+            *) write_gate "$g" "$tier" pass "$TREE" "[]" ;;
         esac
     done
 }
 
+# The tier check() asks verify-evidence.sh to certify; empty = its default (full).
+TIER_FLAG=""
+
 # check <name> <expected-exit> <grep-pattern-that-must-appear>
 check() {
     local name="$1" want="$2" pattern="$3" out rc
-    out="$(bash scripts/verify-evidence.sh --strict 2>&1)"
+    # shellcheck disable=SC2086 # TIER_FLAG is empty or two words, by design
+    out="$(bash scripts/verify-evidence.sh --strict $TIER_FLAG 2>&1)"
     rc=$?
     if [ "$rc" -ne "$want" ]; then
         echo "  FAIL  $name: exit $rc, wanted $want"
@@ -97,6 +113,22 @@ check() {
     fi
     if [ -n "$pattern" ] && ! printf '%s\n' "$out" | grep -q "$pattern"; then
         echo "  FAIL  $name: exit $rc correct, but no message matching '$pattern'"
+        echo "$out" | sed 's/^/        /'
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    echo "  ok    $name"
+    PASS=$((PASS + 1))
+}
+
+# check_absent <name> <grep-pattern-that-must-NOT-appear>: the run is still
+# rejected (exit 1), but without this message.
+check_absent() {
+    local name="$1" pattern="$2" out rc
+    out="$(bash scripts/verify-evidence.sh --strict 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 1 ] || printf '%s\n' "$out" | grep -q "$pattern"; then
+        echo "  FAIL  $name: exit $rc, or a message matching '$pattern'"
         echo "$out" | sed 's/^/        /'
         FAIL=$((FAIL + 1))
         return
@@ -119,6 +151,15 @@ check "a gate that never ran is not a pass" 1 "deny: no evidence file"
 seed_all_valid
 write_gate deny full skip "$TREE" "[]"
 check "a skipped gate (tool absent) is not a pass" 1 "deny: skipped"
+
+# The no-extension build's leg (S-645) is part of the full tier's contract, and its
+# binaries count in the denominator: three test legs of 10 binaries each.
+seed_all_valid
+rm -f "$EVID/test-noext.json"
+check "the no-extension leg is required at full tier" 1 "test-noext: no evidence file"
+
+seed_all_valid
+check "the no-extension leg counts in the test denominator" 0 "30/30 test binaries"
 
 # Cargo's target-level fail-fast never LAUNCHES the later binaries, so they print
 # neither `Running` nor a summary: started == finished, both below expected. That
@@ -182,6 +223,52 @@ seed_all_valid
 echo "an edit made after the gates ran" >>file.txt
 check "evidence older than the working tree rejected" 1 "stale evidence"
 git checkout -- file.txt 2>/dev/null
+
+# --- the public-terms gate (S-716) --------------------------------------------
+#
+# Required at BOTH tiers, and its counters are recomputed like a test unit's: an
+# empty walk or a hit fails it whatever its verdict field says.
+
+seed_all_valid
+rm -f "$EVID/public-terms.json"
+check "the public-terms gate is required at full tier" 1 "public-terms: no evidence file"
+
+seed_all_valid fast
+rm -f "$EVID/public-terms.json"
+TIER_FLAG="--tier fast"
+check "the public-terms gate is required at fast tier" 1 "public-terms: no evidence file"
+TIER_FLAG=""
+
+seed_all_valid
+write_gate public-terms full pass "$TREE" "$(files_unit 0 0)"
+check "a public-terms walk that read zero files rejected" 1 "public-terms/files: the walk read zero text files"
+
+seed_all_valid
+write_gate public-terms full pass "$TREE" "$(files_unit 1044 2)"
+check "public-terms hits under a 'pass' verdict rejected" 1 "public-terms/files: 2 term hit(s)"
+
+# Every refusal of the files unit speaks of files, never of test binaries.
+seed_all_valid
+write_gate public-terms full pass "$TREE" "$(files_unit 0 0)"
+check_absent "an empty walk is not also misreported as a test-floor breach" "is below"
+
+seed_all_valid
+write_gate public-terms full pass "$TREE" '[{"unit":"files","expected":1044,"floor":1,"started":1044,"finished":900,"passed":900,"failed":0,"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"}]'
+check "a killed public-terms walk is reported in files" 1 "public-terms/files: 1044 text files started, only 900 finished — the scan was killed mid-walk"
+
+seed_all_valid
+write_gate public-terms full pass "$TREE" '[{"unit":"files","expected":1044,"floor":1,"started":900,"finished":900,"passed":900,"failed":0,"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"}]'
+check "a truncated public-terms walk is reported in files" 1 "public-terms/files: 900 of 1044 text files ran"
+
+seed_all_valid
+check "the public-terms walk is reported with its denominator, outside the test count" 0 "public-terms  full   pass        1044/1044 files 0 hits"
+
+# Exactly what `gate.sh fast` writes: its four gates and nothing else.
+seed_all_valid fast
+for g in test-agents test-noext deny ui-typecheck ui-test ui-build ui-e2e; do rm -f "$EVID/$g.json"; done
+TIER_FLAG="--tier fast"
+check "genuinely valid fast-tier evidence accepted" 0 "EVIDENCE VERIFIED for tree $TREE (tier fast, 10/10 test binaries)"
+TIER_FLAG=""
 
 # --- and the control: valid evidence must be ACCEPTED -------------------------
 #

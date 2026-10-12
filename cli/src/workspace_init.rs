@@ -67,7 +67,7 @@ pub(crate) const SUPERVISOR_COMMAND: &str = "internal-warm";
 /// dirties N repositories, and that no longer goes unsaid (FR-WS-02,
 /// FR-IN-04). Its one-line prose form goes to stderr, so stdout stays exactly
 /// one machine document.
-pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member], Option<usize>) -> bool) -> Result<i32> {
+pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member], Option<usize>) -> bool, host: &logos_ext::ExtensionHost) -> Result<i32> {
     let existing = federation::discover(root)?;
     let workspace_root = existing
         .as_ref()
@@ -136,7 +136,7 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
         // member gained anything. stdout carries exactly one machine document
         // either way (FR-CL-02).
         match fallback {
-            Some((interactive, hooks)) => out.print(&logos_core::Engine::init_with(root, &crate::init_options(interactive, hooks))?)?,
+            Some((interactive, hooks)) => out.print(&logos_core::Engine::init_with_contributions(root, &crate::init_options(interactive, hooks), &host.init_steps())?)?,
             None => eprintln!("logos init --workspace: no candidate member repositories found under {} — nothing to do", workspace_root.display()),
         }
         return Ok(0);
@@ -603,7 +603,7 @@ mod tests {
         let tmp = fixture(&["api", "web"]);
         SEEN.lock().unwrap().clear();
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record, &logos_ext::ExtensionHost::new()).unwrap(), 0);
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(
@@ -642,7 +642,7 @@ mod tests {
 
         SEEN.lock().unwrap().clear();
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record, &logos_ext::ExtensionHost::new()).unwrap(), 0);
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(seen, [Some(2)], "the declared override reaches the warm");
@@ -684,7 +684,7 @@ mod tests {
 
         let tmp = fixture(&["api", "web"]);
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record, &logos_ext::ExtensionHost::new()).unwrap(), 0);
 
         // A third sibling appears only for the second run.
         let batch = tmp.path().join("batch");
@@ -695,7 +695,7 @@ mod tests {
         git(&batch, &["commit", "-q", "-m", "init"]);
 
         SEEN.lock().unwrap().clear();
-        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record, &logos_ext::ExtensionHost::new()).unwrap(), 0);
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "still one invocation: {seen:?}");
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(nudge(tmp.path(), false, false, |_, _| true), Some(true));
 
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), None, true, &[], &out, |_, _| true).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, |_, _| true, &logos_ext::ExtensionHost::new()).unwrap(), 0);
         assert!(
             tmp.path().join(logos_core::federation::MANIFEST_FILENAME).is_file(),
             "accepting writes logos.workspace.toml via the FR-WS-02 path"
@@ -872,7 +872,7 @@ mod tests {
         // nothing may be warmed, and the early return must happen before it.
         let code = run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, |_, _| {
             unreachable!("nothing was approved, so nothing is warmed")
-        });
+        }, &logos_ext::ExtensionHost::new());
         assert_eq!(code.unwrap(), 0);
 
         assert!(
@@ -894,6 +894,27 @@ mod tests {
         assert!(!tmp.path().join(".mcp.json").exists(), "and no MCP entry — the workspace one least of all");
     }
 
+    /// The fallback is the `logos init` the user typed, so it runs the composed
+    /// host's init steps too, exactly as the plain single-root `init` does
+    /// (FR-DS-04): an extension's step is not lost because Logos offered a
+    /// workspace first.
+    #[test]
+    fn the_fallback_init_runs_the_hosts_init_steps() {
+        let tmp = fixture(&["api", "web"]);
+        let host = logos_ext::ExtensionHost::new()
+            .register(logos_ext::testing::StubExtension::new())
+            .expect("the stub registers");
+        let out = Output { json: true, quiet: true };
+        let code = run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, |_, _| {
+            unreachable!("nothing was approved, so nothing is warmed")
+        }, &host);
+        assert_eq!(code.unwrap(), 0);
+        assert!(
+            tmp.path().join(logos_ext::testing::STUB_INIT_TARGET).is_file(),
+            "the stub's init step ran on the fallback init"
+        );
+    }
+
     /// The other half of the pair, and the reason the provenance exists at all:
     /// an explicit `logos init --workspace` that approves no member is
     /// **unchanged** — the user asked for a workspace and approved none, so
@@ -911,7 +932,7 @@ mod tests {
         let out = Output { json: true, quiet: true };
         let code = run(tmp.path(), None, false, &["*".to_string()], &out, |_, _| {
             unreachable!("nothing was approved, so nothing is warmed")
-        });
+        }, &logos_ext::ExtensionHost::new());
         assert_eq!(code.unwrap(), 0);
 
         assert!(
@@ -951,7 +972,7 @@ mod tests {
 
         let out = Output { json: true, quiet: true };
         let warm: fn(&[Member], Option<usize>) -> bool = |_, _| unreachable!("nothing is warmed");
-        assert_eq!(run(root, Some((false, true)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+        assert_eq!(run(root, Some((false, true)), false, &["*".to_string()], &out, warm, &logos_ext::ExtensionHost::new()).unwrap(), 0);
 
         let hooks_path = std::process::Command::new("git")
             .arg("-C")
@@ -980,12 +1001,12 @@ mod tests {
         let tmp = fixture(&["api", "web"]);
         let out = Output { json: true, quiet: true };
         let warm: fn(&[Member], Option<usize>) -> bool = |_, _| unreachable!("nothing is warmed");
-        assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+        assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm, &logos_ext::ExtensionHost::new()).unwrap(), 0);
 
         let config = tmp.path().join(".logos").join("config.toml");
         assert!(config.is_file(), "the fallback ran the ordinary init and wrote a config.toml");
         std::fs::write(&config, "# hand-edited\n").unwrap();
-        assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+        assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm, &logos_ext::ExtensionHost::new()).unwrap(), 0);
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
             "# hand-edited\n",

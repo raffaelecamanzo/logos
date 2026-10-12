@@ -23,18 +23,51 @@
  * S-311 ([FR-UI-31], [FR-UI-32]) gave the answer body's one remaining
  * user-agent-default surface — a GFM table — the same treatment: see the answer
  * table section below the fenced code block it shares its container chrome with.
+ *
+ * S-618 ([FR-UI-45], CR-204 L1/L7/L8) put answer and user-turn text on the chat prose
+ * scale (`--text-chat` / `--leading-chat`; answer h2–h4 at weight 600 with
+ * `--tracking-heading`) and kept `--so-red` for small signals: Send and the delete
+ * confirm became neutral fills, leaving two 0.5rem dots as the only red fills.
+ *
+ * S-619 ([FR-UI-45], CR-204 L2/L3/L6/C8) made the card fill the view's height at
+ * desktop widths, with the transcript as its `flex: 1` scroller and the page's only
+ * one; capped answer prose at a LEFT-anchored `--measure-prose`; turned the composer
+ * into one pill (`--radius-pill`, `--elevation-composer`) with a round in-pill Send
+ * that is the signal red only while sendable; took the rail out of its card behind a
+ * collapse toggle; and folded the status band into a one-line chip. See the
+ * full-height, rail, consent-chip and composer sections below.
  */
 
+/* ── The full-height chain (S-619, FR-UI-45, CR-204 L2) ──────────────────────
+   At desktop widths the view fills the shell's content box — `height: 100%` of
+   `main#view-root`, which the shell's flex column sizes to the viewport below the
+   header — and every link down to the transcript is a flex item that may shrink
+   (`min-height: 0`): view → stack → two-pane grid → conversation card → its frame
+   and evidence → thread root → transcript. The transcript takes what is left, so
+   the page itself never scrolls and the composer never leaves the screen.
+
+   The chain can only fill the viewport if it never ASKS for more than it: while the
+   shell sizes its row, a percentage height is not yet resolvable and the view is
+   measured by its content. The transcript and the rail pane are therefore
+   size-contained (`contain: size`), contributing their floor rather than a
+   200-message transcript or a long conversation list. Below the breakpoint (the
+   rung at the end of this section) the panes stack and all of it is released: the
+   view takes its content height again and the transcript is the bounded box it
+   was. */
 .view {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  height: 100%;
 }
 
 /* The configured chat is a WidgetStack (S-617): the stack owns its column and
-   its one gap; this only lets it shrink inside the shell. */
+   its one gap; this lets it shrink inside the shell and take the view's height
+   below the Workspace Chat's heading. */
 .chat {
   min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* The Workspace Chat's heading (S-485, frontend-design §4.22): it names its scope in
@@ -48,8 +81,8 @@
 /* ── Two-pane layout: history rail + conversation (S-210, S-308, FR-UI-26/33) ── */
 /* Desktop (≥1024px): the Wiki menu's fluid rail track and column gap, verbatim
    (`WikiView.module.css` `.layout` — the design-system guard reads both files and
-   fails if they drift). The narrow-viewport toggle is display:none here, so it
-   occupies no grid cell and the rail is always shown.
+   fails if they drift). The rail column holds the collapse toggle over the rail
+   (S-619); collapsed, the column narrows to the toggle (`.layoutCollapsed`).
 
    Unlike the Wiki, the row is NOT `align-items: start`: the default `stretch` is
    what makes the rail span the full column height beside the conversation card
@@ -57,54 +90,100 @@
 .layout {
   display: grid;
   grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--space-5);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* The rail collapsed (S-619): its column narrows to the toggle and the conversation
+   takes the freed width. */
+.layoutCollapsed {
+  grid-template-columns: auto minmax(0, 1fr);
 }
 .main {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   min-width: 0;
+  min-height: 0;
+}
+/* The conversation card (the `chatConversation` Widget) fills the column, and its
+   frame and evidence part pass that height down to the thread. The two inner parts
+   are the shared Widget's, reached by the data attributes it marks them with, so the
+   frame stays the one every widget renders through. */
+.conversation {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.conversation > [data-widget],
+.conversation [data-widget-part="evidence"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* ── History rail (ThreadList) ─────────────────────────────────────────────── */
-.railToggle {
-  display: none; /* shown only below the breakpoint (see the media query) */
-  align-items: center;
+/* The rail column (S-619): the collapse toggle over the rail. A flex column, so the
+   pane below the toggle takes the rest of the row's height. */
+.railColumn {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  color: var(--text-1);
-  background: var(--surface-2);
-  border: 1px solid var(--border-subtle);
+  min-width: 0;
+  min-height: 0;
+}
+/* The collapse toggle (S-619, FR-UI-45): an icon-only ghost button, shown at every
+   width. Its name says what it will do; its tooltip says it again for a pointer. */
+.railToggle {
+  flex: none;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--text-2);
+  background: transparent;
+  border: 0;
   border-radius: var(--radius-2);
-  padding: var(--space-2) var(--space-3);
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--motion-ease);
 }
 .railToggle:hover {
-  border-color: var(--color-accent);
+  color: var(--text-1);
+  background: var(--tint-hover);
 }
 /* The rail pane is size-contained: it contributes NO height of its own to the
    grid row, so the row is exactly as tall as the conversation card and a long
    conversation list scrolls inside the rail instead of stretching the page. The
-   stretched pane is then a definite height, which `.rail`'s `height: 100%`
-   resolves against. (Released below the breakpoint, where the rail stacks.) */
+   pane is then a definite height — the column's, less the toggle — which `.rail`'s
+   `height: 100%` resolves against. (Released below the breakpoint, where the rail
+   stacks.) A collapsed rail is `hidden`, and stays hidden whatever display a rung
+   gives the pane. */
 .railPane {
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   contain: size;
+}
+.railPane[hidden] {
+  display: none;
 }
 /* The rail spans the full column height and carries no viewport-height cap of its
    own (S-308): its bound is the row. It does NOT scroll as a whole — only the list
-   below the "+ New chat" action does, which is what keeps that action pinned. */
+   below the "+ New chat" action does, which is what keeps that action pinned.
+
+   It renders NO card (S-619, CR-204 L6): no fill, border, radius or inset of its
+   own, so it reads as part of the page surface beside the conversation card. */
 .rail {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   height: 100%;
-  padding: var(--space-3);
-  background: var(--surface-1);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
 }
 /* A full-size action (S-308): the shared `Button` at `md` with a leading
    `IconPlus`. `flex: none` keeps it out of the list's scroll region; the floor
@@ -115,8 +194,8 @@
   min-height: 2.25rem;
 }
 /* The scroll region. The inset padding (cancelled by an equal negative inline
-   margin, so rows stay flush with the rail's padding) gives the 2px+2px global
-   focus ring room, so a focused row is never clipped by the scroll box. */
+   margin, so rows stay flush with the rail's edge) gives the 2px+2px global focus
+   ring room, so a focused row is never clipped by the scroll box. */
 .threadList {
   list-style: none;
   flex: 1 1 auto;
@@ -135,10 +214,40 @@
   flex-direction: column;
   gap: var(--space-1);
 }
+/* The row LINE — title and trash — is the filled pill (S-619, CR-204 L6): the hover
+   tint on hover and keyboard focus, the selected tint on the open conversation. The
+   red reaches the active row only as the small marker on its leading edge (below),
+   never as an outline. */
 .threadLine {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-1);
+  padding-right: var(--space-1);
+  border-radius: var(--radius-pill);
+  transition: background-color var(--motion-fast) var(--motion-ease);
+}
+.threadLine:hover,
+.threadLine:focus-within {
+  background: var(--tint-hover);
+}
+.threadLineActive,
+.threadLineActive:hover,
+.threadLineActive:focus-within {
+  background: var(--tint-selected);
+}
+/* The active marker: a 3px × 1rem signal-red bar on the row's leading edge — a
+   small signal, bounded well inside the 40×40px a red fill may take. */
+.threadLineActive::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 1rem;
+  transform: translateY(-50%);
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
 }
 .threadItem {
   display: block;
@@ -150,43 +259,55 @@
   font-size: var(--text-sm);
   color: var(--text-1);
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-1);
-  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   /* One line per conversation — the auto-title, ellipsised when long. */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.threadItem:hover {
-  background: var(--surface-2);
-  border-color: var(--border-subtle);
-}
 .threadActive {
-  background: var(--surface-2);
-  border-color: var(--card-accent);
   font-weight: var(--weight-semibold);
 }
-/* The delete affordance: calm and muted until hovered/focused — a destructive
-   action should not shout from every row, but must be reachable by keyboard. */
+/* The delete affordance: a trash glyph, hidden on an idle row and shown on row
+   hover, row focus, the active row and while its confirm is open (S-619, CR-204 L6)
+   — a destructive action should not shout from every row, but must be reachable by
+   keyboard, which `:focus-within` guarantees: tabbing onto the row's title already
+   reveals it. Hidden by opacity, not `visibility`, so it stays in the tab order. A
+   device that cannot hover shows it always. */
 .threadDelete {
   flex: 0 0 auto;
-  font: inherit;
-  font-size: var(--text-sm);
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
   color: var(--text-2);
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-1);
-  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
   cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--motion-ease);
+}
+.threadLine:hover .threadDelete,
+.threadLine:focus-within .threadDelete,
+.threadLineActive .threadDelete,
+.threadDelete[aria-expanded="true"] {
+  opacity: 1;
+}
+@media (hover: none) {
+  .threadDelete {
+    opacity: 1;
+  }
 }
 .threadDelete:hover,
 .threadDelete:focus-visible {
-  color: var(--color-accent);
+  color: var(--text-1);
   background: var(--surface-2);
-  border-color: var(--border-subtle);
 }
 /* The confirm step (S-211 AC-1): an inline panel naming what is about to go, so a
    destructive click is never one click. */
@@ -220,9 +341,13 @@
   border: 1px solid transparent;
   cursor: pointer;
 }
+/* The destructive confirm keeps its weight as an INVERTED neutral (full-contrast ink
+   as the fill), not the signal red: `--so-red` is a small signal in the chat, never
+   the fill of a text button (CR-204 L7, FR-UI-45). The panel's own 3px red left
+   edge (`.threadConfirm`) carries the "this is destructive" signal. */
 .threadConfirmDelete {
-  color: var(--ink-on-red);
-  background: var(--color-accent);
+  color: var(--surface-1);
+  background: var(--text-1);
 }
 .threadConfirmCancel {
   color: var(--text-1);
@@ -230,10 +355,10 @@
   border-color: var(--border-subtle);
 }
 /* The rail's honest notes. A failed read or delete is a signal, but
-   `--color-accent` as INK on the rail's `--surface-1` is 3.55:1 in the dark theme —
-   below the 4.5:1 AA body minimum (S-308 re-measure). So the hue rides a left edge,
-   the view's in-flow notice grammar (`.halt`/`.error`, `.threadConfirm`), and the
-   text takes `--text-1`. */
+   `--color-accent` as INK on the page surface is below the 4.5:1 AA body minimum in
+   the dark theme (S-308 re-measure, on the then rail card). So the hue rides a left
+   edge, the view's in-flow notice grammar (`.halt`/`.error`, `.threadConfirm`), and
+   the text takes `--text-1`. */
 .railEmpty,
 .railError {
   margin: 0;
@@ -248,25 +373,24 @@
   color: var(--text-1);
 }
 
-/* Tablet & below (≤1023px): the rail collapses behind a toggle, mirroring the
-   AppShell sidebar behaviour (frontend-design §4.13 / §7). The layout stacks to a
-   single column; the toggle appears; the rail shows only when opened. */
+/* Tablet & below (≤1023px): the panes stack to one column, the rail column — the
+   toggle over the rail — above the conversation, mirroring the AppShell sidebar
+   (frontend-design §4.13 / §7). The full-height chain is released here: the view
+   takes its content height and the transcript is a bounded box again (see `.log`'s
+   own rung below). */
 @media (max-width: 1023px) {
-  .layout {
-    grid-template-columns: 1fr;
+  .view {
+    height: auto;
   }
-  .railToggle {
-    display: inline-flex;
-    justify-self: start;
+  .layout,
+  .layoutCollapsed {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
   }
   /* Stacked, the rail has no column beside the card to span: it sizes to its
      content again, so the containment that bound it to the row is released. */
   .railPane {
-    display: none;
     contain: none;
-  }
-  .railPaneOpen {
-    display: block;
   }
 }
 
@@ -282,15 +406,76 @@
 }
 
 /* ── Persistent status band (S-309, FR-UI-33, CR-092's third §4.13 lead-callout
-   state): once configured and consented, the compact provider/model line — sharing
-   `.providerLine` with the consent banner above — plus the turn's budget-tree
-   bounds, moved here from the empty-thread hint so they survive past the first
-   message instead of vanishing. */
-.status p {
+   state), folded into a one-line chip (S-619, CR-204 C8, FR-UI-45) ─────────────
+   Once configured and consented, the lead is ONE line: a quiet chip in the callout
+   idiom (the raised fill, a hairline, the muted 4px left edge of a `muted`
+   Callout) naming the provider, host, model and the budget bounds in short. It
+   never wraps — a long model name is ellipsised, the whole line stays on the chip's
+   accessible name — and a click discloses the band's sentences beneath it. */
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.statusChip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 100%;
+  align-self: flex-start;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.statusChip:hover {
+  border-color: var(--border-strong);
+}
+/* The callout's uppercase tracked label voice (`Callout.module.css` `.label`). */
+.statusLabel {
+  flex: none;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.statusLine {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+.statusChevron {
+  flex: none;
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+.statusChip[aria-expanded="true"] .statusChevron {
+  transform: rotate(180deg);
+}
+/* The band's sentences, disclosed under the chip on the same raised fill. */
+.statusBand {
+  padding: var(--space-2) var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius-1);
+}
+.statusBand p {
   margin: 0 0 var(--space-1);
   line-height: var(--leading-base);
 }
-.status p:last-child {
+.statusBand p:last-child {
   margin-bottom: 0;
 }
 .budgetLine {
@@ -307,12 +492,16 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  flex: 1 1 auto;
+  min-height: 0;
 }
-/* The transcript stays a BOUNDED scroll box (FR-UI-33, CR-092 §3.2): it is
-   assistant-ui's thread viewport, which follows the stream by driving its own
-   `scrollTop` — an unbounded box would silently stop auto-follow and walk the
-   composer off-screen mid-answer. The floor keeps an empty or one-turn transcript
-   from collapsing to its content (it measured 95px under S-300).
+/* The transcript is the card's `flex: 1` BOUNDED scroller and the page's only one
+   (S-619, FR-UI-45; FR-UI-33, CR-092 §3.2): it is assistant-ui's thread viewport,
+   which follows the stream by driving its own `scrollTop` — an unbounded box would
+   silently stop auto-follow and walk the composer off-screen mid-answer. Its bound is
+   the card's height, which the full-height chain above makes the viewport's; it is
+   size-contained so a long thread never asks the page for more (see that chain),
+   and the floor keeps it a usable box on a short viewport.
 
    The negative inline margin hands the viewport's own inset back to the card's
    padding, so the turns align on the card's content edge — the same line as the
@@ -324,11 +513,23 @@
   /* Generous inter-turn spacing: with the card chrome gone, the rhythm between
      turns is what separates them, so it has to do that work on its own. */
   gap: var(--space-6);
-  min-height: 20rem;
-  max-height: 60vh;
+  flex: 1 1 auto;
+  min-height: 12rem;
+  contain: size;
   overflow-y: auto;
   margin-inline: calc(-1 * var(--space-4));
   padding: var(--space-5) var(--space-4);
+}
+/* Stacked (≤1023px) the view takes its content height, so there is no card height
+   to fill: the transcript is the bounded box it was before S-619 — a floor and a
+   viewport cap — and is measured by its content again. */
+@media (max-width: 1023px) {
+  .log {
+    flex: none;
+    contain: none;
+    min-height: 20rem;
+    max-height: 60vh;
+  }
 }
 
 /* Both roles share ONE alignment line — the card's content edge — because each
@@ -344,14 +545,20 @@
    RIGHT edge — the transcript's only remaining bubble. */
 .user {
   display: flex;
+  /* The turn's action bar (S-624) wraps to its own line under the bubble. */
+  flex-wrap: wrap;
   justify-content: flex-end;
 }
 .userBubble {
   max-width: 80%;
-  padding: var(--space-2) var(--space-3);
+  /* 10px × 20px and the 24px chat radius (S-620, CR-204 L4, FR-UI-45). */
+  padding: 10px 20px;
   background: var(--surface-2);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
+  border-radius: var(--radius-3);
+  /* The user's text reads on the same chat prose scale as the answer (CR-204 L1). */
+  font-size: var(--text-chat);
+  line-height: var(--leading-chat);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -560,10 +767,21 @@
   flex-direction: column;
   gap: var(--space-2);
 }
+/* `font-size` is the answer's chat prose size, inherited by the markdown inside and
+   by the streaming caret (`.streaming::after`); the 1.75 leading is set on the prose
+   blocks themselves (`.final .markdown p/ul/ol`, below), so tables and the caret
+   keep the base leading. */
 .final {
   margin: 0;
+  font-size: var(--text-chat);
   line-height: var(--leading-base);
   overflow-wrap: anywhere;
+  /* The reading measure (S-619, FR-UI-45, CR-204 L2): answer prose is capped at
+     `--measure-prose`, LEFT-anchored — the box starts on the transcript's content
+     edge and only its right side stops short, so no void opens between the rail and
+     the conversation (BR-39). Declared here, where the 16px chat size is, so the
+     72ch is measured in the prose's own characters. */
+  max-width: var(--measure-prose);
 }
 /* "Working" indicator — shown from Send until the first answer token arrives
    (plan / think / step phase), where the streaming caret then takes over. */
@@ -658,6 +876,45 @@
 .markdown ol {
   margin: 0 0 var(--space-2);
   line-height: var(--leading-base);
+}
+/* The chat prose scale (CR-204 L1, FR-UI-45): 16px on a 1.75 leading = a 28px line
+   box, scoped to the ANSWER (`.final`, which carries the 16px size down to its
+   children). `.markdown` itself declares no size: the same renderer also draws the
+   Activity fold's step results, which sit inside `.activityResult` at `--text-sm`
+   and are context rather than the answer — a size here would override that and grow
+   the quiet fold to answer size (reproduced at review). The app-wide `--text-base`
+   stays 15px everywhere else. */
+.final .markdown p,
+.final .markdown ul,
+.final .markdown ol {
+  line-height: var(--leading-chat);
+}
+/* Answer headings: weight 600, tightened tracking, the h2 → h4 ladder (CR-204 L1).
+   Declared per level because the user-agent heading sizes are em-relative to the
+   parent and would otherwise float with the prose size. h5 and h6 take the prose
+   size, so no heading reads smaller than the paragraph under it (the user-agent
+   0.83em / 0.67em would). */
+.final .markdown h2,
+.final .markdown h3,
+.final .markdown h4,
+.final .markdown h5,
+.final .markdown h6 {
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  line-height: var(--leading-tight);
+}
+.final .markdown h2 {
+  font-size: 1.875rem;
+}
+.final .markdown h3 {
+  font-size: 1.5rem;
+}
+.final .markdown h4 {
+  font-size: 1.25rem;
+}
+.final .markdown h5,
+.final .markdown h6 {
+  font-size: var(--text-chat);
 }
 /* Answer links. On the card fill `--color-accent` ink falls below 4.5:1 in the
    dark theme (3.55:1), so the link takes full-contrast ink and the signal red
@@ -971,6 +1228,11 @@
 .actions {
   display: flex;
   gap: var(--space-2);
+  /* The containing block of Copy's visually-hidden "Copied" status (`.sr-only` is
+     absolutely positioned): without one it resolves to the conversation card, OUTSIDE
+     the transcript's scroller, so every answer's status would extend the page's
+     scroll height by its offset in the thread (S-620). */
+  position: relative;
 }
 .action {
   font-size: var(--text-xs);
@@ -986,61 +1248,428 @@
   color: var(--text-1);
   border-color: var(--color-accent);
 }
+/* The action bar's Copy and Regenerate (S-620, FR-UI-45, CR-204 C10): 24px icon
+   buttons, ghost until hovered or keyboard-focused, when they take the shared
+   `--tint-hover` fill. The glyph is sized here (the icon set's default is 18px, which
+   would fill the whole box); the accessible name and tooltip are the control's. */
+.actionIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  color: var(--text-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
+}
+.actionIcon svg {
+  width: 1rem;
+  height: 1rem;
+}
+.actionIcon:hover,
+.actionIcon:focus-visible {
+  color: var(--text-1);
+  background: var(--tint-hover);
+}
+.actionIcon:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+/* The global ring (`styles/base.css` `:focus-visible`) also sets `--radius-sm`, and it
+   is emitted after this module at the same specificity — restate the shape. */
+.actionIcon:focus-visible {
+  border-radius: var(--radius-2);
+}
+/* A just-copied Copy shows its check in the signal-free ink, not in red. */
+.actionIcon[data-copied] {
+  color: var(--text-1);
+}
 
-/* ── Composer (assistant-ui ComposerPrimitive) ────────────────────────────── */
-/* The composer fills the card's content box (S-308), on the same edge as the
-   turns above it, so the card reads as one surface from the last turn down into
-   the input. */
-.composer {
+/* ── Edit and resend (S-624, FR-UI-46) ─────────────────────────────────────── */
+/* A user turn's action bar: a whole line of the turn, under the bubble and hugging
+   the same right edge. */
+.userActions {
+  flex-basis: 100%;
+  justify-content: flex-end;
+}
+/* The turn opened for editing: its text in a box drawn like the composer pill —
+   the same fill, edge and focus ring, at the bubble's radius and width — so the
+   field reads as a field. The input inside is the composer's own `.input`. */
+.userEdit {
+  flex: 0 1 80%;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-3);
 }
-.input {
-  width: 100%;
-  resize: vertical;
-  font: inherit;
+.userEdit:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* The composer's input, filling the box instead of centring on the pill's axis (the
+   descendant selector outranks `.input`, which this file declares later). */
+.userEdit .input {
+  align-self: stretch;
+  font-size: var(--text-chat);
+  line-height: var(--leading-chat);
+}
+
+/* ── Scroll-to-bottom (S-620, FR-UI-46) ───────────────────────────────────── */
+/* A zero-height STICKY anchor at the end of the transcript's content: it rides the
+   scroller's visible bottom edge as the turns scroll beneath it, so the round ↓
+   control floats just above the composer however tall the input has grown. Its
+   negative top margin takes back the one flex gap it adds, so it adds no height. */
+.scrollAnchor {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex: none;
+  height: 0;
+  margin-top: calc(-1 * var(--space-6));
+}
+.scrollToBottom {
+  position: absolute;
+  bottom: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
   color: var(--text-1);
   background: var(--surface-1);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--elevation-composer);
+  cursor: pointer;
+}
+.scrollToBottom:hover,
+.scrollToBottom:focus-visible {
+  background: var(--surface-2);
+}
+.scrollToBottom:focus-visible {
+  border-radius: var(--radius-pill);
+}
+
+/* ── Composer (assistant-ui ComposerPrimitive) ────────────────────────────── */
+/* ONE pill (S-619, FR-UI-45, CR-204 L3): `--radius-pill`, a hairline and the
+   composer lift, pinned under the transcript (`flex: none`, the thread root's last
+   item) on the card's content edge — its box sits where the turns' edge is, so it
+   declares no inline margin. The "+" slot, the input and the round Send / Stop sit
+   inside it, bottom-aligned so the buttons stay by the last line as the input grows.
+
+   The focus ring is the PILL's (`:focus-within`), in the global ring's token and
+   geometry (`styles/base.css`), so the input does not draw a second one inside it. */
+.composer {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--elevation-composer);
+}
+.composer:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* The input: one line, growing with its content to a capped height (8 lines, set
+   on the primitive) and then scrolling. No fill, border or ring of its own — the pill
+   is the field. `align-self: center` keeps a one-line input on the buttons' axis. */
+.input {
+  flex: 1 1 auto;
+  align-self: center;
+  min-width: 0;
+  resize: none;
+  font: inherit;
+  line-height: var(--leading-base);
+  color: var(--text-1);
+  background: transparent;
+  border: 0;
+  padding: var(--space-1) var(--space-1);
+  overflow-y: auto;
 }
 .input:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
+  outline: none;
 }
 .input:disabled {
-  opacity: 0.6;
   cursor: not-allowed;
 }
-.composerActions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
+/* The muted hint under the pill (S-620, FR-UI-46): names the two composer keys. It sits
+   close under the pill — the negative top margin takes back most of the thread
+   root's flex gap — and stays one quiet line. */
+.composerHint {
+  flex: none;
+  margin: calc(-1 * var(--space-2)) 0 0;
+  padding-inline: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-2);
 }
+.composerHint kbd {
+  font-family: var(--font-mono);
+  font-size: inherit;
+}
+/* The pill's round buttons: a 2rem circle each, well inside the 40×40px a red fill
+   may take (the sendable Send, below). */
+.composerMenu,
 .send,
 .stop {
-  font: inherit;
-  font-weight: var(--weight-semibold);
-  padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-2);
-  cursor: pointer;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
   border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
 }
+/* The "+" that opens the preset menu (S-625): a ghost, disabled until consent. */
+.composerMenu {
+  color: var(--text-2);
+  background: transparent;
+}
+.composerMenu:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+/* Send: NEUTRAL while there is nothing to send (assistant-ui disables it on an empty
+   input and before consent), the signal red once there is (CR-204 L7) — the one
+   sendable signal, now the button's own state. The red rule restates the circle's
+   size so the red fill is bounded where it is declared. */
 .send {
-  color: var(--ink-on-red);
-  background: var(--color-accent);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
 }
 .send:disabled {
-  opacity: 0.6;
   cursor: not-allowed;
 }
+.send:not(:disabled) {
+  width: 2rem;
+  height: 2rem;
+  color: var(--ink-on-red);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+/* The round controls keep their shape on keyboard focus. The global ring
+   (`styles/base.css` `:focus-visible`) also sets `--radius-sm`, and it is emitted
+   after this module at the same specificity, so without this restatement each circle
+   — the sendable red Send included — would square off while focused, ring and all. */
+.threadItem:focus-visible,
+.threadDelete:focus-visible,
+.composerMenu:focus-visible,
+.send:focus-visible,
+.stop:focus-visible {
+  border-radius: var(--radius-pill);
+}
+.railToggle:focus-visible {
+  border-radius: var(--radius-2);
+}
+/* Stop: neutral, while a turn runs (FR-UI-19). */
 .stop {
   color: var(--text-1);
   background: var(--surface-2);
-  border-color: var(--border-subtle);
+  border-color: var(--border-strong);
+}
+.stop:hover {
+  border-color: var(--text-2);
 }
 
 /* The global Clear-history block was removed by S-211 (CR-053 / ADR-47): deletion
    is per conversation, styled with the rail above. */
+
+/* The empty thread's welcome (S-621, FR-UI-46, CR-204 C1): a centred greeting over a
+   row of suggestion chips. It fills the transcript's height and centres inside it —
+   the greeting is the centred empty state of a region with no content, which
+   FR-UI-40 permits; the answer prose keeps its left-anchored measure. */
+.welcome {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  text-align: center;
+  margin-block: auto;
+}
+.welcomeTitle {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  line-height: var(--leading-tight);
+}
+/* The welcome caps its own width: `--measure-prose` is the answer prose's alone. */
+.welcomeLead {
+  max-width: 36rem;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  max-width: 36rem;
+}
+/* A chip is a pill button in the composer's grammar: a quiet outline, the page
+   surface behind it, the accent only on hover and focus (red stays a small signal). */
+.chip {
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--text-1);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  /* A returned name can be one long unbreakable token (a dotted topic key, a deep
+     path): the chip wraps it within its row instead of widening past the log. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+.chip:hover:not(:disabled) {
+  background: var(--tint-hover);
+  border-color: var(--color-accent);
+}
+.chip:focus-visible {
+  border-radius: var(--radius-pill);
+}
+.chip:disabled {
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+}
+
+/* ── Presets (S-625, FR-UI-49, CR-204 C7) ─────────────────────────────────── */
+/* The "+" menu anchors to the "+" itself: the popup opens UPWARD from the pill's
+   leading edge, over the transcript, so it never pushes the pinned composer. */
+.presetAnchor {
+  position: relative;
+  flex: none;
+  display: flex;
+}
+.presetMenu {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: min(20rem, calc(100vw - 2 * var(--space-4)));
+  padding: var(--space-1);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-2);
+  box-shadow: var(--elevation-2);
+}
+/* One preset: its label over its one-line description, neutral throughout — the
+   checked one takes the raised fill, never the signal red (CR-204 L7). */
+.presetItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.125rem;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  text-align: left;
+  color: var(--text-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+.presetItem:hover,
+.presetItem:focus-visible {
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+}
+.presetItem[aria-checked="true"] {
+  background: var(--surface-2);
+}
+.presetItem[aria-checked="true"] .presetLabel {
+  font-weight: 600;
+}
+.presetLabel {
+  font-size: var(--text-sm);
+}
+.presetDescription {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+/* The non-Default preset's chip, inside the pill beside the "+": one quiet line that
+   names the preset, with its clear control. Centred on the buttons' axis like the
+   one-line input. */
+.presetChip {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 0.125rem 0 var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+}
+/* The cap is the label's, so a long name truncates and the chip itself stays an
+   uncapped item of the pill. */
+.presetChipLabel {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The clear control: the "+" glyph turned to a ×. */
+.presetChipClear {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+.presetChipClear svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  transform: rotate(45deg);
+}
+.presetChipClear:hover {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.presetChipClear:focus-visible {
+  border-radius: var(--radius-pill);
+}

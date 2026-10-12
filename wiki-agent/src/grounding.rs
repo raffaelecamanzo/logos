@@ -5,7 +5,7 @@
 //! handing it the bare FR-WK-13 "read the source" *directive* (the external-hook
 //! contract, [ADR-33]) we resolve the grounding material **in-binary** and inject
 //! it straight into the synthesis prompt ([ADR-51]). Two paths, matching the
-//! [`DocGrounding`](logos_core::wiki::DocGrounding) shape the queue already carries:
+//! [`DocGrounding`](logos_wiki::DocGrounding) shape the queue already carries:
 //!
 //! - **doc-grounded** ([`DocGrounding::fallback_to_code`] is `false`) — read the
 //!   named `docs/` source file(s)/glob, each **bounded/truncated per source** to a
@@ -34,8 +34,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use logos_core::models::ContextBundle;
-use logos_core::wiki::GenerationItem;
 use logos_core::Engine;
+use logos_wiki::GenerationItem;
 
 /// The default **per-source token budget** ([S-236], [ADR-51]) each grounding
 /// source is bounded to when a caller does not set one — a large source is
@@ -134,7 +134,7 @@ fn read_doc_sources(root: &Path, sources: &[String], budget: usize) -> String {
 /// Expand a `docs/`-relative source pattern into the concrete files it names.
 ///
 /// Supports a plain file path or a **single-`*`** filename glob scoped to one
-/// directory — exactly the forms the [`DocGrounding`](logos_core::wiki::DocGrounding)
+/// directory — exactly the forms the [`DocGrounding`](logos_wiki::DocGrounding)
 /// sources use (`*.md`, `FR-*.md`, `docs/specs/software-spec.md`). Directory-scoped
 /// (never a tree walk) and **sorted**, so the excerpt is deterministic
 /// ([NFR-RA-06]); a missing directory or file reads as "no match".

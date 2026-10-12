@@ -4,6 +4,7 @@ import {
   convertMessage,
   findRerunIndex,
   foldPersistedMessages,
+  storedUserTurn,
   type ChatMessage,
 } from "./chatRuntime.tsx";
 import { initialTurn, type PersistedChatMessage, type TurnState } from "./chatModel.ts";
@@ -134,5 +135,36 @@ describe("findRerunIndex (regenerate targeting, FR-UI-20)", () => {
     expect(
       findRerunIndex([{ kind: "assistant", id: 9, parentId: 0, turn: turn({}) }], "0"),
     ).toBe(-1);
+  });
+});
+
+describe("storedUserTurn (the truncate's question, S-624)", () => {
+  const a = (id: number, parentId: number): ChatMessage => ({ kind: "assistant", id, parentId, turn: turn({}) });
+  const messages: ChatMessage[] = [
+    { kind: "user", id: 1, text: "q0" },
+    a(2, 1),
+    { kind: "user", id: 3, text: "refused", unsent: true },
+    a(4, 3),
+    { kind: "user", id: 5, text: "q1" },
+    a(6, 5),
+  ];
+
+  it("counts the stored questions before the message", () => {
+    expect(storedUserTurn(messages, 0)).toBe(0);
+    expect(storedUserTurn(messages, 4)).toBe(1);
+  });
+
+  it("skips a question the server refused, but counts every stored one", () => {
+    const stored = messages.map((m) => (m.kind === "user" ? { ...m, unsent: undefined } : m));
+    expect(storedUserTurn(stored, 4)).toBe(2);
+    expect(storedUserTurn(messages, 4)).toBe(1);
+  });
+
+  it("counts questions, not messages: an unanswered turn's question still counts", () => {
+    const unanswered: ChatMessage[] = [
+      { kind: "user", id: 1, text: "stopped" },
+      { kind: "user", id: 2, text: "q1" },
+    ];
+    expect(storedUserTurn(unanswered, 1)).toBe(1);
   });
 });

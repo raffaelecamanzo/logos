@@ -1,0 +1,52 @@
+Logos — structural code intelligence for AI-assisted development
+
+Usage: logos [OPTIONS] <COMMAND>
+
+Commands:
+  init                 Initialise `.logos/` (config.toml, rules.toml, .gitignore) and the store
+  index                Build or rebuild the full code-graph index
+  sync                 Reconcile exactly the given paths into the index
+  status               Show the current index and sync health
+  search               Full-text search over the code graph
+  query                Query a symbol — a façade over search/callers/callees (FR-CL-05)
+  context              Deterministic context bundle for a task (the token-saving tool)
+  explore              Explore a symbol's neighbourhood, source grouped by file
+  node                 Full info for one symbol: metadata, edges, optional code
+  callers              Direct callers of a symbol
+  callees              Direct callees of a symbol
+  impact               Transitive impact of changing a symbol, both directions labeled
+  impact-intersection  Which planned work items collide, and on what (FR-NV-11): given work items each naming the symbols it intends to change, the pairs whose transitive impact sets intersect, the pairs that are safely parallel, and the coverage limits of that verdict
+  precedent            Structurally analogous code — the sibling that already does this (FR-NV-12): nodes sharing a supertype, a registration, or a call shape with the target, each naming why. Ranked by counted graph facts, never a score; an empty answer states its reason
+  branch-overlap       Which git refs collide, and what a merge did not carry (FR-NV-13): given the refs about to be merged, the symbols more than one of them modifies; given `--merge`, the symbols and files a ref changed that the stated merge result does not. A clean merge is not a complete merge
+  affected             Files affected by a changed set — whole reverse-transitive closure
+  implements           Code that implements a documentation node or requirement (FR-NV-10): the code symbols a doc node points at over doc→code edges
+  referencing-docs     Documentation sections that reference a symbol (FR-NV-10): the docs a change to the symbol may oblige updating
+  scan                 Full architecture-quality scan (reconcile-then-score)
+  check                Architecture-rules compliance check; error violations exit 1, no rules contract loaded exits 4 (FR-GV-22)
+  quality-report       Non-blocking quality readout for the report tier (FR-IN-07, CR-095): the freshly computed signal, the blessed baseline and their delta, plus the last recorded `check` findings — computed **without writing**, so it never appends to the evolution series or takes the graph write lock. Always exits 0; it reports, it never gates
+  gate                 CI gate: regression vs the saved baseline (or under --threshold) exits 1
+  health               ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift (FR-GV-18/FR-GV-20) and graph counts; an unhealthy graph exits 1. For INDEX freshness use `status`
+  session-start        Begin a quality session (FR-GV-04): record the baseline BEFORE edits — the CLI half of the session gate the MCP instructions call mandatory
+  session-end          End the quality session (FR-GV-05): re-score and compare to the baseline; an aggregate regression beyond epsilon exits 1
+  doctor               Fast graph structural-integrity check (CR-052, FR-GV-18): asserts one node per symbol_id and zero orphan rows; drift exits 1
+  verify               Deep graph consistency check (CR-052, FR-GV-19): reindex into a throwaway shadow store and diff node/edge/file counts + symbol sets against the live graph; reports leaked/orphaned symbols and drift, exits 1 on drift
+  evolution            Signal evolution over stored snapshots
+  dsm                  Dependency structure matrix (module rollup by default)
+  doc-gaps             Undocumented exported functions (static doc-gap analysis, FR-GV-14)
+  hotspots             Hotspot ranking: files high in both churn and structural complexity (the non-gated temporal tier — never moves the gate, FR-GH-06/BR-26)
+  coverage             Coverage evidence tier: ingest external reports and read freshness-checked status (the non-gated coverage tier — never moves the gate, BR-28)
+  wiki                 Source wiki: write/read/search/status/delete agent-generated pages in the gate-immune `.logos/wiki.db` store (CR-008). Every read carries mandatory provenance (generator, written-at HEAD, per-anchor freshness, the fixed generated-content marker)
+  hook                 Install the Claude Code session-start quality-report hook (FR-IN-07, ADR-49): a marker-tagged hook script plus a non-clobbering merge into the shared `.claude/settings.json` that surfaces a non-blocking signal/baseline/violations readout when a session starts, resumes, or is reopened by `/clear`. Also sweeps the retired SessionEnd hook and its orphaned script (CR-095). The binary stays offline (NFR-SE-01). Re-emit with `--force`. CLI-only. (`logos wiki hook --emit` is the hidden alias of this command.)
+  xservice             Cross-service workspace queries (federation, FR-WS-05): route-providers, callers, impact, search, build-deps (a build dependency, never a runtime coupling) and type-refs (an advisory type reference, never a coupling) — each with an optional `--repo` member filter
+  workspace            Workspace-level commands (federation, FR-WS-05): `status` reports per-member freshness + the 3-state cross-service coverage summary
+  stats                Aggregated usage/performance statistics
+  languages            List registered language grammars
+  serve                Start a long-lived server: the stdio MCP surface and/or — in `ui` builds — the localhost web dashboard, over one Engine and one watcher
+  help                 Print this message or the help of the given subcommand(s)
+
+Options:
+      --project <PATH>  Override the project root (defaults to the current directory)
+      --json            Output results as machine-readable JSON
+      --quiet           Suppress non-essential output (exit codes and --json still apply)
+  -h, --help            Print help
+  -V, --version         Print version

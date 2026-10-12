@@ -138,14 +138,14 @@ impl WorkspaceBudget {
     /// its core count.
     ///
     /// **Observes** the limit; it does not change it. Raising the soft limit is
-    /// process-level startup work the binary owns ([`main`] calls
-    /// [`raise_open_file_limit`](crate::fdlimit::raise_open_file_limit) before
-    /// anything opens a file), and [ADR-63] scopes the raise to startup for that
+    /// process-level startup work the binary owns (the CLI's entry, [`run_from`],
+    /// calls [`raise_open_file_limit`](crate::fdlimit::raise_open_file_limit)
+    /// before anything opens a file), and [ADR-63] scopes the raise to startup for that
     /// reason. A value constructor that mutated a process-global limit as a side
     /// effect would do it behind the back of every embedder of this crate — and
     /// the budget is the guarantee regardless, so there is nothing to gain by it.
     ///
-    /// [`main`]: ../../../cli/src/main.rs
+    /// [`run_from`]: ../../../cli/src/lib.rs
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     pub fn from_host() -> Self {
         let soft_limit = crate::fdlimit::open_file_soft_limit().unwrap_or(ASSUMED_FD_SOFT_LIMIT);

@@ -7,6 +7,9 @@
  * S-192; migration completed in Sprint 33). The Dashboard lives at `/` (S-194).
  */
 
+import type { ExtensionNavEntry } from "./api/extensionsClient.ts";
+import { mountedNavAnchor, mountedNavEntries } from "./extensions/registry.ts";
+import { routeOwns } from "./routeOwns.ts";
 import { isViewHidden } from "./views/hiddenWidgets.ts";
 
 /** The three sidebar groups (CR-042): primary read surfaces, risk & coverage,
@@ -62,19 +65,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Dashboard", path: "/", group: "A", scope: "member" },
   { id: "health", label: "Health", path: "/health", group: "A", scope: "member" },
   { id: "graph", label: "Graph", path: "/graph", group: "A", scope: "member" },
-  // Chat — migrated (S-190) to a React SSE client over the unchanged
-  // intent-guarded `POST /chat` stream. The MEMBER chat: offered in single-root and
-  // `--standalone` serves only. In a workspace the chat is the Workspace Chat
-  // (S-485, ADR-71), and a member's conversations live in its `--standalone` serve.
-  {
-    id: "chat",
-    label: "Chat",
-    path: "/chat",
-    group: "A",
-    scope: "member",
-    replacedInWorkspaceBy: "workspace-chat",
-  },
-  { id: "wiki", label: "Wiki", path: "/wiki", group: "A", scope: "member" },
+  // Chat and Wiki sit here when the `chat` and `wiki` extensions are active (S-643,
+  // S-644): their entries are the extensions', each placed after Graph by its
+  // registration (`views/chat/extension.tsx`, `views/wiki/extension.tsx`), in the
+  // order the server lists them — the binary composes Chat, then Wiki.
   // S-612 (FR-UI-41): "Architecture", not "Architecture / Cycles" — the Cycles
   // band and list are hidden through the hidden-widget register, and a label
   // naming them would point at nothing on the page. The route is unchanged.
@@ -117,7 +111,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * Workspace-mode-only and app-scoped are two different axes that happen to agree
  * for every entry here today: this list decides whether the tab is OFFERED,
  * {@link NavItem.scope} decides what it ANSWERS FOR. Nothing derives one from the
- * other.
+ * other here. (An extension's entries, which come from a manifest that carries no
+ * workspace-only flag, are the one exception: `appNavItems` / `memberNavItems` offer
+ * an `app`-scoped extension entry in workspace mode only and a `member`-scoped one in
+ * both — the declared scope drives both axes for them.)
  */
 export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   // S-428 (CR-137, FR-UI-36): the two app-level views over read-models that
@@ -142,14 +139,8 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   },
   { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
-  // S-485 (CR-155, FR-WS-34, ADR-71): the Workspace Chat — the workspace roster on
-  // its own route and store (S-482). App-scoped: it answers for the whole
-  // workspace and reads no `?repo=`, so a member switch must not remount it. It
-  // REPLACES the member Chat in workspace mode rather than sitting beside it
-  // (`replacedInWorkspaceBy` on that entry). Group A after the cross-service
-  // surfaces, as frontend-design §3 draws it; a sibling of `/workspace`, not a
-  // child, for the reason the S-428 entries above give.
-  { id: "workspace-chat", label: "Chat", path: "/workspace-chat", group: "A", scope: "app" },
+  // The Workspace Chat sits here when the `chat` extension is active (S-643): its
+  // entry is the extension's, placed after Workspace by its registration.
   // S-429 (CR-137, FR-UI-37): usage summed across every member, over an aggregate
   // that constructs no member engine (NFR-PE-10).
   //
@@ -201,16 +192,117 @@ export const NAV_SCOPE_LABELS: Readonly<Record<NavScope, string>> = {
 };
 
 /**
+ * The navigation entries the mounted extensions add (S-642, FR-UI-51), by the role
+ * they play beside the built-in lists: a `member`-scoped entry joins
+ * {@link NAV_ITEMS} (offered in both modes, replaced in workspace mode when it says
+ * so), an `app`-scoped one joins {@link WORKSPACE_NAV_ITEMS} (workspace mode only).
+ *
+ * Read at call time from the registry, which holds an entry only when the server
+ * reports its extension active (`extensions/registry.ts`). Empty in a build that
+ * composes none, which is what keeps every list below equal to the built-in one.
+ *
+ * Two repairs keep a malformed manifest from breaking the shell: an entry whose id
+ * or route a built-in (or an earlier extension) already owns is dropped — the
+ * built-in wins, as it does for a route or a tool on the server — and a
+ * `replacedInWorkspaceBy` naming no offered app entry is cleared, so the sidebar
+ * never drops a view that nothing replaces (see {@link workspaceReplacementPath}).
+ */
+/** A wire navigation entry as a `NavItem`, or `null` when its group or scope is not
+ *  one the shell knows (the server types both closed, so this is a stale-bundle
+ *  guard: a sidebar section keyed on an unknown scope would render nothing). */
+function navItemOf(entry: ExtensionNavEntry): NavItem | null {
+  const group = NAV_GROUPS.find((g) => g === entry.group);
+  const scope = NAV_SCOPES.find((s) => s === entry.scope);
+  if (group === undefined || scope === undefined) return null;
+  return {
+    id: entry.id,
+    label: entry.label,
+    path: entry.path,
+    group,
+    scope,
+    ...(entry.replaced_in_workspace_by !== undefined && {
+      replacedInWorkspaceBy: entry.replaced_in_workspace_by,
+    }),
+  };
+}
+
+function extensionNavItems(): { member: readonly NavItem[]; app: readonly NavItem[] } {
+  const taken = new Set(
+    [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS].flatMap((i) => [`id:${i.id}`, `path:${i.path}`]),
+  );
+  const accepted = mountedNavEntries().flatMap((entry) => navItemOf(entry) ?? []).filter((item) => {
+    const keys = [`id:${item.id}`, `path:${item.path}`];
+    if (keys.some((k) => taken.has(k))) return false;
+    keys.forEach((k) => taken.add(k));
+    return true;
+  });
+  const appIds = new Set(
+    [...WORKSPACE_NAV_ITEMS, ...accepted.filter((i) => i.scope === "app")].map((i) => i.id),
+  );
+  const checked = accepted.map((item) => {
+    if (item.replacedInWorkspaceBy === undefined || appIds.has(item.replacedInWorkspaceBy)) {
+      return item;
+    }
+    const { replacedInWorkspaceBy: _unresolved, ...rest } = item;
+    return rest;
+  });
+  return {
+    member: checked.filter((i) => i.scope === "member"),
+    app: checked.filter((i) => i.scope === "app"),
+  };
+}
+
+/**
+ * `extras` placed into `base`: each directly after the entry its extension anchors it
+ * to (`ExtensionUi.navAfter`, read through {@link mountedNavAnchor}) — after the
+ * anchor and any entry already placed after it, so two entries anchored to one id keep
+ * their registration order — or appended when it names no anchor, or one this list
+ * does not offer. The anchor is matched within the one list, so an entry can never
+ * jump from its sidebar section into another.
+ */
+function placed(base: readonly NavItem[], extras: readonly NavItem[]): readonly NavItem[] {
+  if (extras.length === 0) return base;
+  const out = [...base];
+  // anchor id → the id of the last entry placed after it.
+  const runs = new Map<string, string>();
+  for (const item of extras) {
+    const anchor = mountedNavAnchor(item.id);
+    const at = anchor === undefined ? -1 : out.findIndex((i) => i.id === (runs.get(anchor) ?? anchor));
+    if (anchor === undefined || at === -1) {
+      out.push(item);
+      continue;
+    }
+    out.splice(at + 1, 0, item);
+    runs.set(anchor, item.id);
+  }
+  return out;
+}
+
+/** The member-scoped list in force: {@link NAV_ITEMS} plus the mounted extensions',
+ *  each where its extension places it. */
+function memberNavItems(): readonly NavItem[] {
+  return placed(NAV_ITEMS, extensionNavItems().member);
+}
+
+/** The workspace-only list in force: {@link WORKSPACE_NAV_ITEMS} plus the mounted
+ *  extensions' app-scoped entries, each where its extension places it. */
+function appNavItems(): readonly NavItem[] {
+  return placed(WORKSPACE_NAV_ITEMS, extensionNavItems().app);
+}
+
+/**
  * The navigable views for the current serve: {@link NAV_ITEMS} in single-root
  * mode; in workspace mode, every one of them a workspace view does not replace
  * ({@link NavItem.replacedInWorkspaceBy}), plus {@link WORKSPACE_NAV_ITEMS}. In
  * both, a view the hidden-widget register hides (CR-208, FR-UI-41) is left out —
- * read off the register at call time, so removing its entry offers it again.
+ * read off the register at call time, so removing its entry offers it again. The
+ * entries of the mounted extensions are part of both lists (S-642).
  */
 export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
+  const members = memberNavItems();
   const offered = isWorkspace
-    ? [...NAV_ITEMS.filter((item) => item.replacedInWorkspaceBy === undefined), ...WORKSPACE_NAV_ITEMS]
-    : NAV_ITEMS;
+    ? [...members.filter((item) => item.replacedInWorkspaceBy === undefined), ...appNavItems()]
+    : members;
   return offered.filter((item) => !isViewHidden(item.path));
 }
 
@@ -225,11 +317,11 @@ export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
  * still lists.
  */
 export function workspaceReplacementPath(pathname: string): string | null {
-  const replaced = NAV_ITEMS.find(
+  const replaced = memberNavItems().find(
     (item) => item.replacedInWorkspaceBy !== undefined && navItemMatches(item, pathname),
   );
   if (!replaced) return null;
-  const replacement = WORKSPACE_NAV_ITEMS.find((item) => item.id === replaced.replacedInWorkspaceBy);
+  const replacement = appNavItems().find((item) => item.id === replaced.replacedInWorkspaceBy);
   if (!replacement) {
     throw new Error(
       `nav.ts: "${replaced.id}" is replaced in workspace mode by "${replaced.replacedInWorkspaceBy}", which is not registered`,
@@ -242,19 +334,16 @@ export function workspaceReplacementPath(pathname: string): string | null {
  * Does `pathname` resolve to `item` — exactly, or as one of the client sub-routes
  * it owns (the Wiki reader's `/wiki/page/*`)?
  *
- * What keeps the root Dashboard (`path: "/"`) from prefix-matching `/health` is the
- * TRAILING SLASH: the arm asks for `${path}/`, so a match is a whole path segment
- * and the root's test is `startsWith("//")`, which no route satisfies. The explicit
- * `item.path !== "/"` beside it is redundant against that spelling and is kept as a
- * statement of the intent — drop the trailing slash and it is the only thing left
- * standing between `/` and every route in the SPA.
+ * What keeps the root Dashboard (`path: "/"`) from prefix-matching `/health`, and
+ * makes a match a whole path segment, is spelled once in `routeOwns`.
  *
  * This is the ONE spelling of "does this route belong to this tab" in the SPA — the
  * sidebar's active-item highlight and {@link scopeForPath} both call it, rather than
- * each carrying its own copy of the rule.
+ * each carrying its own copy of the rule — and it is `routeOwns` (the rule over a bare
+ * route), which the hidden-widget register and the extension registry call too.
  */
 export function navItemMatches(item: NavItem, pathname: string): boolean {
-  return pathname === item.path || (item.path !== "/" && pathname.startsWith(`${item.path}/`));
+  return routeOwns(item.path, pathname);
 }
 
 /**
@@ -268,7 +357,7 @@ export function navItemMatches(item: NavItem, pathname: string): boolean {
  */
 export function scopeForPath(pathname: string): NavScope {
   let best: NavItem | null = null;
-  for (const item of [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS]) {
+  for (const item of [...memberNavItems(), ...appNavItems()]) {
     if (navItemMatches(item, pathname) && item.path.length > (best?.path.length ?? -1)) {
       best = item;
     }

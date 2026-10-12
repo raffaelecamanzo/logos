@@ -23,7 +23,9 @@ import {
   fetchWorkspaceChatConfig,
   fetchWorkspaceChatReadRoots,
   MEMBER_CHAT_ROUTES,
+  renameChatThread,
   streamChatTurn,
+  truncateChatThread,
   WORKSPACE_CHAT_ROUTE,
   WORKSPACE_CHAT_ROUTES,
 } from "./chatClient.ts";
@@ -40,7 +42,7 @@ afterEach(() => {
 describe("streamChatTurn", () => {
   it("POSTs the form-encoded question with the SSE Accept header over the intent seam", async () => {
     const ctrl = new AbortController();
-    await streamChatTurn(MEMBER_CHAT_ROUTES, "what is risky?", null, ctrl.signal);
+    await streamChatTurn(MEMBER_CHAT_ROUTES, "what is risky?", null, "default", ctrl.signal);
     expect(mockMutate).toHaveBeenCalledWith(CHAT_ROUTE, {
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/event-stream" },
       body: "q=what%20is%20risky%3F",
@@ -49,13 +51,22 @@ describe("streamChatTurn", () => {
   });
 
   it("omits the thread field for a fresh conversation (byte-identical single-thread body)", async () => {
-    await streamChatTurn(MEMBER_CHAT_ROUTES, "hi", null);
+    await streamChatTurn(MEMBER_CHAT_ROUTES, "hi", null, "default");
     expect(mockMutate.mock.calls[0][1]?.body).toBe("q=hi");
   });
 
   it("appends the active thread id when continuing a conversation", async () => {
-    await streamChatTurn(MEMBER_CHAT_ROUTES, "more", 7);
+    await streamChatTurn(MEMBER_CHAT_ROUTES, "more", 7, "default");
     expect(mockMutate.mock.calls[0][1]?.body).toBe("q=more&thread=7");
+  });
+
+  // S-625 / FR-UI-49: a steered conversation names its preset; Default sends none
+  // (the server reads an absent field as Default), so the bodies above are unchanged.
+  it("appends a non-Default preset after the thread, and on a fresh conversation", async () => {
+    await streamChatTurn(MEMBER_CHAT_ROUTES, "more", 7, "impact_analysis");
+    await streamChatTurn(WORKSPACE_CHAT_ROUTES, "hi", null, "troubleshooting");
+    expect(mockMutate.mock.calls[0][1]?.body).toBe("q=more&thread=7&preset=impact_analysis");
+    expect(mockMutate.mock.calls[1][1]?.body).toBe("q=hi&preset=troubleshooting");
   });
 });
 
@@ -90,6 +101,60 @@ describe("deleteChatThread (S-211, FR-UI-26)", () => {
   });
 });
 
+describe("renameChatThread (S-623, FR-UI-48)", () => {
+  const FORM = { "Content-Type": "application/x-www-form-urlencoded" };
+
+  it("POSTs the per-thread rename route with the title form-encoded", async () => {
+    await renameChatThread(MEMBER_CHAT_ROUTES, 42, "a&b + c%");
+    expect(mockMutate).toHaveBeenCalledWith("/api/v1/chat/threads/42/rename", {
+      headers: FORM,
+      body: "title=a%26b%20%2B%20c%25",
+    });
+  });
+
+  it("scopes a member rename to the active member, and a workspace rename to no member", async () => {
+    setScopedMember("api");
+    await renameChatThread(MEMBER_CHAT_ROUTES, 4, "x");
+    await renameChatThread(WORKSPACE_CHAT_ROUTES, 5, "y");
+    expect(mockMutate.mock.calls.map((c) => c[0])).toEqual([
+      "/api/v1/chat/threads/4/rename?repo=api",
+      "/api/v1/workspace/chat/threads/5/rename",
+    ]);
+  });
+
+  it("returns the raw response so 204 / 400 / 404 stay distinguishable", async () => {
+    mockMutate.mockResolvedValueOnce({ ok: false, status: 400 } as Response);
+    await expect(renameChatThread(MEMBER_CHAT_ROUTES, 9, "")).resolves.toMatchObject({ status: 400 });
+  });
+});
+
+describe("truncateChatThread (S-624, FR-UI-46)", () => {
+  const FORM = { "Content-Type": "application/x-www-form-urlencoded" };
+
+  it("POSTs the per-thread truncate route with the question's index as `user_turn`", async () => {
+    await truncateChatThread(MEMBER_CHAT_ROUTES, 42, 2);
+    expect(mockMutate).toHaveBeenCalledWith("/api/v1/chat/threads/42/truncate", {
+      headers: FORM,
+      body: "user_turn=2",
+    });
+  });
+
+  it("scopes a member truncate to the active member, and a workspace truncate to no member", async () => {
+    setScopedMember("api");
+    await truncateChatThread(MEMBER_CHAT_ROUTES, 4, 0);
+    await truncateChatThread(WORKSPACE_CHAT_ROUTES, 5, 1);
+    expect(mockMutate.mock.calls.map((c) => c[0])).toEqual([
+      "/api/v1/chat/threads/4/truncate?repo=api",
+      "/api/v1/workspace/chat/threads/5/truncate",
+    ]);
+  });
+
+  it("returns the raw response so 204 / 400 / 404 stay distinguishable", async () => {
+    mockMutate.mockResolvedValueOnce({ ok: false, status: 404 } as Response);
+    await expect(truncateChatThread(MEMBER_CHAT_ROUTES, 9, 0)).resolves.toMatchObject({ status: 404 });
+  });
+});
+
 describe("the retired global clear (S-211, ADR-47)", () => {
   it("exports no clear-all helper or route — per-conversation delete is the only path", () => {
     const surface = chatClient as unknown as Record<string, unknown>;
@@ -110,14 +175,14 @@ describe("fetchChatConfig", () => {
 describe("the workspace chat's routes (S-485, S-482)", () => {
   it("streams the turn to the workspace route, carrying no member even when one is active", async () => {
     setScopedMember("api");
-    await streamChatTurn(WORKSPACE_CHAT_ROUTES, "q", 3);
+    await streamChatTurn(WORKSPACE_CHAT_ROUTES, "q", 3, "default");
     expect(mockMutate).toHaveBeenCalledWith(WORKSPACE_CHAT_ROUTE, expect.anything());
     expect(mockMutate.mock.calls[0][1]?.body).toBe("q=q&thread=3");
   });
 
   it("scopes the MEMBER chat's turn and delete to the active member — the contrast", async () => {
     setScopedMember("api");
-    await streamChatTurn(MEMBER_CHAT_ROUTES, "q", null);
+    await streamChatTurn(MEMBER_CHAT_ROUTES, "q", null, "default");
     await deleteChatThread(MEMBER_CHAT_ROUTES, 4);
     expect(mockMutate.mock.calls.map((c) => c[0])).toEqual([
       "/chat?repo=api",

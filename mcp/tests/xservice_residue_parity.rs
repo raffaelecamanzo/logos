@@ -106,7 +106,7 @@ async fn both_surfaces(
     let members = vec![member("api", &api), member("web", &web)];
 
     // The CLI arm's body, verbatim minus the print: discover → registry → bridge →
-    // `query::*` read-model → `serde_json` (cli/src/xservice.rs, cli/src/main.rs).
+    // `query::*` read-model → `serde_json` (cli/src/xservice.rs, cli/src/lib.rs).
     let cli = {
         let reg = registry("shop", root, members.clone());
         let bridge = ContractBridge::new();
@@ -209,7 +209,7 @@ async fn the_two_surfaces_scope_the_residue_identically() {
 #[test]
 fn both_reachability_tool_descriptions_document_the_residue() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new())).list_tools();
+    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new()), &logos_ext::ExtensionHost::new()).list_tools();
 
     for tool in ["xservice_callers", "xservice_impact"] {
         let description = tools

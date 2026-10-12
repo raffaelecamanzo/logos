@@ -1,0 +1,607 @@
+[
+  {
+    "description": "Which git refs collide, and what a merge did not carry (FR-NV-13). Give the refs about to be merged; returns the symbols more than one of them modifies (naming the refs, and naming the refs that do NOT touch a shared symbol — the silent-drop shape), plus, with `merge`, the symbols and files a ref changed that the stated merge result does not. Ask BEFORE integrating parallel branches, and again after: a clean merge is not a complete merge. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base": {
+          "description": "Comparison point (default: the merge-base of the supplied refs).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "merge": {
+          "description": "A stated merge result to check the refs' work against.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refs": {
+          "description": "The git refs about to be merged (or just merged) — branches, tags or\ncommits; anything `git rev-parse` accepts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "refs"
+      ],
+      "title": "BranchOverlapParams",
+      "type": "object"
+    },
+    "name": "branch_overlap"
+  },
+  {
+    "description": "Direct callees of a symbol (FR-NV-05). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "description": "Maximum results (default 50).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "symbol": {
+          "description": "Symbol whose direct callers/callees to list.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "title": "EdgeParams",
+      "type": "object"
+    },
+    "name": "callees"
+  },
+  {
+    "description": "Direct callers of a symbol (FR-NV-05). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "description": "Maximum results (default 50).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "symbol": {
+          "description": "Symbol whose direct callers/callees to list.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "title": "EdgeParams",
+      "type": "object"
+    },
+    "name": "callers"
+  },
+  {
+    "description": "Architecture-rules compliance report against rules.toml (FR-GV-02): constraints, layer ordering (unassigned files exempt), and boundary checks.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "no_reconcile": {
+          "description": "Skip the pre-evaluation reconcile for tight inner loops; the\nfreshness line marks the result assumed-fresh (FR-RC-04).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "ReconcileParams",
+      "type": "object"
+    },
+    "name": "check_rules"
+  },
+  {
+    "description": "Deterministic multi-symbol context bundle for a task description — one call replaces several file reads (FR-NV-02).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "include_code": {
+          "description": "Include source code in the bundle (default false).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_nodes": {
+          "description": "Cap on bundle size in nodes (default 25).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "task": {
+          "description": "Natural-language task description to build the context bundle for.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "title": "ContextParams",
+      "type": "object"
+    },
+    "name": "context"
+  },
+  {
+    "description": "Ingest an LCOV/Cobertura coverage report into the evidence store (FR-CV-01): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "format": {
+          "description": "Force the report format (\"lcov\" or \"cobertura\"); default auto-detects.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "description": "Path to the LCOV/Cobertura coverage report to ingest (FR-CV-01).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "report"
+      ],
+      "title": "CoverageIngestParams",
+      "type": "object"
+    },
+    "name": "coverage_ingest"
+  },
+  {
+    "description": "Coverage refresh (FR-CV-10): explicitly run the configured [coverage_ingest].refresh_cmd as a subprocess (the ONLY place Logos ever spawns a coverage command, never on the serve/watcher path, ADR-38), then ingest the artifact it produced. Errors loud if no refresh_cmd is configured, the command fails, or it produced no recognizable artifact. The NON-GATED coverage tier (BR-28).",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "coverage_refresh"
+  },
+  {
+    "description": "Coverage status (FR-CV-05/06): per-file freshness (fresh value / stale label / n-a, hash-based against the ingest anchor), the overall freshness fraction, snapshot provenance, and an artifact-vs-HEAD staleness prompt when the coverage lags the current commit (FR-CV-10). Raw numbers only, no grading (BR-28). With no coverage ingested, reports n/a + a notice.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "coverage_status"
+  },
+  {
+    "description": "Fast graph structural-integrity check (FR-GV-18/FR-GV-20, NFR-RA-13): asserts one node per symbol_id and zero orphan rows (dangling file/edge/shingle), and flags every indexed file the current admission rules (gitignore, nested-.git boundary, ignored_dirs, globs) would reject — in a handful of indexed queries plus O(files) matcher work, no reindex. `ok:false` with named faults and a capped `unadmitted_sample` on drift — the always-on guard that also hard-fails session_end/check_rules. For a deep reindex-diff see verify.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "doctor"
+  },
+  {
+    "description": "Dependency structure matrix (FR-GV-07): cell (i,j) counts dep edges i->j; rows ordered by layer order then name; module granularity by default.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "granularity": {
+          "description": "Matrix granularity: \"module\" (default) or \"file\" (FR-GV-07).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "no_reconcile": {
+          "description": "Skip the pre-evaluation reconcile (FR-RC-04).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "DsmParams",
+      "type": "object"
+    },
+    "name": "dsm"
+  },
+  {
+    "description": "Signal evolution over stored snapshots with per-metric deltas (FR-GV-06, default window 30).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "description": "Snapshot window size (default 30, FR-GV-06).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "EvolutionParams",
+      "type": "object"
+    },
+    "name": "evolution"
+  },
+  {
+    "description": "Neighbourhood exploration around a query, source grouped by file (FR-NV-03). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "max_files": {
+          "description": "Cap on file groups returned (default 10).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Symbol or text to explore around.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "ExploreParams",
+      "type": "object"
+    },
+    "name": "explore"
+  },
+  {
+    "description": "ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift, graph counts. For INDEX freshness use the status tool.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "health"
+  },
+  {
+    "description": "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Non-git/shallow repos return n/a + a notice.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "description": "Cap the ranked files returned (default: all, FR-GH-06).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "production_scope": {
+          "description": "Drop whole test files (`is_test`-only) from the candidate set before\nranking (default false — whole-repo board unchanged, CR-076).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "untested": {
+          "description": "Rank only untested hotspots (no fresh execution coverage); falls back to\nthe labeled static-reachability signal when no coverage is ingested\n(default false, FR-CV-07).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "HotspotsParams",
+      "type": "object"
+    },
+    "name": "hotspots"
+  },
+  {
+    "description": "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "depth": {
+          "description": "Traversal depth bound (default 3).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "symbol": {
+          "description": "Symbol whose transitive impact to compute.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "title": "ImpactParams",
+      "type": "object"
+    },
+    "name": "impact"
+  },
+  {
+    "description": "Which planned work items collide, and on what (FR-NV-11). Give work items as `<id>=<symbol>[,<symbol>...]`; returns the pairs whose transitive impact sets intersect (naming the shared symbols), the pairs that are safely parallel, and the coverage limits of that verdict. Ask BEFORE scheduling work in parallel, not after. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "depth": {
+          "description": "Traversal depth bound for every impact set (default 3).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "items": {
+          "description": "The work items, each `<id>=<symbol>[,<symbol>...]`. Repeating an id\naccumulates its symbols.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "ImpactIntersectionParams",
+      "type": "object"
+    },
+    "name": "impact_intersection"
+  },
+  {
+    "description": "Everything about one symbol: kind, location, signature, annotations, immediate edges (FR-NV-04). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "include_code": {
+          "description": "Include the node's source code (default false).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "symbol": {
+          "description": "Symbol to look up.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "title": "NodeParams",
+      "type": "object"
+    },
+    "name": "node"
+  },
+  {
+    "description": "Structural precedent (FR-NV-12): nodes analogous to a symbol or a project-relative file — those sharing a trait/interface implementation, a registration edge (the same registry, dispatcher or factory names both), or a call shape. Each result names WHY it is analogous and through which nodes; ranking is counted graph facts, never a score, and an empty answer states its reason, and names the resolution denominator where the reason is the index's reach rather than the code (`resolution_denominator`, FR-NV-14). Ask BEFORE writing new code, to find the sibling that already does this.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "description": "Maximum number of precedents (default 20, capped at 100).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Symbol or project-relative file whose structural precedents to find.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "PrecedentParams",
+      "type": "object"
+    },
+    "name": "precedent"
+  },
+  {
+    "description": "Re-scan with the same parameters as the last scan (ADR-11).",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "rescan"
+  },
+  {
+    "description": "Full architecture-quality scan, reconcile-then-score (ADR-11): the 0-10000 signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "no_reconcile": {
+          "description": "Skip the pre-evaluation reconcile for tight inner loops; the\nfreshness line marks the result assumed-fresh (FR-RC-04).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "ReconcileParams",
+      "type": "object"
+    },
+    "name": "scan"
+  },
+  {
+    "description": "FTS5 full-text symbol search over the code graph, optionally filtered by node kind (FR-NV-01).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "kind": {
+          "description": "Optional node-kind filter, e.g. \"function\", \"struct\", \"route\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Maximum number of hits (default 20).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "FTS5 search query (symbol name or free text).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "SearchParams",
+      "type": "object"
+    },
+    "name": "search"
+  },
+  {
+    "description": "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "session_end"
+  },
+  {
+    "description": "Begin a quality session (FR-GV-04): records the quality baseline before edits — call this BEFORE making changes.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "session_start"
+  },
+  {
+    "description": "INDEX health: file/node/edge counts, store size, freshness of the index vs the working tree (FR-NV-07). For ARCHITECTURE health use the health tool.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "status"
+  },
+  {
+    "description": "Deep graph consistency check (FR-GV-19, NFR-RA-06): reindexes the project into a throwaway shadow store via the always-purge index path, then diffs node/edge/file counts and symbol sets against the live graph. Reports `ok:false` with live-vs-reindex deltas and a capped sample of leaked (live-only) / orphaned (reindex-only) symbols, and embeds the fast structural + admission check (FR-GV-20). Catches Channel-B orphans (files the live store retains but a fresh index drops) that doctor cannot. On-demand only — a full reindex is seconds-to-minutes; the live store is read-only and the shadow store is torn down on completion.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "verify"
+  },
+  {
+    "description": "Deterministically materialize the presented tier (FR-WK-20, CR-062): in SRS mode, assembles each present Design/Specs category and the single-file Architecture page from the project's authored `docs/specs/**` sources into `wiki.db` with `generator = \"logos:doc-present\"`, then runs the reconciliation sweep. Pure local-FS reads + `wiki.db` writes — no LLM, no network (NFR-SE-01); byte-identical on re-run. Outside SRS mode (Case 2) this is a no-op returning the empty summary.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "wiki_materialize"
+  },
+  {
+    "description": "Read a source-wiki page by slug (FR-WK-04) with MANDATORY provenance no surface may omit: the generator label, the written-at HEAD commit, per-anchor freshness (fresh/stale/missing, computed against the current tree — no sync needed), and the fixed 'generated content — not extracted by Logos' marker. A miss (or an all-anchors-gone auto-prune) returns null. Wiki prose is generated content, never extracted fact.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "slug": {
+          "description": "The slug to read.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slug"
+      ],
+      "title": "WikiReadParams",
+      "type": "object"
+    },
+    "name": "wiki_read"
+  },
+  {
+    "description": "FTS5 bm25 search over source-wiki page titles and bodies (FR-WK-05), indexed inside wiki.db so it survives `index`. Every hit carries its staleness flag and provenance summary (generator, HEAD). `list: true` enumerates all pages (slug-ordered) instead of searching. Offline; no vectors (NFR-SE-01). A pure read — never prunes.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "list": {
+          "description": "Enumerate all pages instead of searching (default false).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "The search query (omit with `list: true` to enumerate all pages).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "WikiSearchParams",
+      "type": "object"
+    },
+    "name": "wiki_search"
+  },
+  {
+    "description": "Source-wiki store summary + regeneration work-list (FR-WK-06): page/stale/missing counts and the freshness fraction, the pruned-orphan log, and the work-list driving regeneration — stale pages, missing-anchor pages, and page-worthy entities lacking a page (modules, top-level files, and — only when the swe-skills doc graph is present — Requirement/Adr/Story nodes). Logos discovers deterministically; the agent writes the pages.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "wiki_status"
+  },
+  {
+    "description": "Write (upsert) a source-wiki page by slug (FR-WK-02): byte-verbatim markdown body (1 MiB cap), write-time anchor resolution to content hashes, write-time HEAD tag, and a MANDATORY non-empty generator label. Anchors are `file:<repo-relative-path>` or `symbol:<canonical-symbol>`; an unknown anchor / empty generator / over-cap body is rejected loudly with the store left byte-identical. The gate-immune wiki store (BR-29) — never moves the quality signal.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "anchors": {
+          "default": [],
+          "description": "Anchor entity ids: `file:<path>` or `symbol:<symbol>` (default none).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "body": {
+          "description": "The markdown body, stored byte-verbatim (1 MiB cap, FR-WK-02).",
+          "type": "string"
+        },
+        "generator": {
+          "description": "The mandatory non-empty generator label (FR-WK-02).",
+          "type": "string"
+        },
+        "slug": {
+          "description": "The page slug (path-like: lowercase/digit/`-`/`_` segments, FR-WK-02).",
+          "type": "string"
+        },
+        "title": {
+          "description": "The page title.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slug",
+        "title",
+        "body",
+        "generator"
+      ],
+      "title": "WikiWriteParams",
+      "type": "object"
+    },
+    "name": "wiki_write"
+  }
+]

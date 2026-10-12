@@ -1,14 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
+import { clearExtensions } from "../extensions/registry.ts";
+import { mountWiki } from "../test/wiki.ts";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
 import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.tsx";
 import { NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { viewForPath, VIEW_REGISTRY } from "./index.ts";
+
+afterEach(clearExtensions);
 
 describe("VIEW_REGISTRY", () => {
   it("registers the dashboard at the root route", () => {
@@ -54,7 +58,8 @@ describe("viewForPath", () => {
     expect(viewForPath("/overview")).toBeNull();
   });
 
-  it("matches a sub-route to its owning view (wiki sub-routes)", () => {
+  it("matches a sub-route to its owning view (wiki sub-routes, the wiki extension's — S-644)", () => {
+    mountWiki();
     expect(viewForPath("/wiki/page/foo")).toBe(WikiView);
     expect(viewForPath("/wiki/search")).toBe(WikiView);
   });

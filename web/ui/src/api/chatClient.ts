@@ -12,7 +12,7 @@
  * S-211 ([CR-053], [FR-UI-26], [ADR-47]) retired the global clear-history helper
  * along with the route itself (S-209 removed it server-side — a POST to it is now
  * `405`): per-conversation delete is the sole deletion path. The retired route
- * literal must not reappear in this module — `web/tests/uat_ui_08.rs` locks that.
+ * literal must not reappear in this module — `logos-chat/tests/uat_ui_08.rs` locks that.
  *
  * S-485 ([FR-WS-34], [ADR-71]) serves the workspace chat over the same functions:
  * each turn/thread helper takes the {@link ChatRoutes} of the chat it talks to, and
@@ -34,20 +34,23 @@ import type {
   ThreadSummary,
   WorkspaceChatConfigReadModel,
 } from "../views/chat/chatModel.ts";
+import { DEFAULT_PRESET, type ChatPresetId } from "../views/chat/presets.ts";
 
-/** The intent-guarded chat-turn route (mirrors `web::CHAT_POST_ROUTE`). */
+/** The intent-guarded chat-turn route (mirrors `logos_chat::CHAT_POST_ROUTE`). */
 export const CHAT_ROUTE = "/chat";
-/** The conversation-history route tree (mirrors `web::CHAT_THREADS_ROUTE`): GET for
- *  the list and one thread's transcript, and the one mutating verb beneath it —
- *  `POST …/{id}/delete` ({@link chatThreadDeleteRoute}). */
+/** The conversation-history route tree (mirrors `logos_chat::CHAT_THREADS_ROUTE`): GET for
+ *  the list and one thread's transcript, and the mutating verbs beneath it —
+ *  `POST …/{id}/delete` ({@link chatThreadDeleteRoute}), `POST …/{id}/rename`
+ *  ({@link chatThreadRenameRoute}) and `POST …/{id}/truncate`
+ *  ({@link chatThreadTruncateRoute}). */
 export const CHAT_THREADS_ROUTE = "/api/v1/chat/threads";
-/** The workspace chat's turn route (mirrors `web::WORKSPACE_CHAT_POST_ROUTE`, S-482):
+/** The workspace chat's turn route (mirrors `logos_chat::WORKSPACE_CHAT_POST_ROUTE`, S-482):
  *  the `/chat` contract unchanged, answering for the workspace. A server route, not a
- *  client one — no view mounts here; the Workspace Chat VIEW is registered in
- *  `nav.ts`. */
+ *  client one — no view mounts here; the Workspace Chat VIEW is the `chat`
+ *  extension's, registered in `views/chat/extension.tsx`. */
 export const WORKSPACE_CHAT_ROUTE = "/workspace/chat";
 /** The workspace chat's conversation-history tree (mirrors
- *  `web::WORKSPACE_CHAT_THREADS_ROUTE`, S-482), over `<workspace root>/.logos/chat.db`. */
+ *  `logos_chat::WORKSPACE_CHAT_THREADS_ROUTE`, S-482), over `<workspace root>/.logos/chat.db`. */
 export const WORKSPACE_CHAT_THREADS_ROUTE = "/api/v1/workspace/chat/threads";
 
 /**
@@ -63,7 +66,8 @@ export const WORKSPACE_CHAT_THREADS_ROUTE = "/api/v1/workspace/chat/threads";
 export interface ChatRoutes {
   /** The intent-guarded turn `POST`. */
   turn: string;
-  /** The conversation-history tree (GET list / `{id}`; `POST {id}/delete`). */
+  /** The conversation-history tree (GET list / `{id}`; `POST {id}/delete`, `{id}/rename`,
+   *  `{id}/truncate`). */
   threads: string;
   /** Whether requests carry the active member's `?repo=`. The member chat answers
    *  for one member; the workspace chat reads no `?repo=` at all. */
@@ -142,17 +146,22 @@ export function fetchWorkspaceChatReadRoots(): Promise<MemberChatReadRoots[]> {
  * body when no conversation is active. The thread the server (auto-)selected is not
  * returned on the SSE stream; the caller re-reads {@link fetchThreads} to learn a
  * newly-created id.
+ *
+ * `preset` (S-625, [FR-UI-49]) is the conversation's prompt-only preset. A steered
+ * one rides a `preset` field the server validates against the same four ids (an
+ * unknown value is a `400` that runs no turn); Default omits the field, which the
+ * server reads as Default — so an unsteered turn keeps the byte-identical body.
  */
 export function streamChatTurn(
   routes: ChatRoutes,
   question: string,
   threadId: number | null,
+  preset: ChatPresetId,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const body =
-    threadId == null
-      ? `q=${encodeURIComponent(question)}`
-      : `q=${encodeURIComponent(question)}&thread=${encodeURIComponent(threadId)}`;
+  let body = `q=${encodeURIComponent(question)}`;
+  if (threadId != null) body += `&thread=${encodeURIComponent(threadId)}`;
+  if (preset !== DEFAULT_PRESET) body += `&preset=${encodeURIComponent(preset)}`;
   return apiMutate(mutationRoute(routes, routes.turn), {
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/event-stream" },
     body,
@@ -179,8 +188,8 @@ export function fetchThreadMessages(routes: ChatRoutes, id: number): Promise<Per
   return apiFetch<PersistedChatMessage[]>(`${threadsEndpoint(routes)}/${id}`);
 }
 
-/** The per-thread delete path for `id` (mirrors the server's `…/{id}/delete`, the
- *  only `POST` admitted under a threads tree). */
+/** The per-thread delete path for `id` (mirrors the server's `…/{id}/delete`, one of
+ *  the `POST`s admitted under a threads tree — `web::THREAD_WRITE_VERBS`). */
 export function chatThreadDeleteRoute(routes: ChatRoutes, id: number): string {
   return `${routes.threads}/${id}/delete`;
 }
@@ -198,4 +207,51 @@ export function chatThreadDeleteRoute(routes: ChatRoutes, id: number): string {
  */
 export function deleteChatThread(routes: ChatRoutes, id: number): Promise<Response> {
   return apiMutate(mutationRoute(routes, chatThreadDeleteRoute(routes, id)), {});
+}
+
+/** The per-thread rename path for `id` (mirrors the server's `…/{id}/rename`, S-623). */
+export function chatThreadRenameRoute(routes: ChatRoutes, id: number): string {
+  return `${routes.threads}/${id}/rename`;
+}
+
+/**
+ * `POST …/chat/threads/{id}/rename` → rename ONE conversation (S-623 producer
+ * contract, [FR-UI-48], [ADR-47] as extended by CR-204). The new title rides a
+ * form-encoded `title` field, as the turn's question rides `q`.
+ *
+ * Intent-guarded like the delete ([ADR-31]) — a forged or intent-less rename never
+ * reaches the handler ([NFR-SE-06]). The response is returned raw so the caller can
+ * tell the server's honest outcomes apart: `204` renamed, `400` the title is blank
+ * or over-long (unchanged), `404` the conversation is gone, anything else a fault.
+ */
+export function renameChatThread(routes: ChatRoutes, id: number, title: string): Promise<Response> {
+  return apiMutate(mutationRoute(routes, chatThreadRenameRoute(routes, id)), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `title=${encodeURIComponent(title)}`,
+  });
+}
+
+/** The per-thread truncate path for `id` (mirrors the server's `…/{id}/truncate`, S-624). */
+export function chatThreadTruncateRoute(routes: ChatRoutes, id: number): string {
+  return `${routes.threads}/${id}/truncate`;
+}
+
+/**
+ * `POST …/chat/threads/{id}/truncate` → cut ONE conversation back to before a
+ * question (S-624 producer contract, [FR-UI-46], [FR-UI-20], [ADR-47] as extended by
+ * CR-204): the question, every later message and the per-thread memory written after
+ * the cut are deleted together. `userTurn` names the question — the 0-based index
+ * among the questions the store holds — and rides a form-encoded `user_turn` field.
+ * Edit-and-resend and Regenerate call it before re-running the turn.
+ *
+ * Intent-guarded like the rename ([ADR-31]) — a forged or intent-less truncate never
+ * reaches the handler ([NFR-SE-06]). The response is returned raw so the caller can
+ * tell the server's honest outcomes apart: `204` cut (or nothing lay past the stored
+ * questions), `404` the conversation is gone, anything else a fault.
+ */
+export function truncateChatThread(routes: ChatRoutes, id: number, userTurn: number): Promise<Response> {
+  return apiMutate(mutationRoute(routes, chatThreadTruncateRoute(routes, id)), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `user_turn=${encodeURIComponent(userTurn)}`,
+  });
 }

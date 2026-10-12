@@ -18,7 +18,7 @@
 //!
 //! The fifth — each workspace read-model tool answers its twin's payload,
 //! compared whole against the MCP tool called over the real protocol — needs the
-//! `mcp` surface crate, so it lives in `web/tests/mcp_parity_workspace_tools.rs`
+//! `mcp` surface crate, so it lives in `logos-chat/tests/mcp_parity_workspace_tools.rs`
 //! (HF-2): this crate, below the surfaces, dev-depends on neither `mcp` nor
 //! `rmcp`. Both suites read the workspace in `tests/support/workspace.rs`.
 //!
@@ -472,7 +472,7 @@ async fn the_sandbox_carries_the_addressed_members_own_ignored_dirs_and_read_roo
 /// `web` inherits the workspace's `[chat]` table **whole** and its own
 /// `read_roots` stop applying: the addressed `read` refuses `docs/guide.md` as
 /// a containment, exactly as `web`'s member chat does (its twin is
-/// `web/src/chat/configured.rs`'s
+/// `logos-chat/src/service/configured.rs`'s
 /// `an_inherited_policy_drops_the_members_own_read_roots_from_the_member_chat`).
 /// The other direction holds too: read roots the workspace table declares
 /// resolve against the workspace root and reach every member inheriting it.

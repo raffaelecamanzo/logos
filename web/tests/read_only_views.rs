@@ -117,7 +117,7 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
     // now reads every dashboard through the `/api/v1/*` read-models, which compose
     // the same read-only accessors the views used (`latest_gate`/
     // `coverage_status`/`check_rules`/`latest_hotspots`/`search`/
-    // `node`/`impact`/`graph_elements`/`config_read`/`wiki_read`) — with one
+    // `node`/`impact`/`graph_elements`/`config_read`) — with one
     // deliberate exception since CR-135: `/api/v1/health` composes `latest_health`,
     // the single-read seam, rather than the `latest_gate` + `latest_scan` pair it
     // used to call. Still write-free, which is what this guard asserts. The CR-018/ADR-28
@@ -140,6 +140,9 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
         "/api/v1/impact-intersection?item=S-1=f&item=S-2=f",
         "/api/v1/precedent?target=f",
         "/api/v1/branch-overlap?ref=main&ref=main",
+        "/api/v1/code-refs?ref=f&ref=src/lib.rs",
+        // The extension host's state (S-641): reads no store at all.
+        "/api/v1/extensions",
     ] {
         for _ in 0..2 {
             let resp = router
@@ -161,90 +164,4 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
         t0,
         "no GET added a temporal_snapshots row (CR-018 regression guard)"
     );
-}
-
-/// The Dashboard's Project Overview widget (CR-034, S-135, [FR-UI-09], [ADR-28])
-/// reads the `overview/project-overview` agent wiki page through the read-only
-/// `wiki_read` accessor seam — the handler fetches it on **every** `/overview`
-/// load, before the view composes. With a page present, loading `/overview` once
-/// and repeatedly must leave the wiki store logically unchanged — no page added,
-/// none pruned-on-read — alongside the metric/temporal snapshot invariant. This
-/// is the HTTP-layer guard for the widget's write-free-on-read AC; the rendered
-/// snippet + `/wiki` link are covered by the pure-render view tests and the
-/// coordinator's live Playwright pass (this bare `-p web` fixture loads no
-/// grammar, so the dashboard takes its un-indexed branch).
-#[tokio::test]
-async fn loading_dashboard_with_a_wiki_page_writes_no_wiki_or_snapshot_row() {
-    let (tmp, engine) = scanned_engine();
-    let repo = tmp.path().to_path_buf();
-
-    // A zero-anchor overview page, as the embedded skill writes it.
-    engine
-        .wiki_write(
-            "overview/project-overview",
-            "Project Overview",
-            "# Project Overview\n\nLogos is a local structural code-intelligence server.\n",
-            &[],
-            "logos-wiki",
-        )
-        .expect("write the overview page");
-
-    let pages0 = engine.wiki_status().expect("wiki status").page_count;
-    let pruned0 = engine.wiki_pruned_log().expect("pruned log").len();
-    let m0 = metric_count(&repo);
-    let t0 = temporal_count(&repo);
-    assert_eq!(pages0, 1, "the fixture wrote exactly one wiki page");
-
-    let router = web::router(Arc::clone(&engine));
-    for _ in 0..2 {
-        let resp = router.clone().oneshot(get("/api/v1/overview")).await.expect("route responds");
-        assert_eq!(resp.status(), StatusCode::OK, "/api/v1/overview answers 200");
-    }
-
-    // The wiki store is logically unchanged: no page added, none pruned on read.
-    assert_eq!(
-        engine.wiki_status().expect("wiki status").page_count,
-        pages0,
-        "no GET added or removed a wiki page (write-free on read, ADR-28)"
-    );
-    assert_eq!(
-        engine.wiki_pruned_log().expect("pruned log").len(),
-        pruned0,
-        "no GET pruned a wiki page on read"
-    );
-    // And the snapshot invariant still holds.
-    assert_eq!(metric_count(&repo), m0, "no GET added a metric_snapshots row");
-    assert_eq!(temporal_count(&repo), t0, "no GET added a temporal_snapshots row");
-}
-
-/// The complementary write-free guard for the **absent** Project Overview page
-/// (CR-034, S-135, [NFR-CC-04], [ADR-28]): with no wiki page written, loading `/`
-/// once and repeatedly must not seed, fabricate, or otherwise write one — the
-/// widget renders its honest empty state from `Ok(None)` without a store write.
-#[tokio::test]
-async fn loading_dashboard_without_a_wiki_page_writes_no_wiki_row() {
-    let (tmp, engine) = scanned_engine();
-    let repo = tmp.path().to_path_buf();
-
-    // No wiki_write — the overview page is absent.
-    let pages0 = engine.wiki_status().expect("wiki status").page_count;
-    let pruned0 = engine.wiki_pruned_log().expect("pruned log").len();
-    let m0 = metric_count(&repo);
-    let t0 = temporal_count(&repo);
-    assert_eq!(pages0, 0, "the fixture has no wiki page");
-
-    let router = web::router(Arc::clone(&engine));
-    for _ in 0..2 {
-        let resp = router.clone().oneshot(get("/api/v1/overview")).await.expect("route responds");
-        assert_eq!(resp.status(), StatusCode::OK, "/api/v1/overview answers 200 with the empty-state model");
-    }
-
-    assert_eq!(
-        engine.wiki_status().expect("wiki status").page_count,
-        pages0,
-        "a missing overview page is never seeded on read (write-free, ADR-28)"
-    );
-    assert_eq!(engine.wiki_pruned_log().expect("pruned log").len(), pruned0, "no prune on read");
-    assert_eq!(metric_count(&repo), m0, "no GET added a metric_snapshots row");
-    assert_eq!(temporal_count(&repo), t0, "no GET added a temporal_snapshots row");
 }

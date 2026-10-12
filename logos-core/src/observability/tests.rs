@@ -17,8 +17,9 @@ use super::tool::{
     EventClass, Tool, ToolClass, UNREGISTERED_CLASS,
 };
 use super::{
-    db, generate_session_id, in_surface, self_referential_surfaces, telemetry_logos_dir,
-    telemetry_origin, traced, EventRecord, Surface, TELEMETRY_TARGET,
+    db, generate_session_id, in_surface, register_extension_tools, self_referential_surfaces,
+    telemetry_logos_dir, telemetry_origin, traced, traced_extension, traced_extension_infallible,
+    EventRecord, ExtensionTool, Surface, TELEMETRY_TARGET,
 };
 
 /// An event record `secs_ago` seconds before the fixed "now" used in tests.
@@ -1904,7 +1905,7 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
 ///
 /// The sibling of [`chat_agent_calls_are_separable_from_web_and_mcp`], pointed
 /// at a third in-process caller, and the unit half of the pair
-/// `web/tests/wikigen_surface.rs` asserts end to end through the real route.
+/// `wiki-agent/tests/wikigen_surface.rs` asserts end to end through the real route.
 ///
 /// # Why this one is not `#[cfg(feature = "agents")]`
 ///
@@ -1926,9 +1927,13 @@ fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_wi
         // The generation pass runs *inside* `serve --ui`, whose process surface
         // is web.
         .with(TelemetryLayer::new(Surface::Web, "main".to_string(), "test-session".to_string(), sink));
+    // The materialize pass is the `wiki` extension's own tool since S-644, emitted
+    // through the extension door under its unchanged wire name.
+    const WIKI_MATERIALIZE: ExtensionTool =
+        ExtensionTool::new("wiki_materialize", ToolClass::EngineInternal);
     tracing::subscriber::with_default(subscriber, || {
         in_surface(Surface::WikiGen, || {
-            traced(Tool::WikiMaterialize, || Ok::<_, anyhow::Error>(())).unwrap();
+            traced_extension(WIKI_MATERIALIZE, || Ok::<_, anyhow::Error>(())).unwrap();
         });
         traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
     });
@@ -3893,4 +3898,112 @@ fn the_rolled_up_outcome_counts_sum_across_days() {
         ),
         "day one (1 of 2) plus day two (1 of 1)"
     );
+}
+
+// ── Extension telemetry tools (S-639, FR-DS-04, ADR-74) ─────────────────────
+
+/// An extension's chokepoint reports through the one emission body, under the
+/// wire name its extension declared — success and failure alike.
+#[test]
+fn an_extension_tool_is_emitted_under_its_declared_name() {
+    const PROBE: ExtensionTool = ExtensionTool::new("ext_emit_probe", ToolClass::QualityGate);
+    let (sink, rx) = TelemetrySink::with_capacity(4);
+    let subscriber = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Cli,
+        "main".to_string(),
+        "test-session".to_string(),
+        sink,
+    ));
+    tracing::subscriber::with_default(subscriber, || {
+        assert_eq!(traced_extension(PROBE, || Ok(7)).unwrap(), 7);
+        assert!(traced_extension(PROBE, || Err::<(), _>(anyhow::anyhow!("boom"))).is_err());
+    });
+    let records: Vec<(String, bool, &str)> =
+        rx.try_iter().map(|r| (r.tool, r.ok, r.surface)).collect();
+    assert_eq!(
+        records,
+        [("ext_emit_probe".to_string(), true, "cli"), ("ext_emit_probe".to_string(), false, "cli")]
+    );
+}
+
+/// The infallible twin emits through the same body: one `ok` event under the
+/// declared name per call, and the closure's value back unchanged.
+#[test]
+fn an_infallible_extension_tool_is_emitted_under_its_declared_name() {
+    const PROBE: ExtensionTool = ExtensionTool::new("ext_infallible_probe", ToolClass::EngineInternal);
+    let (sink, rx) = TelemetrySink::with_capacity(4);
+    let subscriber = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Cli,
+        "main".to_string(),
+        "test-session".to_string(),
+        sink,
+    ));
+    tracing::subscriber::with_default(subscriber, || {
+        assert_eq!(traced_extension_infallible(PROBE, || 7), 7);
+    });
+    let records: Vec<(String, bool, &str)> =
+        rx.try_iter().map(|r| (r.tool, r.ok, r.surface)).collect();
+    assert_eq!(records, [("ext_infallible_probe".to_string(), true, "cli")]);
+}
+
+/// The stats read-model classifies an extension tool only once its extension
+/// is registered, and then as declared; re-registering is harmless.
+#[test]
+fn a_registered_extension_tool_is_classified_as_declared() {
+    const PROBE: ExtensionTool = ExtensionTool::new("ext_class_probe", ToolClass::QualityGate);
+    assert_eq!(class_of_wire(PROBE.name()), UNREGISTERED_CLASS, "unknown before registration");
+    register_extension_tools(&[PROBE]).expect("registers");
+    assert_eq!(class_of_wire(PROBE.name()), "quality-gate");
+    register_extension_tools(&[PROBE]).expect("idempotent");
+    assert_eq!(class_of_wire(PROBE.name()), "quality-gate");
+}
+
+/// One name may not be declared under two classes, and a refused registration
+/// registers nothing at all — not even the acceptable tools beside the clash.
+#[test]
+fn registration_refuses_a_second_class_and_registers_nothing() {
+    const FINE: ExtensionTool = ExtensionTool::new("ext_refusal_fine", ToolClass::Navigation);
+    const TWICE: ExtensionTool = ExtensionTool::new("ext_refusal_twice", ToolClass::Navigation);
+    const OTHER: ExtensionTool = ExtensionTool::new("ext_refusal_twice", ToolClass::ReadModel);
+    let err = register_extension_tools(&[FINE, TWICE, OTHER]).expect_err("two classes are refused");
+    assert!(err.to_string().contains("both"), "{err}");
+    assert_eq!(class_of_wire(FINE.name()), UNREGISTERED_CLASS, "nothing was registered");
+    register_extension_tools(&[TWICE]).expect("one class registers");
+    assert!(register_extension_tools(&[OTHER]).is_err(), "and a later second class is refused");
+    assert_eq!(class_of_wire(TWICE.name()), "navigation");
+}
+
+/// An extension's calls are never counted as a core tool's: its tool may not
+/// take a core tool's name — every one of them — so nothing an extension emits
+/// can inflate a core figure, registered or not.
+#[test]
+fn an_extension_tool_may_not_take_any_core_tools_name() {
+    for tool in Tool::ALL {
+        let caught = std::panic::catch_unwind(|| {
+            ExtensionTool::new(std::hint::black_box(tool.as_str()), ToolClass::Navigation)
+        });
+        assert!(caught.is_err(), "`{}` must be refused", tool.as_str());
+    }
+    let _ = ExtensionTool::new(std::hint::black_box("search_ext"), ToolClass::Navigation);
+}
+
+/// Extension tool names have the shape every core wire name has, so none can
+/// carry a quote into a query or a space into a report.
+#[test]
+#[should_panic(expected = "must match [a-z][a-z0-9_]*")]
+fn an_extension_tool_name_must_be_a_wire_name() {
+    let _ = ExtensionTool::new(std::hint::black_box("Ext-Probe"), ToolClass::Navigation);
+}
+
+#[test]
+fn every_wire_name_shape_is_judged_by_its_first_and_later_characters() {
+    for good in ["a", "ext_probe", "x9", "a_b_c_1"] {
+        let _ = ExtensionTool::new(std::hint::black_box(good), ToolClass::Navigation);
+    }
+    for bad in ["", "9ext", "_ext", "ext-probe", "ext probe", "Ext", "ext'"] {
+        let caught = std::panic::catch_unwind(|| {
+            ExtensionTool::new(std::hint::black_box(bad), ToolClass::Navigation)
+        });
+        assert!(caught.is_err(), "{bad:?} must be refused");
+    }
 }

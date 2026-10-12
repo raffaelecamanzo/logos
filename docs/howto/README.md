@@ -106,7 +106,7 @@ graph. Generated prose is written **in-process** when the Wiki tab is opened
 (`--features agents` builds — the egress tier carved out of `ui` by CR-078), on the same `rig` agent substrate as Chat and honoring a
 dedicated `[wiki].model`. The CLI surface is
 `logos wiki write|read|search|status|generate|materialize|delete` plus `logos wiki
-skill --emit` and `logos wiki hook --emit`; `write`/`read`/`search`/`status`/`materialize`
+skill --emit`; `write`/`read`/`search`/`status`/`materialize`
 have payload-identical MCP twins (five wiki tools).
 
 ## Contents
@@ -114,7 +114,7 @@ have payload-identical MCP twins (five wiki tools).
 1. [Installation](installation.md) — building the `logos` binary, feature flags, verification
 2. [Configuration](configuration.md) — `.logos/`, `config.toml`, `rules.toml`, logging, query overrides
 3. [Usage](usage.md) — indexing workflow, navigation, agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
-4. [Commands](commands.md) — the full 38-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots` and the `logos wiki …` / `logos coverage …` families)
+4. [Commands](commands.md) — the full 39-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots` and the `logos wiki …` / `logos coverage …` families)
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)

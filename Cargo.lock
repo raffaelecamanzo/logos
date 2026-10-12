@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-core"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
  "anyhow",
  "futures",
@@ -350,7 +350,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chat-agent"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
  "agent-core",
  "anyhow",
@@ -1537,25 +1537,54 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "logos"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "http-body-util",
+ "logos-chat",
  "logos-core",
+ "logos-ext",
+ "logos-wiki",
  "mcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
  "web",
+ "wiki-agent",
+]
+
+[[package]]
+name = "logos-chat"
+version = "1.15.8"
+dependencies = [
+ "agent-core",
+ "anyhow",
+ "axum",
+ "chat-agent",
+ "http-body-util",
+ "logos-core",
+ "logos-ext",
+ "mcp",
+ "rmcp",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "web",
 ]
 
 [[package]]
 name = "logos-core"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
  "anyhow",
  "arborium-dockerfile",
@@ -1606,6 +1635,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-ext"
+version = "1.15.8"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "logos-core",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "logos-wiki"
+version = "1.15.8"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "clap",
+ "comrak",
+ "http-body-util",
+ "logos-core",
+ "logos-ext",
+ "mcp",
+ "rmcp",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tower",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-md",
+ "web",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1628,10 +1699,11 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
  "anyhow",
  "logos-core",
+ "logos-ext",
  "rmcp",
  "serde",
  "serde_json",
@@ -3724,28 +3796,23 @@ dependencies = [
 
 [[package]]
 name = "web"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
- "agent-core",
  "anyhow",
  "axum",
- "chat-agent",
- "comrak",
  "getrandom 0.4.2",
  "http-body-util",
  "logos-core",
+ "logos-ext",
  "mcp",
- "rmcp",
  "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tower",
  "tracing",
- "wiki-agent",
 ]
 
 [[package]]
@@ -3797,14 +3864,20 @@ dependencies = [
 
 [[package]]
 name = "wiki-agent"
-version = "1.15.3"
+version = "1.15.8"
 dependencies = [
  "agent-core",
  "anyhow",
+ "axum",
+ "http-body-util",
  "logos-core",
+ "logos-wiki",
+ "rusqlite",
  "serde",
  "tempfile",
  "tokio",
+ "tower",
+ "web",
 ]
 
 [[package]]

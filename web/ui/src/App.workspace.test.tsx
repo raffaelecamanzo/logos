@@ -12,10 +12,12 @@
 
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
-import { WORKSPACE_NAV_ITEMS } from "./nav.ts";
+import { clearExtensions } from "./extensions/registry.ts";
+import { navItemsFor } from "./nav.ts";
+import { mountChat } from "./test/chat.ts";
 import { redirect } from "./router.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
@@ -62,9 +64,10 @@ vi.mock("./views/index.ts", async () => {
 // navigating under it. `currentUrl`/`replaceUrl` are the REAL ones (S-426) — they
 // are the seam the member switch writes the URL through, and a stub would make the
 // URL assertions below pin the stub instead of the behaviour.
-/** Every `app`-scoped client route, spelled out.
+/** Every `app`-scoped client route, spelled out — the chat extension's included, as
+ *  every spec here runs with it active.
  *
- *  Deliberately a literal list rather than a filter over `WORKSPACE_NAV_ITEMS`:
+ *  Deliberately a literal list rather than a filter over the offered navigation:
  *  the shell decides the mount key from the SAME `scope` field that filter would
  *  read, so deriving it here would let one mutation move both sides at once. The
  *  price is that each new app-scoped view must be added here by hand — which the
@@ -94,8 +97,13 @@ vi.mock("./router.tsx", async (importOriginal) => ({
   redirect: vi.fn(),
 }));
 
+// The release (`agents`) build's shell: the `chat` extension active, as its server
+// reports it (S-643) — the Workspace Chat and the /chat replacement are its.
+beforeEach(mountChat);
+
 afterEach(() => {
   cleanup();
+  clearExtensions();
   vi.unstubAllGlobals();
   setScopedMember(null);
   pathname.current = "/";
@@ -174,7 +182,8 @@ describe("a member switch remounts the member-scoped views and no app-scoped one
     // escape the remount invariant.
     expect(APP_ROUTES.length).toBeGreaterThan(0);
     expect([...APP_ROUTES].sort()).toEqual(
-      WORKSPACE_NAV_ITEMS.filter((i) => i.scope === "app")
+      navItemsFor(true)
+        .filter((i) => i.scope === "app")
         .map((i) => i.path)
         .sort(),
     );

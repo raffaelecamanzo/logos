@@ -192,6 +192,59 @@ A clean tree passes `check` with exit 0; the seeded rules file forces the
 error-severity path so you can see exactly what a failing Enforce step looks
 like in CI.
 
+## Publishing a release: one commit per tag
+
+This repository publishes each release to `origin` as **one commit** over
+`origin/main`, whatever local history led to it. `scripts/publish-public.sh`
+builds that commit; the tag-triggered `.github/workflows/release.yml` builds the
+release from it.
+
+```bash
+bash scripts/publish-public.sh --version 1.15.7          # dry run: prints, moves nothing
+bash scripts/publish-public.sh --version 1.15.7 --push   # tags and pushes
+```
+
+**What the commit is.** Its parent is `origin/main`, its tree is the release
+tree (`HEAD` by default, `--from REV` otherwise), and its message is every
+`CHANGELOG.md` section `origin` has not seen: from `## [X.Y.Z]` down to, not
+including, the newest `vMAJOR.MINOR.PATCH` tag reachable from `origin/main`,
+newest first. It carries the release commit's dates, so the dry run and the
+later `--push` build the same commit id.
+
+**What it checks before writing anything.** The version must be newer than
+origin's newest, the release tree's `Cargo.toml` must carry it, `CHANGELOG.md`
+must hold its section and origin's newest one below it, and no local tag of that
+version may exist. Then `scripts/check-public-terms.sh` runs on the message and on
+the release tree exactly as published (read from the commit, never from the
+working directory). A hit exits 1 before any commit object exists.
+
+**Dry run by default.** Without `--push` the script writes one unreferenced commit
+object and nothing else: no tag, no branch, no network call. It prints the commit
+id and the exact `git tag` and `git push` it would run. With `--push` it checks
+that origin's `main` still equals the local `origin/main`, creates the annotated
+tag `vX.Y.Z` on the commit, and pushes the commit to `main` and the tag in one
+`git push --atomic`, never forced. Local `main`, every existing tag, local history
+and every other remote stay where they are in both modes.
+
+Exit codes: `0` done, `1` the term gate found a listed term, `2` usage error or a
+failed precondition, `3` the term gate could not run or read the wrong number of
+files, `4` the push failed (the tag the run created is deleted again).
+
+**How `release.yml` consumes the tag.** Traced through the workflow file:
+
+| Step | What it reads | So it builds |
+|---|---|---|
+| Trigger | `on.push.tags: '**[0-9]+.[0-9]+.[0-9]+*'` | the pushed `vX.Y.Z` starts the run |
+| `plan` | `github.ref_name` → `dist host --steps=create --tag=vX.Y.Z` | the release named by the tag; `dist` refuses a tag the workspace version does not match, which is why the script checks `Cargo.toml` first |
+| Every job that builds | `actions/checkout@v6` with no `ref:` override (six of the seven; `publish-homebrew-formula` checks out the tap repository and only commits the formula built from the tag's artifacts) | the triggering ref: the tag, so the squash commit's tree |
+| `build-*` | `dist build --tag=vX.Y.Z` | the artifacts from that tree |
+| `host` | `gh release create vX.Y.Z --target "$RELEASE_COMMIT"`, where `RELEASE_COMMIT` is `github.sha` | a GitHub Release pointing at the squash commit |
+
+Nothing in the workflow reads history behind the tagged commit, so a release
+built from the one squash commit is the same release the local tree would build.
+The tests are `bash scripts/tests/test-publish-public.sh`: every case runs in a
+throwaway clone whose `origin` is a local bare repository.
+
 ## See also
 
 - [Commands](commands.md#quality--governance) — full flags for `check`, `scan`, `gate`, `doctor`, `verify`.

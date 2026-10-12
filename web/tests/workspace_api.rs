@@ -214,21 +214,6 @@ const WORKSPACE_WRITE_ENDPOINTS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The workspace chat's conversation routes ([S-482]) — mounted only under
-/// `agents`, and two of them carry a `:id` segment, so none can join the `GET`
-/// loops over [`WORKSPACE_ENDPOINTS`]. They are walked where their contract
-/// lives instead: `chat_threads_api.rs` runs every threads case on both the
-/// member and the workspace tree, and `workspace_chat.rs` walks all of them for
-/// the single-root `404` and the non-creating read. Listed here so the
-/// route-table guard below still sees every `/api/v1/workspace/*` route named.
-///
-/// [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
-const WORKSPACE_CHAT_ROUTES: &[&str] = &[
-    "/api/v1/workspace/chat/threads",
-    "/api/v1/workspace/chat/threads/:id",
-    "/api/v1/workspace/chat/threads/:id/delete",
-];
-
 fn ws_router(tmp: &TempDir) -> axum::Router {
     let federation = discover(tmp.path()).expect("discovery succeeds").expect("a workspace");
     let registry = EngineRegistry::<Engine>::new_serve_default(federation);
@@ -2084,9 +2069,10 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// and the write-free loop all walk, so a route missing from it is unguarded on all
 /// three — and silently, which is the failure mode an enumerated list has instead of
 /// a wildcard. The `POST` routes live in [`WORKSPACE_WRITE_ENDPOINTS`] instead
-/// (those loops issue `GET`s), and are walked by the S-450 tests; the workspace
-/// chat's routes live in [`WORKSPACE_CHAT_ROUTES`], walked by the chat suites.
-/// This asserts the union of the three lists and the router's own route table
+/// (those loops issue `GET`s), and are walked by the S-450 tests. The workspace
+/// chat's routes are the `chat` extension's since S-643, not this router's table:
+/// `logos-chat`'s suites walk them. This asserts the union of the two lists and the
+/// router's own route table
 /// name exactly the same set, read out of `src/lib.rs` at compile time. Set
 /// equality in both directions, so it needs no count to keep up to date.
 ///
@@ -2100,7 +2086,7 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 ///
 /// So the scan runs over the whole source as one string (formatting-independent),
 /// and a path given by **constant** is resolved from its `const` declaration in
-/// the same file (S-482's `WORKSPACE_CHAT_THREADS_ROUTE` is one), as `lib.rs`'s own
+/// the same file (`VERIFY_POST_ROUTE` is one), as `lib.rs`'s own
 /// `every_post_mounted_route_is_admitted_by_the_method_guard` resolves them —
 /// whatever the `&str` annotation, and wherever rustfmt breaks the declaration. A
 /// `.route(` argument that is code but not a resolvable constant (a call, a
@@ -2175,7 +2161,6 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
         .iter()
         .map(|e| e.split('?').next().expect("a path before any query string"))
         .chain(WORKSPACE_WRITE_ENDPOINTS.iter().map(|(path, _)| *path))
-        .chain(WORKSPACE_CHAT_ROUTES.iter().copied())
         .collect();
     enumerated.sort_unstable();
     enumerated.dedup();
@@ -2200,9 +2185,13 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
         .map(|(_, value)| *value)
         .filter(|path| path.starts_with("/api/v1/workspace/"))
         .collect();
+    // Guard the guard: the const scan does find the router's route constants. No
+    // workspace route is mounted by constant since the workspace chat's left with
+    // chat (S-643), so the list above may be empty — the router's answer, not a
+    // blind scan, as long as the scan still reads the verify route's constant.
     assert!(
-        !const_declared.is_empty(),
-        "guard the guard: WORKSPACE_CHAT_THREADS_ROUTE is a const-declared workspace route"
+        consts.iter().any(|(name, value)| *name == "VERIFY_POST_ROUTE" && *value == "/api/v1/verify"),
+        "guard the guard: the const scan must read VERIFY_POST_ROUTE out of src/lib.rs"
     );
     for path in &const_declared {
         assert!(
@@ -3236,3 +3225,45 @@ async fn re_saving_the_identical_broken_tier_document_is_a_422_not_unchanged() {
     assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), past, "not rewritten");
 }
 
+
+/// In workspace mode the chat's code-reference resolution runs against the
+/// ADDRESSED member (S-622, [FR-UI-47], [FR-WS-34]): `?repo=` selects the member
+/// whose graph answers, exactly as for every member read. The `web` member owns
+/// `src/main.rs` and `get_user`; the `api` member owns neither, so the same spans
+/// resolve under one address and stay plain under the other — a link is never
+/// borrowed from a sibling member's graph.
+///
+/// [FR-UI-47]: ../../docs/specs/requirements/FR-UI-47.md
+/// [FR-WS-34]: ../../docs/specs/requirements/FR-WS-34.md
+#[tokio::test]
+async fn code_refs_resolve_against_the_addressed_member_only() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    let outcomes = |body: &str| -> Vec<(String, String)> {
+        let payload: serde_json::Value = serde_json::from_str(body).expect("json");
+        payload["refs"]
+            .as_array()
+            .expect("refs")
+            .iter()
+            .map(|r| (r["text"].as_str().unwrap().to_string(), r["outcome"].as_str().unwrap().to_string()))
+            .collect()
+    };
+    let pair = |text: &str, outcome: &str| (text.to_string(), outcome.to_string());
+
+    let path = "/api/v1/code-refs?repo=web&ref=src/main.rs&ref=get_user";
+    let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, path);
+    assert_eq!(outcomes(&body), vec![pair("src/main.rs", "file"), pair("get_user", "symbol")], "{body}");
+
+    let path = "/api/v1/code-refs?repo=api&ref=src/main.rs&ref=get_user";
+    let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        outcomes(&body),
+        vec![pair("src/main.rs", "unresolved"), pair("get_user", "unresolved")],
+        "the `api` member's graph does not answer for `web`'s file and symbol: {body}"
+    );
+}

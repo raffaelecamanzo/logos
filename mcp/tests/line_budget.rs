@@ -227,6 +227,47 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// per-member error live in `logos_core::federation::query`, so the CLI prints
 /// the same read-models. The three descriptions grew and cost zero lines.
 ///
+/// **S-639/CR-213 1035→1105** for the extension host ([FR-DS-04], [ADR-74]):
+/// measured 1032→1102 (+70), 3 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `LogosMcp` doc, and `new`/`federated` taking the host (docs, the wrapped composition call) | **+12** |
+/// | `with_extensions` — the `+` composition, and the clash rule that keeps a core tool | **+24** |
+/// | `extension_route` — one `ToolRoute::new_dyn` per extension tool, answered through `run_result` | **+19** |
+/// | the shared bridge maps an extension's `InvalidParams` to `invalid_params`, and says so | **+5** |
+/// | the `logos_ext` / dynamic-route imports | **+1** |
+/// | `lib.rs`: `serve_stdio`/`serve_stdio_on` take the host, their docs and the surface contract, the import | **+8** |
+/// | `bin/logos-mcp.rs`: the public host | **+1** |
+/// | | **+70** |
+///
+/// Adapter plumbing, not logic: an `#[tool]` method cannot be added to this type
+/// from another crate, so serving an extension's tool means building its route
+/// here, and running it through the bridge every core tool already uses is what
+/// keeps its result, failure mapping and log line identical to a core tool's.
+/// (The story's review folded a line-for-line copy of `run_result` back into it:
+/// widening its tool name to `&str` was the whole of the difference.)
+/// The handler itself — the only part that computes anything — is the
+/// extension's. Nothing can move to `logos-core`: the core names no MCP type.
+///
+/// **S-644 1105→1023** for the wiki becoming the `wiki` extension ([ADR-74]): its
+/// five `#[tool]` methods and three parameter structs leave this crate for
+/// `logos-wiki/src/mcp.rs`, which serves them through the `extension_route` above
+/// with the same names, descriptions and schemas. Measured 1103→1020 (−83); the
+/// budget is lowered to the measurement plus the usual 3 lines. The derivation
+/// above (30 registrations, "5 wiki") is the pre-S-644 roster: the core's own is
+/// 25 now, the wiki's 5 are the extension's.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the five wiki `#[tool]` methods and their section comment | **−54** |
+/// | the three wiki parameter structs and their section header | **−30** |
+/// | the `logos_wiki` import | **−1** |
+/// | the module doc: the core roster is 25, and the extensions' tools join it through the host | **+2** |
+/// | | **−83** |
+///
+/// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
+/// [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
 /// [CR-152]: ../../docs/requests/CR-152-cross-member-type-references-overlay.md
 /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
 /// [CR-148]: ../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
@@ -240,8 +281,8 @@ fn mcp_surface_line_budget() {
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1035,
-        "mcp adapter exceeds the 1035 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1023,
+        "mcp adapter exceeds the 1023 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

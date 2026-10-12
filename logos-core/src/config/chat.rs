@@ -331,6 +331,54 @@ impl Default for ChatConfig {
 }
 
 impl ChatConfig {
+    /// The `[chat]` table of a `config.toml` whose table an extension claims — the
+    /// routed value ([`Routed::reserved`](super::ownership::Routed)'s `chat`
+    /// entry), or `None` when the document declares no `[chat]` (S-643).
+    ///
+    /// Its owner, the `chat` extension, has already validated `value` with exactly
+    /// this parse ([`validate_table`](Self::validate_table)), so it is read as
+    /// written; were it somehow not valid, the defaults are read rather than a
+    /// value no validator accepted.
+    pub(crate) fn from_claimed(value: Option<&toml::Value>) -> ChatConfig {
+        value.and_then(|value| Self::parse_table(value).ok()).unwrap_or_default()
+    }
+
+    /// The `[chat]` table of the `config.toml` `text` at `path` as the core parses
+    /// it when **no** extension claims it — exactly as it did while it owned the
+    /// table (S-643): the same `deny_unknown_fields` parse, with the same error and
+    /// position, then [`validate`](Self::validate). The rest of the document is the
+    /// routed parse's, already done, so it is not looked at here.
+    pub(crate) fn from_document(text: &str, path: &Path) -> Result<ChatConfig, ConfigError> {
+        #[derive(Deserialize)]
+        struct ChatOnly {
+            #[serde(default)]
+            chat: ChatConfig,
+        }
+        let chat = toml::from_str::<ChatOnly>(text)
+            .map_err(|source| ConfigError::Parse { path: path.to_path_buf(), source })?
+            .chat;
+        chat.validate()?;
+        Ok(chat)
+    }
+
+    /// Validate `value` as a `[chat]` table: its schema (an unknown key, a value of
+    /// the wrong type) and its bounds ([`validate`](Self::validate)) — the checks
+    /// the core ran while it owned the table, and the ones its owner runs now
+    /// (the `chat` extension's `validate_config_table`, [FR-CF-09], S-643). `Err`
+    /// says what is wrong, naming the key inside the table.
+    ///
+    /// [FR-CF-09]: ../../../docs/specs/requirements/FR-CF-09.md
+    pub fn validate_table(value: &toml::Value) -> Result<(), String> {
+        Self::parse_table(value).map(drop)
+    }
+
+    /// `value` as a valid [`ChatConfig`] — the one parse behind
+    /// [`validate_table`](Self::validate_table) and
+    /// [`from_claimed`](Self::from_claimed).
+    fn parse_table(value: &toml::Value) -> Result<ChatConfig, String> {
+        parse_claimed_table(value, ChatConfig::validate)
+    }
+
     /// The effective model for `role`: its per-role override if set, else the
     /// top-level [`model`](Self::model) ([FR-CF-06], [ADR-41]).
     ///
@@ -370,7 +418,8 @@ impl ChatConfig {
     ///   declaring root itself — never what was meant).
     ///
     /// `max_replans` needs no check: `0` is valid (a single plan pass, no replan)
-    /// and `u32` has no negative form.
+    /// and `u32` has no negative form. The table's owner runs it through
+    /// [`validate_table`](Self::validate_table) (S-643).
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |key: &str, message: String| ConfigError::InvalidValue {
             key: format!("chat.{key}"),
@@ -668,6 +717,46 @@ fn resolve_chat_with(
     })
 }
 
+/// `value`, a claimed table, parsed as `T` and checked by `validate` — the one
+/// parse behind every claimed table the core still reads (`[chat]`, `[wiki]`):
+/// a schema error carries no file content ([`without_file_content`]), and a
+/// bounds error keeps the key inside the table, since the load error that
+/// carries it already names the table.
+pub(super) fn parse_claimed_table<T: serde::de::DeserializeOwned>(
+    value: &toml::Value,
+    validate: impl FnOnce(&T) -> Result<(), ConfigError>,
+) -> Result<T, String> {
+    let parsed: T = value.clone().try_into().map_err(|e| without_file_content(e.message()))?;
+    validate(&parsed).map_err(|e| match e {
+        ConfigError::InvalidValue { key, message } => format!("{key}: {message}"),
+        other => other.to_string(),
+    })?;
+    Ok(parsed)
+}
+
+/// `message` — a claimed table's schema error — with no fragment of the file left in it
+/// ([NFR-SE-07]). Serde quotes what it rejects — a string value in `"…"`, a
+/// variant or a key name in backticks — and a key pasted into the wrong field lands
+/// exactly there. It escapes neither quote inside the other, so the message cannot
+/// be re-tokenized safely (a quoted key holding a backtick would end a token
+/// early). Instead it is cut by structure: what precedes the first quote is serde's
+/// wording, what follows its **last** `, expected` is the list serde generated from
+/// the types (field names, variants, a type), and everything between — the
+/// rejected content, whatever it holds — becomes `…` in the quote it opened with.
+///
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+fn without_file_content(message: &str) -> String {
+    let Some(open) = message.find(['"', '`']) else {
+        return message.to_string();
+    };
+    let quote = &message[open..=open];
+    let tail = message
+        .rfind(", expected")
+        .filter(|&at| at > open)
+        .map_or("", |at| &message[at..]);
+    format!("{}{quote}…{quote}{tail}", &message[..open])
+}
+
 /// Resolve one half against the two-tier chain: the member's value if it
 /// `declares`, else the workspace's if it `declares`, else the member's value
 /// as [`ChatOrigin::Unset`]. The workspace root is read only on a member miss.
@@ -695,11 +784,24 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
+    /// `text` loaded as a `config.toml` is: routed, with the core reading `[chat]`
+    /// for the shared seam (S-643) — by its own parse, as no extension claims the
+    /// table in this test binary.
+    fn config_of(text: &str) -> Config {
+        crate::config::parse_config(text, Path::new(".logos/config.toml")).expect("a valid config")
+    }
+
+    /// `text` as a `[chat]` table, validated as its owner validates it.
+    fn validate_chat(text: &str) -> Result<(), String> {
+        let document: toml::Value = text.parse().expect("TOML");
+        ChatConfig::validate_table(&document["chat"])
+    }
+
     /// [FR-CF-06] AC: an absent `[chat]` section is all-defaults — OpenRouter
     /// `base_url`, the documented budget-tree defaults, the `openai` provider.
     #[test]
     fn absent_chat_section_is_all_defaults() {
-        let cfg: Config = toml::from_str("").unwrap();
+        let cfg = config_of("");
         assert_eq!(cfg.chat, ChatConfig::default());
         assert_eq!(cfg.chat.provider, ChatProvider::OpenAi);
         assert_eq!(cfg.chat.base_url, "https://openrouter.ai/api/v1");
@@ -719,7 +821,7 @@ mod tests {
     /// ([FR-CF-06] AC) — here only `model` is given.
     #[test]
     fn partial_chat_section_fills_defaults() {
-        let cfg: Config = toml::from_str("[chat]\nmodel = \"anthropic/claude\"\n").unwrap();
+        let cfg = config_of("[chat]\nmodel = \"anthropic/claude\"\n");
         assert_eq!(cfg.chat.model.as_deref(), Some("anthropic/claude"));
         // Everything else is still the default.
         assert_eq!(cfg.chat.base_url, DEFAULT_CHAT_BASE_URL);
@@ -731,10 +833,9 @@ mod tests {
     /// `"anthropic"` and `"openai"` (the alias for the OpenAI-compatible family).
     #[test]
     fn provider_serde_wire_names() {
-        let anthropic: Config =
-            toml::from_str("[chat]\nprovider = \"anthropic\"\n").unwrap();
+        let anthropic = config_of("[chat]\nprovider = \"anthropic\"\n");
         assert_eq!(anthropic.chat.provider, ChatProvider::Anthropic);
-        let openai: Config = toml::from_str("[chat]\nprovider = \"openai\"\n").unwrap();
+        let openai = config_of("[chat]\nprovider = \"openai\"\n");
         assert_eq!(openai.chat.provider, ChatProvider::OpenAi);
     }
 
@@ -742,22 +843,46 @@ mod tests {
     /// ([FR-CF-06] AC, the [FR-CF-01] discipline).
     #[test]
     fn unknown_chat_key_is_rejected() {
-        let err = toml::from_str::<Config>("[chat]\nbogus = 1\n").unwrap_err();
-        assert!(
-            err.to_string().contains("bogus") || err.to_string().contains("unknown"),
-            "unknown key error should name the field: {err}"
-        );
+        let err = validate_chat("[chat]\nbogus = 1\n").unwrap_err();
+        // The unknown name is file content (a pasted key lands there), so it is
+        // elided; the expected names are the schema's and survive (S-643).
+        assert!(err.starts_with("unknown field `…`, expected one of `provider`"), "{err}");
     }
 
     /// An unknown per-role override key under `[chat.models]` also fails loud.
     #[test]
     fn unknown_role_override_is_rejected() {
-        let err =
-            toml::from_str::<Config>("[chat.models]\narchitect = \"m\"\n").unwrap_err();
-        assert!(
-            err.to_string().contains("architect") || err.to_string().contains("unknown"),
-            "unknown role override should be rejected: {err}"
-        );
+        let err = validate_chat("[chat.models]\narchitect = \"m\"\n").unwrap_err();
+        assert!(err.starts_with("unknown field `…`, expected one of `planner`"), "unknown role override should be rejected: {err}");
+    }
+
+    /// A `[chat]` schema error never carries file content, whichever way a pasted
+    /// key lands in it ([NFR-SE-07], S-643): a string value (an escaped quote
+    /// inside it included), a rejected enum variant, a key name. What the schema
+    /// expected is kept.
+    ///
+    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+    #[test]
+    fn a_chat_schema_error_never_echoes_what_the_file_holds() {
+        for (text, secret) in [
+            ("[chat]\nmax_tokens = \"sk-live-QUOTED-a1\"\n", "QUOTED"),
+            ("[chat]\nmax_tokens = \"sk-live\\\"AFTER-ESCAPED-QUOTE-b2\"\n", "AFTER-ESCAPED"),
+            ("[chat]\nprovider = \"sk-live-VARIANT-c3\"\n", "VARIANT"),
+            ("[chat]\nsk-live-KEYNAME-d4 = 1\n", "KEYNAME"),
+            ("[chat.models]\nplanner = \"m\"\nsk-live-ROLE-e5 = \"m\"\n", "ROLE"),
+            // Serde escapes no backtick: a quoted key or a value holding one must not
+            // end the elision early (the S-643 review's parser differential).
+            ("[chat]\n\"sk-live`TICK-KEY-f6\" = 1\n", "TICK-KEY"),
+            ("[chat]\nprovider = \"sk-live`TICK-VALUE-g7\"\n", "TICK-VALUE"),
+            ("[chat]\nprovider = \"x, expected `sk-live-SPOOF-h8`\"\n", "SPOOF"),
+        ] {
+            let err = validate_chat(text).unwrap_err();
+            assert!(!err.contains(secret) && !err.contains("sk-live"), "{text:?} echoed: {err}");
+        }
+        let variant = validate_chat("[chat]\nprovider = \"nope\"\n").unwrap_err();
+        assert_eq!(variant, "unknown variant `…`, expected `anthropic` or `openai`");
+        let typed = validate_chat("[chat]\nmax_tokens = \"x\"\n").unwrap_err();
+        assert!(typed.starts_with("invalid type: string \"…\", expected"), "{typed}");
     }
 
     /// Per-role overrides win over the top-level model; an un-overridden role
@@ -794,14 +919,12 @@ mod tests {
     }
 
     /// Each out-of-range value is a load-time `InvalidValue` (exit 2) naming the
-    /// `chat.<key>` ([FR-CF-06] AC). Validation runs through the whole `Config`.
+    /// `chat.<key>` ([FR-CF-06] AC). Every load runs it: through the `chat`
+    /// extension's [`ChatConfig::validate_table`] when it claims the table, else
+    /// through the core's own parse (S-643).
     #[test]
     fn out_of_range_values_are_rejected() {
-        let bad = |chat: ChatConfig| Config {
-            chat,
-            ..Default::default()
-        }
-        .validate();
+        let bad = |chat: ChatConfig| chat.validate();
 
         // Empty base_url.
         assert!(matches!(
@@ -868,19 +991,16 @@ mod tests {
     /// opts in), parses a list, and round-trips through serialize → parse.
     #[test]
     fn read_roots_default_empty_parse_and_round_trip() {
-        let absent: Config = toml::from_str("[chat]\nmodel = \"m\"\n").unwrap();
+        let absent = config_of("[chat]\nmodel = \"m\"\n");
         assert!(absent.chat.read_roots.is_empty());
         assert!(
             !toml::to_string(&absent.chat).unwrap().contains("read_roots"),
             "an empty list is not serialized"
         );
 
-        let declared: Config = toml::from_str(
-            "[chat]\nread_roots = [\n  \"../logos-docs\",\n  \"/abs/docs\",\n]\n",
-        )
-        .unwrap();
+        let declared = config_of("[chat]\nread_roots = [\n  \"../logos-docs\",\n  \"/abs/docs\",\n]\n");
         assert_eq!(declared.chat.read_roots, ["../logos-docs", "/abs/docs"]);
-        assert!(declared.validate().is_ok());
+        assert!(declared.chat.validate().is_ok());
 
         let reparsed: ChatConfig =
             toml::from_str(&toml::to_string(&declared.chat).unwrap()).unwrap();
@@ -890,15 +1010,12 @@ mod tests {
     /// A blank `read_roots` entry fails loud at load, naming `chat.read_roots`.
     #[test]
     fn a_blank_read_roots_entry_is_rejected() {
-        let cfg = Config {
-            chat: ChatConfig {
-                read_roots: vec!["../docs".to_string(), "  ".to_string()],
-                ..Default::default()
-            },
+        let chat = ChatConfig {
+            read_roots: vec!["../docs".to_string(), "  ".to_string()],
             ..Default::default()
         };
         assert!(matches!(
-            cfg.validate(),
+            chat.validate(),
             Err(ConfigError::InvalidValue { ref key, ref message })
                 if key == "chat.read_roots" && message.contains("entry 1")
         ));
@@ -910,26 +1027,21 @@ mod tests {
     /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
     #[test]
     fn history_window_keys_default_and_honor_explicit_values() {
-        let defaulted: Config = toml::from_str("[chat]\nmodel = \"m\"\n").unwrap();
+        let defaulted = config_of("[chat]\nmodel = \"m\"\n");
         assert_eq!(defaulted.chat.history_max_turns, DEFAULT_HISTORY_MAX_TURNS);
         assert_eq!(defaulted.chat.history_max_chars, DEFAULT_HISTORY_MAX_CHARS);
 
-        let explicit: Config =
-            toml::from_str("[chat]\nhistory_max_turns = 2\nhistory_max_chars = 500\n").unwrap();
+        let explicit = config_of("[chat]\nhistory_max_turns = 2\nhistory_max_chars = 500\n");
         assert_eq!(explicit.chat.history_max_turns, 2);
         assert_eq!(explicit.chat.history_max_chars, 500);
-        assert!(explicit.validate().is_ok());
+        assert!(explicit.chat.validate().is_ok());
     }
 
     /// [S-483] AC: out-of-range window keys are rejected at load like the budget
     /// keys, each naming its own key; the boundary values are valid.
     #[test]
     fn history_window_out_of_range_values_are_rejected() {
-        let bad = |chat: ChatConfig| Config {
-            chat,
-            ..Default::default()
-        }
-        .validate();
+        let bad = |chat: ChatConfig| chat.validate();
         let names = |r: Result<(), ConfigError>, want: &str| {
             matches!(r, Err(ConfigError::InvalidValue { ref key, .. }) if key == want)
         };
@@ -967,15 +1079,12 @@ mod tests {
     #[test]
     fn provider_retry_keys_default_and_honor_explicit_values() {
         // Absent → documented defaults.
-        let defaulted: Config = toml::from_str("[chat]\nmodel = \"m\"\n").unwrap();
+        let defaulted = config_of("[chat]\nmodel = \"m\"\n");
         assert_eq!(defaulted.chat.max_provider_retries, 2);
         assert_eq!(defaulted.chat.provider_retry_base_ms, 200);
 
         // Explicit values are honored, including `0` retries (disables retrying).
-        let explicit: Config = toml::from_str(
-            "[chat]\nmax_provider_retries = 0\nprovider_retry_base_ms = 50\n",
-        )
-        .unwrap();
+        let explicit = config_of("[chat]\nmax_provider_retries = 0\nprovider_retry_base_ms = 50\n");
         assert_eq!(explicit.chat.max_provider_retries, 0);
         assert_eq!(explicit.chat.provider_retry_base_ms, 50);
     }
@@ -984,11 +1093,7 @@ mod tests {
     /// `max_provider_retries` are rejected at load (exit 2), each naming its key.
     #[test]
     fn provider_retry_out_of_range_values_are_rejected() {
-        let bad = |chat: ChatConfig| Config {
-            chat,
-            ..Default::default()
-        }
-        .validate();
+        let bad = |chat: ChatConfig| chat.validate();
 
         // A zero base delay would busy-retry.
         assert!(matches!(
@@ -1075,7 +1180,7 @@ mod resolution_tests {
     }
 
     fn parsed(text: &str) -> ChatConfig {
-        toml::from_str::<crate::config::Config>(text).unwrap().chat
+        crate::config::parse_config(text, Path::new(".logos/config.toml")).unwrap().chat
     }
 
     fn origins(r: &ChatResolution) -> (ChatOrigin, ChatOrigin) {

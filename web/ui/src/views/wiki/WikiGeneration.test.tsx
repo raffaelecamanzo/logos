@@ -453,7 +453,7 @@ describe("Wiki-tab generation trigger (S-178, FR-WK-18, FR-UI-19, NFR-SE-07)", (
 });
 
 describe("Wiki-tab re-attach to an in-flight run (S-223, FR-UI-19, FR-WK-18, NFR-CC-04)", () => {
-  // The server-side re-attach contract (web::wikigen::WikiRunState::subscribe,
+  // The server-side re-attach contract (logos_wiki::web::WikiRunState::subscribe,
   // CR-056/S-222) replays a reopening trigger's SSE response with the run's history
   // first, then continues live — so from this hook's view, reopening the tab is just
   // a second `streamWikiGeneration` call whose stream already carries the cumulative
