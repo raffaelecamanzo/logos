@@ -192,16 +192,86 @@ A clean tree passes `check` with exit 0; the seeded rules file forces the
 error-severity path so you can see exactly what a failing Enforce step looks
 like in CI.
 
-## Publishing a release: one commit per tag
+## Publishing a sprint: one pull request
 
-This repository publishes each release to `origin` as **one commit** over
-`origin/main`, whatever local history led to it. `scripts/publish-public.sh`
-builds that commit and tags it. The tag is a source release: no workflow in
-this repository runs on it.
+An approved sprint reaches `origin` as **one reviewable pull request**, not as part
+of a later release. The sprint runs on the local branch `sprint/N` and is merged
+into local `main`; `scripts/publish-sprint.sh` then builds one commit over
+`origin/main` whose tree is local `main`'s tree, pushes it to the branch
+`sprint/N` on `origin`, and opens the pull request against `main`.
+
+```bash
+bash scripts/publish-sprint.sh --sprint 101           # dry run: prints, moves nothing
+bash scripts/publish-sprint.sh --sprint 101 --push    # pushes sprint/101, opens the pull request
+```
+
+**What the commit is.** Its parent is `origin/main`; its tree is local `main`'s;
+it carries the dates of local `main`'s tip, so the dry run and the later `--push`
+build the same commit id. Its message is a neutral summary: the title of each
+story of the sprint that has a `- **Tracker:** github#N` line, each followed by
+`Closes #N`; a sprint with no such story gets a one-line summary. Stories are
+read from the sprint's plan file (`docs/planning/sprints/sprint-N.md`) and the
+journal (`docs/planning/journal.md`), which must agree on a story's issue number.
+Those files are not part of a public checkout: without them the message is the
+one-line summary, and the output says so. `--plan DIR` points the script at
+another directory holding them, and a `--plan` that lacks the sprint file is
+refused rather than summarised. Relative paths among the options are relative to
+where you run it, which may be a subdirectory or a linked worktree.
+
+**What it checks before writing anything** (exit 2, no object written):
+`origin/main` is an ancestor of local `main` (otherwise a publish would revert
+what `origin/main` holds and `main` lacks; run `git fetch origin && git merge
+origin/main`); the local branch `sprint/N` exists and is merged into local `main`
+(`--unbranched` accepts a sprint that ran before sprint branches, and relaxes
+nothing else); local `main`'s tree differs from `origin/main`'s; and the plan
+files are sound: a `--plan` directory holds `sprint-N.md`, each Tracker bullet is
+`github#N` or `none`, the two files agree on a story's issue number, and a
+mirrored story has a title that does not name an issue after a closing keyword
+(it would close that issue when the pull request merges). Then
+`scripts/check-public-terms.sh` runs on the message and on the tree exactly as
+published (read from the commit, never from the working directory). A hit exits 1
+before any commit object exists. Last, once the commit id is known, a
+remote-tracking `origin/sprint/N`, if present, must be that commit; this one
+refusal (exit 2) follows the build and leaves the unreferenced commit object behind.
+
+**Dry run by default.** Without `--push` the script writes one unreferenced commit
+object and nothing else: no branch, no pull request, no network call. It prints
+the commit id, the message, and the exact `git push origin <sha>:refs/heads/sprint/N`
+and `gh pr create --base main --head sprint/N --fill` it would run. With `--push`
+it needs `gh` on `PATH` (checked before anything is pushed), reads `origin`
+itself: `main` must still equal the local `origin/main`, and `sprint/N` must be absent (it is pushed, never forced) or already the commit built
+(a re-run skips the push and retries the pull request). `--fill` makes the pull
+request's title and body the commit's message.
+
+**Merging it.** The pull request is merged on GitHub with **Rebase and merge**, so
+`origin/main` gains exactly the one commit with its message unchanged. Afterwards
+run `git fetch origin && git merge origin/main`: the trees are equal, so the merge
+is trivial, and it restores `origin/main` as an ancestor of local `main` for the
+next publish.
+
+Exit codes: `0` done, `1` the term gate found a listed term, `2` usage error or a
+failed precondition, `3` the term gate could not run or read the wrong number of
+files, `4` the push failed, `5` the branch is on `origin` but the pull request
+could not be created (re-run to retry it).
+
+The tests are `bash scripts/tests/test-publish-sprint.sh`: every case runs in a
+throwaway clone whose `origin` is a local bare repository, with a recording
+stand-in for `gh`, and the plan files are fixtures.
+
+## Publishing a release: a tag on a published commit
+
+A release is a **tag**, and the tag marks one commit on `origin/main`. When the
+sprints a release holds were already published as pull requests, that commit is
+already on `origin/main` and `--tag-only` (below) tags it. When a release is
+published without them, `scripts/publish-public.sh` builds **one commit** over
+`origin/main`, whatever local history led to it, and tags it. The tag is a source
+release: no workflow in this repository runs on it.
 
 ```bash
 bash scripts/publish-public.sh --version 1.15.7          # dry run: prints, moves nothing
 bash scripts/publish-public.sh --version 1.15.7 --push   # tags and pushes
+bash scripts/publish-public.sh --bootstrap [--yes]         # record origin/main as merged
+bash scripts/publish-public.sh --version 1.15.7 --tag-only [--push]   # tag origin/main
 ```
 
 **What the commit is.** Its parent is `origin/main`, its tree is the release
@@ -211,7 +281,11 @@ including, the newest `vMAJOR.MINOR.PATCH` tag reachable from `origin/main`,
 newest first. It carries the release commit's dates, so the dry run and the
 later `--push` build the same commit id.
 
-**What it checks before writing anything.** The version must be newer than
+**What it checks before writing anything.** `origin/main` must already be an
+ancestor of the release commit: a commit built over `origin/main` from a tree that
+lacks something merged there would publish it reverted, so otherwise the script
+exits 2 naming `git fetch origin && git merge origin/main` and writes no object.
+The version must be newer than
 origin's newest, the release tree's `Cargo.toml` must carry it, `CHANGELOG.md`
 must hold its section and origin's newest one below it, and no local tag of that
 version may exist. Then `scripts/check-public-terms.sh` runs on the message and on
@@ -224,7 +298,28 @@ id and the exact `git tag` and `git push` it would run. With `--push` it checks
 that origin's `main` still equals the local `origin/main`, creates the annotated
 tag `vX.Y.Z` on the commit, and pushes the commit to `main` and the tag in one
 `git push --atomic`, never forced. Local `main`, every existing tag, local history
-and every other remote stay where they are in both modes.
+and every other remote stay where they are in both modes. (`--tag-only` without
+`--push` is the exception: its result is the local tag, below.)
+
+**Recording the ancestry.** The commit a publish pushes is not in local history,
+so after each publish `origin/main` is not yet an ancestor of local `main`.
+`bash scripts/publish-public.sh --bootstrap` records it with
+`git merge -s ours origin/main`, which keeps local `main`'s tree. It does so
+only when `origin/main`'s tree is the tree of a commit in `HEAD`'s history (the
+one the published commit was built from); any other `origin/main` holds content
+local history never had, and the script exits 2. It prints the merge by default
+and runs it only with `--yes`; either way it needs a branch, a clean tracked tree
+and a history shared with `origin/main`, and refuses otherwise. It never pushes.
+When the ancestry is already recorded it says so and makes no merge. It takes no
+other option.
+
+**Tagging what origin already holds.** `--version X.Y.Z --tag-only` is for a
+release that reached `origin/main` by other means (a merged pull request, say).
+It creates the annotated tag `vX.Y.Z` on `origin/main`, and only when the release
+tree equals `origin/main`'s tree and the version and `CHANGELOG.md` checks above
+hold; no commit is built, so no term gate runs. The tag is created locally;
+`--push` pushes the tag alone, never forced, and a failed push deletes the tag
+the run created.
 
 Exit codes: `0` done, `1` the term gate found a listed term, `2` usage error or a
 failed precondition, `3` the term gate could not run or read the wrong number of

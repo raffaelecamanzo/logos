@@ -40,11 +40,12 @@
 # Usage:
 #   bash scripts/gate.sh probe    # resolve paths + counts, run no gates
 #   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch,
-#                                 public terms (skips the two timing suites;
-#                                 `full` does not)
+#                                 public terms, the script suites when scripts/
+#                                 changed (skips the two timing suites; `full`
+#                                 does not)
 #   bash scripts/gate.sh full     # pre-handoff: every package, the agents-marker
-#                                 leg, deny, public terms, ui, the ui-e2e
-#                                 browser leg (full only, never fast)
+#                                 leg, deny, public terms, the script suites, ui,
+#                                 the ui-e2e browser leg (full only, never fast)
 #
 # `full` RESUMES: a gate that already passed for this exact tree is not re-run,
 # so a run killed by memory pressure continues where it stopped when invoked
@@ -74,11 +75,13 @@ usage: bash scripts/gate.sh {probe|fast|full}
   probe  resolve the evidence path, the tree id and the per-package expected
          test-binary counts, then exit. Runs no gates and writes no evidence.
   fast   clippy + the packages the working tree touches + the architecture
-         gate + the public-terms gate. Emits tier "fast", which only
-         `verify-evidence.sh --tier fast` accepts.
+         gate + the public-terms gate, plus the script suites exactly when
+         `git diff --name-only` against the gate base touches scripts/. Emits
+         tier "fast", which only `verify-evidence.sh --tier fast` accepts.
   full   all packages, the agents-marker leg (the `observability::` unit
          tests with logos-core's `agents` marker on), cargo-deny, the
-         public-terms gate, and the web/ui gates, including the ui-e2e
+         public-terms gate, the script suites (one unit per
+         scripts/tests/test-*.sh), and the web/ui gates, including the ui-e2e
          browser leg (never run by fast). Emits
          tier "full", which is what verify-evidence.sh requires.
 EOF
@@ -712,6 +715,80 @@ EOF
     fi
 }
 
+# --------------------------------------------------------------- script suites
+#
+# This repository's own script tests (every scripts/tests/test-*.sh: the gate,
+# the verifier, the term gate, the publish script and the helpers they use): the
+# code that decides whether a tree may be handed off is itself guarded here, and
+# CI runs the same suites. One
+# evidence unit per suite, in name order:
+#   expected / floor / started   1 (a suite is one run)
+#   finished                     1 for a suite that ran to an exit, 0 for one the
+#                                shell reports killed by a signal (exit >= 128)
+#   passed / failed              the checks the suite counted, read from its last
+#                                summary line (`N passed, M failed ...` or
+#                                `passed N, failed M`); 0 / 0 when it prints none
+# A suite that exits 0 having counted no passing check proved nothing and fails,
+# like an empty roster; one that exits non-zero without counting a failure is
+# recorded as 1 failed. A glob that matches no suite is a failed leg, never a
+# pass over zero suites. Each suite runs from $ROOT with this gate's own knobs
+# (GATE_FORCE, GATE_BASE) unset: a suite builds its own fixtures and must not
+# inherit a resume or a base it did not choose.
+suite_counts() { # log -> "passed failed" of the last summary line, or nothing
+    LC_ALL=C awk '
+        /^[A-Za-z0-9_.-]+: [0-9]+ passed, [0-9]+ failed/ || /^[0-9]+ passed, [0-9]+ failed/ {
+            p = f = ""
+            for (i = 1; i < NF; i++) {
+                if ($(i + 1) ~ /^passed,?$/ && $i ~ /^[0-9]+$/) p = $i
+                if ($(i + 1) ~ /^failed/ && $i ~ /^[0-9]+$/)    f = $i
+            }
+            if (p != "" && f != "") last = p " " f
+        }
+        /^passed [0-9]+, failed [0-9]+([, ]|$)/ { gsub(/,/, ""); last = $2 " " $4 }
+        END { if (last != "") print last }' "$1"
+}
+
+gate_script_suites() {
+    local gate=script-suites worst=pass ex=0 n=0 name log rc t0 sp sf fin verdict trunc why suite
+    local passed=0 failed=0
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
+    reset_units
+    rm -f "$EVID/$gate"--*.log
+    echo "$gate:"
+    for suite in "$ROOT"/scripts/tests/test-*.sh; do
+        [ -e "$suite" ] || break # an unmatched glob stays literal: no suite at all
+        n=$((n + 1))
+        name="$(basename "$suite" .sh)"
+        log="$EVID/$gate--$name.log"
+        rc=0 t0=$SECONDS
+        (cd "$ROOT" && env -u GATE_FORCE -u GATE_BASE CARGO_TERM_COLOR=never \
+            bash "scripts/tests/$name.sh") </dev/null >"$log" 2>&1 || rc=$?
+        read -r sp sf <<EOF
+$(suite_counts "$log")
+EOF
+        sp="${sp:-0}" sf="${sf:-0}"
+        fin=1 verdict=pass trunc=none why=""
+        if [ "$rc" -ge 128 ]; then fin=0 trunc=killed; fi
+        if [ "$rc" -eq 0 ] && [ "$sp" -eq 0 ] && [ "$sf" -eq 0 ]; then sf=1 why="  [counted no passing check]"; fi
+        if [ "$rc" -ne 0 ] && [ "$sf" -eq 0 ]; then sf=1; fi
+        if [ "$rc" -ne 0 ] || [ "$sf" -ne 0 ]; then verdict=fail; fi
+        add_unit "$name" 1 1 1 "$fin" "$sp" "$sf" 0 "$rc" "$verdict" "$trunc" \
+            "env -u GATE_FORCE -u GATE_BASE bash scripts/tests/$name.sh"
+        passed=$((passed + sp)) failed=$((failed + sf))
+        printf '    %-24s %s  %s passed, %s failed, %ss%s\n' "$name" "$verdict" "$sp" "$sf" "$((SECONDS - t0))" \
+            "$([ "$verdict" = pass ] || echo "$why  (exit $rc; $log)")"
+        if [ "$verdict" != pass ]; then worst=fail ex=1; fi
+    done
+    if [ "$n" -eq 0 ]; then
+        echo "    no scripts/tests/test-*.sh suite"
+        add_unit "(none)" 1 1 0 0 0 0 0 1 fail no_binaries ""
+        worst=fail ex=1
+    fi
+    cat "$EVID/$gate"--*.log >"$EVID/$gate.log" 2>/dev/null || : >"$EVID/$gate.log"
+    write_evidence "$gate" "bash scripts/tests/test-*.sh" "$ex" "$worst" none
+    record "$gate" "$worst" "($n suite(s); $passed passed, $failed failed)"
+}
+
 # ------------------------------------------------------------------- web/ui
 #
 # Every npm script this gate intends to run is checked against package.json
@@ -885,6 +962,32 @@ gate_base() {
     printf '%s\n' HEAD
 }
 
+# 0 when `git diff --name-only <gate base>` names a path under scripts/ (the
+# directory itself: `scripts-old/x` is not under it). Same base as the other
+# change-scoped legs. Staged, unstaged and committed-since-base changes to tracked
+# files all count; the handoff commits before it gates, so a new file is tracked
+# by then.
+#   - No pipe: `git diff | grep -q` under pipefail returns 141 when grep stops at
+#     the first match while git is still writing, so a diff past the pipe buffer
+#     would read "no change" and skip the leg.
+#   - Fails closed: a base git cannot resolve (a typo in GATE_BASE, a ref not
+#     fetched) or a diff that errors counts as changed. The leg runs; it is never
+#     skipped on a guess.
+#   - core.quotePath off: a non-ASCII path is otherwise printed quoted, and no
+#     longer starts with `scripts/`.
+#   - --no-renames: with rename detection a file moved OUT of scripts/ lists only
+#     its new path, and the suite the move may have broken would not run.
+scripts_changed() {
+    local base files
+    base="$(gate_base)"
+    git rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1 || return 0
+    files="$(git -c core.quotePath=false diff --name-only --no-renames "$base" 2>/dev/null)" || return 0
+    case "$files" in
+        scripts/* | *$'\n'scripts/*) return 0 ;;
+    esac
+    return 1
+}
+
 # ------------------------------------------------------- which packages changed
 touched_packages() {
     local changed p dir
@@ -928,6 +1031,11 @@ case "$TIER" in
         fi
         gate_arch
         gate_public_terms
+        if scripts_changed; then
+            gate_script_suites
+        else
+            echo "script-suites: not run — scripts/ is unchanged against the base $(gate_base)"
+        fi
         if git diff --name-only "$(gate_base)" 2>/dev/null | grep -q '^web/ui/'; then
             gate_ui ui-typecheck typecheck
             gate_ui ui-test test
@@ -941,6 +1049,7 @@ case "$TIER" in
         gate_deny
         gate_arch
         gate_public_terms
+        gate_script_suites
         gate_ui ui-typecheck typecheck
         gate_ui ui-test test
         gate_ui ui-build build

@@ -37,7 +37,7 @@ members = [
 # one version makes that macro correct wherever it appears and makes a release
 # bump a single edit. Found at the Sprint 64 human review.
 [workspace.package]
-version = "1.16.1"
+version = "1.16.2"
 license = "Apache-2.0"
 repository = "https://github.com/raffaelecamanzo/logos"
 

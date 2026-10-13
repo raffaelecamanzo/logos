@@ -28,6 +28,9 @@
 #   - started == finished                            (the OOM-kill signature)
 #   - all tree_ids equal each other AND the tree      (run full, edit, re-run
 #     recomputed right now                            only fast, then commit)
+#   - script-suites (S-719): a unit for every          (a suite left out; a red
+#     scripts/tests/test-*.sh the tree holds, none      suite; a suite that
+#     exited non-zero or counted no passing check       proved nothing)
 #
 # THE TWO TIERS IT WILL CERTIFY, and why `fast` is not a loophole
 #   `--tier full` (the default) is unchanged: every gate in ALL_GATES, each
@@ -38,10 +41,12 @@
 #   arch, public-terms — and NOTHING is relaxed about those four: same
 #   recomputation from counters, same tree identity, same refusal of a "skip".
 #   (public-terms is required at both tiers, S-716: a term merged after a fast
-#   gate is as public as one merged after a full gate.) The fast tier exists
-#   because the standing sprint contract runs one full gate on MERGED MAIN at
-#   review rather than eight per-branch full gates, and without it a fast-tier
-#   session cannot hand off at all. Three properties keep it honest:
+#   gate is as public as one merged after a full gate. script-suites, S-719, is
+#   required at full only: `gate.sh fast` runs it exactly when scripts/ changed,
+#   so fast accepts evidence with or without it and validates it when present.)
+#   The fast tier exists because the standing sprint contract runs one full gate
+#   on MERGED MAIN at review rather than eight per-branch full gates, and
+#   without it a fast-tier session cannot hand off at all. Three properties keep it honest:
 #     - the marker records the tier, the gates and the TEST DENOMINATOR, so a
 #       merge commit can state what was certified instead of implying "all of it"
 #       (gate.sh's fast tier runs tests only over packages touched vs HEAD, which
@@ -151,12 +156,13 @@ evid, tree_now, mode, expect_tier = sys.argv[1], sys.argv[2], sys.argv[3], sys.a
 # The full tier's contract. A gate absent from disk is a gate that did not run.
 ALL_GATES = [
     "clippy", "test", "agents-marker", "deny", "arch", "public-terms",
-    "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
+    "script-suites", "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
 ]
 # What `gate.sh fast` actually runs. Its two UI legs are conditional on web/ui
-# having changed, so they are not required — but a gate this tier does not
-# require is still VALIDATED when its evidence describes THIS tree, so a
-# passing-looking leg cannot be admitted unexamined. Evidence describing an
+# having changed (and script-suites, when scripts/ did), so they are not
+# required — but a gate this tier does not require is still VALIDATED when its
+# evidence describes THIS tree, so a passing-looking leg cannot be admitted
+# unexamined. Evidence describing an
 # older tree is history from an earlier run, not a claim about the tree being
 # handed off, so it is skipped rather than treated as a failure: the marker will
 # name the gates it actually certified.
@@ -186,6 +192,17 @@ UNIT_WORDS = {
         "nothing_ran": "the agents-gated test did not execute",
         "floor": None,
         "row_field": "passed", "row_extra": "%d passed",
+    },
+    # The script-suites gate has one unit per scripts/tests/test-*.sh: a suite
+    # that ran to an exit is 1 of 1, and `passed`/`failed` are the checks it
+    # counted (gate.sh's gate_script_suites).
+    "script-suites": {
+        "things": "suites", "short": "suites",
+        "killed": "the suite was killed by a signal",
+        "failures": "check(s) failed",
+        "nothing_ran": "the suite did not run",
+        "floor": None,
+        "row_field": "passed", "row_extra": "%d checks passed",
     },
     "public-terms": {
         "things": "text files", "short": "files",
@@ -304,6 +321,28 @@ for gate in REQUIRED + OPTIONAL:
                      words["row_extra"] % tot_extra))
     else:
         rows.append((gate, tier, verdict, "exit %s" % doc.get("exit_code"), ""))
+
+    # The script suites (S-719): one unit per suite the tree holds. A unit's exit
+    # status is checked on its own — the generic counters above see `failed`,
+    # which a suite that exited non-zero without counting a failure would leave
+    # at zero.
+    if gate == "script-suites" and doc.get("tree_id") == tree_now:
+        if verdict == "pass" and not units:
+            problems.append("script-suites: passed with no suite unit — nothing was run")
+        ran = set()
+        for u in units:
+            ran.add(u.get("unit"))
+            if u.get("exit_code") != 0:
+                problems.append("script-suites/%s: the suite exited %r"
+                                % (u.get("unit"), u.get("exit_code")))
+            elif u.get("verdict") == "pass" and not u.get("passed"):
+                problems.append("script-suites/%s: the suite counted no passing check "
+                                "— a suite that proved nothing is not a pass" % u.get("unit"))
+        for suite in sorted(glob.glob(os.path.join("scripts", "tests", "test-*.sh"))):
+            name = os.path.basename(suite)[:-len(".sh")]
+            if name not in ran:
+                problems.append("script-suites/%s: the tree holds this suite "
+                                "but the evidence has no unit for it" % name)
 
     if gate == "test":
         # The denominator, carried into the marker. A test gate with no units is

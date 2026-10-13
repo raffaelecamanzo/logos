@@ -13,6 +13,11 @@
 #   committer dates, so a dry run and the later --push build the same commit id.
 #
 # WHAT IT CHECKS FIRST
+#   - origin/main is an ancestor of the release commit: a commit built over
+#     origin/main from a tree that lacks something merged there would publish that
+#     thing reverted. Otherwise exit 2, naming `git fetch origin && git merge
+#     origin/main`; no commit object is written. See --bootstrap for the one
+#     publish whose origin/main was built from a local commit and never merged back;
 #   - X.Y.Z is newer than origin's newest version, and the release tree's
 #     Cargo.toml carries version X.Y.Z (the tag names the product version, and a
 #     tag the workspace version does not match would name a different one);
@@ -28,6 +33,7 @@
 #   else: no tag, no branch, no remote call. It prints the commit id and the exact
 #   `git tag` and `git push` it would run. Local main, every existing tag, local
 #   history and every other remote are never moved or rewritten, in either mode.
+#   (--tag-only is the exception: its result is the local tag, see below.)
 #
 # --push
 #   Checks that origin can be read and its main still equals the local
@@ -35,6 +41,26 @@
 #   the commit to origin's main and the tag in one atomic push, never forced. A
 #   push that fails or is interrupted deletes the tag this run created. Only the
 #   owner runs --push.
+#
+# --bootstrap [--yes]
+#   Records origin/main as an ancestor of HEAD with `git merge -s ours origin/main`,
+#   which keeps HEAD's tree. Only sound when origin/main's tree is the tree of a
+#   commit in HEAD's history, the one the published commit was built from; any
+#   other origin/main holds content HEAD never had, and the script refuses (exit
+#   2). Already an ancestor: says so, creates nothing, exit 0. Prints the merge by
+#   default and runs it only with --yes. Either way it needs a branch (not a
+#   detached HEAD), a clean tracked tree and a history shared with origin/main, and
+#   refuses (exit 2) otherwise, so the dry run never promises what --yes refuses.
+#   A merge a hook stops is aborted. It never pushes and takes no other option.
+#
+# --tag-only
+#   For a release whose commit is already on origin/main (merged there by other
+#   means): creates the annotated tag vX.Y.Z on origin/main, only when the release
+#   tree equals origin/main's tree and the checks above (the version and the
+#   CHANGELOG ones) hold. No commit is built, so no term gate runs: nothing is
+#   published but the tag. The tag is created locally; with --push it is pushed
+#   (the tag alone, never forced), and a push that fails or is interrupted deletes
+#   the tag this run created.
 #
 # WHAT A PUBLIC TAG IS
 #   A source release. No workflow in this repository runs on a pushed tag, builds
@@ -45,12 +71,15 @@
 # Usage:
 #   bash scripts/publish-public.sh --version X.Y.Z [--from REV] [--push]
 #                                  [--terms FILE] [--allow FILE]
+#   bash scripts/publish-public.sh --version X.Y.Z --tag-only [--from REV] [--push]
+#   bash scripts/publish-public.sh --bootstrap [--yes]
 #
 #   Run it from inside the repository. --terms and --allow are handed to
 #   check-public-terms.sh unchanged (its own defaults otherwise).
 #
 # Exit codes:
-#   0  dry run printed, or the push succeeded
+#   0  dry run printed, the push succeeded, or --bootstrap / --tag-only did its
+#      work (including "already recorded")
 #   1  the term gate found a listed term in the message or the tree; nothing built
 #   2  usage error, or a precondition above does not hold
 #   3  the term gate could not run, or read a different number of files than
@@ -61,20 +90,25 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$HERE/check-public-terms.sh"
+CORE="$HERE/lib/publish-core.sh"
 REMOTE=origin
 VERSION=""
-FROM=HEAD
+FROM=""
 PUSH=no
+TAG_ONLY=no
+BOOTSTRAP=no
+YES=no
 GATE_ARGS=()
 
 usage() {
     sed -n '/^# Usage:/,/^#   check-public-terms.sh unchanged/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
-die() { # die <exit> <message>
-    echo "publish-public.sh: $2" >&2
-    exit "$1"
-}
+
+# The shared checks and the commit builder; it defines die.
+[ -f "$CORE" ] || { echo "publish-public.sh: cannot find $CORE" >&2; exit 2; }
+# shellcheck source=lib/publish-core.sh
+. "$CORE"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -92,6 +126,18 @@ while [ $# -gt 0 ]; do
             PUSH=yes
             shift
             ;;
+        --tag-only)
+            TAG_ONLY=yes
+            shift
+            ;;
+        --bootstrap)
+            BOOTSTRAP=yes
+            shift
+            ;;
+        --yes)
+            YES=yes
+            shift
+            ;;
         --terms | --allow)
             [ $# -ge 2 ] || usage
             GATE_ARGS+=("$1" "$2")
@@ -105,9 +151,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$VERSION" ] || usage
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 2 "--version must be MAJOR.MINOR.PATCH (got '$VERSION')"
+if [ "$BOOTSTRAP" = yes ]; then
+    # It merges into the current branch and publishes nothing: no release, no push.
+    if [ -n "$VERSION" ] || [ -n "$FROM" ] || [ "$PUSH" = yes ] || [ "$TAG_ONLY" = yes ] || [ ${#GATE_ARGS[@]} -gt 0 ]; then
+        die 2 "--bootstrap takes only --yes"
+    fi
+else
+    [ "$YES" = no ] || die 2 "--yes belongs to --bootstrap"
+    [ -n "$VERSION" ] || usage
+    [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 2 "--version must be MAJOR.MINOR.PATCH (got '$VERSION')"
+fi
 [ -f "$CHECK" ] || die 2 "cannot find $CHECK"
+FROM="${FROM:-HEAD}"
 
 # The repository is the one the caller stands in; nothing in the environment may
 # point git somewhere else.
@@ -115,43 +170,61 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die 2 "not inside a git repository"
 cd "$ROOT"
 
-# version_gt A B: true when MAJOR.MINOR.PATCH A is newer than B.
-version_gt() {
-    local a1 a2 a3 b1 b2 b3
-    IFS=. read -r a1 a2 a3 <<<"$1"
-    IFS=. read -r b1 b2 b3 <<<"$2"
-    [ "$a1" -ne "$b1" ] && { [ "$a1" -gt "$b1" ]; return; }
-    [ "$a2" -ne "$b2" ] && { [ "$a2" -gt "$b2" ]; return; }
-    [ "$a3" -gt "$b3" ]
-}
-
 TAG="v$VERSION"
 RELEASE="$(git rev-parse --verify --quiet "$FROM^{commit}")" || die 2 "--from $FROM is not a commit"
 TREE="$(git rev-parse "$RELEASE^{tree}")"
 PARENT="$(git rev-parse --verify --quiet "refs/remotes/$REMOTE/main^{commit}")" \
     || die 2 "no $REMOTE/main: fetch $REMOTE first"
 
-# --- origin's newest version -----------------------------------------------------
-NEWEST=""
-while IFS= read -r t; do
-    [[ "$t" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || continue
-    v="${BASH_REMATCH[1]}"
-    if [ -z "$NEWEST" ] || version_gt "$v" "$NEWEST"; then NEWEST="$v"; fi
-done < <(git tag --merged "$PARENT" --list 'v*')
-[ -n "$NEWEST" ] || die 2 "no vMAJOR.MINOR.PATCH tag is reachable from $REMOTE/main: nothing marks what is already published"
-version_gt "$VERSION" "$NEWEST" || die 2 "$VERSION is not newer than v$NEWEST, the newest version on $REMOTE"
-
-if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-    die 2 "tag $TAG already exists locally; publishing would move it"
+# --- --bootstrap --------------------------------------------------------------------
+if [ "$BOOTSTRAP" = yes ]; then
+    if git merge-base --is-ancestor "$PARENT" "$RELEASE"; then
+        echo "publish-public.sh: already recorded: $REMOTE/main ($PARENT) is an ancestor of HEAD; no merge made"
+        exit 0
+    fi
+    ORIGIN_TREE="$(git rev-parse "$PARENT^{tree}")"
+    # The local commit origin's was built from: the newest one in HEAD's history
+    # with origin's tree. Read whole, so a closed pipe cannot fail it.
+    BUILT_FROM="$(git log --format='%H %T' "$RELEASE" | awk -v t="$ORIGIN_TREE" '$2 == t && !f { print $1; f = 1 }')"
+    [ -n "$BUILT_FROM" ] \
+        || die 2 "$REMOTE/main's tree $ORIGIN_TREE is the tree of no commit in HEAD's history: it holds content HEAD never had, and recording it as merged would discard it. Run: git fetch $REMOTE && git merge $REMOTE/main"
+    # What --yes needs is checked in the dry run too, so the dry run does not
+    # promise a merge --yes then refuses.
+    git merge-base "$PARENT" "$RELEASE" >/dev/null 2>&1 \
+        || die 2 "$REMOTE/main and HEAD share no history: git merge -s ours would refuse to join them"
+    BRANCH="$(git symbolic-ref --quiet --short HEAD)" || die 2 "HEAD is detached: check out the branch to record the ancestry on"
+    [ -z "$(git status --porcelain --untracked-files=no)" ] || die 2 "the working tree has uncommitted changes: commit or stash them first"
+    echo "publish-public.sh: bootstrap"
+    echo "  $REMOTE/main  $PARENT (tree $ORIGIN_TREE)"
+    echo "  built from   $BUILT_FROM (same tree, in HEAD's history)"
+    echo
+    echo "merge: git merge -s ours $REMOTE/main"
+    if [ "$YES" = no ]; then
+        echo
+        echo "dry run: nothing was merged. Re-run with --yes to record the ancestry."
+        exit 0
+    fi
+    # A merge a hook stops after it was started leaves MERGE_HEAD behind, and the
+    # next merge is then refused; put the branch back as it was.
+    if ! GIT_MERGE_AUTOEDIT=no git merge -s ours "$REMOTE/main"; then
+        if [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; then git merge --abort >/dev/null 2>&1 || true; fi
+        die 2 "the merge failed; $BRANCH is as it was"
+    fi
+    echo
+    echo "merged: $BRANCH is now $(git rev-parse HEAD), with $REMOTE/main as an ancestor and its tree unchanged. Nothing was pushed."
+    exit 0
 fi
 
-# --- the release tree carries the version --------------------------------------
-CARGO_VERSION="$(git show "$RELEASE:Cargo.toml" 2>/dev/null | awk '
-    /^\[workspace\.package\]/ { f = 1; next }
-    /^\[/ { f = 0 }
-    f && /^version *=/ { gsub(/[" ]/, ""); sub(/version=/, ""); print; exit }')" || true
-[ "$CARGO_VERSION" = "$VERSION" ] \
-    || die 2 "the release tree's Cargo.toml [workspace.package] version is '${CARGO_VERSION}', not $VERSION"
+# --- the preconditions ------------------------------------------------------------
+publish_require_merged "$RELEASE"
+# A --tag-only run without --push keeps its tag, on origin/main's tip: left to
+# publish_newest_version it would read as origin's newest version and the re-run
+# would be refused as "not newer".
+if [ "$TAG_ONLY" = yes ] && [ "$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")" = "$PARENT" ]; then
+    die 2 "tag $TAG already exists locally (a --tag-only run without --push keeps it); push it with: git push $REMOTE refs/tags/$TAG:refs/tags/$TAG"
+fi
+publish_newest_version
+publish_check_version
 
 # Scratch files live under this repository's git directory, so nothing appears in
 # the working tree and nothing is read from it.
@@ -159,13 +232,20 @@ SCRATCH="$(git rev-parse --absolute-git-dir)/publish-public.$$"
 OBJECTS="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/objects"
 # The EXIT trap also undoes this run's tag if the push did not complete, whether
 # the push failed or the run was interrupted during it (INT/TERM exit through it).
+# A --tag-only run without --push keeps the tag it made: that is its result.
 TAG_MADE=no
 PUSHED=no
 cleanup() {
     rm -rf "$SCRATCH"
-    if [ "$TAG_MADE" = yes ] && [ "$PUSHED" = no ]; then
-        git tag -d "$TAG" >/dev/null 2>&1 || true
-        echo "publish-public.sh: the push did not complete; deleted the local tag $TAG this run created" >&2
+    if [ "$TAG_MADE" = yes ] && [ "$PUSHED" = no ] && [ "$PUSH" = yes ]; then
+        # A signal that arrives while the push runs is acted on when the push
+        # returns, so the push may have landed: the tag then stays.
+        if git ls-remote "$REMOTE" "refs/tags/$TAG" 2>/dev/null | grep -q .; then
+            echo "publish-public.sh: interrupted after the push landed: $REMOTE has $TAG; kept the local tag" >&2
+        else
+            git tag -d "$TAG" >/dev/null 2>&1 || true
+            echo "publish-public.sh: the push did not complete; deleted the local tag $TAG this run created" >&2
+        fi
     fi
 }
 trap cleanup EXIT
@@ -173,130 +253,39 @@ trap 'exit 130' INT TERM
 rm -rf "$SCRATCH"
 mkdir -p "$SCRATCH"
 
-# --- the message: every section origin has not seen ----------------------------
-git show "$RELEASE:CHANGELOG.md" >"$SCRATCH/CHANGELOG.md" 2>/dev/null \
-    || die 2 "the release tree has no CHANGELOG.md"
-# Prints the sections from `## [VERSION]` up to, not including, `## [NEWEST]`;
-# exits 3 when the first is missing, 4 when the second is, 5 when a section in
-# between is not a version strictly between the two (the file is newest first).
-SECTIONS_RC=0
-MESSAGE="$(awk -v want="$VERSION" -v stop="$NEWEST" '
-    function header(line,   v) {
-        if (line !~ /^## \[/) return ""
-        v = line; sub(/^## \[/, "", v); sub(/\].*/, "", v); return v
-    }
-    function newer(a, b,   x, y, i) {
-        split(a, x, "."); split(b, y, ".")
-        for (i = 1; i <= 3; i++) if (x[i] + 0 != y[i] + 0) return x[i] + 0 > y[i] + 0
-        return 0
-    }
-    {
-        v = header($0)
-        if (!on) { if (v == want) on = 1; else next }
-        else if (v != "") {
-            if (v == stop) { done = 1; exit }
-            if (v !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ || !newer(want, v) || !newer(v, stop)) { bad = v; exit }
-        }
-        print
-    }
-    END {
-        if (!on) exit 3
-        if (bad != "") { print bad > "/dev/stderr"; exit 5 }
-        if (!done) exit 4
-    }' "$SCRATCH/CHANGELOG.md")" || SECTIONS_RC=$?
-case "$SECTIONS_RC" in
-    0) ;;
-    3) die 2 "CHANGELOG.md has no ## [$VERSION] section" ;;
-    4) die 2 "CHANGELOG.md has no ## [$NEWEST] section below ## [$VERSION]: cannot tell where unpublished history ends" ;;
-    5) die 2 "CHANGELOG.md is out of order: a section between [$VERSION] and [$NEWEST] is not a version between them" ;;
-    *) die 2 "could not read the sections of CHANGELOG.md (awk exited $SECTIONS_RC)" ;;
-esac
-# $(...) already dropped the trailing newlines; drop trailing blank lines too.
-MESSAGE="$(printf '%s\n' "$MESSAGE" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')"
-[ -n "$MESSAGE" ] || die 2 "the CHANGELOG sections for $VERSION are empty"
-
-# --- the term gate ------------------------------------------------------------------
-# gate <label> <dir> <expected-files>: run check-public-terms.sh on <dir> and
-# insist it read exactly the files the input holds, all of them tracked.
-gate() {
-    local label="$1" dir="$2" expected="$3" out rc summary
-    rc=0
-    out="$(bash "$CHECK" --root "$dir" ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} 2>&1)" || rc=$?
-    summary="$(printf '%s\n' "$out" | tail -n 1)"
-    if [ "$rc" -eq 1 ]; then
-        echo "publish-public.sh: the $label carries a listed term; nothing was built:" >&2
-        printf '%s\n' "$out" | sed 's/^/    /' >&2
-        exit 1
-    fi
-    if [ "$rc" -ne 0 ]; then
-        echo "publish-public.sh: the term gate could not check the $label (exit $rc):" >&2
-        printf '%s\n' "$out" | sed 's/^/    /' >&2
-        exit 3
-    fi
-    if [[ ! "$summary" =~ ^public-terms:\ tracked=([0-9]+)\ untracked=0\  ]] || [ "${BASH_REMATCH[1]}" -ne "$expected" ]; then
-        echo "publish-public.sh: the term gate did not walk the $label's $expected file(s): $summary" >&2
-        exit 3
-    fi
-    echo "  $label: $summary"
-}
-
-echo "publish-public.sh: $TAG over $REMOTE/main"
-echo "  release  $RELEASE (tree $TREE)"
-echo "  parent   $PARENT ($REMOTE/main, newest published v$NEWEST)"
-echo "  sections $(printf '%s\n' "$MESSAGE" | sed -n 's/^## \[\([^]]*\)\].*/\1/p' | paste -sd ' ' -)"
-
-# The message, as the only file of a repository: the scanner keys its allowlist
-# on path and line, and these are lines of CHANGELOG.md, so it carries that name.
-git init -q "$SCRATCH/message"
-printf '%s\n' "$MESSAGE" >"$SCRATCH/message/CHANGELOG.md"
-git -C "$SCRATCH/message" add CHANGELOG.md
-gate message "$SCRATCH/message" 1
-
-# The release tree, checked out from the commit through an alternate object
-# store: no object is copied, and the index lists exactly the tree's entries.
-# info/attributes outranks every .gitattributes and the global attributes file:
-# it switches off each attribute that rewrites a file on checkout (an encoding
-# turns UTF-8 into UTF-16 the scanner would skip as binary; a filter or `ident`
-# rewrites text), so the scanner reads the bytes the commit publishes.
-# A checkout that fails (two paths differing only in case, on a case-insensitive
-# filesystem) is reported as such: under set -e it would exit 1, which reads as
-# a term hit.
-if ! {
-    git init -q "$SCRATCH/tree" &&
-        printf '%s\n' "$OBJECTS" >"$SCRATCH/tree/.git/objects/info/alternates" &&
-        printf '* -text -eol -filter -ident -working-tree-encoding\n' >"$SCRATCH/tree/.git/info/attributes" &&
-        git -C "$SCRATCH/tree" read-tree "$TREE" &&
-        git -C "$SCRATCH/tree" checkout-index -a
-} 2>"$SCRATCH/export.err"; then
-    sed 's/^/    /' "$SCRATCH/export.err" >&2
-    die 3 "could not check out the release tree to scan it"
+if [ "$TAG_ONLY" = yes ]; then
+    # --- --tag-only ------------------------------------------------------------------
+    ORIGIN_TREE="$(git rev-parse "$PARENT^{tree}")"
+    [ "$TREE" = "$ORIGIN_TREE" ] \
+        || die 2 "the release tree $TREE is not $REMOTE/main's tree $ORIGIN_TREE: --tag-only tags what origin already holds"
+    publish_changelog_message
+    SQUASH="$PARENT"
+    TAG_CMD=(git tag -a "$TAG" -m "logos $VERSION" "$SQUASH")
+    PUSH_CMD=(git push "$REMOTE" "refs/tags/$TAG:refs/tags/$TAG")
+    echo "publish-public.sh: $TAG on $REMOTE/main"
+    echo "  release  $RELEASE (tree $TREE, the tree of $REMOTE/main)"
+    echo "  tagged   $SQUASH ($REMOTE/main, newest published v$NEWEST)"
+else
+    publish_build_commit
+    TAG_CMD=(git tag -a "$TAG" -m "logos $VERSION" "$SQUASH")
+    PUSH_CMD=(git push --atomic "$REMOTE" "$SQUASH:refs/heads/main" "refs/tags/$TAG:refs/tags/$TAG")
+    echo "  squash   $SQUASH"
 fi
-gate "release tree" "$SCRATCH/tree" "$(git ls-tree -r "$TREE" | wc -l | tr -d ' ')"
-
-# --- the squash commit ----------------------------------------------------------------
-AUTHOR_DATE="$(git log -1 --format=%ad --date=raw "$RELEASE")"
-COMMITTER_DATE="$(git log -1 --format=%cd --date=raw "$RELEASE")"
-printf '%s\n' "$MESSAGE" >"$SCRATCH/message.txt"
-SQUASH="$(GIT_AUTHOR_DATE="$AUTHOR_DATE" GIT_COMMITTER_DATE="$COMMITTER_DATE" \
-    git commit-tree -p "$PARENT" -F "$SCRATCH/message.txt" "$TREE")"
-
-TAG_CMD=(git tag -a "$TAG" -m "logos $VERSION" "$SQUASH")
-PUSH_CMD=(git push --atomic "$REMOTE" "$SQUASH:refs/heads/main" "refs/tags/$TAG:refs/tags/$TAG")
-# Each command printed as one line a shell reads back as the same words.
-quoted() {
-    local q
-    q="$(printf '%q ' "$@")"
-    printf '%s\n' "${q% }"
-}
-echo "  squash   $SQUASH"
 echo
 echo "tag:  $(quoted "${TAG_CMD[@]}")"
 echo "push: $(quoted "${PUSH_CMD[@]}")"
 
 if [ "$PUSH" = no ]; then
     echo
-    echo "dry run: the commit above is unreferenced; no tag, branch or remote was touched."
-    echo "Re-run with --push to tag it and push."
+    if [ "$TAG_ONLY" = yes ]; then
+        "${TAG_CMD[@]}"
+        TAG_MADE=yes
+        echo "created the local tag $TAG on $SQUASH; nothing was pushed."
+        echo "Run the push above to publish it."
+    else
+        echo "dry run: the commit above is unreferenced; no tag, branch or remote was touched."
+        echo "Re-run with --push to tag it and push."
+    fi
     exit 0
 fi
 

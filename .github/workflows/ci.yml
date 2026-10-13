@@ -17,6 +17,8 @@
 #   - cargo deny check           license / advisory violation (NFR-CR-01)
 #   - public terms               a listed term in a tracked text
 #                                file, outside the allowlist  (NFR-CR-04)
+#   - script suites              any scripts/tests/test-*.sh that fails: this
+#                                repository's own script tests  (CR-227)
 
 name: CI
 
@@ -59,6 +61,38 @@ jobs:
       # scripts/public-terms.allow.
       - name: public terms
         run: bash scripts/check-public-terms.sh
+
+      # This repository's own script tests (S-719, CR-227): every
+      # scripts/tests/test-*.sh, the roster scripts/gate.sh's script-suites leg
+      # runs. They need only bash, git, perl, python3 and cargo (one suite reads
+      # `cargo metadata`), all on the runner, and build nothing, so the step sits
+      # right after the term scan and a broken gate script stops the run before the
+      # pinned toolchain is installed (the runner's own serves `cargo metadata`). A suite that does not pass on this runner is fixed
+      # in the suite, never skipped here. Every suite runs even after one fails, so
+      # one run names all that are red; a glob matching no suite fails the step
+      # (nothing run is not a pass).
+      - name: script suites (scripts/tests/test-*.sh)
+        timeout-minutes: 20
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          shopt -s nullglob
+          suites=(scripts/tests/test-*.sh)
+          if [ "${#suites[@]}" -eq 0 ]; then
+            echo "::error::no scripts/tests/test-*.sh suite to run"
+            exit 1
+          fi
+          failed=()
+          for suite in "${suites[@]}"; do
+            echo "::group::$suite"
+            bash "$suite" || failed+=("$suite")
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::failing suites: ${failed[*]}"
+            exit 1
+          fi
+          echo "ran ${#suites[@]} suites: ${suites[*]}"
 
       - name: Install Rust (stable) with clippy + rustfmt
         uses: dtolnay/rust-toolchain@stable

@@ -208,8 +208,15 @@ and camelCase humps separate words.
 The leg prints the files it scanned. `scripts/verify-evidence.sh` refuses fast-
 and full-tier evidence without it, and CI runs it first on the checkout.
 
-The shell scripts' own suites are not part of any gate tier. Run them by hand
-after changing anything under `scripts/`:
+The shell scripts' own suites (`scripts/tests/test-*.sh`) run in a
+`script-suites` leg, one evidence unit per suite (a suite that exits non-zero is
+a failed unit). `gate.sh full` always runs it. `gate.sh fast` runs it when
+`git diff --name-only` against the gate base touches `scripts/`, and prints a
+note otherwise. A glob that matches no suite fails the leg. The leg prints each
+suite with its counts; ten suites today, about two minutes in all.
+`scripts/verify-evidence.sh --tier full` refuses evidence without the leg or
+with a failed suite. `--tier fast` validates it when present. CI runs every
+suite right after checkout. To run them by hand:
 
 ```bash
 for t in scripts/tests/test-*.sh; do bash "$t" || echo "FAILED: $t"; done
