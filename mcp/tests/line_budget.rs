@@ -251,8 +251,8 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// extension's. Nothing can move to `logos-core`: the core names no MCP type.
 ///
 /// **S-644 1105→1023** for the wiki becoming the `wiki` extension ([ADR-74]): its
-/// five `#[tool]` methods and three parameter structs leave this crate for
-/// `logos-wiki/src/mcp.rs`, which serves them through the `extension_route` above
+/// five `#[tool]` methods and three parameter structs leave this crate for the
+/// wiki extension's own crate, which serves them through the `extension_route` above
 /// with the same names, descriptions and schemas. Measured 1103→1020 (−83); the
 /// budget is lowered to the measurement plus the usual 3 lines. The derivation
 /// above (30 registrations, "5 wiki") is the pre-S-644 roster: the core's own is
@@ -262,7 +262,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// |---|---|
 /// | the five wiki `#[tool]` methods and their section comment | **−54** |
 /// | the three wiki parameter structs and their section header | **−30** |
-/// | the `logos_wiki` import | **−1** |
+/// | the wiki crate's import | **−1** |
 /// | the module doc: the core roster is 25, and the extensions' tools join it through the host | **+2** |
 /// | | **−83** |
 ///

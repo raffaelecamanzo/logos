@@ -81,15 +81,25 @@ files_unit() {
     printf '"verdict":"pass","truncation":"none"}]'
 }
 
+# The agents-marker gate's one unit (gate.sh's gate_agents_marker): the gated tests
+# scripts/agents-marker.sh names, against those that printed a result line.
+# Args: expected started finished failed
+gated_unit() {
+    printf '[{"unit":"gated","expected":%d,"floor":1,"started":%d,"finished":%d,' "$1" "$2" "$3"
+    printf '"passed":88,"failed":%d,"ignored":0,"exit_code":0,' "$4"
+    printf '"verdict":"pass","truncation":"none"}]'
+}
+
 # Lay down a valid evidence set at a tier (default full), then let each case
 # corrupt one thing.
 seed_all_valid() {
     local tier="${1:-full}"
     rm -rf "$EVID"
     local g
-    for g in clippy test test-agents test-noext deny arch public-terms ui-typecheck ui-test ui-build ui-e2e; do
+    for g in clippy test agents-marker deny arch public-terms ui-typecheck ui-test ui-build ui-e2e; do
         case "$g" in
-            test | test-agents | test-noext) write_gate "$g" "$tier" pass "$TREE" "$(good_unit)" ;;
+            agents-marker) write_gate "$g" "$tier" pass "$TREE" "$(gated_unit 1 1 1 0)" ;;
+            test) write_gate "$g" "$tier" pass "$TREE" "$(good_unit)" ;;
             public-terms) write_gate "$g" "$tier" pass "$TREE" "$(files_unit 1044 0)" ;;
             *) write_gate "$g" "$tier" pass "$TREE" "[]" ;;
         esac
@@ -152,14 +162,18 @@ seed_all_valid
 write_gate deny full skip "$TREE" "[]"
 check "a skipped gate (tool absent) is not a pass" 1 "deny: skipped"
 
-# The no-extension build's leg (S-645) is part of the full tier's contract, and its
-# binaries count in the denominator: three test legs of 10 binaries each.
+# The full tier has one test leg: the build this repository ships composes no
+# extension, so its no-extension suite runs in the default leg and no other
+# feature set's leg is required. Its binaries are the whole denominator.
 seed_all_valid
-rm -f "$EVID/test-noext.json"
-check "the no-extension leg is required at full tier" 1 "test-noext: no evidence file"
+check "the one test leg is the full tier's whole denominator" 0 "10/10 test binaries"
 
+# Evidence a retired leg left behind (an `agents` or no-extension run, even one
+# that failed) is not read: only the gates the tier names are.
 seed_all_valid
-check "the no-extension leg counts in the test denominator" 0 "30/30 test binaries"
+write_gate test-agents full fail "$TREE" "$(good_unit)"
+write_gate test-noext full fail "$TREE" "$(good_unit)"
+check "a retired leg's leftover evidence is ignored" 0 "10/10 test binaries"
 
 # Cargo's target-level fail-fast never LAUNCHES the later binaries, so they print
 # neither `Running` nor a summary: started == finished, both below expected. That
@@ -261,11 +275,40 @@ write_gate public-terms full pass "$TREE" '[{"unit":"files","expected":1044,"flo
 check "a truncated public-terms walk is reported in files" 1 "public-terms/files: 900 of 1044 text files ran"
 
 seed_all_valid
-check "the public-terms walk is reported with its denominator, outside the test count" 0 "public-terms  full   pass        1044/1044 files 0 hits"
+check "the public-terms walk is reported with its denominator, outside the test count" 0 "public-terms   full   pass        1044/1044 files 0 hits"
+
+# --- the agents-marker gate ------------------------------------------------------
+#
+# Required at the full tier only (gate.sh fast never runs it). Its counters are
+# the gated tests, and they are recomputed like any unit's: a run in which the
+# gated test never executed is rejected whatever its verdict field says.
+
+seed_all_valid
+rm -f "$EVID/agents-marker.json"
+check "the agents-marker gate is required at full tier" 1 "agents-marker: no evidence file"
+
+seed_all_valid
+write_gate agents-marker full pass "$TREE" "$(gated_unit 1 0 0 0)"
+check "an agents-marker run in which the gated test never ran rejected" 1 "agents-marker/gated: the agents-gated test did not execute"
+
+seed_all_valid
+write_gate agents-marker full pass "$TREE" "$(gated_unit 1 1 0 0)"
+check "a gated test that started and never reported rejected" 1 "agents-marker/gated: 1 gated tests started, only 0 finished"
+
+seed_all_valid
+write_gate agents-marker full pass "$TREE" "$(gated_unit 2 1 1 0)"
+check "fewer gated tests than the script names rejected" 1 "agents-marker/gated: 1 of 2 gated tests ran"
+
+seed_all_valid
+write_gate agents-marker full pass "$TREE" "$(gated_unit 1 1 1 1)"
+check "a failed gated test under a 'pass' verdict rejected" 1 "agents-marker/gated: 1 test(s) failed"
+
+seed_all_valid
+check "the agents-marker gate is reported with its denominator" 0 "agents-marker  full   pass        1/1 gated"
 
 # Exactly what `gate.sh fast` writes: its four gates and nothing else.
 seed_all_valid fast
-for g in test-agents test-noext deny ui-typecheck ui-test ui-build ui-e2e; do rm -f "$EVID/$g.json"; done
+for g in agents-marker deny ui-typecheck ui-test ui-build ui-e2e; do rm -f "$EVID/$g.json"; done
 TIER_FLAG="--tier fast"
 check "genuinely valid fast-tier evidence accepted" 0 "EVIDENCE VERIFIED for tree $TREE (tier fast, 10/10 test binaries)"
 TIER_FLAG=""

@@ -182,18 +182,18 @@ describe("until the boot read settles", () => {
   });
 });
 
-describe("with no extension active — a build without extensions (S-643, S-644)", () => {
-  it("leaves the shell built-in: an unowned route mounts nothing and redirects nowhere, and no Chat or Wiki is offered", async () => {
+describe("with no extension active — a build without extensions (S-643, S-644, S-651)", () => {
+  it("leaves the shell built-in: an unowned route lands on the Dashboard, and no Chat or Wiki is offered", async () => {
     stubApi({ probeStatus: 404 });
     pathname.current = "/stub";
     render(app());
 
-    await screen.findByRole("navigation", { name: "Views" });
-    // Not held either: the read is still `loading`, and nothing waits on it.
+    // Not held: the read is still `loading`, and nothing waits on it — the route is
+    // served by no view, so it lands where a hidden view does.
+    expect(await screen.findByTestId("dashboard-view")).toBeInTheDocument();
     expect(screen.queryByText("Starting…")).toBeNull();
     expect(screen.queryByTestId("stub-view")).toBeNull();
-    expect(screen.queryByTestId("dashboard-view")).toBeNull();
-    expect(redirect).not.toHaveBeenCalled();
+    await waitFor(() => expect(redirect).toHaveBeenCalledWith("/"));
     expect(within(sidebar()).getAllByRole("link").map((a) => a.textContent)).toEqual([
       "Dashboard",
       "Health",
@@ -205,4 +205,19 @@ describe("with no extension active — a build without extensions (S-643, S-644)
       "Config",
     ]);
   });
+
+  // FR-UI-51 AC2: a direct visit to a route of an extension this build does not
+  // compose lands on the Dashboard — an old bookmark does not open an empty page.
+  for (const route of ["/chat", "/wiki", "/workspace-chat"]) {
+    it(`lands a direct visit to ${route} on the Dashboard, query and fragment kept`, async () => {
+      stubApi({ probeStatus: 404 });
+      setActiveExtensions(extensionsInfo());
+      pathname.current = route;
+      window.history.replaceState(null, "", `${route}?q=1#top`);
+      render(app());
+
+      expect(await screen.findByTestId("dashboard-view")).toBeInTheDocument();
+      await waitFor(() => expect(redirect).toHaveBeenCalledWith("/?q=1#top"));
+    });
+  }
 });

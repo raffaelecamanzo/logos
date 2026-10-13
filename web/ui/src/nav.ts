@@ -50,7 +50,8 @@ export interface NavItem {
    * question in workspace mode, where this view is therefore NOT offered (S-485,
    * FR-UI-35, ADR-71): the sidebar drops it, and its route redirects to the
    * replacement's ({@link workspaceReplacementPath}). Absent — the case for every
-   * view but the member Chat — means offered in both modes.
+   * built-in view — means offered in both modes; an extension's entry declares it in
+   * its manifest (`replaced_in_workspace_by`).
    *
    * Declared on the replaced entry, never derived from a shared label: two views
    * may share a name across scopes and BOTH be offered (Dashboard, Health…).
@@ -65,10 +66,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Dashboard", path: "/", group: "A", scope: "member" },
   { id: "health", label: "Health", path: "/health", group: "A", scope: "member" },
   { id: "graph", label: "Graph", path: "/graph", group: "A", scope: "member" },
-  // Chat and Wiki sit here when the `chat` and `wiki` extensions are active (S-643,
-  // S-644): their entries are the extensions', each placed after Graph by its
-  // registration (`views/chat/extension.tsx`, `views/wiki/extension.tsx`), in the
-  // order the server lists them — the binary composes Chat, then Wiki.
+  // An extension entry its registration anchors to Graph (`ExtensionUi.navAfter`)
+  // sits here, in the order the server lists the extensions.
   // S-612 (FR-UI-41): "Architecture", not "Architecture / Cycles" — the Cycles
   // band and list are hidden through the hidden-widget register, and a label
   // naming them would point at nothing on the page. The route is unchanged.
@@ -127,8 +126,8 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   // label the sidebar renders, not by a second name.
   //
   // Their routes are siblings of `/workspace`, not children of it. A path under
-  // it would prefix-match in {@link navItemMatches} — the rule that keeps the
-  // Wiki tab lit while its reader is open — and light up BOTH the Workspace tab
+  // it would prefix-match in {@link navItemMatches} — the rule that keeps a tab
+  // lit on the client sub-routes it owns — and light up BOTH the Workspace tab
   // and the new one at once.
   {
     id: "workspace-dashboard",
@@ -139,8 +138,6 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   },
   { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
-  // The Workspace Chat sits here when the `chat` extension is active (S-643): its
-  // entry is the extension's, placed after Workspace by its registration.
   // S-429 (CR-137, FR-UI-37): usage summed across every member, over an aggregate
   // that constructs no member engine (NFR-PE-10).
   //
@@ -308,8 +305,9 @@ export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
 
 /**
  * Workspace mode only: the route `pathname` redirects to because the view it
- * resolves to is replaced there (S-485 — `/chat` and its sub-routes land on the
- * Workspace Chat), or `null` when it is offered as-is. The caller carries the query
+ * resolves to is replaced there (S-485 — an entry's route and its sub-routes land
+ * on the app entry it names in {@link NavItem.replacedInWorkspaceBy}), or `null`
+ * when it is offered as-is. The caller carries the query
  * and fragment across; this answers for the path alone.
  *
  * Read off the same declaration {@link navItemsFor} filters on, so the sidebar
@@ -332,7 +330,7 @@ export function workspaceReplacementPath(pathname: string): string | null {
 
 /**
  * Does `pathname` resolve to `item` — exactly, or as one of the client sub-routes
- * it owns (the Wiki reader's `/wiki/page/*`)?
+ * it owns (`/<path>/…`)?
  *
  * What keeps the root Dashboard (`path: "/"`) from prefix-matching `/health`, and
  * makes a match a whole path segment, is spelled once in `routeOwns`.

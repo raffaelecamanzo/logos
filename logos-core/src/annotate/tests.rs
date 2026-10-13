@@ -1662,7 +1662,7 @@ fn is_test_marked_leaves_a_module_to_the_path_rule() {
     assert!(is_test_marked(&module("parser_test", "src/parser_test.go"), &m));
     // An inline `mod tests` inside a production file is a declaration, not the
     // file: the name markers still judge it.
-    assert!(is_test_marked(&module("tests", "agent-core/src/provider.rs"), &m));
+    assert!(is_test_marked(&module("tests", "agent/src/provider.rs"), &m));
 }
 
 /// `is_test` is recomputed each run from the persisted inputs, so it is

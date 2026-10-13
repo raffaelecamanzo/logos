@@ -2868,7 +2868,7 @@ fn adjacency(
 /// empty/whitespace query (a well-defined no-op, not an opaque FTS `syntax
 /// error`). Embedded `"` is doubled per FTS5 string quoting; the value is a bound
 /// parameter besides ([NFR-SE-02]). Mirrors the wiki's `fts_phrase_query` (in the
-/// `logos-wiki` crate, which the core does not depend on) and
+/// wiki extension's crate, which the core does not depend on) and
 /// the [graph_store] `suggest` quoting precedent. Unlike [`seed_query`] (prose →
 /// OR-of-prefix-terms), this keeps the query's adjacency: a symbol name is matched
 /// as one phrase, not scattered tokens.

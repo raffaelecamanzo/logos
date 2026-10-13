@@ -13,8 +13,9 @@ import { enumerateDashboardCards } from "./cardEnumeration.ts";
  * rendered PASS over a zero-rule contract without consulting `checked_rules`;
  * see DashboardView.test.tsx for the behavioral coverage of the fix). The other
  * six were already honest about absence and needed no change:
- *   ProjectOverviewCard, QualityCard, LanguagesCard, GraphCard, ActivityCard,
- *   CodeCoverageCard — conformant.
+ *   QualityCard, LanguagesCard, GraphCard, ActivityCard, CodeCoverageCard —
+ *   conformant (as was the seventh, the Project Overview card, which left this
+ *   file with the extensions, S-651).
  *   RuleFindingsCard — corrected.
  *
  * This count is a dated finding, not a floor: a card added later legitimately
@@ -23,7 +24,6 @@ import { enumerateDashboardCards } from "./cardEnumeration.ts";
  * that addition, so the audit tool is not merely reporting "looks fine".
  */
 const AUDITED_CONFORMANT_OR_CORRECTED = [
-  "ProjectOverviewCard",
   "QualityCard",
   "LanguagesCard",
   "GraphCard",
@@ -33,7 +33,7 @@ const AUDITED_CONFORMANT_OR_CORRECTED = [
 ];
 
 describe("Dashboard card enumeration (S-438 audit, CR-141)", () => {
-  it("enumerates every Card-returning component in DashboardView.tsx — audited 2026-09-21, 7 of 7 conformant or corrected", () => {
+  it("enumerates every Card-returning component in DashboardView.tsx — audited 2026-09-21, the 6 of 7 still in this file conformant or corrected", () => {
     const cards = enumerateDashboardCards(dashboardSource);
     expect(cards.map((c) => c.component)).toEqual(expect.arrayContaining(AUDITED_CONFORMANT_OR_CORRECTED));
     expect(cards.find((c) => c.component === "RuleFindingsCard")?.title).toBe("Rule findings");

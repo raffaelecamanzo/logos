@@ -46,10 +46,7 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // S-188 — the Files & Risk and Coverage read-only display tabs.
   "/files": FilesView,
   "/coverage": CoverageView,
-  // S-189 — the Architecture/Cycles and Rule-findings tabs. The Wiki tab is the
-  // `wiki` extension's view since S-644 (`views/wiki/extension.tsx`); it still owns
-  // its client sub-routes (`/wiki/search`, `/wiki/page/*`) through the
-  // longest-prefix match in `viewForPath`.
+  // S-189 — the Architecture/Cycles and Rule-findings tabs.
   "/architecture": ArchitectureView,
   "/gaps": GapsView,
   // S-235 — the read-only Statistics view over GET /api/v1/statistics (CR-058),
@@ -82,17 +79,16 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // single-root serve states that this is not a workspace; its nav item is
   // workspace-mode-only (nav.ts), and its endpoints answer `404` there.
   "/workspace-config": WorkspaceConfigView,
-  // `/chat` and `/workspace-chat` are the `chat` extension's views (S-643), mounted
-  // from its registration (`views/chat/extension.tsx`) when the server reports it
-  // active, through `mountedViews()` below.
+  // An extension's views are mounted from its registration when the server reports
+  // it active, through `mountedViews()` below.
 };
 
 /**
  * The React view for a client pathname, or `null` when the path owns no view.
  *
  * An exact route wins; otherwise the **longest registered route that owns this
- * sub-path** does (`/wiki/page/x` → `/wiki`), so a tab can host its own client
- * sub-routes (the Wiki reader's index/search/page) inside one mounted view.
+ * sub-path** does (`/tab/page/x` → `/tab`), so a tab can host its own client
+ * sub-routes inside one mounted view.
  *
  * The views of the mounted extensions (S-642, FR-UI-51) are registered beside the
  * built-in ones and resolve under the same rules; a built-in route always wins a

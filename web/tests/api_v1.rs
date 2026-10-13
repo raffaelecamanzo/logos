@@ -17,7 +17,7 @@
 //! - a `node`/`search` call without its required query param is a `400`.
 //!
 //! The wiki's read routes are the `wiki` extension's since S-644; their half of
-//! this suite moved with them (`logos-wiki/tests/api_v1.rs`).
+//! this suite moved with them, to that extension's own suites.
 //!
 //! The whole suite runs under a bare `cargo test -p web` with no `lang-rust` gate:
 //! the populated-graph assertions index Rust fixtures, and the test build always
@@ -139,7 +139,7 @@ const V1_ENDPOINTS: &[&str] = &[
     // so the `200`+CSP, POST-`405` and write-free loops all walk it.
     "/api/v1/code-refs?ref=f&ref=src/lib.rs",
     // The wiki's `/api/v1/wiki*` reads are the `wiki` extension's routes since
-    // S-644, walked by the same three loops in `logos-wiki/tests/api_v1.rs`.
+    // S-644, walked by the same three loops in that extension's own suite.
     "/api/v1/config",
     "/api/v1/statistics",
     "/api/v1/status",
@@ -296,7 +296,7 @@ async fn quadrant_endpoint_is_unrouted() {
 /// opaque `200` — spot-check the keys the SPA reads off `query`/`node`/`status`
 /// so a reshaped read-model can't silently pass the contract loop ([FR-UI-21],
 /// [NFR-RA-05]). The wiki's (`wiki`, `wiki/search`) are spot-checked with the
-/// extension that serves them (`logos-wiki/tests/api_v1.rs`, S-644).
+/// extension that serves them (S-644).
 #[tokio::test]
 async fn single_read_endpoints_serialize_their_read_model_fields() {
     let (_tmp, engine) = scanned_engine();

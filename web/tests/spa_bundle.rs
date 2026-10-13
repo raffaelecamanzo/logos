@@ -34,22 +34,24 @@ use web::spa::Spa;
 /// to catch an accidental multi-megabyte regression, and is re-blessed when the
 /// per-tab migrations add the heavier viz libraries (ECharts/uPlot/Mermaid).
 ///
-/// Re-baselined for assistant-ui (S-200, CR-051, ADR-45, NFR-PC-04): the chat
-/// surface rebuilt on `@assistant-ui/react` (+ radix-ui primitives, react-markdown,
-/// remark-gfm) adds ~0.4 MB to the hashed JS chunk. The full embedded bundle —
+/// Re-baselined for the chat surface's component library (S-200, CR-051, ADR-45,
+/// NFR-PC-04): the chat surface rebuilt on it (with its primitives and its markdown
+/// renderer) adds ~0.4 MB to the hashed JS chunk. The full embedded bundle —
 /// app JS + CSS + the vendored Mermaid runtime (S-196) — measures ~4.4 MB, so the
 /// 8 MB cap still holds with comfortable headroom; it is deliberately re-blessed
 /// here rather than tightened, keeping its role as a runaway guard (the exact
 /// measured size is logged by `embedded_bundle_size_is_recorded_and_within_budget`).
 ///
 /// Re-baselined for `highlight.js` (S-622, CR-204 C4, FR-UI-47): the core plus the
-/// 27 grammars `views/chat/highlight.ts` registers. Measured with `vite build` at
-/// the parent commit and with the change, over every embedded file: 4,766,316 →
-/// 4,883,992 bytes, a delta of +117,676 bytes (the app JS chunk +114.8 kB minified,
-/// +37.4 kB gzip; the CSS +2.8 kB for the syntax tokens and code-block rules). The
-/// bundle is 4.66 MiB of the 8 MiB cap, so the cap is re-blessed unchanged, still a
-/// runaway guard. `embedded_bundle_carries_the_highlight_core_and_only_its_declared_grammars`
-/// pins that the core, not the ~190-grammar full build, is what ships.
+/// 27 grammars the chat view registered. Measured with `vite build` at the parent
+/// commit and with the change, over every embedded file: 4,766,316 → 4,883,992
+/// bytes, a delta of +117,676 bytes (the app JS chunk +114.8 kB minified, +37.4 kB
+/// gzip; the CSS +2.8 kB for the syntax tokens and code-block rules). The bundle
+/// was 4.66 MiB of the 8 MiB cap, so the cap was re-blessed unchanged.
+///
+/// Chat and the wiki left this repository (S-651), and with them every dependency
+/// only they used: the bundle shrinks, and the cap stays where it is, a runaway
+/// guard rather than a measurement.
 const BUNDLE_SIZE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 /// File extensions whose bytes are text we can scan for origins/inline markup.
@@ -250,39 +252,14 @@ fn embedded_bundle_size_is_recorded_and_within_budget() {
     );
 }
 
-/// The chat's syntax highlighting ships as the `highlight.js` CORE with an explicit
-/// grammar list (S-622, FR-UI-47, NFR-PC-04), and needs no wasm (NFR-SE-06: a wasm
-/// module would need `'wasm-unsafe-eval'` and break the byte-identical CSP — the
-/// reason Shiki was rejected).
-///
-/// No embedded file is a `.wasm` module, in any build. Over a real bundle, the app
-/// JS registers the Rust grammar and NONE of four grammars the full build carries
-/// and the declared list omits — so a regression from the core import to
-/// `import hljs from "highlight.js"` (every grammar, roughly ten times the weight)
-/// fails here. The placeholder bundle of a Node-free build carries no JS; that is
-/// said, not silently passed as a check.
+/// No embedded file is a `.wasm` module, in any build (NFR-SE-06): a wasm module
+/// would need `'wasm-unsafe-eval'` and break the byte-identical CSP — the reason
+/// Shiki was rejected for syntax highlighting (S-622).
 #[test]
-fn embedded_bundle_carries_the_highlight_core_and_only_its_declared_grammars() {
+fn embedded_bundle_carries_no_wasm_module() {
     let files = embedded_files();
+    assert!(!files.is_empty(), "the embedded bundle was read");
     for (path, _) in &files {
         assert!(!path.ends_with(".wasm"), "`{path}` is a wasm module — the SPA ships none (NFR-SE-06)");
-    }
-    let js: Vec<String> = files
-        .iter()
-        .filter(|(path, _)| path.starts_with("assets/index-") && path.ends_with(".js"))
-        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
-        .collect();
-    if js.is_empty() {
-        println!("placeholder bundle embedded: no app JS to inspect for grammars");
-        return;
-    }
-    let app = js.concat();
-    assert!(app.contains("name:\"Rust\""), "the Rust grammar is bundled (FR-UI-47)");
-    for omitted in ["Brainfuck", "Haskell", "Fortran", "Apache config"] {
-        assert!(
-            !app.contains(&format!("name:\"{omitted}\"")),
-            "the `{omitted}` grammar is bundled — highlight.js must be imported as the core with \
-             an explicit language list, not the full build (NFR-PC-04)",
-        );
     }
 }

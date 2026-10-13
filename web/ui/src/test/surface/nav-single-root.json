@@ -21,21 +21,6 @@
     "scope": "member"
   },
   {
-    "id": "chat",
-    "label": "Chat",
-    "path": "/chat",
-    "group": "A",
-    "scope": "member",
-    "replacedInWorkspaceBy": "workspace-chat"
-  },
-  {
-    "id": "wiki",
-    "label": "Wiki",
-    "path": "/wiki",
-    "group": "A",
-    "scope": "member"
-  },
-  {
     "id": "files",
     "label": "Files & Risk",
     "path": "/files",

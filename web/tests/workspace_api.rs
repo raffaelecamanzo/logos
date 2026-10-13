@@ -2071,7 +2071,7 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// a wildcard. The `POST` routes live in [`WORKSPACE_WRITE_ENDPOINTS`] instead
 /// (those loops issue `GET`s), and are walked by the S-450 tests. The workspace
 /// chat's routes are the `chat` extension's since S-643, not this router's table:
-/// `logos-chat`'s suites walk them. This asserts the union of the two lists and the
+/// that extension's suites walk them. This asserts the union of the two lists and the
 /// router's own route table
 /// name exactly the same set, read out of `src/lib.rs` at compile time. Set
 /// equality in both directions, so it needs no count to keep up to date.

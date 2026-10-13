@@ -14,10 +14,12 @@
  * Tables carry no per-row action either: CR-207 removed the Members and Binding
  * evidence "What you can do" columns, so the web UI has no action text at all.
  *
- * ONE entry renders no explanation part (CR-208): Project Overview, whose wiki
- * snippet already says what it is. It is typed apart, as a `NoExplanationEntry`
- * keyed to that one widget, so the exception is a type every other entry cannot
- * borrow — they stay `CopyEntry`s and still fail `tsc -b` without `what`/`why`.
+ * ONE widget may render no explanation part (CR-208): the Project Overview card,
+ * whose prose snippet already says what it is — a Dashboard card an extension
+ * contributes, so no catalogue in this build holds its entry. It is typed apart,
+ * as a `NoExplanationEntry` keyed to that one widget, so the exception is a type
+ * every other entry cannot borrow — they stay `CopyEntry`s and still fail `tsc -b`
+ * without `what`/`why`.
  */
 
 import type { GlossaryTerm } from "./glossary.ts";

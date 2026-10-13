@@ -2,16 +2,16 @@
 # swe-build.sh — build contract: see sprint-coordinator references/build-hook-contract.md
 #
 # Builds the version the human tests at the sprint-review gate: bump the workspace
-# version, build the FULL binary (real UI bundle + `--features agents`), commit
+# version, build the FULL binary (real UI bundle, default features), commit
 # `release(X.Y.Z)`, install to ~/.logos-bin/X.Y.Z, PATH-promote it, and smoke the
 # INSTALLED binary. Never tags or pushes — releasing stays with the user.
 #
 # Publishing is a separate, later step: `scripts/publish-public.sh --version X.Y.Z`
 # turns the release(X.Y.Z) tree into one commit over origin/main, gated by
 # scripts/check-public-terms.sh, and with --push tags it vX.Y.Z and pushes both.
-# The tag push starts .github/workflows/release.yml, which checks out the tag and
-# builds with `dist --tag=vX.Y.Z`: the version this script writes to Cargo.toml
-# must match the tag, or the workflow refuses it. See docs/howto/ci-integration.md.
+# The tag is a source release: no workflow here builds or publishes anything from
+# it, and the version this script writes to Cargo.toml is the one the tag names
+# (publish-public.sh refuses a tag that disagrees with it).
 #
 # Usage: swe-build.sh [--dry-run] [--bump patch|minor]
 set -euo pipefail
@@ -65,14 +65,14 @@ PY
 # 3. rust-embed may not recompile just because dist/ changed.
 touch web/src/spa.rs
 # 4. The full build the user runs.
-cargo build -p logos --release --features agents
+cargo build -p logos --release
 
 # 5. Release commit — version, changelog, lockfile only (dist/ stays unstaged).
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -q -m "release($NEXT)"
 
 # 6. Install from the REAL bundle, reusing the workspace target dir.
-cargo install --path cli --root "$BIN_ROOT" --locked --features agents --force
+cargo install --path cli --root "$BIN_ROOT" --locked --force
 
 # 7. ONLY NOW restore the committed placeholder. Doing this before step 6 embeds
 #    placeholder-shell + real assets = hash mismatch = blank page (hit twice).

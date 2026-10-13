@@ -40,7 +40,6 @@ dependency set.
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | bstr | 1.12.1 | MIT OR Apache-2.0 | https://github.com/BurntSushi/bstr |
 | bytes | 1.11.1 | MIT | https://github.com/tokio-rs/bytes |
-| caseless | 0.2.2 | MIT | https://github.com/unicode-rs/rust-caseless |
 | cc | 1.2.63 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
 | chrono | 0.4.45 | MIT OR Apache-2.0 | https://github.com/chronotope/chrono |
@@ -49,7 +48,6 @@ dependency set.
 | clap_derive | 4.6.1 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | clap_lex | 1.1.0 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
-| comrak | 0.52.0 | BSD-2-Clause | https://github.com/kivikakk/comrak |
 | constant_time_eq | 0.4.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://github.com/cesarb/constant_time_eq |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | crossbeam-channel | 0.5.15 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
@@ -63,14 +61,11 @@ dependency set.
 | digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
 | either | 1.16.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
-| entities | 1.0.1 | MIT | https://github.com/p-jackson/entities |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | https://github.com/sfackler/rust-fallible-iterator |
 | fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | https://github.com/sfackler/fallible-streaming-iterator |
-| fastrand | 2.4.1 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | file-id | 0.2.3 | MIT OR Apache-2.0 | https://github.com/notify-rs/notify.git |
 | find-msvc-tools | 0.1.9 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
-| finl_unicode | 1.4.0 | (MIT OR Apache-2.0) AND Unicode-DFS-2016 | https://github.com/dahosek/finl_unicode |
 | fixedbitset | 0.4.2 | MIT/Apache-2.0 | https://github.com/petgraph/fixedbitset |
 | foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
@@ -103,7 +98,6 @@ dependency set.
 | indexmap | 2.14.0 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
 | is_terminal_polyfill | 1.70.2 | MIT OR Apache-2.0 | https://github.com/polyfill-rs/is_terminal_polyfill |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
-| jetscii | 0.5.3 | MIT OR Apache-2.0 | https://github.com/shepmaster/jetscii |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | https://github.com/rust-lang-nursery/lazy-static.rs |
 | libc | 0.2.186 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | libsqlite3-sys | 0.38.0 | MIT | https://github.com/rusqlite/rusqlite |
@@ -122,10 +116,6 @@ dependency set.
 | pastey | 0.2.3 | MIT OR Apache-2.0 | https://github.com/as1100k/pastey |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
 | petgraph | 0.6.5 | MIT OR Apache-2.0 | https://github.com/petgraph/petgraph |
-| phf | 0.13.1 | MIT | https://github.com/rust-phf/rust-phf |
-| phf_codegen | 0.13.1 | MIT | https://github.com/rust-phf/rust-phf |
-| phf_generator | 0.13.1 | MIT | https://github.com/rust-phf/rust-phf |
-| phf_shared | 0.13.1 | MIT | https://github.com/rust-phf/rust-phf |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project-lite |
 | pkg-config | 0.3.33 | MIT OR Apache-2.0 | https://github.com/rust-lang/pkg-config-rs |
 | proc-macro2 | 1.0.106 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
@@ -146,7 +136,6 @@ dependency set.
 | rust-embed | 8.11.0 | MIT | https://pyrossh.dev/repos/rust-embed |
 | rust-embed-impl | 8.11.0 | MIT | https://pyrossh.dev/repos/rust-embed |
 | rust-embed-utils | 8.11.0 | MIT | https://pyrossh.dev/repos/rust-embed |
-| rustc-hash | 2.1.2 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustversion | 1.0.22 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
@@ -164,7 +153,6 @@ dependency set.
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | sharded-slab | 0.1.7 | MIT | https://github.com/hawkw/sharded-slab |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
-| siphasher | 1.0.3 | MIT/Apache-2.0 | https://github.com/jedisct1/rust-siphash |
 | slab | 0.4.12 | MIT | https://github.com/tokio-rs/slab |
 | smallvec | 1.15.1 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
 | socket2 | 0.6.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/socket2 |
@@ -177,11 +165,8 @@ dependency set.
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 2.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thread_local | 1.1.9 | MIT OR Apache-2.0 | https://github.com/Amanieu/thread_local-rs |
-| tinyvec | 1.11.0 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
-| tinyvec_macros | 0.1.1 | MIT OR Apache-2.0 OR Zlib | https://github.com/Soveu/tinyvec_macros |
 | tokio | 1.52.3 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-macros | 2.7.0 | MIT | https://github.com/tokio-rs/tokio |
-| tokio-stream | 0.1.18 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-util | 0.7.18 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.23 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_datetime | 0.6.11 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
@@ -219,10 +204,8 @@ dependency set.
 | tree-sitter-toml-ng | 0.7.0 | MIT | https://github.com/tree-sitter-grammars/tree-sitter-toml |
 | tree-sitter-typescript | 0.23.2 | MIT | https://github.com/tree-sitter/tree-sitter-typescript |
 | tree-sitter-yaml | 0.7.2 | MIT | https://github.com/tree-sitter-grammars/tree-sitter-yaml |
-| typed-arena | 2.0.2 | MIT | https://github.com/SimonSapin/rust-typed-arena |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
-| unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-normalization |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | https://github.com/alacritty/vte |
 | vcpkg | 0.2.15 | MIT/Apache-2.0 | https://github.com/mcgoo/vcpkg-rs |
 | version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
@@ -236,213 +219,15 @@ Production npm dependencies compiled into the embedded dashboard bundle (CR-049,
 
 | Package | Version | License | Source |
 |---------|---------|---------|--------|
-| @assistant-ui/core | 0.2.19 | MIT | https://www.npmjs.com/package/@assistant-ui/core |
-| @assistant-ui/react | 0.14.24 | MIT | https://www.npmjs.com/package/@assistant-ui/react |
-| @assistant-ui/store | 0.2.19 | MIT | https://www.npmjs.com/package/@assistant-ui/store |
-| @assistant-ui/tap | 0.9.3 | MIT | https://www.npmjs.com/package/@assistant-ui/tap |
-| @babel/runtime | 7.29.7 | MIT | https://www.npmjs.com/package/@babel/runtime |
-| @floating-ui/core | 1.7.5 | MIT | https://www.npmjs.com/package/@floating-ui/core |
-| @floating-ui/dom | 1.7.6 | MIT | https://www.npmjs.com/package/@floating-ui/dom |
-| @floating-ui/react-dom | 2.1.8 | MIT | https://www.npmjs.com/package/@floating-ui/react-dom |
-| @floating-ui/utils | 0.2.11 | MIT | https://www.npmjs.com/package/@floating-ui/utils |
-| @radix-ui/number | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/number |
-| @radix-ui/primitive | 1.1.4 | MIT | https://www.npmjs.com/package/@radix-ui/primitive |
-| @radix-ui/react-accessible-icon | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-accessible-icon |
-| @radix-ui/react-accordion | 1.2.14 | MIT | https://www.npmjs.com/package/@radix-ui/react-accordion |
-| @radix-ui/react-alert-dialog | 1.1.17 | MIT | https://www.npmjs.com/package/@radix-ui/react-alert-dialog |
-| @radix-ui/react-arrow | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-arrow |
-| @radix-ui/react-aspect-ratio | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-aspect-ratio |
-| @radix-ui/react-avatar | 1.2.0 | MIT | https://www.npmjs.com/package/@radix-ui/react-avatar |
-| @radix-ui/react-checkbox | 1.3.5 | MIT | https://www.npmjs.com/package/@radix-ui/react-checkbox |
-| @radix-ui/react-collapsible | 1.1.14 | MIT | https://www.npmjs.com/package/@radix-ui/react-collapsible |
-| @radix-ui/react-collection | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-collection |
-| @radix-ui/react-compose-refs | 1.1.3 | MIT | https://www.npmjs.com/package/@radix-ui/react-compose-refs |
-| @radix-ui/react-context | 1.1.4 | MIT | https://www.npmjs.com/package/@radix-ui/react-context |
-| @radix-ui/react-context-menu | 2.3.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-context-menu |
-| @radix-ui/react-dialog | 1.1.17 | MIT | https://www.npmjs.com/package/@radix-ui/react-dialog |
-| @radix-ui/react-direction | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-direction |
-| @radix-ui/react-dismissable-layer | 1.1.13 | MIT | https://www.npmjs.com/package/@radix-ui/react-dismissable-layer |
-| @radix-ui/react-dropdown-menu | 2.1.18 | MIT | https://www.npmjs.com/package/@radix-ui/react-dropdown-menu |
-| @radix-ui/react-focus-guards | 1.1.4 | MIT | https://www.npmjs.com/package/@radix-ui/react-focus-guards |
-| @radix-ui/react-focus-scope | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-focus-scope |
-| @radix-ui/react-form | 0.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-form |
-| @radix-ui/react-hover-card | 1.1.17 | MIT | https://www.npmjs.com/package/@radix-ui/react-hover-card |
-| @radix-ui/react-id | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-id |
-| @radix-ui/react-label | 2.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-label |
-| @radix-ui/react-menu | 2.1.18 | MIT | https://www.npmjs.com/package/@radix-ui/react-menu |
-| @radix-ui/react-menubar | 1.1.18 | MIT | https://www.npmjs.com/package/@radix-ui/react-menubar |
-| @radix-ui/react-navigation-menu | 1.2.16 | MIT | https://www.npmjs.com/package/@radix-ui/react-navigation-menu |
-| @radix-ui/react-one-time-password-field | 0.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-one-time-password-field |
-| @radix-ui/react-password-toggle-field | 0.1.5 | MIT | https://www.npmjs.com/package/@radix-ui/react-password-toggle-field |
-| @radix-ui/react-popover | 1.1.17 | MIT | https://www.npmjs.com/package/@radix-ui/react-popover |
-| @radix-ui/react-popper | 1.3.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-popper |
-| @radix-ui/react-portal | 1.1.12 | MIT | https://www.npmjs.com/package/@radix-ui/react-portal |
-| @radix-ui/react-presence | 1.1.6 | MIT | https://www.npmjs.com/package/@radix-ui/react-presence |
-| @radix-ui/react-primitive | 2.1.6 | MIT | https://www.npmjs.com/package/@radix-ui/react-primitive |
-| @radix-ui/react-progress | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-progress |
-| @radix-ui/react-radio-group | 1.4.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-radio-group |
-| @radix-ui/react-roving-focus | 1.1.13 | MIT | https://www.npmjs.com/package/@radix-ui/react-roving-focus |
-| @radix-ui/react-scroll-area | 1.2.12 | MIT | https://www.npmjs.com/package/@radix-ui/react-scroll-area |
-| @radix-ui/react-select | 2.3.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-select |
-| @radix-ui/react-separator | 1.1.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-separator |
-| @radix-ui/react-slider | 1.4.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-slider |
-| @radix-ui/react-slot | 1.3.0 | MIT | https://www.npmjs.com/package/@radix-ui/react-slot |
-| @radix-ui/react-switch | 1.3.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-switch |
-| @radix-ui/react-tabs | 1.1.15 | MIT | https://www.npmjs.com/package/@radix-ui/react-tabs |
-| @radix-ui/react-toast | 1.2.17 | MIT | https://www.npmjs.com/package/@radix-ui/react-toast |
-| @radix-ui/react-toggle | 1.1.12 | MIT | https://www.npmjs.com/package/@radix-ui/react-toggle |
-| @radix-ui/react-toggle-group | 1.1.13 | MIT | https://www.npmjs.com/package/@radix-ui/react-toggle-group |
-| @radix-ui/react-toolbar | 1.1.13 | MIT | https://www.npmjs.com/package/@radix-ui/react-toolbar |
-| @radix-ui/react-tooltip | 1.2.10 | MIT | https://www.npmjs.com/package/@radix-ui/react-tooltip |
-| @radix-ui/react-use-callback-ref | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-callback-ref |
-| @radix-ui/react-use-controllable-state | 1.2.3 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-controllable-state |
-| @radix-ui/react-use-effect-event | 0.0.3 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-effect-event |
-| @radix-ui/react-use-escape-keydown | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-escape-keydown |
-| @radix-ui/react-use-is-hydrated | 0.1.1 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-is-hydrated |
-| @radix-ui/react-use-layout-effect | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-layout-effect |
-| @radix-ui/react-use-previous | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-previous |
-| @radix-ui/react-use-rect | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-rect |
-| @radix-ui/react-use-size | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/react-use-size |
-| @radix-ui/react-visually-hidden | 1.2.6 | MIT | https://www.npmjs.com/package/@radix-ui/react-visually-hidden |
-| @radix-ui/rect | 1.1.2 | MIT | https://www.npmjs.com/package/@radix-ui/rect |
-| @standard-schema/spec | 1.1.0 | MIT | https://www.npmjs.com/package/@standard-schema/spec |
-| @types/debug | 4.1.13 | MIT | https://www.npmjs.com/package/@types/debug |
-| @types/estree | 1.0.9 | MIT | https://www.npmjs.com/package/@types/estree |
-| @types/estree-jsx | 1.0.5 | MIT | https://www.npmjs.com/package/@types/estree-jsx |
-| @types/hast | 3.0.4 | MIT | https://www.npmjs.com/package/@types/hast |
-| @types/mdast | 4.0.4 | MIT | https://www.npmjs.com/package/@types/mdast |
-| @types/ms | 2.1.0 | MIT | https://www.npmjs.com/package/@types/ms |
-| @types/prop-types | 15.7.15 | MIT | https://www.npmjs.com/package/@types/prop-types |
-| @types/react | 18.3.31 | MIT | https://www.npmjs.com/package/@types/react |
-| @types/react-dom | 18.3.7 | MIT | https://www.npmjs.com/package/@types/react-dom |
-| @types/unist | 2.0.11 | MIT | https://www.npmjs.com/package/@types/unist |
-| @types/unist | 3.0.3 | MIT | https://www.npmjs.com/package/@types/unist |
-| @ungap/structured-clone | 1.3.2 | ISC | https://www.npmjs.com/package/@ungap/structured-clone |
-| aria-hidden | 1.2.6 | MIT | https://www.npmjs.com/package/aria-hidden |
-| assistant-cloud | 0.1.34 | MIT | https://www.npmjs.com/package/assistant-cloud |
-| assistant-stream | 0.3.24 | MIT | https://www.npmjs.com/package/assistant-stream |
-| bail | 2.0.2 | MIT | https://www.npmjs.com/package/bail |
-| ccount | 2.0.1 | MIT | https://www.npmjs.com/package/ccount |
-| character-entities | 2.0.2 | MIT | https://www.npmjs.com/package/character-entities |
-| character-entities-html4 | 2.1.0 | MIT | https://www.npmjs.com/package/character-entities-html4 |
-| character-entities-legacy | 3.0.0 | MIT | https://www.npmjs.com/package/character-entities-legacy |
-| character-reference-invalid | 2.0.1 | MIT | https://www.npmjs.com/package/character-reference-invalid |
-| comma-separated-tokens | 2.0.3 | MIT | https://www.npmjs.com/package/comma-separated-tokens |
-| csstype | 3.2.3 | MIT | https://www.npmjs.com/package/csstype |
-| debug | 4.4.3 | MIT | https://www.npmjs.com/package/debug |
-| decode-named-character-reference | 1.3.0 | MIT | https://www.npmjs.com/package/decode-named-character-reference |
-| dequal | 2.0.3 | MIT | https://www.npmjs.com/package/dequal |
-| detect-node-es | 1.1.0 | MIT | https://www.npmjs.com/package/detect-node-es |
-| devlop | 1.1.0 | MIT | https://www.npmjs.com/package/devlop |
 | echarts | 5.6.0 | Apache-2.0 | https://www.npmjs.com/package/echarts |
-| escape-string-regexp | 5.0.0 | MIT | https://www.npmjs.com/package/escape-string-regexp |
-| estree-util-is-identifier-name | 3.0.0 | MIT | https://www.npmjs.com/package/estree-util-is-identifier-name |
-| extend | 3.0.2 | MIT | https://www.npmjs.com/package/extend |
-| get-nonce | 1.0.1 | MIT | https://www.npmjs.com/package/get-nonce |
-| hast-util-to-jsx-runtime | 2.3.6 | MIT | https://www.npmjs.com/package/hast-util-to-jsx-runtime |
-| hast-util-whitespace | 3.0.0 | MIT | https://www.npmjs.com/package/hast-util-whitespace |
-| highlight.js | 11.12.0 | BSD-3-Clause | https://www.npmjs.com/package/highlight.js |
-| html-url-attributes | 3.0.1 | MIT | https://www.npmjs.com/package/html-url-attributes |
-| inline-style-parser | 0.2.7 | MIT | https://www.npmjs.com/package/inline-style-parser |
-| is-alphabetical | 2.0.1 | MIT | https://www.npmjs.com/package/is-alphabetical |
-| is-alphanumerical | 2.0.1 | MIT | https://www.npmjs.com/package/is-alphanumerical |
-| is-decimal | 2.0.1 | MIT | https://www.npmjs.com/package/is-decimal |
-| is-hexadecimal | 2.0.1 | MIT | https://www.npmjs.com/package/is-hexadecimal |
-| is-plain-obj | 4.1.0 | MIT | https://www.npmjs.com/package/is-plain-obj |
 | js-tokens | 4.0.0 | MIT | https://www.npmjs.com/package/js-tokens |
-| longest-streak | 3.1.0 | MIT | https://www.npmjs.com/package/longest-streak |
 | loose-envify | 1.4.0 | MIT | https://www.npmjs.com/package/loose-envify |
-| markdown-table | 3.0.4 | MIT | https://www.npmjs.com/package/markdown-table |
-| mdast-util-find-and-replace | 3.0.2 | MIT | https://www.npmjs.com/package/mdast-util-find-and-replace |
-| mdast-util-from-markdown | 2.0.3 | MIT | https://www.npmjs.com/package/mdast-util-from-markdown |
-| mdast-util-gfm | 3.1.0 | MIT | https://www.npmjs.com/package/mdast-util-gfm |
-| mdast-util-gfm-autolink-literal | 2.0.1 | MIT | https://www.npmjs.com/package/mdast-util-gfm-autolink-literal |
-| mdast-util-gfm-footnote | 2.1.0 | MIT | https://www.npmjs.com/package/mdast-util-gfm-footnote |
-| mdast-util-gfm-strikethrough | 2.0.0 | MIT | https://www.npmjs.com/package/mdast-util-gfm-strikethrough |
-| mdast-util-gfm-table | 2.0.0 | MIT | https://www.npmjs.com/package/mdast-util-gfm-table |
-| mdast-util-gfm-task-list-item | 2.0.0 | MIT | https://www.npmjs.com/package/mdast-util-gfm-task-list-item |
-| mdast-util-mdx-expression | 2.0.1 | MIT | https://www.npmjs.com/package/mdast-util-mdx-expression |
-| mdast-util-mdx-jsx | 3.2.0 | MIT | https://www.npmjs.com/package/mdast-util-mdx-jsx |
-| mdast-util-mdxjs-esm | 2.0.1 | MIT | https://www.npmjs.com/package/mdast-util-mdxjs-esm |
-| mdast-util-phrasing | 4.1.0 | MIT | https://www.npmjs.com/package/mdast-util-phrasing |
-| mdast-util-to-hast | 13.2.1 | MIT | https://www.npmjs.com/package/mdast-util-to-hast |
-| mdast-util-to-markdown | 2.1.2 | MIT | https://www.npmjs.com/package/mdast-util-to-markdown |
-| mdast-util-to-string | 4.0.0 | MIT | https://www.npmjs.com/package/mdast-util-to-string |
-| micromark | 4.0.2 | MIT | https://www.npmjs.com/package/micromark |
-| micromark-core-commonmark | 2.0.3 | MIT | https://www.npmjs.com/package/micromark-core-commonmark |
-| micromark-extension-gfm | 3.0.0 | MIT | https://www.npmjs.com/package/micromark-extension-gfm |
-| micromark-extension-gfm-autolink-literal | 2.1.0 | MIT | https://www.npmjs.com/package/micromark-extension-gfm-autolink-literal |
-| micromark-extension-gfm-footnote | 2.1.0 | MIT | https://www.npmjs.com/package/micromark-extension-gfm-footnote |
-| micromark-extension-gfm-strikethrough | 2.1.0 | MIT | https://www.npmjs.com/package/micromark-extension-gfm-strikethrough |
-| micromark-extension-gfm-table | 2.1.1 | MIT | https://www.npmjs.com/package/micromark-extension-gfm-table |
-| micromark-extension-gfm-tagfilter | 2.0.0 | MIT | https://www.npmjs.com/package/micromark-extension-gfm-tagfilter |
-| micromark-extension-gfm-task-list-item | 2.1.0 | MIT | https://www.npmjs.com/package/micromark-extension-gfm-task-list-item |
-| micromark-factory-destination | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-factory-destination |
-| micromark-factory-label | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-factory-label |
-| micromark-factory-space | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-factory-space |
-| micromark-factory-title | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-factory-title |
-| micromark-factory-whitespace | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-factory-whitespace |
-| micromark-util-character | 2.1.1 | MIT | https://www.npmjs.com/package/micromark-util-character |
-| micromark-util-chunked | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-chunked |
-| micromark-util-classify-character | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-classify-character |
-| micromark-util-combine-extensions | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-combine-extensions |
-| micromark-util-decode-numeric-character-reference | 2.0.2 | MIT | https://www.npmjs.com/package/micromark-util-decode-numeric-character-reference |
-| micromark-util-decode-string | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-decode-string |
-| micromark-util-encode | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-encode |
-| micromark-util-html-tag-name | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-html-tag-name |
-| micromark-util-normalize-identifier | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-normalize-identifier |
-| micromark-util-resolve-all | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-resolve-all |
-| micromark-util-sanitize-uri | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-sanitize-uri |
-| micromark-util-subtokenize | 2.1.0 | MIT | https://www.npmjs.com/package/micromark-util-subtokenize |
-| micromark-util-symbol | 2.0.1 | MIT | https://www.npmjs.com/package/micromark-util-symbol |
-| micromark-util-types | 2.0.2 | MIT | https://www.npmjs.com/package/micromark-util-types |
-| ms | 2.1.3 | MIT | https://www.npmjs.com/package/ms |
-| nanoid | 5.1.16 | MIT | https://www.npmjs.com/package/nanoid |
-| nanoid | 5.1.16 | MIT | https://www.npmjs.com/package/nanoid |
-| nanoid | 5.1.16 | MIT | https://www.npmjs.com/package/nanoid |
-| parse-entities | 4.0.2 | MIT | https://www.npmjs.com/package/parse-entities |
-| property-information | 7.2.0 | MIT | https://www.npmjs.com/package/property-information |
-| radix-ui | 1.6.0 | MIT | https://www.npmjs.com/package/radix-ui |
 | react | 18.3.1 | MIT | https://www.npmjs.com/package/react |
 | react-dom | 18.3.1 | MIT | https://www.npmjs.com/package/react-dom |
-| react-markdown | 10.1.0 | MIT | https://www.npmjs.com/package/react-markdown |
-| react-remove-scroll | 2.7.2 | MIT | https://www.npmjs.com/package/react-remove-scroll |
-| react-remove-scroll-bar | 2.3.8 | MIT | https://www.npmjs.com/package/react-remove-scroll-bar |
-| react-style-singleton | 2.2.3 | MIT | https://www.npmjs.com/package/react-style-singleton |
-| react-textarea-autosize | 8.5.9 | MIT | https://www.npmjs.com/package/react-textarea-autosize |
-| remark-gfm | 4.0.1 | MIT | https://www.npmjs.com/package/remark-gfm |
-| remark-parse | 11.0.0 | MIT | https://www.npmjs.com/package/remark-parse |
-| remark-rehype | 11.1.2 | MIT | https://www.npmjs.com/package/remark-rehype |
-| remark-stringify | 11.0.0 | MIT | https://www.npmjs.com/package/remark-stringify |
-| safe-content-frame | 0.0.21 | MIT | https://www.npmjs.com/package/safe-content-frame |
 | scheduler | 0.23.2 | MIT | https://www.npmjs.com/package/scheduler |
-| secure-json-parse | 4.1.0 | BSD-3-Clause | https://www.npmjs.com/package/secure-json-parse |
-| space-separated-tokens | 2.0.2 | MIT | https://www.npmjs.com/package/space-separated-tokens |
-| stringify-entities | 4.0.4 | MIT | https://www.npmjs.com/package/stringify-entities |
-| style-to-js | 1.1.21 | MIT | https://www.npmjs.com/package/style-to-js |
-| style-to-object | 1.0.14 | MIT | https://www.npmjs.com/package/style-to-object |
-| trim-lines | 3.0.1 | MIT | https://www.npmjs.com/package/trim-lines |
-| trough | 2.2.0 | MIT | https://www.npmjs.com/package/trough |
 | tslib | 2.3.0 | 0BSD | https://www.npmjs.com/package/tslib |
-| unified | 11.0.5 | MIT | https://www.npmjs.com/package/unified |
-| unist-util-is | 6.0.1 | MIT | https://www.npmjs.com/package/unist-util-is |
-| unist-util-position | 5.0.0 | MIT | https://www.npmjs.com/package/unist-util-position |
-| unist-util-stringify-position | 4.0.0 | MIT | https://www.npmjs.com/package/unist-util-stringify-position |
-| unist-util-visit | 5.1.0 | MIT | https://www.npmjs.com/package/unist-util-visit |
-| unist-util-visit-parents | 6.0.2 | MIT | https://www.npmjs.com/package/unist-util-visit-parents |
 | uplot | 1.6.32 | MIT | https://www.npmjs.com/package/uplot |
-| use-callback-ref | 1.3.3 | MIT | https://www.npmjs.com/package/use-callback-ref |
-| use-composed-ref | 1.4.0 | MIT | https://www.npmjs.com/package/use-composed-ref |
-| use-effect-event | 2.0.3 | MIT | https://www.npmjs.com/package/use-effect-event |
-| use-isomorphic-layout-effect | 1.2.1 | MIT | https://www.npmjs.com/package/use-isomorphic-layout-effect |
-| use-latest | 1.3.0 | MIT | https://www.npmjs.com/package/use-latest |
-| use-sidecar | 1.1.3 | MIT | https://www.npmjs.com/package/use-sidecar |
-| vfile | 6.0.3 | MIT | https://www.npmjs.com/package/vfile |
-| vfile-message | 4.0.3 | MIT | https://www.npmjs.com/package/vfile-message |
-| zod | 4.4.3 | MIT | https://www.npmjs.com/package/zod |
 | zrender | 5.6.1 | BSD-3-Clause | https://www.npmjs.com/package/zrender |
-| zustand | 5.0.14 | MIT | https://www.npmjs.com/package/zustand |
-| zwitch | 2.0.4 | MIT | https://www.npmjs.com/package/zwitch |
 
 ## Non-crate components
 

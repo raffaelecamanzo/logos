@@ -3,9 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
-import { WikiView } from "./wiki/WikiView.tsx";
-import { clearExtensions } from "../extensions/registry.ts";
-import { mountWiki } from "../test/wiki.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../extensions/registry.ts";
+import { extensionsInfo, STUB_UI, StubView, stubInfo } from "../test/extensions.tsx";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
 import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.tsx";
@@ -58,10 +57,12 @@ describe("viewForPath", () => {
     expect(viewForPath("/overview")).toBeNull();
   });
 
-  it("matches a sub-route to its owning view (wiki sub-routes, the wiki extension's — S-644)", () => {
-    mountWiki();
-    expect(viewForPath("/wiki/page/foo")).toBe(WikiView);
-    expect(viewForPath("/wiki/search")).toBe(WikiView);
+  it("matches a sub-route to its owning view — a mounted extension's included (S-642)", () => {
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    expect(viewForPath("/stub/page/foo")).toBe(StubView);
+    expect(viewForPath("/stub/search")).toBe(StubView);
+    expect(viewForPath("/workspace/anything")).toBe(VIEW_REGISTRY["/workspace"]);
   });
 
   it("does NOT treat / as a prefix for all paths", () => {

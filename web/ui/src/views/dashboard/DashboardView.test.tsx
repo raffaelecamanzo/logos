@@ -8,15 +8,14 @@ import {
   codeCoverage,
   graph,
   languages,
-  projectOverview,
   qualityIndex,
 } from "../../copy/dashboard.copy.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import { ruleFindings } from "../../copy/ruleFindings.copy.ts";
-import type { CopyEntry, NoExplanationEntry } from "../../copy/types.ts";
-import { clearExtensions } from "../../extensions/registry.ts";
+import type { CopyEntry } from "../../copy/types.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions, type DashboardCardProps } from "../../extensions/registry.ts";
+import { extensionsInfo, STUB_ID, stubInfo } from "../../test/extensions.tsx";
 import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
-import { mountWiki } from "../../test/wiki.ts";
 import { DashboardView } from "./DashboardView.tsx";
 
 // ── A fully-populated, indexed overview read-model ────────────────────────────
@@ -47,15 +46,6 @@ const OVERVIEW: OverviewModel = {
   coverage: { head_sha: "abc1234", config_hash: "cfg", formats: ["lcov"], report_count: 1, total_files: 42, fresh_files: 42, stale_files: 0, freshness_bp: 10_000, overall_coverage_bp: 7200, files: [], notice: null, current_head: "abc1234", head_stale: false, staleness_prompt: null },
   rules: { passed: true, checked_rules: 3, rules_present: true, violations: [], freshness: "fresh", warnings: [] },
   stats: { window_days: 7, calls_total: 5, calls_by_tool: [], latency_p50_ms: 3, latency_p95_ms: 9, latency_p99_ms: 12, reads_saved_estimate: 40, tokens_saved_estimate: 100, artifact_bindings: {}, activity_by_day: [], calls_by_origin: [], calls_by_tool_origin: [], calls_by_class: [], attribution_coverage: { raw_events_only: true, requested_window_days: 7, covered_window_days: 7, truncated_by_retention: false, legacy_null_origin_folds_into_main: true, notes: [] }, warnings: [] },
-  overview_page: {
-    slug: "overview/project-overview",
-    title: "Project Overview",
-    body: "# Project Overview\n\nLogos is a structural code-intelligence engine.",
-    generator: "agent",
-    built_at_revision: 7,
-    stale: false,
-    has_missing: false,
-  },
 };
 
 /** Deep-clone the canned model so a test can null out a field without bleeding. */
@@ -77,12 +67,8 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-// The default build: the `wiki` extension active, as its server reports it (S-644) —
-// the Project Overview card is its. A spec about a build without it clears the
-// registry first.
 beforeEach(() => {
   vi.clearAllMocks();
-  mountWiki();
 });
 afterEach(clearExtensions);
 
@@ -119,8 +105,6 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     // Both footnotes render; the resolution caveat moved into the `**` footnote.
     expect(screen.getByText(/reflect the last full index/i)).toBeInTheDocument();
     expect(screen.getByText(/partial resolution figure is expected/i)).toBeInTheDocument();
-    // Project Overview snippet (markdown reduced to prose).
-    expect(screen.getByText(/Logos is a structural code-intelligence engine/i)).toBeInTheDocument();
     // Rule findings widget: the passing (green) state names the checked-rule count.
     expect(screen.getByText(/No findings/i)).toBeInTheDocument();
     // Both the quality and rule-findings cards carry a PASS badge.
@@ -160,21 +144,10 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
   });
 
-  it("names the command that writes the Project Overview, not the one that lists it (FR-EH-04)", async () => {
-    const m = clone();
-    m.overview_page = null;
-    stub(m);
-    render(<DashboardView />);
-    const absence = await screen.findByText(/No project overview generated yet/i);
-    expect(absence.textContent).toMatch(/logos wiki write overview\/project-overview\.$/);
-    expect(readerText(absence.closest("[data-widget]")!)).not.toMatch(/logos wiki status/);
-  });
-
   it("renders honest per-widget empty states, never fabricated figures", async () => {
     const m = clone();
     m.gate.signal = null; // no scan run → no quality signal
     m.coverage.overall_coverage_bp = null; // no coverage ingested
-    m.overview_page = null; // not yet generated
     m.stats.calls_total = 0; // no telemetry
     m.composition.languages = []; // nothing indexed
     stub(m);
@@ -182,7 +155,6 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
 
     expect(await screen.findByText(/No quality signal recorded yet/i)).toBeInTheDocument();
     expect(screen.getAllByText(/No coverage ingested/i).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText(/No project overview generated yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No telemetry yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No languages indexed/i)).toBeInTheDocument();
     // No fabricated percentage when there is no coverage / no signal.
@@ -320,10 +292,8 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
 
 // ── S-617 (CR-203, FR-UI-39/40): every widget explains itself, in one stack ──
 
-/** Each widget's catalogue entry, by title. Project Overview's is the one entry
- *  with no explanation (CR-208): `expectWidgetCopy` asserts it renders none. */
-const ENTRIES: Record<string, CopyEntry | NoExplanationEntry> = {
-  "Project Overview": projectOverview,
+/** Each widget's catalogue entry, by title. */
+const ENTRIES: Record<string, CopyEntry> = {
   "Quality index": qualityIndex,
   Languages: languages,
   Graph: graph,
@@ -342,7 +312,6 @@ const STATES: {
     name: "healthy (everything recorded, rules pass)",
     model: clone,
     expected: [
-      "Project Overview",
       "Quality index",
       "Languages",
       "Graph",
@@ -367,7 +336,6 @@ const STATES: {
       return m;
     },
     expected: [
-      "Project Overview",
       "Quality index",
       "Languages",
       "Graph",
@@ -393,7 +361,6 @@ const STATES: {
       return m;
     },
     expected: [
-      "Project Overview",
       "Quality index",
       "Languages",
       "Graph",
@@ -403,12 +370,11 @@ const STATES: {
     ],
   },
   {
-    name: "nothing recorded yet (indexed, but no scan, coverage, telemetry, overview or rules)",
+    name: "nothing recorded yet (indexed, but no scan, coverage, telemetry or rules)",
     model: () => {
       const m = clone();
       m.gate.signal = null;
       m.coverage.overall_coverage_bp = null;
-      m.overview_page = null;
       m.stats.calls_total = 0;
       m.composition.languages = [];
       m.status.total_line_count = null;
@@ -418,7 +384,6 @@ const STATES: {
       return m;
     },
     expected: [
-      "Project Overview",
       "Quality index",
       "Languages",
       "Graph",
@@ -439,7 +404,7 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     for (const widget of widgets) expectWidgetCopy(widget, ENTRIES[widgetTitle(widget)]);
   });
 
-  it.each(STATES)("$name: Project Overview renders no explanation part, and every other widget does (CR-208)", async ({ model }) => {
+  it.each(STATES)("$name: every widget renders its explanation part — none is a no-explanation entry (CR-208)", async ({ model }) => {
     stub(model());
     const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
@@ -447,14 +412,14 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
       widgetTitle(w),
       w.querySelector('[data-widget-part="explanation"]') !== null,
     ]);
-    expect(explained).toEqual(STATES[0].expected.map((title) => [title, title !== "Project Overview"]));
+    expect(explained).toEqual(STATES[0].expected.map((title) => [title, true]));
   });
 
   it("states each absence in its widget's figure row, never as a centred empty state", async () => {
     stub(STATES[3].model());
     const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
-    expect(container.querySelectorAll("[data-widget-absence]")).toHaveLength(6);
+    expect(container.querySelectorAll("[data-widget-absence]")).toHaveLength(5);
     // The one view-level empty state is for an un-indexed root (no widget at all).
     expect(container.querySelector('[class*="empty"]')).toBeNull();
   });
@@ -466,7 +431,6 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     const absenceOf = (title: string) =>
       readerText(widgetsIn(container).find((w) => widgetTitle(w) === title)!.querySelector('[data-widget-part="figure"], [data-widget-part="evidence"]')!);
     for (const [title, cmd] of [
-      ["Project Overview", "logos wiki write overview/project-overview"],
       ["Quality index", "logos scan"],
       ["Languages", "logos index"],
       ["Activity", "logos stats"],
@@ -481,25 +445,43 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
   });
 });
 
-describe("the Project Overview card is the wiki extension's (S-644)", () => {
-  it("renders in the extension slot, directly after the freshness statement", async () => {
+/** A stub extension's Dashboard card: it renders the overview it is handed. */
+function StubCard({ card, overview }: DashboardCardProps) {
+  return (
+    <section data-testid="stub-card">
+      {card.label}: {overview.status.node_count} nodes
+    </section>
+  );
+}
+
+/** Mount the stub with one Dashboard card, as its server would report it. */
+function mountStubCard(): void {
+  registerExtensionUi({ id: STUB_ID, dashboardCards: { "stub-card": StubCard } });
+  setActiveExtensions(
+    extensionsInfo(stubInfo({ ui: { nav: [], views: [], config_panels: [], dashboard_cards: [{ id: "stub-card", label: "Stub card" }] } })),
+  );
+}
+
+describe("the extension card slot (S-644)", () => {
+  it("renders a mounted extension's card directly after the freshness statement, over the overview", async () => {
+    mountStubCard();
     stub(OVERVIEW);
     const { container } = render(<DashboardView />);
-    await screen.findByText(/Logos is a structural code-intelligence engine/);
-    const titles = expectOneWidgetStack(container).map(widgetTitle);
-    expect(titles.indexOf("Project Overview")).toBe(titles.indexOf("Quality index") - 1);
+    const card = await screen.findByTestId("stub-card");
+    expect(card).toHaveTextContent("Stub card: 1200 nodes");
+    // The slot sits between the freshness callout and the first built-in widget.
+    const stack = card.parentElement!;
+    const children = [...stack.children];
+    expect(children.indexOf(card)).toBe(1);
+    expect(expectOneWidgetStack(container).map(widgetTitle)[0]).toBe("Quality index");
   });
 
-  it("is absent, with every other widget unchanged, in a build without the wiki", async () => {
-    clearExtensions();
-    // A server without the extension adds no `overview_page` field at all.
-    const { overview_page: _absent, ...withoutWiki } = OVERVIEW;
-    stub(withoutWiki);
+  it("is empty in this build: no extension card, and every built-in widget unchanged", async () => {
+    stub(OVERVIEW);
     const { container } = render(<DashboardView />);
     await screen.findByText("Quality index");
-    const titles = expectOneWidgetStack(container).map(widgetTitle);
-    expect(titles).not.toContain("Project Overview");
-    expect(titles).toContain("Quality index");
-    expect(screen.queryByText(/project overview/i)).toBeNull();
+    expect(screen.queryByTestId("stub-card")).toBeNull();
+    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual(STATES[0].expected);
+    expect(screen.queryByText(/project overview|wiki/i)).toBeNull();
   });
 });

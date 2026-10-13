@@ -21,11 +21,7 @@ export {
   fetchNode,
   fetchOverview,
   fetchStatus,
-  fetchWikiNav,
-  fetchWikiPage,
-  fetchWikiStatus,
   runQuery,
-  searchWiki,
 } from "./client.ts";
 export type { GraphParams, QueryParams } from "./client.ts";
 export {

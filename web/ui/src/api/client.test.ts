@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setScopedMember } from "../workspace/scope.ts";
-import { apiUrl, fetchGraph, runQuery } from "./client.ts";
+import { apiUrl, fetchCodeRefs, fetchGraph, runQuery } from "./client.ts";
 
 describe("apiUrl", () => {
   it("prefixes /api/v1 and omits empty/false/null params (byte-identical no-filter)", () => {
@@ -90,5 +90,37 @@ describe("the member scope on /api/v1 reads", () => {
   it("an explicit repo param overrides the ambient scope", () => {
     setScopedMember("api");
     expect(apiUrl("node", { symbol: "f", repo: "web" })).toBe("/api/v1/node?repo=web&symbol=f");
+  });
+});
+
+describe("fetchCodeRefs (S-622, FR-UI-47)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setScopedMember(null);
+  });
+
+  function stubFetch(): () => string[] {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        calls.push(url);
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ refs: [] }) } as Response);
+      }),
+    );
+    return () => calls;
+  }
+
+  it("repeats `ref` once per span in one batched read", async () => {
+    const calls = stubFetch();
+    await fetchCodeRefs(["f", "src/lib.rs"]);
+    expect(calls()).toEqual(["/api/v1/code-refs?ref=f&ref=src%2Flib.rs"]);
+  });
+
+  it("keeps the addressed member's scope, so that member's graph answers", async () => {
+    setScopedMember("api");
+    const calls = stubFetch();
+    await fetchCodeRefs(["f"]);
+    expect(calls()).toEqual(["/api/v1/code-refs?repo=api&ref=f"]);
   });
 });

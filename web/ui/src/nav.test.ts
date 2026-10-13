@@ -13,15 +13,31 @@ import {
   type NavItem,
   type NavScope,
 } from "./nav.ts";
-import { clearExtensions } from "./extensions/registry.ts";
-import { CHAT_ACTIVE, mountChat } from "./test/chat.ts";
-import { mountAgentsBuild } from "./test/wiki.ts";
-
-/** A member-scoped tab that owns client sub-routes — the shape of the `wiki`
- *  extension's entry (S-644), declared here because the route-ownership rule is
- *  the subject, not which extension is mounted. */
-const WIKI_ITEM: NavItem = { id: "wiki", label: "Wiki", path: "/wiki", group: "A", scope: "member" };
+import type { ExtensionNavEntry } from "./api/extensionsClient.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions } from "./extensions/registry.ts";
+import { extensionsInfo, STUB_ID, StubAppView, StubView, stubInfo } from "./test/extensions.tsx";
 import { removeHiddenWidgetEntry } from "./test/hiddenWidgets.ts";
+
+/** A member-scoped tab that owns client sub-routes, declared here because the
+ *  route-ownership rule is the subject, not which entry is registered. */
+const READER_ITEM: NavItem = { id: "reader", label: "Reader", path: "/reader", group: "A", scope: "member" };
+
+/** A stub extension's member entry, replaced in a workspace by its own app entry. */
+const REPLACED: ExtensionNavEntry = {
+  id: "stub",
+  label: "Stub",
+  path: "/stub",
+  group: "A",
+  scope: "member",
+  replaced_in_workspace_by: "stub-app",
+};
+const REPLACEMENT: ExtensionNavEntry = { id: "stub-app", label: "Stub app", path: "/stub-app", group: "A", scope: "app" };
+
+/** Mount the stub with the two entries above, a view registered for each. */
+function mountReplacingStub(): void {
+  registerExtensionUi({ id: STUB_ID, views: { "/stub": StubView, "/stub-app": StubAppView } });
+  setActiveExtensions(extensionsInfo(stubInfo({ ui: { nav: [REPLACED, REPLACEMENT], views: [], config_panels: [] } })));
+}
 
 /** Every registered entry, in both modes. */
 const ALL_ITEMS: readonly NavItem[] = [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS];
@@ -43,64 +59,21 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
     ]);
   });
 
-  it("offers no Chat in either mode while no extension contributes it (S-643)", () => {
-    for (const isWorkspace of [false, true]) {
-      expect(navItemsFor(isWorkspace).filter((i) => /chat/.test(i.id))).toEqual([]);
-    }
-  });
-});
-
-describe("navItemsFor with the chat extension active (S-643)", () => {
-  beforeEach(mountChat);
-  afterEach(clearExtensions);
-
-  it("appends the workspace-only tabs in workspace mode, the Workspace Chat where the built-in one was", () => {
-    // Less the member Chat, which the Workspace Chat replaces there (S-485), and
-    // the Architecture view, which the register hides (CR-208).
-    expect(navItemsFor(true).filter((i) => i.scope === "member")).toEqual(
-      NAV_ITEMS.filter((i) => i.id !== "architecture"),
-    );
+  it("pins the workspace sidebar as the literal roster, both sections", () => {
+    // Pinned as literals rather than derived from the lists: sessions append to these
+    // ONE lists, and a parallel append to a single list is a known entry-DROPPING
+    // merge. A derived expectation agrees with whatever survived the merge and
+    // reports nothing. Architecture is absent while the register hides it (CR-208).
+    const member = navItemsFor(true).filter((i) => i.scope === "member").map((i) => i.id);
+    expect(member).toEqual(["overview", "health", "graph", "files", "gaps", "coverage", "statistics", "config"]);
     const added = navItemsFor(true).filter((i) => !NAV_ITEMS.includes(i));
-    // Pinned as the literal roster rather than derived from WORKSPACE_NAV_ITEMS:
-    // three sessions across this sprint append to this ONE list, and a parallel
-    // append to a single list is a known entry-DROPPING merge. A derived
-    // expectation agrees with whatever survived the merge and reports nothing.
     expect(added.map((i) => [i.id, i.path])).toEqual([
       ["workspace-dashboard", "/workspace-dashboard"],
       ["workspace-health", "/workspace-health"],
       ["workspace", "/workspace"],
-      ["workspace-chat", "/workspace-chat"],
       ["workspace-statistics", "/workspace-statistics"],
       ["workspace-config", "/workspace-config"],
     ]);
-  });
-
-  it("drops the member Chat — and, while the register hides it, Architecture — from a workspace's member section (S-485)", () => {
-    // Pinned as the literal id list, for the merge reason the roster above gives.
-    const member = navItemsFor(true).filter((i) => i.scope === "member").map((i) => i.id);
-    expect(member).toEqual(["overview", "health", "graph", "files", "gaps", "coverage", "statistics", "config"]);
-    // Single-root keeps it, after Graph where the built-in entry sat.
-    expect(navItemsFor(false).map((i) => i.id).slice(0, 4)).toEqual(["overview", "health", "graph", "chat"]);
-    expect(navItemsFor(false).some((i) => i.id === "workspace-chat")).toBe(false);
-  });
-});
-
-describe("navItemsFor in the agents build — chat and the wiki active (S-643, S-644)", () => {
-  beforeEach(mountAgentsBuild);
-  afterEach(clearExtensions);
-
-  it("places Chat and then Wiki after Graph, where the built-in entries sat", () => {
-    expect(navItemsFor(false).map((i) => i.id).slice(0, 6)).toEqual([
-      "overview",
-      "health",
-      "graph",
-      "chat",
-      "wiki",
-      "files",
-    ]);
-    // In a workspace the member Chat gives way to the Workspace Chat; the Wiki stays.
-    const member = navItemsFor(true).filter((i) => i.scope === "member").map((i) => i.id);
-    expect(member).toEqual(["overview", "health", "graph", "wiki", "files", "gaps", "coverage", "statistics", "config"]);
   });
 });
 
@@ -124,9 +97,7 @@ describe("the Architecture tab (S-612, FR-UI-41)", () => {
     const restore = removeHiddenWidgetEntry("architecture-view");
     try {
       expect(navItemsFor(false)).toEqual(NAV_ITEMS);
-      expect(navItemsFor(true).filter((i) => i.scope === "member")).toEqual(
-        NAV_ITEMS.filter((i) => i.id !== "chat"),
-      );
+      expect(navItemsFor(true).filter((i) => i.scope === "member")).toEqual(NAV_ITEMS);
     } finally {
       restore();
     }
@@ -134,22 +105,25 @@ describe("the Architecture tab (S-612, FR-UI-41)", () => {
 });
 
 describe("workspaceReplacementPath (S-485, ADR-71)", () => {
-  it("replaces nothing while no extension contributes a replaced entry (S-643)", () => {
-    expect(workspaceReplacementPath("/chat")).toBeNull();
+  it("replaces no route while no mounted entry declares a replacement", () => {
+    expect(ALL_ITEMS.some((i) => i.replacedInWorkspaceBy !== undefined)).toBe(false);
+    for (const item of ALL_ITEMS) {
+      expect({ path: item.path, to: workspaceReplacementPath(item.path) }).toEqual({ path: item.path, to: null });
+    }
   });
 });
 
-describe("workspaceReplacementPath with the chat extension active (S-485, ADR-71, S-643)", () => {
-  beforeEach(mountChat);
+describe("workspaceReplacementPath with a mounted entry that declares one (S-485, ADR-71)", () => {
+  beforeEach(mountReplacingStub);
   afterEach(clearExtensions);
 
-  it("lands /chat — and its sub-routes — on the Workspace Chat", () => {
-    expect(workspaceReplacementPath("/chat")).toBe("/workspace-chat");
-    expect(workspaceReplacementPath("/chat/anything")).toBe("/workspace-chat");
+  it("lands the replaced route — and its sub-routes — on the app entry it names", () => {
+    expect(workspaceReplacementPath("/stub")).toBe("/stub-app");
+    expect(workspaceReplacementPath("/stub/anything")).toBe("/stub-app");
   });
 
   it("leaves every other route where it is, near misses included", () => {
-    for (const path of ["/", "/chatter", "/workspace-chat", "/workspace", "/health", "/wiki/page/x"]) {
+    for (const path of ["/", "/stubby", "/stub-app", "/workspace", "/health", "/reader/page/x"]) {
       expect({ path, to: workspaceReplacementPath(path) }).toEqual({ path, to: null });
     }
   });
@@ -157,7 +131,7 @@ describe("workspaceReplacementPath with the chat extension active (S-485, ADR-71
   it("names a registered workspace view for every replacement it declares", () => {
     const offered = [...navItemsFor(false), ...navItemsFor(true)];
     const replaced = offered.filter((i) => i.replacedInWorkspaceBy !== undefined);
-    expect(replaced.map((i) => [i.id, i.replacedInWorkspaceBy])).toEqual([["chat", "workspace-chat"]]);
+    expect(replaced.map((i) => [i.id, i.replacedInWorkspaceBy])).toEqual([["stub", "stub-app"]]);
     expect(NAV_ITEMS.some((i) => i.replacedInWorkspaceBy !== undefined)).toBe(false);
     for (const item of replaced) {
       const target = navItemsFor(true).find((w) => w.id === item.replacedInWorkspaceBy);
@@ -201,14 +175,14 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
       ["workspace-statistics", "app"],
       ["workspace-config", "app"],
     ]);
-    // The chat extension's two entries declare theirs on the server (S-643).
-    mountChat();
+    // A mounted extension's entries declare theirs on the server (S-642).
+    mountReplacingStub();
     try {
-      expect(navItemsFor(true).filter((i) => /chat/.test(i.id)).map((i) => [i.id, i.scope])).toEqual([
-        ["workspace-chat", "app"],
+      expect(navItemsFor(true).filter((i) => i.id.startsWith("stub")).map((i) => [i.id, i.scope])).toEqual([
+        ["stub-app", "app"],
       ]);
-      expect(navItemsFor(false).filter((i) => /chat/.test(i.id)).map((i) => [i.id, i.scope])).toEqual([
-        ["chat", "member"],
+      expect(navItemsFor(false).filter((i) => i.id.startsWith("stub")).map((i) => [i.id, i.scope])).toEqual([
+        ["stub", "member"],
       ]);
     } finally {
       clearExtensions();
@@ -276,7 +250,7 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
 
   it("keeps every app-scoped route a SIBLING of /workspace, never a child of it", () => {
     // `navItemMatches` treats a path under a tab's route as belonging to that tab
-    // — the rule that keeps the Wiki tab lit while its reader is open. A route
+    // — the rule that keeps a tab lit on the client sub-routes it owns. A route
     // under `/workspace` would therefore highlight TWO sidebar items at once.
     const workspaceTab = WORKSPACE_NAV_ITEMS.find((i) => i.id === "workspace");
     expect(workspaceTab).toBeDefined();
@@ -303,8 +277,8 @@ describe("isAppLevelPath is a lookup over that one field (S-425, ADR-66 §3)", (
     // remounting it on a member switch would tear down the canvas for no new data.
     expect(isAppLevelPath("/workspace")).toBe(true);
     expect(isAppLevelPath("/workspace/anything")).toBe(true);
-    // …and a member-scoped tab's sub-route stays member-scoped (the Wiki reader).
-    expect(isAppLevelPath("/wiki/page/x")).toBe(false);
+    // …and a member-scoped tab's sub-route stays member-scoped.
+    expect(isAppLevelPath("/health/page/x")).toBe(false);
   });
 
   it("leaves every member-scoped view keyed on the member", () => {
@@ -328,7 +302,7 @@ describe("isAppLevelPath is a lookup over that one field (S-425, ADR-66 §3)", (
       expect(navItemMatches(NAV_ITEMS[0], item.path)).toBe(false);
     }
     // …including a route that is a strict string-prefix extension of another's.
-    expect(navItemMatches(WIKI_ITEM, "/wikipedia")).toBe(false);
+    expect(navItemMatches(READER_ITEM, "/readers")).toBe(false);
   });
 
   it("keys an unregistered path as member-scoped, as it always has", () => {
@@ -426,22 +400,6 @@ function codeOf(source: string): string {
   return out;
 }
 
-/**
- * The SERVER routes that share an app route's leading segment — removed, as exact
- * double-quoted literals, before the route-literal probe below reads a module.
- *
- * `"/workspace/chat"` is the workspace chat's turn `POST` (S-482, mirrored in
- * `api/chatClient.ts`): no client view mounts there, so it is not a second spelling
- * of the `/workspace` tab. Exempting it as one exact literal, rather than exempting
- * the module, keeps every other spelling in that module under the guard — a
- * `"/workspace"` or `"/workspace/"` beside it still fails.
- */
-const SERVER_ROUTE_LITERALS: readonly string[] = ['"/workspace/chat"'];
-
-function withoutServerRoutes(code: string): string {
-  return SERVER_ROUTE_LITERALS.reduce((out, literal) => out.split(literal).join('""'), code);
-}
-
 describe("no second list of app-level paths exists in the tree (ADR-66 §1)", () => {
   // The defect this replaces was a hard-coded path list consulted in one place. The
   // hazard it leaves behind is a SECOND one: a `startsWith("/workspace")` in a view,
@@ -469,23 +427,18 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
     expect(modules).toContain("shell/Sidebar.tsx");
   });
 
-  // Every app-scoped route, from EITHER registry — and the chat extension's, as its
-  // server declares it (S-643). Nothing stops an `app` entry being registered in
-  // `NAV_ITEMS` — that is how a promoted tab would land — and keying this off
-  // `WORKSPACE_NAV_ITEMS` alone would exempt it from the grep half.
-  const appPaths = [
-    ...ALL_ITEMS.filter((i) => i.scope === "app").map((i) => i.path),
-    ...CHAT_ACTIVE.extensions.flatMap((e) => e.ui?.nav ?? []).filter((n) => n.scope === "app").map((n) => n.path),
-  ];
+  // Every app-scoped route, from EITHER registry. Nothing stops an `app` entry being
+  // registered in `NAV_ITEMS` — that is how a promoted tab would land — and keying
+  // this off `WORKSPACE_NAV_ITEMS` alone would exempt it from the grep half.
+  const appPaths = ALL_ITEMS.filter((i) => i.scope === "app").map((i) => i.path);
 
   // The modules that may spell an app-scoped route: `nav.ts` — the navigation
-  // registry that DECLARES the scope; `views/index.ts` — the component registry that
-  // maps a built-in path to the React view it mounts; and the chat extension's
-  // registration, which is the same component registry for the views IT mounts
-  // (S-643) — keyed by path by construction, holding no scope (its server declares
-  // it). Any other file is re-deriving the level from the route spelling, which
-  // ADR-66 §1 forbids.
-  const ROUTE_REGISTRIES = ["nav.ts", "views/chat/extension.tsx", "views/index.ts"];
+  // registry that DECLARES the scope; and `views/index.ts` — the component registry
+  // that maps a built-in path to the React view it mounts. (An extension's
+  // registration is the same component registry for the views IT mounts, keyed by
+  // path by construction and holding no scope; this build composes none.) Any other
+  // file is re-deriving the level from the route spelling, which ADR-66 §1 forbids.
+  const ROUTE_REGISTRIES = ["nav.ts", "views/index.ts"];
 
   it("has app-scoped routes to check at all", () => {
     // `it.each([])` registers ZERO tests and raises nothing, so without this floor
@@ -504,7 +457,7 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
       // `"/workspace"`; and `web/ui` configures neither ESLint nor Prettier, so
       // single quotes and template literals are not hypothetical.
       const probe = new RegExp(`["'\`]${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
-      const mentions = modules.filter((m) => probe.test(withoutServerRoutes(codeOf(SOURCES[m]))));
+      const mentions = modules.filter((m) => probe.test(codeOf(SOURCES[m])));
       expect(mentions.length).toBeGreaterThan(0);
       expect(mentions.filter((m) => !ROUTE_REGISTRIES.includes(m))).toEqual([]);
     },
@@ -525,11 +478,11 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
 
 describe("navItemMatches (S-425) — the SPA's one route-ownership rule", () => {
   it("matches a route exactly, and the sub-routes a tab owns", () => {
-    expect(navItemMatches(WIKI_ITEM, "/wiki")).toBe(true);
-    expect(navItemMatches(WIKI_ITEM, "/wiki/page/x")).toBe(true);
+    expect(navItemMatches(READER_ITEM, "/reader")).toBe(true);
+    expect(navItemMatches(READER_ITEM, "/reader/page/x")).toBe(true);
     // A near miss: a sibling route that merely starts with the same characters.
-    expect(navItemMatches(WIKI_ITEM, "/wikipedia")).toBe(false);
-    expect(navItemMatches(WIKI_ITEM, "/health")).toBe(false);
+    expect(navItemMatches(READER_ITEM, "/readers")).toBe(false);
+    expect(navItemMatches(READER_ITEM, "/health")).toBe(false);
   });
 
   it("types the scope union closed", () => {
@@ -541,12 +494,3 @@ describe("navItemMatches (S-425) — the SPA's one route-ownership rule", () => 
   });
 });
 
-describe("the server-route exemption is exact (S-485)", () => {
-  it("removes the exempt literal and nothing one character from it", () => {
-    expect(withoutServerRoutes('x = "/workspace/chat";')).toBe('x = "";');
-    // Near misses stay visible to the probe.
-    for (const code of ['"/workspace/"', '"/workspace"', '"/workspace/chats"', "'/workspace/chat'"]) {
-      expect(withoutServerRoutes(code)).toBe(code);
-    }
-  });
-});

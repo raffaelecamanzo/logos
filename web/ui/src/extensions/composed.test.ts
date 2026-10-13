@@ -1,21 +1,16 @@
 /*
- * The composed entry of this build (S-642, FR-UI-51, S-643, S-644):
+ * The composed entry of this build (S-642, FR-UI-51, FR-DS-05):
  * `virtual:logos-extensions` resolves — through vitest's own copy of the alias,
- * unmocked — to the code of the `chat` and `wiki` extensions and nothing else.
- * Registered code is inert until the server reports its extension active, so the boot
- * read decides: a `logos` binary composing neither gets exactly the built-in shell,
- * and one composing an extension gets its navigation, views, config panels and cards.
+ * unmocked — to an entry that registers no extension. Whatever the server reports, the
+ * open-source build mounts nothing beyond the built-in shell, and nothing stands in
+ * place of an extension it does not compose.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import registrations from "virtual:logos-extensions";
 
-import { CHAT_ACTIVE } from "../test/chat.ts";
 import { extensionsInfo, stubInfo } from "../test/extensions.tsx";
-import { WIKI_ACTIVE } from "../test/wiki.ts";
-import { CHAT_EXTENSION_UI } from "../views/chat/extension.tsx";
-import { WIKI_EXTENSION_UI } from "../views/wiki/extension.tsx";
 import { bootExtensions } from "./boot.ts";
 import noExtension from "./fixtures/no-extension.real.json";
 import {
@@ -41,46 +36,32 @@ async function bootWith(body: unknown): Promise<void> {
   await bootExtensions();
 }
 
+/** Nothing is mounted on any contribution point, and no route is an extension's. */
+function expectBuiltInShellOnly(): void {
+  expect(getExtensions().status).toBe("ready");
+  expect(getExtensions().mounted).toEqual([]);
+  expect(getExtensions().registeredPaths).toEqual([]);
+  expect(mountedNavEntries()).toEqual([]);
+  expect(mountedViews()).toEqual([]);
+  expect(mountedConfigPanels("member")).toEqual([]);
+  expect(mountedConfigPanels("workspace")).toEqual([]);
+  expect(mountedDashboardCards()).toEqual([]);
+}
+
 describe("virtual:logos-extensions in this build", () => {
-  it("resolves to the chat and wiki extensions' registrations, and only those", () => {
-    expect(registrations).toEqual([CHAT_EXTENSION_UI, WIKI_EXTENSION_UI]);
+  it("registers no extension", () => {
+    expect(registrations).toEqual([]);
   });
 
-  it("mounts nothing for a server that reports no extension — a build without extensions", async () => {
-    // The body the no-extension build serves (S-645, `cli/tests/no_extension_surface.rs`).
+  it("mounts nothing for the body this build serves — no extension listed", async () => {
+    // The body the binary built from this repository serves (S-645,
+    // `cli/tests/no_extension_surface.rs`).
     await bootWith(noExtension);
-    expect(getExtensions().status).toBe("ready");
-    expect(getExtensions().mounted).toEqual([]);
-    expect(mountedNavEntries()).toEqual([]);
-    expect(mountedViews()).toEqual([]);
-    expect(mountedConfigPanels("member")).toEqual([]);
-    expect(mountedConfigPanels("workspace")).toEqual([]);
-    expect(mountedDashboardCards()).toEqual([]);
-    // The chat and wiki routes are still known as an extension's, so a deep link to
-    // one is routed by the inactive-extension rule rather than taken for a built-in
-    // path.
-    expect(getExtensions().registeredPaths).toEqual(["/chat", "/workspace-chat", "/wiki"]);
+    expectBuiltInShellOnly();
   });
 
-  it("leaves an extension the server reports active with no code here inert", async () => {
+  it("mounts nothing for a server that reports an extension active: this bundle carries no code for it", async () => {
     await bootWith(extensionsInfo(stubInfo()));
-    expect(mountedNavEntries()).toEqual([]);
-  });
-
-  it("mounts the wiki's entry, view, config panels and Dashboard card for a server that reports it active", async () => {
-    await bootWith(WIKI_ACTIVE);
-    expect(mountedNavEntries().map((n) => n.id)).toEqual(["wiki"]);
-    expect(mountedViews().map(([route]) => route)).toEqual(["/wiki"]);
-    expect(mountedConfigPanels("member").map((p) => p.panel.table)).toEqual(["wiki"]);
-    expect(mountedConfigPanels("workspace").map((p) => p.panel.table)).toEqual(["wiki"]);
-    expect(mountedDashboardCards().map(({ card }) => card.id)).toEqual(["project-overview"]);
-  });
-
-  it("mounts chat's entries, views and both config panels for a server that reports it active", async () => {
-    await bootWith(CHAT_ACTIVE);
-    expect(mountedNavEntries().map((n) => n.id)).toEqual(["chat", "workspace-chat"]);
-    expect(mountedViews().map(([route]) => route)).toEqual(["/chat", "/workspace-chat"]);
-    expect(mountedConfigPanels("member").map((p) => p.panel.table)).toEqual(["chat"]);
-    expect(mountedConfigPanels("workspace").map((p) => p.panel.table)).toEqual(["chat"]);
+    expectBuiltInShellOnly();
   });
 });

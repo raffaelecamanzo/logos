@@ -1359,7 +1359,7 @@ fn the_shell_chrome_exclusion_reaches_rollup_rows() {
 /// [`Surface::Shell`] is stored as `shell` and never reaches a usage figure,
 /// while the same tool called outside that scope still counts.
 ///
-/// Mirrors `chat_agent_calls_are_separable_from_web_and_mcp` — the two are the
+/// Mirrors `chat_surface_calls_are_separable_from_web_and_mcp` — the two are the
 /// same mechanism (an adapter naming itself at its boundary) pointed at
 /// opposite conclusions: the chat agent's calls are separable **and counted**,
 /// the shell's are separable **and excluded**.
@@ -1829,7 +1829,7 @@ fn an_event_field_override_wins_over_the_ambient_scope() {
     assert_eq!(records[0].surface, "watcher");
 }
 
-/// [FR-OB-10]: a chat-agent tool call is stored under `surface = "chat"`,
+/// [FR-OB-10]: a chat agent's tool call is stored under `surface = "chat"`,
 /// separable from both `web` (the process it runs inside) and `mcp` — and it
 /// counts as an engine query, not as a self-referential read.
 ///
@@ -1837,7 +1837,7 @@ fn an_event_field_override_wins_over_the_ambient_scope() {
 /// without `agents` the variant does not exist and neither does this test.
 #[cfg(feature = "agents")]
 #[test]
-fn chat_agent_calls_are_separable_from_web_and_mcp() {
+fn chat_surface_calls_are_separable_from_web_and_mcp() {
     assert_eq!(Surface::Chat.as_str(), "chat", "the FR-OB-10 wire value");
 
     let (sink, rx) = TelemetrySink::with_capacity(8);
@@ -1903,9 +1903,9 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
 /// from `mcp`, and from `chat` (the *other* in-process agent) — and it counts
 /// as an engine query, because its subject is the indexed code.
 ///
-/// The sibling of [`chat_agent_calls_are_separable_from_web_and_mcp`], pointed
-/// at a third in-process caller, and the unit half of the pair
-/// `wiki-agent/tests/wikigen_surface.rs` asserts end to end through the real route.
+/// The sibling of [`chat_surface_calls_are_separable_from_web_and_mcp`], pointed
+/// at a third in-process caller, and the unit half of a pair whose end-to-end
+/// half, through the real route, lives with the wiki generator's crate.
 ///
 /// # Why this one is not `#[cfg(feature = "agents")]`
 ///

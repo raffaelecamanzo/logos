@@ -7,11 +7,6 @@ notes/
 # derived state are ephemeral and never committed. See the dogfooding plan.
 .logos/
 
-# Binary-generated, version-stamped wiki skill — materialized locally by
-# `logos wiki skill --emit` / `init -i` (FR-WK-08), regenerable, never tracked
-# (unlike the hand-authored dev-process skills in .agents/skills/).
-.agents/skills/logos-wiki/
-
 # Local-only agent/harness config — kept out of version control per
 # working-directory preference (make them local to this checkout).
 .agents/

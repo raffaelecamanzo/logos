@@ -11,8 +11,9 @@
 #   - cargo clippy -D warnings   any lint warning             (NFR-MA-04)
 #   - cargo test --workspace     any failing test, incl. the
 #                                no-network fitness function  (NFR-SE-01)
-#   - no-extension build         clippy + test of `logos` with no
-#                                extension composed           (FR-DS-05)
+#                                and the no-extension suite   (FR-DS-05)
+#   - agents marker              the logos-core code gated behind the
+#                                `agents` marker, tested with it on (FR-OB-10)
 #   - cargo deny check           license / advisory violation (NFR-CR-01)
 #   - public terms               a listed term in a tracked text
 #                                file, outside the allowlist  (NFR-CR-04)
@@ -123,7 +124,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # Test gate — includes the no-network fitness function that asserts the
-      # default dependency graph carries no socket/HTTP crate (NFR-SE-01).
+      # default dependency graph carries no socket/HTTP crate (NFR-SE-01), and the
+      # no-extension suite (cli/tests/no_extension_surface.rs, FR-DS-05): the build
+      # this repository ships composes no extension, so no chat or wiki route, tool,
+      # command or extension is served, and `status` and `serve --ui` start on a
+      # chat- and wiki-configured project.
       #
       # LOGOS_PERF_TOLERANCE widens the NFR-PE-05 cold-start band for THIS HOST
       # only, using the knob `cold_start_to_ready_engine_is_within_pe05_budget`
@@ -146,26 +151,16 @@ jobs:
           LOGOS_PERF_TOLERANCE: "3"
         run: cargo test --workspace
 
-      # The no-extension build (S-645, FR-DS-05): `--no-default-features --features
-      # lang-all,ui` — the dashboard without the `wiki` or `agents` feature, so the
-      # composition registers nothing. Its fitness suite
-      # (cli/tests/no_extension_surface.rs: no chat or wiki route, tool, command or
-      # extension; `status` and `serve --ui` start on a chat- and wiki-configured
-      # project) compiles to nothing in the default build above, so it needs this
-      # build — clippy too, or that file would never be linted. Every other `logos`
-      # suite runs here as well. It recompiles logos-core, mcp, web and the cli in a
-      # feature set no other step builds: ~3 min on the reference machine (a 64 s
-      # cold build, the 99 s suite, ~20 s of clippy); unmeasured on a GitHub runner,
-      # which runs ~3x slower (see the test step above).
-      - name: clippy + test (no-extension build)
-        run: |
-          cargo clippy -p logos --no-default-features --features lang-all,ui --all-targets -- -D warnings
-          cargo test -p logos --no-default-features --features lang-all,ui
-
-      # The agent-tool ↔ MCP-twin payload parity (HF-2) needs no step of its own
-      # any more: its suite moved from `web`, where it was `agents`-gated, to the
-      # `chat` extension's crate (`logos-chat/tests/mcp_parity_workspace_tools.rs`,
-      # S-644), which is ungated — so `cargo test --workspace` above runs it.
+      # The `agents` marker (logos-core/Cargo.toml) declares `Surface::Chat`, and
+      # no crate of this workspace turns it on, so the step above compiles that
+      # variant and its tests out. This step runs the `observability::` unit tests
+      # with the marker on: `cargo test -p logos-core --lib --features agents
+      # observability::`. scripts/agents-marker.sh exits non-zero not only on a
+      # failing test but on a run in which the gated test never printed a result
+      # line, and prints its denominator as the last line. Same script as the
+      # `full` tier of scripts/gate.sh.
+      - name: agents marker (observability unit tests)
+        run: bash scripts/agents-marker.sh
 
       # Supply-chain gate — license allowlist + RustSec advisories (NFR-CR-01).
       # cargo-deny is version-pinned: an unpinned tool fetched at run time is

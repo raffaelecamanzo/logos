@@ -15,9 +15,8 @@
 //! tree no-egress-client scan in logos-core/tests/no_network_deps.rs — there is
 //! no network *client* crate in this surface's graph, so it can only listen,
 //! never dial. The surfaces that dial are extensions with their own zero-egress
-//! proofs: the chat extension's over the full orchestrated turn
-//! (logos-chat/tests/uat_ui_07.rs, [UAT-UI-07]), and the wiki generator's
-//! (wiki-agent/tests/uat_wk_06.rs).
+//! proofs, kept with them: the chat extension's over the full orchestrated turn
+//! ([UAT-UI-07]), and the wiki generator's.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -514,8 +513,9 @@ async fn assert_unmounted_post_is_405(path: &str, why: &str) {
 /// mounts none of its routes and admits none of its POSTs, in **every** build — so
 /// the turn, the workspace turn and every per-thread write (delete S-209, rename
 /// S-623, truncate S-624, and their workspace twins S-482) are `405`. Only a
-/// binary's `main` composes chat in, under `agents` (the composed surface is the
-/// `cli` surface snapshots' and `logos-chat`'s own suites').
+/// binary's `main` composes chat in, and the binary this repository builds
+/// composes none (FR-DS-05; the composed surface is the chat extension's own
+/// suites').
 #[tokio::test]
 async fn chat_posts_are_405_without_the_chat_extension() {
     for path in [
@@ -537,7 +537,7 @@ async fn chat_posts_are_405_without_the_chat_extension() {
 /// it nowhere and admits no `POST` to it, in **every** build, so a **well-formed**
 /// mutating POST is answered `405` — the dialing seam is genuinely absent, not
 /// merely guarded (CR-078, ADR-60, S-286). The positive coverage is the
-/// extension's own (`logos-wiki/tests/wiki_sse.rs`).
+/// extension's own.
 #[tokio::test]
 async fn wiki_generation_post_is_405_without_the_wiki_extension() {
     assert_unmounted_post_is_405(

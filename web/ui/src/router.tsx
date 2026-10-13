@@ -48,31 +48,12 @@ export function usePathname(): string {
 
 /**
  * Navigate to an in-SPA route without a full reload (every tab is a React view).
- * The optional `state` rides in `history.state` for the destination view to read
- * via `useNavigationState` — an ephemeral client-side payload (e.g. the wiki
- * search term crossing into the reader, FR-WK-28) that needs no URL query param
- * or read-model change.
+ * The optional `state` rides in `history.state` — an ephemeral client-side payload
+ * (FR-WK-28) that needs no URL query param or read-model change.
  */
 export function navigate(path: string, state: unknown = {}): void {
   window.history.pushState(state, "", urlWithMember(path, scopedMember()));
   window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
-/**
- * The current history-entry's state, kept in sync like `usePathname`. Reads
- * `window.history.state` (set by `navigate`'s `pushState`, or by the browser on
- * back/forward) rather than the dispatched event's own `.state` — the synthetic
- * `PopStateEvent` above carries none, but `window.history.state` is authoritative
- * either way.
- */
-export function useNavigationState<T = unknown>(): T | null {
-  const [state, setState] = useState<T | null>(() => (window.history.state as T) ?? null);
-  useEffect(() => {
-    const onPop = () => setState((window.history.state as T) ?? null);
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
-  return state;
 }
 
 /**
@@ -99,7 +80,7 @@ export function currentUrl(): string {
  * ten presses of Back. Two further properties are its own:
  *
  *   - `history.state` is carried across, not replaced with `{}` — the current entry's
- *     ephemeral payload (the wiki search term, FR-WK-28) belongs to the entry, not to
+ *     ephemeral payload (a search term, FR-WK-28) belongs to the entry, not to
  *     the member shown in it.
  *   - **no** `popstate` is dispatched. The caller is the one that just changed the
  *     state; re-notifying the SPA would have it re-derive from the URL the answer it

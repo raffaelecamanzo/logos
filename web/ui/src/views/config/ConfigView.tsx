@@ -4,9 +4,9 @@
  * last interactive tab and the SPA's first **mutating** surface.
  *
  * Hybrid editing (FR-UI-12): each file is edited two ways over ONE candidate
- * document — typed form fields for the scalar/list keys (and the `[chat]`
- * provider/model/base_url controls), plus a raw-TOML pane holding the full
- * document including the repeated-table sections that do not formify. The raw pane
+ * document — typed form fields for the scalar/list keys, plus a raw-TOML pane
+ * holding the full document including the repeated-table sections that do not
+ * formify. The raw pane
  * is the **authoritative candidate** posted verbatim to `/config/save`; a typed
  * field patches its one key into that text (`./toml.ts`), so there is no second
  * source of truth and a patch defect can at worst yield a `422`, never a partial
@@ -15,20 +15,11 @@
  * Save ≠ Apply (FR-UI-13): Save validates-then-atomic-writes and runs no pipeline;
  * the explicit Apply reconciles (config.toml) or re-evaluates the gate
  * (rules.toml) over the saved file. A `rules.toml` Save is gated behind an
- * explicit confirmation (BR-35). The chat API key is a write-only/masked secret
- * (FR-CF-06, NFR-SE-07) edited in its own section — never echoed onto this surface.
+ * explicit confirmation (BR-35).
  *
- * Chat is an extension (S-643): the `[chat]` typed fields join the document form, and
- * the key card ({@link ChatKeyPanel}) is mounted beneath it, only while the `chat`
- * extension is active and mounts its config panel — a build without it offers
- * neither, and its `[chat]` table, if any, is edited in the raw pane like any other
- * text.
- *
- * Inheritance (S-452, FR-WS-30): in a workspace a member may inherit either chat
- * half from the workspace root. That is disclosed as read-only prose beside the
- * `[chat]` fields and in the key card, read off the read-model's `effective_chat`
- * slice; the editors themselves render and post ONLY the member's literal document
- * and its own key.
+ * The config panels the mounted extensions contribute (S-642) render beneath the
+ * config document; this build composes none, so a table only an extension reads is
+ * edited in the raw pane like any other text.
  *
  * Renders exclusively through the S-193 design system; every read is GET-only.
  *
@@ -47,31 +38,21 @@ import {
   applyConfig,
   fetchConfig,
   saveConfig,
-  saveSecret,
   verifyGraph,
   type PolicyFile,
 } from "../../api/configClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
-import {
-  chatScope,
-  workspaceConfigRepairHref,
-  WORKSPACE_CONFIG_FILE,
-  WORKSPACE_SECRETS_FILE,
-} from "../chat/chatModel.ts";
-import { ExtensionConfigPanels, useMountedConfigTable } from "../../extensions/ConfigPanels.tsx";
-import type { ConfigPanelHost, ConfigPanelProps } from "../../extensions/registry.ts";
+import { ExtensionConfigPanels } from "../../extensions/ConfigPanels.tsx";
+import type { ConfigPanelHost } from "../../extensions/registry.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import type {
   ConfigApplyOutcome,
   ConfigReadModel,
   ConfigWriteOutcome,
-  EffectiveChat,
   FileView,
-  MaskedSecret,
   ParsedConfig,
   ParsedRules,
   RulesDefaults,
-  SecretWriteOutcome,
   VerifyReport,
 } from "../../api/types.ts";
 import {
@@ -92,9 +73,8 @@ import styles from "./ConfigView.module.css";
 
 // ── Typed-field model ─────────────────────────────────────────────────────────
 
-/** How a typed field renders. `provider` is a string select; the rest map 1:1 to
- *  a {@link TomlFieldType}. */
-type Control = "int" | "float" | "str" | "list" | "bool" | "provider";
+/** How a typed field renders — the TOML type it patches as. */
+type Control = TomlFieldType;
 
 /** A typed field that patches its `key` in `table` of the raw candidate. */
 interface FieldDescriptor {
@@ -105,10 +85,6 @@ interface FieldDescriptor {
   help: string;
   /** Pre-filled value from the parsed projection (never fabricated). */
   initial: string;
-  placeholder?: string;
-  /** Overrides the rendered/accessible label when `key` collides with another
-   *  table's field (e.g. `[wiki].model` beside `[chat].model`). Defaults to `key`. */
-  label?: string;
   /** The server-computed default (or, for `[constraints]`, the honest
    *  `unset → not enforced` state plus the recommended baseline) beside the
    *  current value (CR-067, FR-UI-12, BR-37). Sourced only from the `defaults`
@@ -121,24 +97,6 @@ interface FieldDescriptor {
 interface FieldGroup {
   legend?: string;
   fields: FieldDescriptor[];
-  /** Read-only prose rendered beneath the fields — never a control, never posted. */
-  note?: ReactNode;
-}
-
-/** The TOML serialisation type for a control (provider serialises as a string). */
-function controlTomlType(control: Control): TomlFieldType {
-  switch (control) {
-    case "int":
-      return "int";
-    case "float":
-      return "float";
-    case "list":
-      return "list";
-    case "bool":
-      return "bool";
-    default:
-      return "str"; // str | provider
-  }
 }
 
 /** A stable per-file state key for a field. */
@@ -195,57 +153,9 @@ function constraintHint(recommended: unknown): string {
   return `Default: unset → not enforced · Recommended: ${fmtDefault(recommended)}`;
 }
 
-/**
- * The read-only disclosure of an inherited `[chat]` policy (S-452, FR-WS-30), or
- * `undefined` when this member's own document is what is in effect.
- *
- * It reads the `effective_chat` slice and nothing else, and it is PROSE: the typed
- * fields and the raw pane above it keep showing — and posting — only the member's
- * literal document. Pre-filling a field from the slice would materialise the
- * inherited value in the member's file on the next save (NFR-RA-05).
- *
- * An inherited policy dials the workspace endpoint with the workspace key only
- * (HF-1, ADR-67 §2), so a key this member declares is withheld — stated off the
- * slice's `member_key_withheld`, never inferred from the member's own `chat_key`.
- */
-function inheritedPolicyNote(effective: EffectiveChat | null): ReactNode {
-  if (effective?.policy_origin !== "workspace") return undefined;
-  const p = effective.policy;
-  return (
-    <p className={styles.inherited}>
-      This member&apos;s <code>config.toml</code> declares no <code>[chat] model</code>, so the whole{" "}
-      <code>[chat]</code> table is inherited from the workspace root: provider{" "}
-      <code>{p.provider}</code>, model <code>{p.model}</code>
-      {p.provider === "openai" && (
-        <>
-          , base_url <code>{p.base_url}</code>
-        </>
-      )}
-      . The fields above show only this member&apos;s own document; setting a model here overrides the
-      inherited table as a whole.
-      {effective.member_key_withheld && (
-        <>
-          {" "}
-          This member&apos;s own API key is not used with the inherited workspace endpoint — setting a{" "}
-          <code>[chat] model</code> here makes this member use its own key.
-        </>
-      )}
-    </p>
-  );
-}
-
-/** The `config.toml` typed fields: top-level scalars/lists + — while the `chat`
- *  extension edits it (`withChat`, S-643) — the `[chat]` group (with its read-only
- *  inheritance note, when the policy is inherited), and — while the `wiki` extension
- *  edits it (`withWiki`, S-644) — the `[wiki]` group. */
-function configGroups(
-  c: ParsedConfig,
-  d: ParsedConfig,
-  effective: EffectiveChat | null,
-  withChat: boolean,
-  withWiki: boolean,
-): FieldGroup[] {
-  const groups: (FieldGroup | null)[] = [
+/** The `config.toml` typed fields: the top-level scalars/lists. */
+function configGroups(c: ParsedConfig, d: ParsedConfig): FieldGroup[] {
+  return [
     {
       fields: [
         { table: "", key: "languages", control: "list", initial: initList(c.languages), help: "Language plugins to enable. One per line.", defaultHint: defaultHint(d.languages) },
@@ -255,37 +165,7 @@ function configGroups(
         { table: "", key: "framework_hints", control: "list", initial: initList(c.framework_hints), help: "Framework hints biasing extraction. One per line.", defaultHint: defaultHint(d.framework_hints) },
       ],
     },
-    withChat ? {
-      legend: "[chat]",
-      fields: [
-        { table: "chat", key: "provider", control: "provider", initial: c.chat.provider, help: "The provider family. openai is OpenAI-compatible (base_url defaults to OpenRouter); anthropic uses the native Messages endpoint.", defaultHint: defaultHint(d.chat.provider) },
-        { table: "chat", key: "model", control: "str", initial: c.chat.model ?? "", placeholder: "leave blank to unset", help: "The model the chat agent uses (a Claude id, or an OpenRouter model slug for openai). Required — until set the Chat tab stays “not yet usable”.", defaultHint: defaultHint(d.chat.model) },
-        { table: "chat", key: "base_url", control: "str", initial: c.chat.base_url, placeholder: "leave blank for the default (OpenRouter)", help: "The OpenAI-compatible endpoint for the openai provider (anthropic ignores this). Leave blank to fall back to OpenRouter.", defaultHint: defaultHint(d.chat.base_url) },
-      ],
-      note: inheritedPolicyNote(effective),
-    } : null,
-    withWiki ? {
-      // S-224/FR-CF-07: the `[wiki]` section carries only `model` — provider,
-      // base_url, and the API key are inherited from `[chat]`, so this single
-      // field fully surfaces it (no new secret surface, NFR-SE-07).
-      legend: "[wiki]",
-      fields: [
-        {
-          table: "wiki",
-          key: "model",
-          control: "str",
-          label: "wiki model",
-          initial: c.wiki?.model ?? "",
-          placeholder: "leave blank to inherit",
-          // Static prose, not a second spelling of the rule: the value is resolved
-          // server-side into `effective_wiki` (Sprint 77 HF-1, ADR-67 §8).
-          help: "The model used for wiki page synthesis, distinct from the chat model. Leave blank to use the workspace root's [wiki] model while this member inherits the workspace [chat] table, else the effective [chat] model.",
-          defaultHint: defaultHint(d.wiki?.model),
-        },
-      ],
-    } : null,
   ];
-  return groups.filter((g): g is FieldGroup => g !== null);
 }
 
 /** The `rules.toml` typed fields: the `[constraints]` and `[metric_thresholds]`
@@ -396,16 +276,6 @@ function describeVerifyError(status: number, detail: string): string {
   return `${label}: ${detail}`;
 }
 
-/** The honest secret-write message — NEVER the raw response body (NFR-SE-07). */
-function describeSecret(outcome: SecretWriteOutcome | null): string {
-  if (outcome === null) return "Key saved (unexpected response format).";
-  if (outcome.chat_key.present) {
-    const tail = outcome.chat_key.last4 ? ` (ends …${outcome.chat_key.last4})` : "";
-    return `Key saved${tail}. It is stored in ${outcome.path} and never echoed.`;
-  }
-  return `Key cleared. ${outcome.path} no longer holds a chat key.`;
-}
-
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : "request error";
 }
@@ -451,7 +321,7 @@ function FieldControl({
 }) {
   const handle = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     onChange(e.target.value);
-  const label = d.label ?? d.key;
+  const label = d.key;
   const hint = fieldHint(d);
   if (d.control === "list") {
     return <TextareaField label={label} hint={hint} rows={3} value={value} onChange={handle} className="mono" spellCheck={false} />;
@@ -465,14 +335,6 @@ function FieldControl({
       </SelectField>
     );
   }
-  if (d.control === "provider") {
-    return (
-      <SelectField label={label} hint={hint} value={value} onChange={handle}>
-        <option value="openai">openai — OpenAI-compatible (OpenRouter by default)</option>
-        <option value="anthropic">anthropic — native Messages API</option>
-      </SelectField>
-    );
-  }
   const numeric = d.control === "int" || d.control === "float";
   return (
     <TextField
@@ -480,7 +342,6 @@ function FieldControl({
       hint={hint}
       type={numeric ? "number" : "text"}
       {...(d.control === "float" ? { step: "any" } : {})}
-      placeholder={d.placeholder}
       value={value}
       onChange={handle}
       className="mono"
@@ -520,7 +381,7 @@ function FileEditor({
     setValues((prev) => ({ ...prev, [fieldId(d)]: value }));
     // Patch the one key into the authoritative raw candidate — the single posted
     // source of truth (FR-UI-12). A hand edit and a typed edit both flow here.
-    setRaw((prev) => patch(prev, d.table, d.key, controlTomlType(d.control), value));
+    setRaw((prev) => patch(prev, d.table, d.key, d.control, value));
   }
 
   async function onSave() {
@@ -587,15 +448,13 @@ function FileEditor({
               <FieldControl
                 key={fieldId(d)}
                 d={d}
-                // A group can appear after mount — an extension's table is offered once
-                // the boot read settles (S-643, S-644) — so an unseeded field shows its
-                // parsed value, never a blank that misstates the file.
+                // An unseeded field shows its parsed value, never a blank that misstates
+                // the file.
                 value={values[fieldId(d)] ?? d.initial}
                 onChange={(v) => onFieldChange(d, v)}
               />
             ))}
           </div>
-          {g.note}
         </fieldset>
       ))}
 
@@ -637,110 +496,6 @@ function FileEditor({
       </div>
       <p className={styles.help}>{applyHelp}</p>
       <ResultPanel result={applyResult} />
-    </Widget>
-  );
-}
-
-/** The chat API key editor — the one write-only/masked secret (FR-CF-06,
- *  NFR-SE-07). The input is never pre-filled (the browser never receives the
- *  stored key); only the masked presence (set + last-4 / not set) is shown, and a
- *  successful write updates that masked state — the secret is never echoed. */
-function SecretEditor({
-  initial,
-  inherited,
-  policyInherited,
-  onSaved,
-}: {
-  initial: MaskedSecret;
-  inherited: boolean;
-  /** The `[chat]` policy is inherited from the workspace, so a key saved here is
-   *  not used until this member declares its own model (HF-1, ADR-67 §2). */
-  policyInherited: boolean;
-  /** Called after a successful key write — the credential's resolution may have
-   *  changed (clearing the member's key hands it to the workspace's). */
-  onSaved?: () => void;
-}) {
-  const [masked, setMasked] = useState<MaskedSecret>(initial);
-  const [value, setValue] = useState("");
-  const [result, setResult] = useState<ResultMessage | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  async function onSave() {
-    setSaving(true);
-    setResult(null);
-    try {
-      const outcome = await saveSecret(value);
-      // Clear the typed secret from state the moment it is persisted.
-      setValue("");
-      if (outcome) setMasked(outcome.chat_key);
-      setResult({ kind: "ok", text: describeSecret(outcome) });
-      onSaved?.();
-    } catch (e) {
-      setResult(
-        e instanceof ConfigMutateError
-          ? { kind: "error", text: describeWriteError(e.status, e.detail) }
-          : { kind: "error", text: `Save failed: ${errorText(e)}` },
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Widget panel="chatKey" title="chat API key">
-      <div className={styles.fileHead}>
-        {masked.present ? (
-          <Badge tone="green">set · ends …{masked.last4 ?? ""}</Badge>
-        ) : (
-          <Badge tone="muted">not set</Badge>
-        )}
-        <span className={styles.path}>.logos/secrets.toml</span>
-      </div>
-      <p className={styles.help}>
-        The LLM API key for the chat agent. It is a secret: stored in the gitignored{" "}
-        <code>.logos/secrets.toml</code> and never echoed — this page only shows whether a key is
-        set and its last 4 characters.
-      </p>
-      {/* S-452: an inherited key is disclosed, never shown — not even its last-4,
-          which belongs to the workspace root's secret, not this member's. */}
-      {/* HF-1: under an inherited policy only the workspace root's key is dialled,
-          so the card says so even when neither root holds a key. */}
-      {(inherited || policyInherited) && !masked.present && (
-        <p className={styles.inherited}>
-          {inherited ? (
-            <>
-              No key is set for this member, so the key is inherited from the workspace root (
-              <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>).
-            </>
-          ) : (
-            <>
-              No key is set for this member, and the workspace root (
-              <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>) declares none for the
-              inherited <code>[chat]</code> table.
-            </>
-          )}{" "}
-          {policyInherited
-            ? "A key saved here is not used while this member inherits the workspace [chat] table; set a [chat] model above for this member to use its own key."
-            : "Saving a key here overrides it for this member only."}
-        </p>
-      )}
-      <TextField
-        label="api_key"
-        type="password"
-        autoComplete="off"
-        spellCheck={false}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="enter a new key to replace, or leave blank to clear"
-        hint="Write-only. Always blank on load; type a new key to replace, or save it empty to remove the key."
-        className="mono"
-      />
-      <div className={styles.actions}>
-        <Button variant="primary" onClick={onSave} disabled={saving} aria-busy={saving}>
-          {saving ? "Saving…" : "Save key"}
-        </Button>
-      </div>
-      <ResultPanel result={result} />
     </Widget>
   );
 }
@@ -860,45 +615,18 @@ function GraphConsistencyCard() {
   );
 }
 
-/**
- * The member chat API key card — the `chat` extension's member config panel (S-643),
- * mounted beneath the config document by {@link ExtensionConfigPanels} while the
- * extension is active. Seeded from the Config view's read-model, and told the
- * resolution's current state (the re-read after each save) for its inheritance
- * notes; its own save asks the view to re-read. Renders nothing outside a Config
- * view that hands it a host.
- */
-export function ChatKeyPanel({ host }: ConfigPanelProps): ReactNode {
-  if (host === undefined) return null;
-  const effective = host.fresh?.effective_chat ?? null;
-  return (
-    <SecretEditor
-      initial={host.model.chat_key}
-      inherited={effective?.credential_origin === "workspace"}
-      policyInherited={effective?.policy_origin === "workspace"}
-      onSaved={host.refresh}
-    />
-  );
-}
-
 /** The editors over a loaded read-model. */
 function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
-  // The inheritance notes are claims about the RESOLUTION, which a save can change
-  // (a member that declares its own model stops inheriting the table). So the
-  // read-model is re-read after a write; the editors themselves keep their own state
-  // and are never re-seeded from it. A failed re-read drops the notes rather than
-  // keep asserting a resolution this page no longer knows to be current (NFR-CC-04).
+  // A mounted panel's claims may be about the RESOLUTION, which a save can change, so
+  // the read-model is re-read after a write and handed to the panels as `fresh`; the
+  // editors themselves keep their own state and are never re-seeded from it. A failed
+  // re-read hands `null`, so a panel drops claims about a resolution this page no
+  // longer knows to be current (NFR-CC-04).
   const [fresh, setFresh] = useState<ConfigReadModel | null>(model);
   const refresh = useCallback(() => {
     fetchConfig().then(setFresh, () => setFresh(null));
   }, []);
   const host: ConfigPanelHost = useMemo(() => ({ model, fresh, refresh }), [model, fresh, refresh]);
-  // `[chat]` is the `chat` extension's table (S-643): its typed fields are offered
-  // while the extension mounts a panel editing it.
-  const withChat = useMountedConfigTable("member", "chat");
-  // `[wiki]` likewise the `wiki` extension's (S-644).
-  const withWiki = useMountedConfigTable("member", "wiki");
-  const effective = fresh?.effective_chat ?? null;
   // One stack (S-617, FR-UI-40): the advisory, then each editor panel.
   return (
     <WidgetStack>
@@ -912,15 +640,12 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <FileEditor
         file="config"
         view={model.config}
-        groups={configGroups(model.config.parsed, model.defaults.config, effective, withChat, withWiki)}
+        groups={configGroups(model.config.parsed, model.defaults.config)}
         isRules={false}
         onSaved={refresh}
       />
       {/* The mounted extensions' panels (S-642), directly beneath the config document
-          whose tables they edit: the chat key card sits right under the [chat] fields
-          (S-452) — a separate save to a separate endpoint, and an unrelated card between
-          the two made saving the config document read as completing the chat
-          configuration. */}
+          whose tables they edit (S-452). */}
       <ExtensionConfigPanels scope="member" host={host} />
       <GraphConsistencyCard />
       <FileEditor
@@ -938,37 +663,38 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
  *  surfaces the fault rather than a fabricated form (NFR-RA-05). */
 export function ConfigView() {
   const model = useApiResource<ConfigReadModel>(() => fetchConfig(), []);
-  const { mode, member } = useWorkspace();
-  const repairHref = workspaceConfigRepairHref(chatScope(mode, member));
+  const { mode } = useWorkspace();
   return (
     <AsyncResource
       resource={model}
       loadingLabel="Loading the config…"
-      errorNote={repairHref && <ConfigReadRepairNote href={repairHref} />}
+      errorNote={mode === "workspace" && <ConfigReadRepairNote />}
     >
       {(m) => <ConfigEditor model={m} />}
     </AsyncResource>
   );
 }
 
+/** The workspace-root file a member may inherit configuration from. */
+const WORKSPACE_CONFIG_FILE = "<workspace-root>/.logos/config.toml";
+/** The workspace-root file a member may inherit its stored key from. */
+const WORKSPACE_SECRETS_FILE = "<workspace-root>/.logos/secrets.toml";
+
 /**
  * Workspace mode only (HF-2, Sprint 77 review option 4i): appended to the
- * shared error panel when this read fails. Identical to the Chat tab's note
- * over the same read (`ChatView.tsx`) — the fault could be this member's own
- * `config.toml`/`secrets.toml`, or the inherited workspace-tier file at the
- * workspace root, and the 500 body cannot reliably say which
- * (`workspaceConfigRepairHref`), so this names both rather than guess wrong.
- * Renders no file content (NFR-SE-07): only the two workspace-root paths by name.
+ * shared error panel when this read fails. The fault could be this member's own
+ * `config.toml`/`secrets.toml`, or a workspace-tier file it inherits from at the
+ * workspace root, and the 500 body cannot reliably say which, so this names both
+ * rather than guess wrong. Renders no file content (NFR-SE-07): only the two
+ * workspace-root paths by name.
  */
-function ConfigReadRepairNote({ href }: { href: string }) {
+function ConfigReadRepairNote() {
   return (
     <p>
       This can be an invalid file at this member&apos;s own root, or at the workspace root (
       <code>{WORKSPACE_CONFIG_FILE}</code> or <code>{WORKSPACE_SECRETS_FILE}</code>) — every member
-      inheriting from a broken workspace-root file fails the same read. The{" "}
-      <a href={href}>workspace Config</a> view says whether either workspace-root file is at fault
-      and repairs an invalid <code>{WORKSPACE_CONFIG_FILE}</code> in place; an unreadable{" "}
-      <code>{WORKSPACE_SECRETS_FILE}</code> is repaired by hand.
+      inheriting from a broken workspace-root file fails the same read. Repair the file at fault by
+      hand.
     </p>
   );
 }

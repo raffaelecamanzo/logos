@@ -7,92 +7,48 @@ members = [
     # The extension host (CR-213, ADR-74/75): the contract optional
     # capabilities compose through. Above logos-core (extensions work over
     # `&Engine`) and below every surface crate; no core crate depends on an
-    # extension crate, and only a binary's `main` names extensions.
+    # extension crate, and only a binary's `main` names extensions. This
+    # workspace's own binary composes none (FR-DS-05).
     "logos-ext",
-    # The source wiki (CR-008, CR-213, ADR-74): the `.logos/wiki.db` store, its
-    # tiers and the `wiki_*` operations, over `&Engine`. Above logos-core, which
-    # never depends on it; extracted from the core in S-644.
-    "logos-wiki",
     "cli",
     "mcp",
-    # The feature-gated web adapter (CR-012, ADR-27). A workspace member so its
-    # tests run with `cargo test --workspace`; it links into the `logos` binary
-    # only under cli's non-default `ui` feature, so its axum/hyper stack never
-    # enters the default-feature tree the no-network fitness test guards.
+    # The web adapter (CR-012, ADR-27). A workspace member so its tests run with
+    # `cargo test --workspace`; it links into the `logos` binary under cli's `ui`
+    # feature, default since CR-078/ADR-60, and the slim build
+    # (`--no-default-features --features lang-all`) carries none of its
+    # axum/hyper stack — the tree the no-network fitness test's slim check guards.
     "web",
-    # The ui-gated rig agent substrate (CR-046/CR-047, ADR-41/ADR-42). A
-    # workspace member so its tests run with `cargo test --workspace`; it
-    # reaches the `logos` binary only through the `chat` extension (`logos-chat`,
-    # S-643) and the wiki's in-app generator (`wiki-agent`, S-644), which only an
-    # `agents` build's `main` composes — `web` has no edge to it — so `rig` and
-    # its `reqwest` HTTP client never enter the default-feature tree the
-    # no-network fitness test guards (NFR-SE-01, ADR-40, ADR-74 §3).
-    "agent-core",
-    # The ui-gated chat-agent component (CR-045/CR-046, ADR-40/ADR-41): the
-    # conversation store (`.logos/chat.db`, S-168) now, the planner/subagent
-    # orchestrator later. A workspace member so its tests run with `cargo test
-    # --workspace`; it reaches the `logos` binary only through the `chat`
-    # extension (`logos-chat`, S-643), which only an `agents` build's `main`
-    # composes, so it never enters the default-feature tree the no-network
-    # fitness test guards, and removing `--features agents` yields no `chat.db`
-    # (NFR-SE-01, ADR-40 reversibility).
-    "chat-agent",
-    # The ui-gated wiki-agent component (CR-047, ADR-42): the single-purpose,
-    # queue-driven in-process wiki generation loop on the shared `agent-core`
-    # substrate. A workspace member so its tests run with `cargo test
-    # --workspace`; it reaches the `logos` binary only through the `wiki`
-    # extension, which an `agents` build's `main` hands its configured generator
-    # (S-644) — `web` has no edge to it — so `rig` and its `reqwest` HTTP client
-    # never enter the default-feature tree the no-network fitness test guards,
-    # and removing `--features agents` yields a binary with no in-process wiki
-    # generation (NFR-SE-01, ADR-40 reversibility).
-    "wiki-agent",
-    # The `chat` extension (S-643, CR-213, ADR-74): the chat routes, workspace
-    # chat, `[chat]` table, `chat.api_key` secret and SPA entries, composed in only
-    # by the `logos` binary's `main` under its `agents` feature. It depends on
-    # `web` and `logos-ext`; no core crate depends on it (ADR-74 §3), so a build
-    # without `agents` carries no chat surface and, through it, no `rig`/`reqwest`
-    # (NFR-SE-01, ADR-60).
-    "logos-chat",
 ]
 
 # Shared package metadata — inherited via `license.workspace = true`. Logos
 # ships under Apache-2.0 as license-clean public OSS (NFR-CR-01, ADR-16);
 # declaring it once here keeps every workspace crate consistent and satisfies
-# the cargo-deny license gate (deny.toml). `repository` feeds the cargo-dist
-# release pipeline (S-023, FR-DS-01): artifact URLs, the Homebrew formula,
-# and the shell-installer download base all derive from it.
+# the cargo-deny license gate (deny.toml). `repository` names the project's home
+# in the package metadata.
 #
 # `version` is the PRODUCT version, and it is shared for a reason. Every member
 # is `publish = false` and ships as one artifact — the single `logos` binary —
 # so a per-crate version is not a release contract, it is just a second number
 # nobody bumps. Two crates had drifted to `0.3.0` while the product shipped
 # 1.4.6, and both of them *print* their own version at a user: the MCP server's
-# `serverInfo` (hosts show it to identify the server) and the materialized
-# `logos-wiki` SKILL.md header. `env!("CARGO_PKG_VERSION")` expands to the
+# `serverInfo` (hosts show it to identify the server) and a materialized skill's
+# SKILL.md header. `env!("CARGO_PKG_VERSION")` expands to the
 # version of the crate it is written in, so both told the user 0.3.0. Inheriting
 # one version makes that macro correct wherever it appears and makes a release
-# bump a single edit. Found at the Sprint 64 human review; only the `dist = true`
-# package (cli) feeds cargo-dist, so renumbering the libraries changes no
-# artifact, tag, or download URL.
+# bump a single edit. Found at the Sprint 64 human review.
 [workspace.package]
-version = "1.15.8"
+version = "1.16.1"
 license = "Apache-2.0"
 repository = "https://github.com/raffaelecamanzo/logos"
 
 # ── Release profile (ADR-16 fitness note, NFR-PC-04) ─────────────────────────
 # The ≤50 MB default-binary budget is met with thin LTO + single codegen unit
-# + symbol stripping. cargo-dist's `dist` profile (below) inherits this, so a
-# local `cargo build --release` measures the same artifact shape CI ships.
+# + symbol stripping, so a local `cargo build --release` measures the artifact
+# shape the budget is stated for.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
-
-# The profile cargo-dist builds release artifacts with (generated by
-# `dist init`, kept thin: everything real lives in [profile.release]).
-[profile.dist]
-inherits = "release"
 
 # Shared dependency versions — all crates inherit from here.
 [workspace.dependencies]

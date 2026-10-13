@@ -1,7 +1,7 @@
 /*
  * The tool-panel register (S-617, CR-203 §3.2 A, FR-UI-39). A tool panel is a
- * search box, a query form, a configuration editor, the chat or a wiki page
- * body: it presents no figure, so it is exempt from why. It
+ * search box, a query form or a configuration editor: it presents no figure, so it
+ * is exempt from why. It
  * still takes the layout standard and states in one line what it is for: a view
  * renders it as `<Widget panel="key" title=…>`, and the frame reads the line
  * from here.
@@ -41,43 +41,11 @@ export const TOOL_PANELS = {
     reason: "A lookup driven by the canvas selection: it shows nothing until a symbol is locked.",
   },
 
-  // ── Wiki ─────────────────────────────────────────────────────────────────
-  wikiStartHere: {
-    name: "Start here",
-    what: "The first page to read in this wiki.",
-    reason: "Navigation into the wiki, with no figure.",
-  },
-  wikiWelcome: {
-    name: "Welcome to the wiki",
-    what: "How the wiki is organised, and how many agent-written pages it holds.",
-    reason: "An introduction to the wiki's sections; its one count is the page total, not a finding.",
-  },
-  wikiSearch: {
-    name: "Search",
-    what: "Searches the titles and bodies of every wiki page as you type.",
-    reason: "A search box: it shows nothing until you type.",
-  },
-  wikiPage: {
-    name: "Wiki page",
-    what: "One wiki page, as an agent wrote it about this codebase.",
-    reason: "A wiki page body: prose to read, with no figure.",
-  },
-  wikiAnchors: {
-    name: "Anchors",
-    what: "The code entities this page documents, each marked fresh or stale against the current code.",
-    reason: "Part of the page reader: the page's own list of what it documents, read beside its body.",
-  },
-
   // ── Config ───────────────────────────────────────────────────────────────
   policyFile: {
     name: "Policy file editor",
     what: "Edits one policy file in place; Save checks the whole file and writes it, and Apply puts it into effect.",
     reason: "A configuration editor: its fields are settings you change, not figures.",
-  },
-  chatKey: {
-    name: "Chat API key",
-    what: "Sets the API key the chat uses; the key is stored as a secret and only its last four characters are ever shown.",
-    reason: "A configuration editor for one secret.",
   },
   graphConsistency: {
     name: "Graph consistency check",
@@ -88,13 +56,6 @@ export const TOOL_PANELS = {
     name: "Workspace configuration group",
     what: "Edits one of the workspace's own files, named beside the title; each group saves on its own.",
     reason: "A configuration editor for a workspace-root file.",
-  },
-
-  // ── Chat ─────────────────────────────────────────────────────────────────
-  chatConversation: {
-    name: "Conversation",
-    what: "Ask about this code; each answer is built from the graph and the source.",
-    reason: "The chat: a conversation, with no figure.",
   },
 
   // ── Workspace ────────────────────────────────────────────────────────────

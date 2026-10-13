@@ -85,9 +85,9 @@ pub const XSERVICE_TOOLS: &[&str] = &[
 
 /// How many tools the single-root backing registers — derived, never written.
 ///
-/// The core's own roster: the `wiki` extension's five `wiki_*` tools join it
-/// through the extension host since S-644, and are rostered with the extension
-/// (`logos-wiki/tests/wiki_parity.rs`).
+/// The core's own roster. A composed extension's tools join it through the
+/// extension host (S-644), and are rostered with that extension; this
+/// repository's binary composes none.
 pub const SINGLE_ROOT: usize =
     NAV_TOOLS.len() + QUALITY_TOOLS.len() + TEMPORAL_TOOLS.len() + COVERAGE_TOOLS.len();
 

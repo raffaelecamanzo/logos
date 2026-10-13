@@ -8,8 +8,8 @@
  * — the second factor the server's same-origin/intent guard requires. Reads of
  * the `/api/v1` read-model carry no token (the surface is GET-only there).
  *
- * The masked chat key is never delivered here, and this module never logs the
- * token (NFR-SE-07).
+ * No stored secret (a configured key) is ever delivered here, and this module
+ * never logs the token (NFR-SE-07).
  */
 
 /** The request header the server's intent guard checks (mirrors web::INTENT_HEADER). */

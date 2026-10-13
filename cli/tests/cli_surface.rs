@@ -134,35 +134,6 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["coverage", "status"],
     &["coverage", "ingest", "coverage.lcov", "--format", "lcov"],
     &["coverage", "refresh"],
-    #[cfg(feature = "wiki")]
-    &[
-        "wiki",
-        "write",
-        "guide/a",
-        "--title",
-        "About a",
-        "--generator",
-        "gen",
-        "--anchor",
-        "file:src/a.rs",
-        "the body",
-    ],
-    #[cfg(feature = "wiki")]
-    &["wiki", "read", "guide/a"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "search", "phrase"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "search", "--list"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "status"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "generate"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "materialize"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "hook", "--emit"],
-    #[cfg(feature = "wiki")]
-    &["wiki", "delete", "guide/a"],
     &["stats", "--window", "30"],
     &["languages"],
     &["serve", "--mcp"],
@@ -588,30 +559,6 @@ fn a_missing_index_exits_three_with_an_actionable_message() {
         stderr.contains("logos index"),
         "the error names the remedy (NFR-UX-02): {stderr}"
     );
-}
-
-/// The `wiki` extension's subcommands keep the core's guard (S-644): over a root
-/// with no index each exits 3 naming the remedy, and none creates a store — the
-/// guard is shared (`logos_ext::cli::CliContext::engine`), not re-spelled per arm.
-#[cfg(feature = "wiki")]
-#[test]
-fn a_wiki_subcommand_without_an_index_exits_three_and_creates_no_store() {
-    let commands: [&[&str]; 6] = [
-        &["wiki", "status"],
-        &["wiki", "read", "overview/project-overview"],
-        &["wiki", "search", "anything"],
-        &["wiki", "generate"],
-        &["wiki", "materialize"],
-        &["wiki", "delete", "overview/project-overview"],
-    ];
-    for args in commands {
-        let tmp = TempDir::new().unwrap();
-        let out = logos(tmp.path(), args);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(exit_code(&out), 3, "`logos {}` without an index: {stderr}", args.join(" "));
-        assert!(stderr.contains("logos index"), "`logos {}` names the remedy: {stderr}", args.join(" "));
-        assert!(!tmp.path().join(".logos").exists(), "`logos {}` created no store", args.join(" "));
-    }
 }
 
 /// FR-GV-03 / UAT-CL-02: a repo violating its checked-in contract exits 1
@@ -1167,14 +1114,11 @@ fn interactive_init_non_tty_applies_safe_defaults() {
         targets.contains(&"CLAUDE.md"),
         "CLAUDE.md step ran: {targets:?}"
     );
-    // The wiki-skill materialization is also a non-TTY `-i` default (FR-WK-08):
-    // confirm the CLI's init_options wiring enables it through the binary. It is
-    // the `wiki` extension's init step (S-644), so a build without the extension
-    // runs none — the skill is not materialized there.
-    assert_eq!(
-        targets.contains(&".agents/skills/logos-wiki"),
-        cfg!(feature = "wiki"),
-        "the wiki skill step runs exactly when the wiki is composed: {targets:?}"
+    // A skill is materialized only by a step a composed extension contributes,
+    // and this build composes none (FR-DS-05): no step writes under `.agents/`.
+    assert!(
+        !targets.iter().any(|t| t.starts_with(".agents")),
+        "no skill step runs in a build that composes no extension: {targets:?}"
     );
     assert!(
         !targets.contains(&".logos/hooks"),
@@ -1182,13 +1126,7 @@ fn interactive_init_non_tty_applies_safe_defaults() {
     );
     assert!(tmp.path().join(".mcp.json").is_file());
     assert!(tmp.path().join("CLAUDE.md").is_file());
-    assert_eq!(
-        tmp.path()
-            .join(".agents/skills/logos-wiki/SKILL.md")
-            .is_file(),
-        cfg!(feature = "wiki"),
-        "wiki skill materialized on non-TTY -i exactly when the wiki is composed"
-    );
+    assert!(!tmp.path().join(".agents").exists(), "no skill is materialized");
     assert!(!tmp.path().join(".logos/hooks").exists());
 }
 
@@ -1733,366 +1671,29 @@ fn a_db_less_worktree_seeds_instead_of_refusing() {
     );
 }
 
-// ── FR-WK-08: the embedded wiki-generation skill through the binary ─────────
-
-/// `logos wiki skill --emit` materializes the canonical layout (exit 0) and
-/// `--json` emits the machine-readable summary; an unforced re-emit skips,
-/// `--force` restores (UAT-WK-04). Run through the real binary so the offline
-/// path (NFR-SE-01) and exit codes are exactly as CI sees them.
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_skill_emit_materializes_and_is_idempotent() {
-    let tmp = TempDir::new().unwrap();
-
-    let out = logos(tmp.path(), &["--json", "wiki", "skill", "--emit"]);
-    assert_eq!(
-        exit_code(&out),
-        0,
-        "emit succeeds: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let body = String::from_utf8_lossy(&out.stdout);
-    assert!(body.contains("\"action\":\"created\""), "json: {body}");
-    let skill_file = tmp.path().join(".agents/skills/logos-wiki/SKILL.md");
-    assert!(skill_file.exists(), "canonical dir written");
-    assert!(
-        tmp.path().join(".claude/skills/logos-wiki").exists(),
-        ".claude pointer written"
-    );
-    // Capture the materialized content so the --force restore can be checked
-    // positively (byte-equality), not merely as "no longer the local edit".
-    let embedded = fs::read_to_string(&skill_file).unwrap();
-
-    // A local edit survives an unforced re-emit (skip-if-present).
-    fs::write(&skill_file, "LOCAL EDIT").unwrap();
-    let again = logos(tmp.path(), &["--json", "wiki", "skill", "--emit"]);
-    assert_eq!(exit_code(&again), 0);
-    assert!(String::from_utf8_lossy(&again.stdout).contains("\"action\":\"skipped\""));
-    assert_eq!(fs::read_to_string(&skill_file).unwrap(), "LOCAL EDIT");
-
-    // --force restores the embedded content byte-for-byte.
-    let forced = logos(
-        tmp.path(),
-        &["--json", "wiki", "skill", "--emit", "--force"],
-    );
-    assert_eq!(exit_code(&forced), 0);
-    assert!(String::from_utf8_lossy(&forced.stdout).contains("\"action\":\"forced\""));
-    assert_eq!(
-        fs::read_to_string(&skill_file).unwrap(),
-        embedded,
-        "--force restores the embedded content through the binary"
-    );
-}
-
-/// `wiki skill` without `--emit` is a clap usage error (exit 2): `--emit` is
-/// required so the verb reads `wiki skill --emit` (FR-CL-03).
-#[test]
-fn wiki_skill_requires_emit() {
-    let tmp = TempDir::new().unwrap();
-    let out = logos(tmp.path(), &["wiki", "skill"]);
-    assert_eq!(exit_code(&out), 2, "missing --emit is a usage error");
-}
-
-// ── FR-WK-13: `logos wiki generate` offline generation queue ────────────────
-
-/// `wiki generate` formats the `wiki status` work-list into a deterministic
-/// generation queue through the real binary: the default is a human prompt
-/// block, `--json` is a byte-identical machine queue, the run writes no wiki
-/// page (a pure read), and the queue carries the agent-tier sections with
-/// runnable `wiki write` skeletons — never any native-tier (Configuration)
-/// content (FR-WK-13, NFR-RA-06, NFR-SE-01).
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_generate_emits_a_deterministic_offline_queue() {
-    let tmp = fixture();
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    // Default: a non-empty human prompt block with runnable skeletons, exit 0.
-    let human = logos(tmp.path(), &["wiki", "generate"]);
-    assert_eq!(
-        exit_code(&human),
-        0,
-        "{}",
-        String::from_utf8_lossy(&human.stderr)
-    );
-    let block = String::from_utf8_lossy(&human.stdout);
-    assert!(
-        block.contains("Wiki generation queue —") && block.contains("logos wiki write "),
-        "the prompt block lists runnable `wiki write` skeletons: {block}"
-    );
-
-    // `--json`: a machine queue, exit 0, byte-identical across two runs.
-    let j1 = logos(tmp.path(), &["wiki", "generate", "--json"]);
-    let j2 = logos(tmp.path(), &["wiki", "generate", "--json"]);
-    assert_eq!(exit_code(&j1), 0, "{}", String::from_utf8_lossy(&j1.stderr));
-    assert_eq!(
-        j1.stdout, j2.stdout,
-        "the --json queue is byte-identical for a fixed wiki.db + revision"
-    );
-    let json: serde_json::Value = serde_json::from_slice(&j1.stdout).expect("one JSON document");
-    let items = json["items"].as_array().expect("items array");
-    assert!(
-        !items.is_empty(),
-        "an indexed project has agent-tier sections to generate"
-    );
-    // The six Overview children lead the queue, each with a runnable skeleton
-    // and target slug; the native-tier Configuration section never appears.
-    assert!(
-        items
-            .iter()
-            .any(|i| i["slug"] == "overview/project-overview"),
-        "the Overview sections are queued: {json}"
-    );
-    assert!(
-        items.iter().all(|i| {
-            let cmd = i["command"].as_str().unwrap_or_default();
-            let slug = i["slug"].as_str().unwrap_or_default();
-            cmd.starts_with("logos wiki write ") && !slug.is_empty()
-        }),
-        "every item carries its target slug and a runnable skeleton: {json}"
-    );
-    assert!(
-        items.iter().all(|i| {
-            let slug = i["slug"].as_str().unwrap_or_default();
-            !slug.contains("config")
-        }),
-        "no native-tier Configuration content is ever queued: {json}"
-    );
-
-    // The run is a pure read: no wiki page was written (the store enumerates empty).
-    let list = logos(tmp.path(), &["wiki", "search", "--list", "--json"]);
-    assert_eq!(exit_code(&list), 0);
-    let pages: serde_json::Value = serde_json::from_slice(&list.stdout).expect("JSON");
-    assert_eq!(
-        pages.as_array().map(Vec::len),
-        Some(0),
-        "wiki generate wrote no page — it is a pure read of the work-list"
-    );
-}
-
-/// AC3 end-to-end through the binary: an empty work-list yields the explicit
-/// "nothing to generate" result and exit 0, never a fabricated queue (FR-WK-13).
-/// An empty project still surfaces the five Overview sections after `index`, so
-/// the empty path is reached by writing those five (zero-anchor) pages at the
-/// current revision — they then drop off the work-list, leaving nothing to do.
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_generate_on_an_empty_work_list_reports_nothing_to_generate() {
-    // An empty project (no source files) → after index, the only work is the
-    // five Overview sections; no per-file objectives, no unanchored entities.
-    // (The synthesized overview/architecture page is retired by CR-062.)
-    let tmp = TempDir::new().unwrap();
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    for (slug, title) in [
-        ("overview/project-overview", "Project Overview"),
-        ("overview/getting-started", "Getting Started"),
-        ("overview/key-concepts", "Key concepts"),
-        ("overview/how-it-works", "How It Works"),
-        ("overview/known-issues", "Known issues"),
-    ] {
-        // Zero-anchor overview pages, written at the current graph revision, so
-        // they are neither absent nor revision-stale → off the work-list.
-        let out = logos(
-            tmp.path(),
-            &[
-                "wiki", "write", slug, "--title", title, "--generator", "test",
-                    "# Page\n\nPlaceholder prose long enough to clear the write-path guard.",
-            ],
-        );
-        assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-    }
-
-    // Default human path: the explicit sentinel, exit 0.
-    let human = logos(tmp.path(), &["wiki", "generate"]);
-    assert_eq!(exit_code(&human), 0);
-    assert!(
-        String::from_utf8_lossy(&human.stdout).contains("Nothing to generate"),
-        "empty work-list → explicit 'nothing to generate': {}",
-        String::from_utf8_lossy(&human.stdout)
-    );
-
-    // Machine path: an empty items array, exit 0, no fabricated queue.
-    let json = logos(tmp.path(), &["wiki", "generate", "--json"]);
-    assert_eq!(exit_code(&json), 0);
-    let queue: serde_json::Value = serde_json::from_slice(&json.stdout).expect("JSON");
-    assert_eq!(
-        queue["items"].as_array().map(Vec::len),
-        Some(0),
-        "empty work-list → empty items array, never fabricated: {queue}"
-    );
-}
-
-// ── FR-WK-20 / FR-WK-09: `logos wiki materialize` deterministic presented tier ──
-
-/// In SRS mode (Case 1), `logos wiki materialize` presents the Architecture
-/// page and the present Design/Specs categories from `docs/specs/**` into
-/// `wiki.db` — a pure deterministic write, no LLM/network — and re-running is
-/// byte-identical (FR-WK-20, NFR-SE-01).
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_materialize_presents_design_specs_pages_in_srs_mode() {
-    let tmp = fixture();
-    write(
-        tmp.path(),
-        "docs/specs/architecture.md",
-        "# Architecture\n\nThe system design.\n",
-    );
-    write(
-        tmp.path(),
-        "docs/specs/requirements/FR-X-01.md",
-        "# FR-X-01\n\nA requirement.\n",
-    );
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    let out = logos(tmp.path(), &["--json", "wiki", "materialize"]);
-    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
-    assert_eq!(summary["srs_mode"], true, "architecture.md + a requirement → Case 1");
-    assert_eq!(
-        summary["materialized"],
-        serde_json::json!(["overview/architecture", "specs/functional-requirements"]),
-    );
-
-    // The presented page reads with doc-present provenance, never the
-    // generated-content marker.
-    let read = logos(tmp.path(), &["--json", "wiki", "read", "overview/architecture"]);
-    assert_eq!(exit_code(&read), 0);
-    let page: serde_json::Value = serde_json::from_slice(&read.stdout).expect("JSON");
-    assert_eq!(page["generator"], "logos:doc-present");
-
-    // Re-running is byte-identical (idempotent, no new work, nothing pruned).
-    let again = logos(tmp.path(), &["--json", "wiki", "materialize"]);
-    assert_eq!(exit_code(&again), 0);
-    assert_eq!(
-        out.stdout, again.stdout,
-        "wiki materialize is byte-identical on re-run over an unchanged tree"
-    );
-}
-
-/// Outside SRS mode (Case 2, no `docs/specs/architecture.md`), `wiki
-/// materialize` is a no-op: the empty summary, no `wiki.db` write (FR-WK-21).
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_materialize_is_a_no_op_outside_srs_mode() {
-    let tmp = fixture();
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    let out = logos(tmp.path(), &["--json", "wiki", "materialize"]);
-    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
-    assert_eq!(
-        summary,
-        serde_json::json!({"srs_mode": false, "materialized": [], "pruned": []}),
-        "Case 2 is the empty summary — no LLM/network, no wiki.db write"
-    );
-
-    let list = logos(tmp.path(), &["wiki", "search", "--list", "--json"]);
-    assert_eq!(exit_code(&list), 0);
-    let pages: serde_json::Value = serde_json::from_slice(&list.stdout).expect("JSON");
-    assert_eq!(
-        pages.as_array().map(Vec::len),
-        Some(0),
-        "materialize wrote no page outside SRS mode"
-    );
-}
-
-// ── FR-WK-19: content-validity guard on the CLI `wiki write` stdin path ──────
-
-/// Run `logos wiki write <args> --body-file -` with `body` piped on stdin — the
-/// external-agent write surface ([FR-WK-19]).
-#[cfg(feature = "wiki")]
-fn wiki_write_via_stdin(project: &Path, slug: &str, title: &str, body: &str) -> Output {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_logos"))
-        .arg("--project")
-        .arg(project)
-        .args(["wiki", "write", slug, "--title", title, "--generator", "test", "--body-file", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the logos binary runs");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(body.as_bytes())
-        .expect("write body to stdin");
-    child.wait_with_output().expect("the process exits")
-}
-
-/// A garbage body (a `<tool_call>` dump) piped via stdin is rejected with a
-/// non-zero exit and leaves no page behind — the CLI `wiki write` stdin path is
-/// the same guard the in-process run goes through ([FR-WK-19]).
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_write_rejects_a_garbage_body_piped_via_stdin() {
-    let tmp = TempDir::new().unwrap();
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    let out = wiki_write_via_stdin(
-        tmp.path(),
-        "guide/noise",
-        "Noise",
-        "<tool_call>\n{\"name\": \"read_file\"}\n</tool_call>",
-    );
-    assert_ne!(exit_code(&out), 0, "a tool-call dump body is rejected");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("FR-WK-19"),
-        "the rejection names the content-validity guard: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let read = logos(tmp.path(), &["--json", "wiki", "read", "guide/noise"]);
-    assert_eq!(exit_code(&read), 0);
-    assert_eq!(
-        String::from_utf8_lossy(&read.stdout).trim(),
-        "null",
-        "the rejected write left no page to read"
-    );
-}
-
-/// A well-formed body piped via the same stdin path is stored — the guard
-/// rejects agent-noise, not the stdin surface itself ([FR-WK-19]). The
-/// read-back body is compared byte-for-byte, not just checked for presence,
-/// so a stdin-path bug that truncated or mangled the piped body would fail
-/// this test rather than slip through on a bare exit-code/null check.
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
-#[test]
-fn wiki_write_accepts_a_well_formed_body_piped_via_stdin() {
-    let tmp = TempDir::new().unwrap();
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    let body = "# OK\n\nPlaceholder prose long enough to satisfy the write-path content-validity guard.";
-    let out = wiki_write_via_stdin(tmp.path(), "guide/ok", "OK", body);
-    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-
-    let read = logos(tmp.path(), &["--json", "wiki", "read", "guide/ok"]);
-    assert_eq!(exit_code(&read), 0, "the accepted write is readable");
-    let page: serde_json::Value = serde_json::from_slice(&read.stdout).expect("JSON");
-    assert_eq!(
-        page["body"].as_str(),
-        Some(body),
-        "the read-back body is byte-identical to what was piped via stdin: {page}"
-    );
-}
-
 // ── CR-070 / FR-WK-14 retirement: the PostToolUse augmentation hook is gone ──
 
-/// `logos wiki hook --emit` materializes only the marker-tagged session-start
+/// The file names under `<root>/.claude/hooks/`, sorted — what a hook install left
+/// there, so an assertion holds the whole directory rather than one known name.
+fn hook_scripts(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(root.join(".claude/hooks"))
+        .expect(".claude/hooks/ is written")
+        .map(|entry| entry.expect("a directory entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `logos hook --emit` materializes only the marker-tagged session-start
 /// quality-report script + settings entry (exit 0), is idempotent on re-run,
 /// `--force` re-emits without duplicating, and a foreign settings file is
 /// never overwritten (FR-IN-07). Run through the real binary so the offline
 /// path (NFR-SE-01) and exit codes are exactly as CI sees them.
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
-fn wiki_hook_emit_installs_and_is_idempotent() {
+fn hook_emit_installs_and_is_idempotent() {
     let tmp = TempDir::new().unwrap();
 
-    let out = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    let out = logos(tmp.path(), &["--json", "hook", "--emit"]);
     assert_eq!(
         exit_code(&out),
         0,
@@ -2116,7 +1717,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
 
     // Idempotent: an unforced re-emit skips, leaving the settings byte-identical.
     let before = fs::read(tmp.path().join(".claude/settings.json")).unwrap();
-    let again = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    let again = logos(tmp.path(), &["--json", "hook", "--emit"]);
     assert_eq!(exit_code(&again), 0);
     assert!(String::from_utf8_lossy(&again.stdout).contains("\"action\":\"skipped\""));
     assert_eq!(
@@ -2126,7 +1727,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
     );
 
     // --force re-emits exactly one entry (no duplicate).
-    let forced = logos(tmp.path(), &["--json", "wiki", "hook", "--emit", "--force"]);
+    let forced = logos(tmp.path(), &["--json", "hook", "--emit", "--force"]);
     assert_eq!(exit_code(&forced), 0);
     assert!(String::from_utf8_lossy(&forced.stdout).contains("\"action\":\"forced\""));
     let settings: serde_json::Value =
@@ -2141,7 +1742,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
     // A drifted managed entry is rewritten unforced, and the JSON says
     // `reconciled` — NOT `forced`, which promises local edits were overwritten
     // (CR-095 §3.5). Asserted through the binary because `action` is a
-    // serialized contract shared with `wiki skill --emit`.
+    // serialized contract.
     let mut drifted = settings.clone();
     drifted["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = serde_json::json!(1);
     fs::write(
@@ -2149,7 +1750,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
         serde_json::to_string_pretty(&drifted).unwrap(),
     )
     .unwrap();
-    let healed = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    let healed = logos(tmp.path(), &["--json", "hook", "--emit"]);
     assert_eq!(exit_code(&healed), 0);
     let out = String::from_utf8_lossy(&healed.stdout);
     assert!(out.contains("\"action\":\"reconciled\""), "{out}");
@@ -2166,41 +1767,27 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
     );
 }
 
-/// `wiki hook` without `--emit` is a clap usage error (exit 2).
-#[test]
-fn wiki_hook_requires_emit() {
-    let tmp = TempDir::new().unwrap();
-    assert_eq!(exit_code(&logos(tmp.path(), &["wiki", "hook"])), 2);
-}
-
-/// [CR-070]/[CR-095]: `wiki hook --emit` materializes only the session-start
+/// [CR-070]/[CR-095]: `hook --emit` materializes only the session-start
 /// quality-report hook — still a single summary object, not an array, since
 /// [CR-095] replaced one hook with one hook — and produces no augmentation
 /// script or PostToolUse entry (the retired [FR-WK-14] hook), and no retired
 /// SessionEnd quality-report entry.
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
-fn wiki_hook_emit_installs_only_the_quality_report_hook() {
+fn hook_emit_installs_only_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
 
-    let out = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    let out = logos(tmp.path(), &["--json", "hook", "--emit"]);
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("object JSON");
     assert!(summary.is_object(), "a single summary object, not an array: {summary}");
     assert_eq!(summary["action"], "created");
     assert_eq!(summary["settings"], ".claude/settings.json");
 
-    // No augmentation script or PostToolUse entry anywhere.
-    assert!(
-        !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
-        "the retired augmentation script is never materialized"
-    );
+    // No augmentation script or PostToolUse entry anywhere: the one script in
+    // `.claude/hooks/` is the quality-report hook, so neither retired script — the
+    // augmentation hook's nor the SessionEnd one's (CR-095) — is materialized.
     let quality_script = tmp.path().join(".claude/hooks/logos-quality-open.sh");
-    assert!(quality_script.exists(), "the quality-report script is written");
-    assert!(
-        !tmp.path().join(".claude/hooks/logos-quality-report.sh").exists(),
-        "the retired SessionEnd script is never materialized (CR-095)"
-    );
+    assert_eq!(hook_scripts(tmp.path()), ["logos-quality-open.sh"], "only the quality-report script is written");
     assert!(
         fs::read_to_string(&quality_script)
             .unwrap()
@@ -2240,24 +1827,20 @@ fn wiki_hook_emit_installs_only_the_quality_report_hook() {
     );
 }
 
-/// [CR-047]/[CR-070] retirement regression: no artifact `wiki hook --emit` (or
+/// [CR-047]/[CR-070] retirement regression: no artifact `hook --emit` (or
 /// `init -i`, covered separately in `logos-core/tests/init.rs`) materializes
 /// references a `claude -p` invocation or the retired autogen hook script, no
 /// augmentation script is written, and no `.claude/settings.local.json` is
 /// ever written (FR-WK-14, FR-WK-16, NFR-SE-01).
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
 fn no_autogen_hook_or_claude_p_reference_remains() {
     let tmp = TempDir::new().unwrap();
-    assert_eq!(exit_code(&logos(tmp.path(), &["--json", "wiki", "hook", "--emit"])), 0);
+    assert_eq!(exit_code(&logos(tmp.path(), &["--json", "hook", "--emit"])), 0);
 
-    assert!(
-        !tmp.path().join(".claude/hooks/logos-wiki-autogen.sh").exists(),
-        "the retired autogen hook script is never materialized"
-    );
-    assert!(
-        !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
-        "the retired augmentation hook script is never materialized"
+    assert_eq!(
+        hook_scripts(tmp.path()),
+        ["logos-quality-open.sh"],
+        "neither the retired autogen nor the augmentation hook script is materialized"
     );
     assert!(
         !tmp.path().join(".claude/settings.local.json").exists(),
@@ -2265,21 +1848,20 @@ fn no_autogen_hook_or_claude_p_reference_remains() {
     );
     let body = fs::read_to_string(tmp.path().join(".claude/hooks/logos-quality-open.sh")).unwrap();
     assert!(
-        !body.contains("claude -p") && !body.contains("logos-wiki-autogen"),
+        !body.contains("claude -p") && !body.contains("autogen"),
         "the quality-report hook carries no claude -p invocation and no autogen reference"
     );
 }
 
 // ── CR-095 retirement: the SessionEnd quality-report hook is swept ───────────
 
-/// [CR-095]: `wiki hook --emit` through the real binary sweeps a retired
+/// [CR-095]: `hook --emit` through the real binary sweeps a retired
 /// SessionEnd quality-report entry and its orphaned script, reports the removal
 /// in its `--json` summary, and leaves a foreign SessionEnd entry untouched.
 /// Without the sweep an existing install keeps emitting `SessionEnd hook [...]
 /// failed: Hook cancelled` on every exit and every `/clear`.
-#[cfg(feature = "wiki")] // the `wiki` extension's command (S-644)
 #[test]
-fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
+fn hook_emit_sweeps_the_retired_session_end_hook() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
     let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
@@ -2299,7 +1881,7 @@ fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
     )
     .unwrap();
 
-    let out = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    let out = logos(tmp.path(), &["--json", "hook", "--emit"]);
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("object JSON");
     // Both halves of the sweep are reported: the deleted script and the removed
@@ -2333,7 +1915,7 @@ fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
     );
 
     // Idempotent: a second emit has nothing left to sweep and claims nothing.
-    let again = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    let again = logos(tmp.path(), &["--json", "hook", "--emit"]);
     assert_eq!(exit_code(&again), 0);
     let summary: serde_json::Value = serde_json::from_slice(&again.stdout).expect("object JSON");
     assert_eq!(

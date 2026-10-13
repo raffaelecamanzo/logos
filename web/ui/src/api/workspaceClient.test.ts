@@ -3,12 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setScopedMember } from "../workspace/scope.ts";
 import { ApiError } from "../intent.ts";
 import {
+  fetchWorkspaceConfig,
   fetchWorkspaceGovernance,
   fetchWorkspaceImpact,
   fetchWorkspaceReachability,
   fetchWorkspaceManifest,
   fetchWorkspaceRoster,
   probeWorkspace,
+  saveWorkspaceConfig,
   saveWorkspaceManifest,
 } from "./workspaceClient.ts";
 import { ConfigMutateError } from "./configClient.ts";
@@ -159,5 +161,49 @@ describe("the S-430 manifest read and save (FR-UI-38)", () => {
     stubOnce(403, "missing or invalid intent token");
     const err = (await saveWorkspaceManifest("c", "a").catch((e: unknown) => e)) as ConfigMutateError;
     expect(err.detail).toBe("missing or invalid intent token");
+  });
+});
+
+describe("the workspace-tier config read and save (S-450, FR-WS-30)", () => {
+  const document = {
+    config: {
+      content: "[chat]\n",
+      fingerprint: "f",
+      exists: true,
+      parsed: { chat: { provider: "openai" } },
+      error: null,
+    },
+    chat_key: { present: false, last4: null },
+    chat_key_error: null,
+  };
+
+  it("reads the tier document on its app-level route, never carrying the ambient member", async () => {
+    setScopedMember("api");
+    const calls = stubFetch(200, document);
+    await expect(fetchWorkspaceConfig()).resolves.toEqual(document);
+    expect(calls()).toEqual(["/api/v1/workspace/config"]);
+  });
+
+  it("refuses a 2xx that is not the read-model, rather than seed an editor from it (NFR-RA-05)", async () => {
+    for (const malformed of [{}, { ...document, config: { ...document.config, content: null } }, { ...document, chat_key: null }]) {
+      stubFetch(200, malformed);
+      await expect(fetchWorkspaceConfig()).rejects.toThrow("answered without a config document or key state");
+    }
+    // A null half is accepted only with the fault that explains it.
+    stubFetch(200, { ...document, config: { ...document.config, parsed: null, error: "bad toml" } });
+    await expect(fetchWorkspaceConfig()).resolves.toBeTruthy();
+  });
+
+  it("saves against the loaded fingerprint, and resolves a 409 conflict as an outcome", async () => {
+    const conflict = { outcome: "conflict", loaded_fingerprint: "f", disk_fingerprint: "g", disk_content: "x" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        const form = new URLSearchParams(String(init?.body));
+        expect([form.get("file"), form.get("content"), form.get("fingerprint")]).toEqual(["config", "c", "f"]);
+        return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve(conflict) } as Response);
+      }),
+    );
+    await expect(saveWorkspaceConfig("c", "f")).resolves.toEqual(conflict);
   });
 });

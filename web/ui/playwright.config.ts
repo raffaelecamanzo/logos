@@ -20,7 +20,7 @@ import { defineConfig, devices } from "@playwright/test";
 // A spec runs in the project its file name names (`*.project.spec.ts`,
 // `*.workspace.spec.ts`). Chromium only. Run through `npm run test:e2e`, which
 // scripts/gate.sh's `ui-e2e` leg calls in the FULL tier only; the binary must
-// embed a real SPA build (`npm run build`, then `cargo build -p logos --features agents`).
+// embed a real SPA build (`npm run build`, then `cargo build -p logos`).
 const PROJECT_PORT = Number(process.env.LOGOS_E2E_PROJECT_PORT ?? 4991);
 const WORKSPACE_PORT = Number(process.env.LOGOS_E2E_WORKSPACE_PORT ?? 4992);
 

@@ -764,7 +764,7 @@ pub(crate) async fn search(
 
 /// The most distinct spans one resolution request resolves ([FR-UI-47]: the
 /// candidate count per turn is capped). The chat client sends at most this many
-/// (`CODE_REF_CAP` in `web/ui/src/views/chat/codeRefs.ts`); a request carrying
+/// (the chat client's own `CODE_REF_CAP`); a request carrying
 /// more is not refused — the excess is counted in `over_cap` and left unresolved,
 /// so a hand-built URL cannot buy unbounded lookups.
 pub(crate) const CODE_REF_CAP: usize = 24;

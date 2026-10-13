@@ -18,12 +18,10 @@
 //!   markers ([FR-IN-02]);
 //! - the optional git-hook installer via `core.hooksPath` ([FR-IN-03],
 //!   [FR-SY-05]);
-//! - the embedded wiki-generation skill materialized into the canonical
-//!   `.agents/skills/logos-wiki/` + `.claude/skills/logos-wiki` layout,
-//!   skip-if-present ([FR-IN-02] as modified by CR-008, [FR-WK-08]) — no
-//!   longer a core step: the `logos-wiki` crate owns the skill and supplies
-//!   the step as an [`InitContribution`] (S-644), which reads
-//!   [`InitOptions::materialize_skill`].
+//! - no skill of its own: a skill an extension ships is materialized by the
+//!   step that extension contributes as an [`InitContribution`] (S-644), which
+//!   reads [`InitOptions::materialize_skill`] ([FR-IN-02] as modified by
+//!   CR-008).
 //!
 //! Failure posture (DL-06): a host-integration target we cannot *safely*
 //! touch (malformed `.mcp.json`, a foreign `core.hooksPath`, a non-managed
@@ -64,11 +62,10 @@ pub struct InitOptions {
     pub write_claude_md: bool,
     /// Install git hooks via `core.hooksPath` (FR-IN-03).
     pub install_hooks: bool,
-    /// Materialize the embedded wiki-generation skill into the canonical layout
-    /// (`.agents/skills/logos-wiki/` + `.claude/skills/logos-wiki`),
-    /// skip-if-present (FR-IN-02 as modified by CR-008, FR-WK-08). The core
-    /// owns the flag, not the step: the contributed step the `logos-wiki`
-    /// crate supplies reads it (S-644).
+    /// Materialize the agent skills the composed extensions ship,
+    /// skip-if-present (FR-IN-02 as modified by CR-008). The core owns the
+    /// flag, not the step: a step an extension contributes reads it (S-644),
+    /// and the core materializes no skill of its own.
     pub materialize_skill: bool,
     /// Install the Claude Code **session-start** quality-report hook (FR-IN-07,
     /// ADR-49, CR-095): a marker-tagged hook script + a non-clobbering merge into

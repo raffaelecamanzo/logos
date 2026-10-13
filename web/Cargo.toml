@@ -19,10 +19,10 @@ publish = false
 default   = []
 lang-rust = ["logos-core/lang-rust", "mcp/lang-rust"]
 lang-all  = ["logos-core/lang-all", "mcp/lang-all"]
-# No `agents` feature (S-644): the two surfaces that dial — chat (S-643) and the
-# wiki's in-app generation (S-644) — are extensions (`logos-chat`, `logos-wiki` +
-# `wiki-agent`) that depend on this crate, never the reverse (ADR-74 §3), and that
-# only a binary's `main` composes under its own `agents` feature (CR-078, ADR-60).
+# No `agents` feature (S-644): the surfaces that dial — chat (S-643) and the
+# wiki's in-app generation (S-644) — are extensions that depend on this crate,
+# never the reverse (ADR-74 §3), and that only a binary's `main` composes
+# (CR-078, ADR-60); the binary this repository builds composes none (FR-DS-05).
 # This crate is the same listen-only dashboard in every build: no agent crate and
 # no egress client in its dependency tree (NFR-SE-01, ADR-40).
 

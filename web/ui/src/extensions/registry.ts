@@ -51,7 +51,7 @@ export type ConfigPanelScope = "member" | "workspace";
  * What a Config view hands the panels it mounts beside its own editors: the
  * read-model it loaded, and the latest re-read of it. The member Config view re-reads
  * after every save, because a save can change the resolution a panel states (a member
- * that declares its own `[chat] model` stops inheriting the table); `fresh` is that
+ * that declares a key of its own stops inheriting the workspace's); `fresh` is that
  * re-read, or `null` while the last one failed — a panel then drops claims about the
  * resolution rather than keep asserting one this page no longer knows to be current.
  * The workspace Config view hands none: its panels own their reads.
@@ -101,8 +101,8 @@ export interface ExtensionUi {
    * Where a navigation entry sits: the id of the entry it follows in its sidebar
    * section, per navigation id. Placement is the bundle's to declare, like a config
    * panel's scope — the manifest says WHAT is offered, the code where it renders —
-   * so an extension that ships a view the built-ins surround (chat's sits between
-   * Graph and Wiki) keeps its place. An entry with none, or whose anchor is not
+   * so an extension that ships a view the built-ins surround (one anchored after
+   * Graph, say) keeps its place. An entry with none, or whose anchor is not
    * offered, is appended (`nav.ts`).
    */
   navAfter?: Readonly<Record<string, string>>;

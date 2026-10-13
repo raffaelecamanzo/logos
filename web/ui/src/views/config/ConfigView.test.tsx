@@ -5,33 +5,25 @@
  *   - typed/raw-TOML round-trip (a typed edit patches the authoritative raw pane);
  *   - validate-then-write Save surfaces a 422 honestly with no fabricated success,
  *     and a mutating write carries the intent token (NFR-SE-06);
- *   - the chat key is write-only and never echoed onto the surface (NFR-SE-07);
+ *   - an inherited value or key in the read-model is never rendered or posted (NFR-SE-07);
  *   - the rules.toml confirm gate blocks the POST until confirmed (BR-35);
  *   - the explicit Apply is decoupled from Save and renders the honest outcome.
  */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ToastProvider } from "../../components/index.ts";
 import type { ConfigReadModel, VerifyReport } from "../../api/types.ts";
 import type { WorkspaceRoster } from "../../api/types.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../../extensions/registry.ts";
-import { mountChat } from "../../test/chat.ts";
-import { mountAgentsBuild, mountWiki } from "../../test/wiki.ts";
 import { extensionsInfo, STUB_UI, stubInfo } from "../../test/extensions.tsx";
 import { ConfigView } from "./ConfigView.tsx";
 import styles from "./ConfigView.module.css";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
-import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
-
-// The release (`agents`) build: the `chat` and `wiki` extensions active, as its server
-// reports them (S-643, S-644) — the `[chat]` fields and the key card are chat's, the
-// `[wiki]` fields the wiki's. A spec about a build without one clears the registry
-// first (`clearExtensions`) and mounts what that build composes.
-beforeEach(mountAgentsBuild);
+import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 
 afterEach(() => {
   cleanup();
@@ -39,9 +31,10 @@ afterEach(() => {
   clearExtensions();
 });
 
-/** A loaded read-model: an indexed config.toml with a `[chat]` section, a
- *  `[wiki]` section (S-224, FR-CF-07), and an absent rules.toml, plus a masked
- *  key (presence + last-4 only). */
+/** A loaded read-model, as the core serves it: an indexed config.toml that also
+ *  carries `[chat]` and `[wiki]` tables (tables only a build composing extensions
+ *  edits — here they are text in the raw pane), an absent rules.toml, and the
+ *  core's masked key slice (presence + last-4 only). */
 function model(): ConfigReadModel {
   return {
     config: {
@@ -188,118 +181,17 @@ describe("ConfigView typed/raw round-trip (FR-UI-12)", () => {
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
 
-    // The provider select starts at the parsed value; switching it patches the
-    // `provider` key inside the `[chat]` table of the raw pane in place.
-    fireEvent.change(screen.getByLabelText("provider"), { target: { value: "anthropic" } });
-    expect(configRaw().value).toContain('provider = "anthropic"');
+    // A typed scalar edit patches its key in the raw pane in place…
+    fireEvent.change(screen.getByLabelText("max_file_size"), { target: { value: "2048" } });
+    expect(configRaw().value).toContain("max_file_size = 2048");
 
-    // A typed model edit inserts the key into the same table.
-    fireEvent.change(screen.getByLabelText("model"), { target: { value: "claude-x" } });
-    expect(configRaw().value).toContain('model = "claude-x"');
+    // …a typed list edit inserts its key into the document…
+    fireEvent.change(screen.getByLabelText("include"), { target: { value: "src/**" } });
+    expect(configRaw().value).toContain('include = ["src/**"]');
 
     // Clearing an optional scalar removes its key (revert to default).
     fireEvent.change(screen.getByLabelText("max_file_size"), { target: { value: "" } });
     expect(configRaw().value).not.toContain("max_file_size");
-  });
-});
-
-describe("ConfigView [wiki] model field (S-224, FR-CF-07, FR-UI-12)", () => {
-  it("renders beside the [chat] fields and initializes from the read-model's [wiki].model", async () => {
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    expect(screen.getByText("[wiki]")).toBeInTheDocument();
-    expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("claude-wiki");
-  });
-
-  it("states the three-step fallback a blank wiki model resolves through (Sprint 77 HF-1)", async () => {
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    const fieldset = screen.getByText("[wiki]").closest("fieldset")!;
-    // A blank field no longer means "the [chat] model" for a member that inherits
-    // the workspace [chat] table: the workspace root's [wiki] model comes first.
-    expect(fieldset).toHaveTextContent(/the workspace root's \[wiki\] model while this member inherits the workspace \[chat\] table, else the effective \[chat\] model/);
-    expect(fieldset).not.toHaveTextContent(/Leave blank to fall back to \[chat\]\.model/);
-    expect(within(fieldset).getByLabelText("wiki model")).toHaveAttribute("placeholder", "leave blank to inherit");
-  });
-
-  it("carries no key or provider control — only the model field (no new secret surface, NFR-SE-07)", async () => {
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    const fieldset = screen.getByText("[wiki]").closest("fieldset")!;
-    expect(within(fieldset).getAllByRole("textbox")).toHaveLength(1);
-    expect(within(fieldset).queryByLabelText(/key/i)).not.toBeInTheDocument();
-  });
-
-  it("patches only [wiki].model in the raw candidate, leaving [chat].model untouched", async () => {
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    fireEvent.change(screen.getByLabelText("wiki model"), { target: { value: "claude-wiki-2" } });
-    expect(configRaw().value).toContain("[wiki]");
-    expect(configRaw().value).toContain('model = "claude-wiki-2"');
-    // The [chat] model field (a distinct table/key pair) is untouched.
-    expect((screen.getByLabelText("model") as HTMLInputElement).value).toBe("");
-
-    // Clearing it removes the key (revert to the [chat].model fallback).
-    fireEvent.change(screen.getByLabelText("wiki model"), { target: { value: "" } });
-    expect(configRaw().value).not.toContain('model = "claude-wiki-2"');
-  });
-
-  it("saves a valid [wiki].model edit through the same validated atomic write-back", async () => {
-    const calls = mockFetch({
-      "POST /config/save": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 96, provenance_stamped: false }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    fireEvent.change(screen.getByLabelText("wiki model"), { target: { value: "claude-wiki-2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
-    expect(await screen.findByText(/Saved \.logos\/config\.toml \(96 bytes\)/)).toBeInTheDocument();
-
-    const save = calls.find((c) => c.url === "/config/save");
-    expect(save?.body).toContain(encodeURIComponent('model = "claude-wiki-2"'));
-  });
-
-  it("rejects an invalid document inline with no partial write (BR-35), retaining the unsaved wiki edit", async () => {
-    mockFetch({
-      "POST /config/save": () => ({ ok: false, status: 422, body: "unknown key: wiki.bogus" }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    fireEvent.change(screen.getByLabelText("wiki model"), { target: { value: "claude-wiki-2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
-
-    expect(await screen.findByText(/Validation error: unknown key: wiki\.bogus/)).toBeInTheDocument();
-    expect(screen.queryByText(/Saved \.logos/)).not.toBeInTheDocument();
-    // A rejected save neither writes the file nor discards the user's edit —
-    // the candidate (and the typed field) still carry it, ready to retry.
-    expect(configRaw().value).toContain('model = "claude-wiki-2"');
-    expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("claude-wiki-2");
-  });
-
-  it("initializes to blank when the read-model omits [wiki] entirely (older server)", async () => {
-    const fixture = model();
-    delete fixture.config.parsed.wiki;
-    mockFetch({
-      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(fixture) }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    expect(screen.getByText("[wiki]")).toBeInTheDocument();
-    expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("");
   });
 });
 
@@ -343,15 +235,15 @@ describe("ConfigView default / recommended-baseline affordance (CR-067, FR-UI-12
   });
 
   it("never fabricates a default when the field has none in the projection", async () => {
-    mockFetch({});
+    // A projection carrying no value for a field (`null` on the wire) — the hint
+    // states that honestly rather than inventing one.
+    const m = model();
+    m.defaults.rules.constraints.max_cc = null;
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(m) }) });
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
-
-    // [chat].model and [wiki].model both have no code default (the
-    // configure-first / inherit-from-[chat] states) — the hint states that
-    // honestly rather than inventing a value, for both fields.
-    expect(fieldHintText("model")).toContain("Default: unset");
-    expect(fieldHintText("wiki model")).toContain("Default: unset");
+    expect(fieldHintText("max_cc")).toContain("Recommended: unset");
+    expect(fieldHintText("max_cc")).not.toContain("15");
   });
 });
 
@@ -424,14 +316,11 @@ describe("ConfigView round-trips only the literal document (S-448, NFR-RA-05)", 
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
 
-    // The typed [chat] fields pre-fill from the literal document, not the slice…
-    expect((screen.getByLabelText("model") as HTMLInputElement).value).toBe("");
-    expect((screen.getByLabelText("provider") as HTMLSelectElement).value).toBe("openai");
-    expect((screen.getByLabelText("base_url") as HTMLInputElement).value).toBe("https://openrouter.ai/api/v1");
+    // The raw pane holds the literal document, not the slice, and nothing on the
+    // page renders an inherited value or key.
     expect(configRaw().value).toBe(model().config.content);
-    // …and the key panel shows the member's own (absent) key, never the inherited one.
     expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/set · ends/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/inherited-model/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
     expect(await screen.findByText(/Saved \.logos\/config\.toml \(120 bytes\)/)).toBeInTheDocument();
@@ -440,402 +329,6 @@ describe("ConfigView round-trips only the literal document (S-448, NFR-RA-05)", 
     expect(new URLSearchParams(save?.body).get("content")).toBe(model().config.content);
     expect(save?.body).not.toContain("inherited-model");
     expect(calls.some((c) => c.url === "/config/secret")).toBe(false);
-  });
-});
-
-describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-30)", () => {
-  /** A member declaring only an endpoint and no key, inheriting BOTH halves: the
-   *  policy whole (it declares no `[chat] model`) and the workspace credential. */
-  function inheriting(): ConfigReadModel {
-    const m = model();
-    return {
-      ...m,
-      chat_key: { present: false },
-      effective_chat: {
-        policy: { provider: "anthropic", model: "ws/inherited-model", base_url: "https://api.anthropic.com" },
-        policy_origin: "workspace",
-        credential: { present: true, last4: "wk42" },
-        credential_origin: "workspace",
-        member_key_withheld: false,
-      },
-    };
-  }
-
-  it("shows the inherited policy as a note inside [chat], and a save still writes none of it", async () => {
-    const calls = mockFetch({
-      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }),
-      "POST /config/save": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 120, provenance_stamped: false }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    const legend = screen.getByText("[chat]", { selector: "legend" });
-    const note = screen.getByText(/table is inherited from the workspace root/, { selector: "p" });
-    // The note lives in the [chat] fieldset, and names what is actually in effect.
-    expect(legend.closest("fieldset")).toContainElement(note);
-    expect(note).toHaveTextContent("ws/inherited-model");
-    expect(note).toHaveTextContent("anthropic");
-    // Read-only: prose, never a control carrying the inherited value.
-    expect(note.querySelector("input, select, textarea")).toBeNull();
-    for (const el of screen.getAllByRole("textbox")) {
-      expect((el as HTMLInputElement).value).not.toContain("ws/inherited-model");
-    }
-
-    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
-    await screen.findByText(/Saved \.logos\/config\.toml/);
-    const written = new URLSearchParams(calls.find((c) => c.url === "/config/save")?.body).get("content");
-    // The written file is the member's literal document: it still declares no model.
-    expect(written).toBe(model().config.content);
-    const chatTable = written?.split(/^\[/m).find((t) => t.startsWith("chat]")) ?? "";
-    expect(chatTable).not.toMatch(/^\s*model\s*=/m);
-    expect(written).not.toContain("ws/inherited-model");
-    expect(written).not.toContain("api.anthropic.com");
-  });
-
-  it("names the inherited endpoint for openai, and none for anthropic, which ignores it", async () => {
-    const openai = inheriting();
-    openai.effective_chat = { ...openai.effective_chat, policy: { provider: "openai", model: "ws/router-model", base_url: "https://llm.example.internal/v1" } };
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(openai) }) });
-    const first = renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).toHaveTextContent(
-      "base_url https://llm.example.internal/v1",
-    );
-    first.unmount();
-
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }) });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).not.toHaveTextContent(
-      "base_url",
-    );
-  });
-
-  it("drops the policy note once a save makes the member declare its own model", async () => {
-    // The note is a claim about the resolution, so it must follow the resolution:
-    // after the save, the re-read reports the member's own policy.
-    let reads = 0;
-    const own = inheriting();
-    own.effective_chat = { ...own.effective_chat, policy: { ...own.effective_chat.policy, model: "own-model" }, policy_origin: "member" };
-    mockFetch({
-      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? inheriting() : own) }),
-      "POST /config/save": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 140, provenance_stamped: false }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("model"), { target: { value: "own-model" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
-    await screen.findByText(/Saved \.logos\/config\.toml \(140 bytes\)/);
-    await waitFor(() =>
-      expect(screen.queryByText(/table is inherited from the workspace root/)).not.toBeInTheDocument(),
-    );
-  });
-
-  /** The key card's section (S-452): the chat extension's member panel (S-643). */
-  const keyCard = () => screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
-
-  it("moves the key card's note with the re-read after a save — the panel reads the host's fresh read-model (S-643)", async () => {
-    // A panel is handed the Config view's re-read (`ConfigPanelHost.fresh`), not the
-    // read-model it mounted with: once a save makes the policy the member's own, the
-    // card stops saying a key saved here is unused.
-    let reads = 0;
-    const own = inheriting();
-    own.effective_chat = { ...own.effective_chat, policy: { ...own.effective_chat.policy, model: "own-model" }, policy_origin: "member" };
-    mockFetch({
-      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? inheriting() : own) }),
-      "POST /config/save": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 140, provenance_stamped: false }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(keyCard()).toHaveTextContent("A key saved here is not used while this member inherits the workspace [chat] table");
-
-    fireEvent.change(screen.getByLabelText("model"), { target: { value: "own-model" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
-    await screen.findByText(/Saved \.logos\/config\.toml \(140 bytes\)/);
-    await waitFor(() => expect(keyCard()).toHaveTextContent("Saving a key here overrides it for this member only."));
-  });
-
-  it("drops every inheritance note when the re-read after a save fails (NFR-CC-04)", async () => {
-    // `ConfigPanelHost.fresh` is null while the last re-read failed: the page no longer
-    // knows the resolution, so neither the [chat] note nor the key card asserts one.
-    let reads = 0;
-    mockFetch({
-      "GET /api/v1/config": () =>
-        reads++ === 0
-          ? { ok: true, status: 200, body: JSON.stringify(inheriting()) }
-          : { ok: false, status: 500, body: "boom" },
-      "POST /config/save": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 140, provenance_stamped: false }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.getAllByText(/inherited from the workspace root/).length).toBeGreaterThan(0);
-
-    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
-    await screen.findByText(/Saved \.logos\/config\.toml \(140 bytes\)/);
-    await waitFor(() => expect(screen.queryByText(/inherited from the workspace root/)).not.toBeInTheDocument());
-    expect(keyCard()).not.toHaveTextContent("A key saved here is not used");
-  });
-
-  it("says the key is inherited without ever showing the inherited key's last-4", async () => {
-    mockFetch({
-      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section");
-    expect(card).toHaveTextContent(/key is inherited from the workspace root/);
-    // The member's own key state is still the badge: not set.
-    expect(within(card as HTMLElement).getByText("not set")).toBeInTheDocument();
-    expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
-  });
-
-  it("discloses the workspace key once the member clears its own", async () => {
-    // Loaded while the member holds its own key under the inherited policy: that key is
-    // withheld (HF-1) and the badge is the member's own. Clearing it leaves the
-    // workspace key as the inherited credential, and the re-read says so.
-    let reads = 0;
-    const own = model();
-    own.effective_chat = { ...own.effective_chat, policy_origin: "workspace", credential: { present: true, last4: "wk42" }, credential_origin: "workspace", member_key_withheld: true };
-    const cleared = { ...own, chat_key: { present: false }, effective_chat: { ...own.effective_chat, member_key_withheld: false } };
-    mockFetch({
-      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? own : cleared) }),
-      "POST /config/secret": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ path: ".logos/secrets.toml", chat_key: { present: false, last4: null } }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.queryByText(/key is inherited from the workspace root/)).not.toBeInTheDocument();
-    expect(screen.getByText(/own API key is not used/, { selector: "p" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
-    await screen.findByText(/Key cleared\./);
-    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section");
-    await waitFor(() => expect(card).toHaveTextContent(/key is inherited from the workspace root/));
-    expect(screen.queryByText(/own API key is not used/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
-  });
-
-  it("says a withheld member key is not used with the inherited endpoint, and how to use it (HF-1)", async () => {
-    // The member holds its own key but inherits the workspace policy: the note names the
-    // withheld key off the slice's flag — the badge's own key is not the signal.
-    const withheld = inheriting();
-    withheld.chat_key = { present: true, last4: "mb77" };
-    withheld.effective_chat = { ...withheld.effective_chat, member_key_withheld: true };
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(withheld) }) });
-    const first = renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    const note = screen.getByText(/table is inherited from the workspace root/, { selector: "p" });
-    expect(note).toHaveTextContent(
-      "This member's own API key is not used with the inherited workspace endpoint — setting a [chat] model here makes this member use its own key.",
-    );
-    first.unmount();
-
-    // Same member key, flag false (the seam did not withhold it): the note says nothing
-    // about it — the SPA does not infer the fact from `chat_key`.
-    const notFlagged = { ...withheld, effective_chat: { ...withheld.effective_chat, member_key_withheld: false } };
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(notFlagged) }) });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).not.toHaveTextContent(
-      /own API key is not used/,
-    );
-  });
-
-  it("says a key saved here is not used when the policy is inherited and no root holds a key (HF-1)", async () => {
-    const keyless = inheriting();
-    keyless.effective_chat = { ...keyless.effective_chat, credential: { present: false }, credential_origin: "unset" };
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(keyless) }) });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
-    expect(card).toHaveTextContent(
-      "No key is set for this member, and the workspace root (<workspace-root>/.logos/secrets.toml) declares none for the inherited [chat] table.",
-    );
-    expect(card).toHaveTextContent("A key saved here is not used while this member inherits the workspace [chat] table");
-    expect(card).not.toHaveTextContent("key is inherited from the workspace root");
-  });
-
-  it("does not promise a saved key overrides the inherited one while the policy is inherited", async () => {
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }) });
-    const first = renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    let card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
-    expect(card).toHaveTextContent("A key saved here is not used while this member inherits the workspace [chat] table");
-    expect(card).not.toHaveTextContent("overrides it for this member only");
-    first.unmount();
-
-    // A member owning its policy: its own key WOULD override the inherited one.
-    const ownPolicy = inheriting();
-    ownPolicy.effective_chat = { ...ownPolicy.effective_chat, policy: { ...ownPolicy.effective_chat.policy, model: "own-model" }, policy_origin: "member" };
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(ownPolicy) }) });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
-    expect(card).toHaveTextContent("Saving a key here overrides it for this member only.");
-  });
-
-  it("drops the key note the moment the member saves its own key, before any re-read", async () => {
-    // The re-read after the write is held PENDING, so only the member's own masked
-    // state can hide the note — an inherited-key note under a "set" badge is false.
-    let reads = 0;
-    const json = (body: unknown) =>
-      ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((url: string | URL, init?: RequestInit) => {
-        const path = String(url);
-        if ((init?.method ?? "GET").toUpperCase() === "POST" && path === "/config/secret") {
-          return Promise.resolve(json({ path: ".logos/secrets.toml", chat_key: { present: true, last4: "ab12" } }));
-        }
-        if (path === "/api/v1/config") {
-          return reads++ === 0 ? Promise.resolve(json(inheriting())) : new Promise<Response>(() => {});
-        }
-        return Promise.resolve({ ok: false, status: 500, text: async () => "no route" } as Response);
-      }),
-    );
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
-    expect(card).toHaveTextContent(/key is inherited from the workspace root/);
-
-    fireEvent.change(screen.getByLabelText("api_key"), { target: { value: "sk-own-ab12" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
-    await screen.findByText(/Key saved \(ends …ab12\)/);
-    expect(within(card).getByText(/set · ends …ab12/)).toBeInTheDocument();
-    expect(card).not.toHaveTextContent(/inherited/);
-    expect(reads).toBe(2);
-  });
-
-  it("shows no inheritance note when the member declares its own halves", async () => {
-    // Both halves the member's own: the case the note must stay out of.
-    const own = model();
-    own.effective_chat = { ...own.effective_chat, policy: { ...own.effective_chat.policy, model: "own-model" }, policy_origin: "member", credential_origin: "member" };
-    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(own) }) });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.queryByText(/inherited from the workspace root/)).not.toBeInTheDocument();
-  });
-
-  it("shows no inheritance note when nothing is declared anywhere", async () => {
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    // The default fixture: policy unset (no model anywhere), key the member's own.
-    expect(screen.queryByText(/inherited from the workspace root/)).not.toBeInTheDocument();
-  });
-
-  it("renders the credential card directly beneath the [chat] fields", async () => {
-    mockFetch({});
-    const { container } = renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    // Each editor is a tool panel (S-617): read them through the widget frame.
-    const cards = widgetsIn(container);
-    const titles = cards.map(widgetTitle);
-    const chatCard = screen.getByText("[chat]", { selector: "legend" }).closest("section");
-    const at = cards.indexOf(chatCard as HTMLElement);
-    expect(titles[at]).toBe("config.toml");
-    // No unrelated card between the [chat] fields and the key they need.
-    expect(titles[at + 1]).toBe("chat API key");
-    expect(
-      screen.getByText("[chat]", { selector: "legend" }).compareDocumentPosition(screen.getByRole("heading", { name: "chat API key" })) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-  });
-});
-
-describe("ConfigView chat key is write-only and never echoed (FR-CF-06, NFR-SE-07)", () => {
-  it("shows only the masked key and never renders the typed secret", async () => {
-    mockFetch({
-      "POST /config/secret": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ path: ".logos/secrets.toml", chat_key: { present: true, last4: "ef01" } }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    // The read-model's masked key is shown as presence + last-4 only.
-    expect(screen.getByText(/ends …9f3a/)).toBeInTheDocument();
-
-    const secret = "sk-super-secret-7777";
-    const input = screen.getByLabelText("api_key") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: secret } });
-    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
-
-    // The masked outcome is surfaced; the raw secret is never rendered, and the
-    // input is wiped so the typed key does not linger in the DOM (NFR-SE-07).
-    expect(await screen.findByText(/Key saved \(ends …ef01\)\. It is stored in .* and never echoed\./)).toBeInTheDocument();
-    expect(screen.queryByText(new RegExp(secret))).not.toBeInTheDocument();
-    expect((screen.getByLabelText("api_key") as HTMLInputElement).value).toBe("");
-  });
-
-  it("reports a cleared key honestly when an empty value is saved", async () => {
-    mockFetch({
-      "POST /config/secret": () => ({
-        ok: true,
-        status: 200,
-        body: JSON.stringify({ path: ".logos/secrets.toml", chat_key: { present: false, last4: null } }),
-      }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
-    expect(await screen.findByText(/Key cleared\. .* no longer holds a chat key\./)).toBeInTheDocument();
-  });
-
-  it("never echoes the secret route's response body on an error (NFR-SE-07)", async () => {
-    // A server error whose body (hypothetically) contains key material must never
-    // reach the surface — the client reports the status with a fixed, body-free
-    // message, not the verbatim body the other routes safely show.
-    const leak = "sk-leaked-key-0000";
-    mockFetch({
-      "POST /config/secret": () => ({ ok: false, status: 422, body: `bad key: ${leak}` }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    fireEvent.change(screen.getByLabelText("api_key"), { target: { value: "whatever" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
-
-    expect(await screen.findByText(/Validation error: the server rejected the key write/)).toBeInTheDocument();
-    expect(screen.queryByText(new RegExp(leak))).not.toBeInTheDocument();
-  });
-
-  it("handles a non-JSON 2xx from the secret route without surfacing the body", async () => {
-    mockFetch({
-      "POST /config/secret": () => ({ ok: true, status: 200, body: "OK" }),
-    });
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-
-    fireEvent.change(screen.getByLabelText("api_key"), { target: { value: "key" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
-
-    expect(await screen.findByText(/Key saved \(unexpected response format\)\./)).toBeInTheDocument();
-    expect((screen.getByLabelText("api_key") as HTMLInputElement).value).toBe("");
   });
 });
 
@@ -1195,17 +688,17 @@ describe("ConfigView load failure names the repair surface (HF-2, Sprint 77 revi
     window.history.replaceState({}, "", "/");
   });
 
-  it("single-root: no workspace link, text unchanged", async () => {
+  it("single-root: no workspace note, text unchanged", async () => {
     mockFetch({ "GET /api/v1/config": () => ({ ok: false, status: 500, body: "invalid policy file" }) });
     renderView();
     expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "workspace Config" })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/workspace root/);
   });
 
-  it("workspace mode: links the workspace Config view, preserving ?repo=, naming both a member-file and a workspace-file fault", async () => {
+  it("workspace mode: names both a member-file and a workspace-file fault, and links no editor", async () => {
     // The read fails identically whether the fault is this member's own file or the
     // inherited workspace-tier file (S-450) — the 500 body carries no field
-    // distinguishing the two, so the note names both (`workspaceConfigRepairHref`).
+    // distinguishing the two, so the note names both.
     //
     // `ConfigView`'s own resource fetches on mount with no dependency on the
     // workspace probe settling first (unlike the real shell, which holds every view
@@ -1225,36 +718,30 @@ describe("ConfigView load failure names the repair surface (HF-2, Sprint 77 revi
       </ToastProvider>,
     );
     expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
-    const link = await screen.findByRole("link", { name: "workspace Config" });
-    expect(link).toHaveAttribute("href", "/workspace-config?repo=web");
-    const panel = screen.getByRole("alert");
+    const panel = await screen.findByRole("alert");
+    await waitFor(() => expect(panel).toHaveTextContent(/the workspace root/));
     expect(panel).toHaveTextContent(/this member.s own root/);
-    expect(panel).toHaveTextContent(/the workspace root/);
     expect(panel).toHaveTextContent("<workspace-root>/.logos/config.toml");
     expect(panel).toHaveTextContent("<workspace-root>/.logos/secrets.toml");
-    // The linked view repairs an invalid config.toml in place but NOT an unreadable
-    // secrets.toml (`UnreadableTierSecret`: "Repair or remove … by hand"), so the
-    // note must not promise it repairs both (S-451 story re-review).
-    expect(panel).toHaveTextContent(
-      "repairs an invalid <workspace-root>/.logos/config.toml in place; an unreadable <workspace-root>/.logos/secrets.toml is repaired by hand.",
-    );
-    expect(panel).not.toHaveTextContent(/repair the workspace-root files/);
+    // No editor in this build repairs a workspace-root file, so the note promises
+    // none and links nowhere.
+    expect(panel).toHaveTextContent("Repair the file at fault by hand.");
+    expect(within(panel).queryByRole("link")).toBeNull();
   });
 });
 
 // ── S-617 (CR-203, FR-UI-39/40): the editors are registered tool panels ──────
 
 describe("the Config editors render as registered tool panels in one stack (S-617)", () => {
-  it("config.toml, the chat API key, the consistency check and rules.toml, each under its TOOL_PANELS key", async () => {
+  it("config.toml, the consistency check and rules.toml, each under its TOOL_PANELS key", async () => {
     mockFetch({});
     const { container } = renderView();
     await screen.findByText(/CONFIG EDITOR/);
     const panels = expectOneWidgetStack(container);
-    expect(panels.map(widgetTitle)).toEqual(["config.toml", "chat API key", "Graph consistency check", "rules.toml"]);
+    expect(panels.map(widgetTitle)).toEqual(["config.toml", "Graph consistency check", "rules.toml"]);
     expectToolPanel(panels[0], "policyFile");
-    expectToolPanel(panels[1], "chatKey");
-    expectToolPanel(panels[2], "graphConsistency");
-    expectToolPanel(panels[3], "policyFile");
+    expectToolPanel(panels[1], "graphConsistency");
+    expectToolPanel(panels[2], "policyFile");
   });
 });
 
@@ -1301,26 +788,10 @@ describe("the config panels of the mounted extensions (S-642, FR-UI-51)", () => 
     expect(screen.queryByTestId("stub-member-panel")).toBeNull();
   });
 
-  it("renders the chat key card beneath config.toml while chat is active — the release build's stack", async () => {
-    mockFetch({});
-    const { container } = renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual([
-      "config.toml",
-      "chat API key",
-      "Graph consistency check",
-      "rules.toml",
-    ]);
-  });
 });
 
-describe("a build without the chat extension — the default build (S-643)", () => {
-  beforeEach(() => {
-    clearExtensions();
-    mountWiki();
-  });
-
-  it("offers neither the [chat] fields nor the chat key card — only the built-in editors", async () => {
+describe("this build composes no extension: no extension table in the document form (FR-DS-05)", () => {
+  it("offers neither [chat] nor [wiki] fields, nor a key card — the built-in editors alone", async () => {
     mockFetch({});
     const { container } = renderView();
     await screen.findByText(/CONFIG EDITOR/);
@@ -1329,73 +800,41 @@ describe("a build without the chat extension — the default build (S-643)", () 
       "Graph consistency check",
       "rules.toml",
     ]);
-    expect(screen.queryByText("[chat]", { selector: "legend" })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "chat API key" })).toBeNull();
-    // The other typed groups are untouched — the wiki's among them, in this build.
-    expect(screen.getByText("[wiki]", { selector: "legend" })).toBeInTheDocument();
+    expect(container.querySelectorAll("legend")).not.toHaveLength(0);
+    for (const legend of container.querySelectorAll("legend")) {
+      expect(legend.textContent).not.toMatch(/chat|wiki/i);
+    }
+    expect(screen.queryByLabelText(/api_key|provider|base_url|model/)).toBeNull();
   });
 
-  it("offers no [chat] fields beside another extension's member panel — only a panel on [chat] brings them", async () => {
+  it("offers no [chat] or [wiki] fields beside an extension's member panel either", async () => {
     mockFetch({});
     registerExtensionUi(STUB_UI);
     setActiveExtensions(extensionsInfo(stubInfo()));
-    renderView();
-    await screen.findByTestId("stub-member-panel");
-    expect(screen.queryByText("[chat]", { selector: "legend" })).toBeNull();
-  });
-
-  it("keeps an existing [chat] table in the raw candidate, so a save never drops it", async () => {
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    const raw = screen.getAllByRole("textbox").find((t) => (t as HTMLTextAreaElement).value.includes("[chat]"));
-    expect(raw).toBeDefined();
-  });
-});
-
-describe("a build without the wiki extension (S-644)", () => {
-  it("offers no [wiki] fields while chat alone is active", async () => {
-    clearExtensions();
-    mountChat();
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.getByText("[chat]", { selector: "legend" })).toBeInTheDocument();
-    expect(screen.queryByText("[wiki]", { selector: "legend" })).toBeNull();
-  });
-
-  it("pre-fills the [chat] and [wiki] fields when the boot read settles after the view mounted", async () => {
-    clearExtensions();
-    mockFetch({});
-    renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.queryByText("[wiki]", { selector: "legend" })).toBeNull();
-
-    act(() => mountAgentsBuild());
-    expect(await screen.findByText("[wiki]", { selector: "legend" })).toBeInTheDocument();
-    expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("claude-wiki");
-    expect((screen.getByLabelText("provider") as HTMLInputElement).value).toBe("openai");
-  });
-
-  it("offers neither [chat] nor [wiki] fields with no extension active — the built-in editors alone", async () => {
-    clearExtensions();
-    mockFetch({});
     const { container } = renderView();
-    await screen.findByText(/CONFIG EDITOR/);
-    expect(screen.queryByText("[chat]", { selector: "legend" })).toBeNull();
-    expect(screen.queryByText("[wiki]", { selector: "legend" })).toBeNull();
-    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual([
-      "config.toml",
-      "Graph consistency check",
-      "rules.toml",
-    ]);
+    await screen.findByTestId("stub-member-panel");
+    for (const legend of container.querySelectorAll("legend")) {
+      expect(legend.textContent).not.toMatch(/chat|wiki/i);
+    }
   });
 
-  it("keeps an existing [wiki] table in the raw candidate, so a save never drops it", async () => {
-    clearExtensions();
-    mockFetch({});
+  it("keeps an existing [chat] or [wiki] table in the raw candidate, so a save never drops it", async () => {
+    const calls = mockFetch({
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 120, provenance_stamped: false }),
+      }),
+    });
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
+    expect(configRaw().value).toContain("[chat]");
     expect(configRaw().value).toContain("[wiki]");
+    fireEvent.change(screen.getByLabelText("max_file_size"), { target: { value: "2048" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
+    expect(await screen.findByText(/Saved \.logos\/config\.toml/)).toBeInTheDocument();
+    const content = new URLSearchParams(calls.find((c) => c.url === "/config/save")?.body).get("content") ?? "";
+    expect(content).toContain('[chat]\nprovider = "openai"');
+    expect(content).toContain('[wiki]\nmodel = "claude-wiki"');
   });
 });

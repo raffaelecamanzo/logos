@@ -91,14 +91,15 @@ external service at serve time**; the single-binary and offline-by-default
 guarantees are unchanged. Node is needed **only at build time**, and only when
 you want the rich SPA compiled into your own build.
 
-- **Plain build — no Node required.** `cargo build -p logos --release` (no `ui`
-  feature) builds the CLI with no web surface and no Node toolchain.
-- **`--features ui` without a built SPA — still Node-free.** A committed
-  placeholder shell keeps `cargo build -p logos --release --features ui`
-  compiling with no Node present; `serve --ui` then serves a minimal placeholder
-  shell (enough to verify wiring, not the full interface).
+- **Slim build — no Node required.** `cargo build -p logos --release
+  --no-default-features --features lang-all` builds the CLI and the MCP server
+  with no web surface and no Node toolchain.
+- **Default build without a built SPA — still Node-free.** The `ui` feature is on
+  by default, and a committed placeholder shell keeps `cargo build -p logos
+  --release` compiling with no Node present; `serve --ui` then serves a minimal
+  placeholder shell (enough to verify wiring, not the full interface).
 - **The rich SPA — build it first, then embed.** Compile the SPA bundle with a
-  Node toolchain, then build with `--features ui` to embed it:
+  Node toolchain, then build with the `ui` feature (a default) to embed it:
 
   ```bash
   cd web/ui
@@ -108,9 +109,8 @@ you want the rich SPA compiled into your own build.
   cargo build -p logos --release --features ui
   ```
 
-Released binaries (Homebrew, the installer, the archives) always embed the
-real SPA — CI runs the `npm run build` step once and embeds the bundle into
-every target, so an installed `logos` needs nothing from you.
+Binaries installed through Homebrew, the installer or the archives embed the
+real SPA, so an installed `logos` needs nothing from you.
 
 ### Browser layout tests (contributors)
 
@@ -141,6 +141,13 @@ fails, its verdict says why:
 To run the specs alone after building the SPA and the binary, use
 `npm run test:e2e` in `web/ui`.
 
+### Build modes
+
+Two build modes ship from this repository: the **default** build (the CLI, the MCP
+server and the web dashboard) and the **slim** headless build. The command for each
+and what each links are in the
+[build matrix](usage.md#build-matrix--dashboard-or-slim-headless).
+
 ### Slim builds (optional)
 
 Grammar support is feature-gated. For a smaller, faster-to-compile binary
@@ -152,38 +159,37 @@ cargo build -p logos --release --no-default-features --features lang-rust
 
 `logos languages` on such a build lists only the compiled-in grammars. The
 full set returns with the default `lang-all` feature. A `--no-default-features`
-build also leaves out the web dashboard (`ui`) and the source wiki (`wiki`);
-add them back by name — `--features lang-rust,wiki` keeps `logos wiki` and the
-`wiki_*` MCP tools in a Rust-only build.
+build also leaves out the web dashboard (`ui`); add it back by name —
+`--features lang-rust,ui` keeps `logos serve --ui` in a Rust-only build.
 
-### A build without extensions (contributors)
+### A build without the dashboard (contributors)
 
-Chat and the source wiki are extensions. A build with the dashboard but neither
-of them composes no extension at all:
+The slim headless build keeps the CLI and the MCP server and drops the web
+surface:
 
 ```bash
-cargo build -p logos --release --no-default-features --features lang-all,ui
+cargo build -p logos --release --no-default-features --features lang-all
 ```
 
-It serves no chat or wiki route, MCP tool, command, sidebar entry or config
-panel, and `GET /api/v1/extensions` lists none. It still starts on a project
-whose `config.toml` has `[chat]` or `[wiki]` tables and whose `secrets.toml`
-holds `chat.api_key`: `[wiki]` is reported once as ignored, and `[chat]` is
-still read by the core. Like the default build, it can listen on loopback but
-links no outbound HTTP client.
+`logos serve --ui` is not an option there (clap exits `2`).
 
-`cargo test -p logos --no-default-features --features lang-all,ui` checks all
-of that (`cli/tests/no_extension_surface.rs`). `bash scripts/gate.sh full` runs
-it as its `test-noext` leg, and CI runs it too. The fast tier skips it, because
-that feature set recompiles the core crates, which adds about two and a half
-minutes.
+`cargo test -p logos` checks the default build's command, route and tool surface
+against the committed snapshots under `cli/tests/surface_snapshots/` (and
+`cli/tests/no_extension_surface.rs`). `bash scripts/gate.sh full` runs it with the
+rest of the suite.
 
 ### The local gate and CI (contributors)
 
-`bash scripts/gate.sh fast` and `full` run the `web` tests with
-`--features lang-all`. That matches what `cargo test --workspace` in CI turns on
-for `web` through the `cli` crate's defaults, so tests gated on `lang-all` run
-locally too. Each test unit's evidence records the exact `cargo` command it ran.
+`bash scripts/gate.sh fast` and `full` test every package that declares a
+`lang-all` feature without enabling it by default (today `logos-core` and `web`)
+with `--features lang-all`, in the `test` leg. The gate reads that from
+`cargo metadata`, not from a package name. It matches what
+`cargo test --workspace` in CI turns on for those packages through the `cli`
+crate's defaults, so tests gated on `lang-all` run locally too. Each test unit's
+evidence records the exact `cargo` command it ran, and the leg prints a
+`reproduce:` line for each package whose flags differ from its leg's.
+`bash scripts/tests/test-gate-pkg-features.sh` checks the rule against fixture
+metadata.
 
 Both tiers also run a `public-terms` leg, `scripts/check-public-terms.sh`. It
 reads every text file `git ls-files` lists, plus the untracked files `git add -A`

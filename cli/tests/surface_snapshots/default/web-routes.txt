@@ -19,11 +19,6 @@ GET      /api/v1/search
 GET      /api/v1/statistics
 GET      /api/v1/status
 POST     /api/v1/verify
-GET      /api/v1/wiki
-GET      /api/v1/wiki/asset/*path
-GET      /api/v1/wiki/nav
-GET      /api/v1/wiki/page/*slug
-GET      /api/v1/wiki/search
 GET      /api/v1/workspace/build-deps
 GET      /api/v1/workspace/callers
 GET      /api/v1/workspace/check

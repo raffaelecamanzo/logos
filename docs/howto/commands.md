@@ -1,9 +1,8 @@
 # Command Reference
 
-All subcommands of the `logos` binary (39 top-level commands in the default
-build, including the Sprint-55 `xservice` and `workspace` federation groups and
-the `wiki` extension's `wiki` group — absent from a build without it, see
-[Source wiki](#source-wiki)). Every command accepts
+All subcommands of the `logos` binary (38 top-level commands in the default
+build, including the Sprint-55 `xservice` and `workspace` federation groups).
+Every command accepts
 the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 [usage.md](usage.md#global-flags-and-exit-codes) for those and for the
 `0/1/2/3` exit-code contract.
@@ -30,7 +29,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`referencing-docs`](#referencing-docs) | ✅ | Doc sections that reference a symbol |
 | [`stats`](#stats) | ✅ | Usage/performance statistics |
 | [`languages`](#languages) | ✅ | Registered language grammars |
-| [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
+| [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`: the `ui` feature is on by default and absent from the slim build) |
 | [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` / `build-deps` / `type-refs` (`--repo` to scope) |
 | [`workspace status`](#workspace-status) | ✅ | Per-member freshness, warm state and open state + the 3-state cross-service coverage summary — exits 1 if a member could not be opened |
 | [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
@@ -45,21 +44,13 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`verify`](#verify) | ✅ | Deep reindex-diff consistency check; exit 1 on drift |
 | [`coverage refresh`](#coverage-refresh) | ✅ | Run the configured `refresh_cmd` and ingest what it produced |
 | [`quality-report`](#quality-report---hook-json) | ✅ | Non-blocking quality readout — writes nothing, always exits 0 (CLI-only) |
-| [`hook --emit`](#hook---emit---force) | ✅ | Install the Claude Code session-start quality-report hook (CLI-only; `wiki hook --emit` is its hidden alias) |
+| [`hook --emit`](#hook---emit---force) | ✅ | Install the Claude Code session-start quality-report hook (CLI-only) |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
 | [`dsm`](#dsm---granularity-g) | ✅ | Dependency-structure-matrix clusters |
 | [`doc-gaps`](#doc-gaps---limit-n) | ✅ | Undocumented exported symbols |
 | [`hotspots`](#hotspots) | ✅ | Churn × complexity ranking — the non-gated temporal tier |
 | [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura report into the evidence store |
 | [`coverage status`](#coverage-status) | ✅ | Per-file coverage freshness + the overall fraction |
-| [`wiki write`](#wiki-write) | ✅ | Upsert a generated wiki page with provenance + anchors |
-| [`wiki read`](#wiki-read) | ✅ | Read a page with provenance + per-anchor freshness |
-| [`wiki search`](#wiki-search) | ✅ | FTS5 search over pages (or `--list` to enumerate) |
-| [`wiki status`](#wiki-status) | ✅ | Store summary + the regeneration work-list |
-| [`wiki generate`](#wiki-generate) | ✅ | Format the work-list into an offline generation queue (prompt block / `--json`, CLI-only) |
-| [`wiki materialize`](#wiki-materialize) | ✅ | Deterministically present the authored `docs/specs/**` + `docs/howto/**` as wiki pages (SRS mode); no LLM/network |
-| [`wiki delete`](#wiki-delete) | ✅ | Explicitly delete a page by slug (CLI-only) |
-| [`wiki skill --emit`](#wiki-skill---emit-dir---force) | ✅ | Materialize the embedded wiki-generation skill (CLI-only) |
 
 ---
 
@@ -87,7 +78,7 @@ bootstrap that `logos index` performs.
 **Interactive (`-i`)** — additionally writes starter policy templates
 (`config.toml`, `rules.toml`), a managed `.logos/.gitignore` block, a
 `logos` entry in the project's `.mcp.json`, a managed usage block in
-`CLAUDE.md`, the embedded `logos-wiki` generation skill, and — default-on —
+`CLAUDE.md`, and — default-on —
 the **session-start quality-report** hook
 ([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
 `.claude/settings.json`, which surfaces a signal/baseline/violations readout
@@ -101,10 +92,6 @@ quality-report hook
 install left one behind. Each step reports its action (`Created` /
 `Updated` / `Unchanged` / `Skipped`). On non-TTY (CI, piped input): safe
 defaults, no prompts.
-Wiki prose generation itself now runs in-process (`ui` builds only) when the
-Wiki tab is opened — there is no more headless `claude -p` autogen hook.
-Non-`ui` builds regenerate manually via the materialized `logos-wiki` skill
-(`wiki skill --emit`, below).
 
 **Hooks (`--hooks`)** — installs managed git hook scripts under
 `.logos/hooks/` and sets `core.hooksPath = .logos/hooks` in the project's git
@@ -877,8 +864,8 @@ over the window, oldest-first) and `calls_by_origin` (a per-`origin` usage
 breakdown, where `origin` is a worktree's branch name or `"main"`). Reads only
 `telemetry.db` — works without an index.
 
-**The surfaces.** Four are **process** surfaces — the kind of process the call ran
-in — and three are **override-only**, naming an in-process caller that would
+**The surfaces.** Three are **process** surfaces — the kind of process the call ran
+in — and two are **override-only**, naming an in-process caller that would
 otherwise be indistinguishable from the person using the surface it runs inside:
 
 | Surface | Kind | What it means |
@@ -886,16 +873,12 @@ otherwise be indistinguishable from the person using the surface it runs inside:
 | `cli` | process | The `logos` binary |
 | `mcp` | process | The `serve --mcp` stdio server |
 | `web` | process | The `serve --ui` dashboard — a query a person issued through the SPA |
-| `chat` | process | The chat agent's own tool calls |
 | `watcher` | override | The debounced filesystem watcher, which runs inside the `serve --mcp` process |
-| `shell` | override | The dashboard's own chrome — the app header re-reads the graph-state readout on every client-side navigation, and the chat resolves the backticked code references of every finalized answer against the graph (`GET /api/v1/code-refs`), so its events are requests the app made incidentally rather than ones you asked for |
-| `wikigen` | override | Logos's own wiki generation pass, which runs inside the `serve --ui` process |
+| `shell` | override | The dashboard's own chrome — the app header re-reads the graph-state readout on every client-side navigation, so its events are requests the app made incidentally rather than ones you asked for |
 
-The override-only distinction is the point: without it, `"Logos's own agent
-navigated the graph N times"` and `"a developer did"` sum into one figure that
-answers neither question. `wikigen` was added in **1.4.15** — before it, a
-`POST /wiki/generate` run inherited the process surface and the wiki generator
-was counted as somebody browsing the dashboard.
+The override-only distinction is the point: without it, `"the dashboard's own
+chrome read the graph N times"` and `"a developer did"` sum into one figure that
+answers neither question. These are the surfaces a default build emits.
 
 Since logos 1.4.13 every event also carries an opaque **per-process
 `session_id`**, recorded independently of `surface` and `origin` and computed
@@ -912,15 +895,13 @@ from every figure** — totals, per-tool, daily series, origin split, latency, a
 the estimate — because a request whose subject is Logos's own state (`stats`
 reading the telemetry store, the shell's `status` readout) measures the
 measurement, not tool value, and a request the application's own chrome makes
-(the chat's automatic code-refs lookup) is app overhead rather than a question
+(the app header's graph-state readout) is app overhead rather than a question
 anyone asked. The exclusion is per *event* and keyed on two axes — the
 **tool**, so it applies on every surface (a CLI `logos stats` is no less
 self-referential than a dashboard render, while a graph query issued *through*
 the dashboard counts normally), and the **surface**, for a read whose caller is
 the application's own chrome rather than a person (the app header's `status`
-readout, which navigation re-issues and nobody asks for, and the chat's code-refs
-lookup, which resolves each finalized answer's backticks and fires up to 24 `node` /
-`graph_elements` reads per answer that nobody asked for).
+readout, which navigation re-issues and nobody asks for).
 
 **Attribution: which tools, from where, of what kind.** `--json` carries two
 further projections:
@@ -1017,24 +998,18 @@ logos serve --mcp --ui [--port <N>]                  # both surfaces in one proc
 
 At least one of `--mcp` / `--ui` is required. `--mcp` starts the MCP server
 over stdio (see [usage.md](usage.md#setting-up-the-mcp-server-ai-agents) for
-host setup, the 20-tool surface, and the stdout-purity / clean-teardown
+host setup, the 25-tool surface, and the stdout-purity / clean-teardown
 guarantees). `--ui` starts the localhost web dashboard (see
-[usage.md](usage.md#the-web-ui-dashboard)) — **available only in a build
-compiled with `--features ui`**; the default binary has no web surface and no
-networking crate. The dashboard is a single embedded React SPA served at `/`,
+[usage.md](usage.md#the-web-ui-dashboard)); it is not offered in the slim build
+(see the [build matrix](usage.md#build-matrix--dashboard-or-slim-headless)). The dashboard is a single embedded React SPA served at `/`,
 client-side routed over a same-origin `/api/v1/*` JSON read-model API
 ([ADR-43](../specs/architecture/decisions/ADR-43.md)); the whole app is built at
 build time and embedded in the binary, so a page load fetches nothing from the
 network, and it binds `127.0.0.1` only with a self-only CSP on every response. It
-is read-only except the intent-guarded mutating routes — the config-write/apply
-routes (`/config/save`, `/config/apply`, `/config/secret`) and the Chat routes
-(`/chat` and the per-conversation delete `/api/v1/chat/threads/{id}/delete`,
-rename `/api/v1/chat/threads/{id}/rename` and truncate
-`/api/v1/chat/threads/{id}/truncate`; in a workspace serve with `agents`, also
-the workspace chat's `/workspace/chat`, `/api/v1/workspace/chat/threads/{id}/delete`,
-`/api/v1/workspace/chat/threads/{id}/rename` and
-`/api/v1/workspace/chat/threads/{id}/truncate`);
-every other non-GET request is answered `405`. Combined
+is read-only except a small, enumerated set of intent-guarded mutating routes —
+the config save and apply routes (`/config/save`, `/config/apply`), the workspace
+manifest and config saves, and the on-demand `verify` (`/api/v1/verify`); every
+other non-GET request is answered `405`. Combined
 `--mcp --ui` runs both on one engine and one watcher: stdout stays JSON-RPC-clean
 for the MCP host while the web surface logs to stderr.
 
@@ -1066,13 +1041,10 @@ curl '127.0.0.1:4983/api/v1/workspace/reachability?repo=<member>'   # scope it t
 curl 127.0.0.1:4983/api/v1/workspace/check           # workspace governance findings (advisory)
 curl 127.0.0.1:4983/api/v1/workspace/statistics      # telemetry summed over members, engine-free
 curl 127.0.0.1:4983/api/v1/workspace/manifest        # the manifest as an editable document (content + fingerprint + parse verdict)
-curl 127.0.0.1:4983/api/v1/workspace/config          # the workspace chat tier (config.toml + masked key)
-curl 127.0.0.1:4983/api/v1/workspace/config/read-roots  # every member's effective chat read roots, engine-free
 ```
 
-The workspace **Config** view writes the manifest and the workspace chat tier through
-intent-guarded `POST /api/v1/workspace/manifest/save`, `…/config/save` and
-`…/config/secret` — see [configuration.md](configuration.md#editing-the-manifest-from-the-app).
+The workspace **Config** view writes the manifest through the
+intent-guarded `POST /api/v1/workspace/manifest/save` — see [configuration.md](configuration.md#editing-the-manifest-from-the-app).
 
 ---
 
@@ -1099,9 +1071,9 @@ later CR-061 story.
 
 **One exception, since S-474:** `xservice type-refs` and the
 `via_type_reference` section of `callers`/`impact` are on the CLI and its MCP
-twins only. `/api/v1/workspace/callers` and `/api/v1/workspace/impact`, and the
-chat agent's `xservice_*` tools, answer without the section — exactly the bytes
-they answered before — and there is no `type-refs` web route.
+twins only. `/api/v1/workspace/callers` and `/api/v1/workspace/impact` answer
+without the section — exactly the bytes they answered before — and there is no
+`type-refs` web route.
 
 ### `xservice` (workspace federation queries)
 
@@ -1340,7 +1312,7 @@ builds all N, [NFR-PE-10](../specs/requirements/NFR-PE-10.md)). All `--json`
 output is a single machine-clean line.
 
 **Each bridge answer names the members it read.** `route-providers`, `callers`
-and `impact` — on the CLI, the `xservice_*` MCP tools, the chat's tools and
+and `impact` — on the CLI, the `xservice_*` MCP tools and
 `/api/v1/workspace/*` alike — carry `member_reads`: `read`, the members this
 answer read, and `unread`, every member it needed and could not read, each with
 its reason (absent when none). A member is never left out silently, with the one
@@ -1354,7 +1326,7 @@ What gets read depends on whether the bridge has already answered once. Its
 **first** answer reads every member — an edge binds the *sole* provider of a
 key, and only every member's surface can say a provider is the sole one — so a
 CLI one-shot, whose bridge starts empty, always lists every member. A
-long-running surface (`serve`, the MCP server, the chat) keeps the bridge's
+long-running surface (`serve`, the MCP server) keeps the bridge's
 answer, and each later answer only checks the members whose index can have
 changed since — those with a live engine — and retries any it could not open
 before or whose store file has gone; the check starts no other member. When a
@@ -2523,10 +2495,10 @@ logos hook --emit          # install the Claude Code quality-report hook (no-op 
 logos hook --emit --force  # re-emit, replacing the managed entry
 ```
 
-`logos wiki hook --emit [--force]` is the hidden alias of this command: it
-writes byte-identical output, exits with the same codes, and is absent from
-`logos wiki --help`. The hook is a core command, not a wiki one — it installs
-the same with or without the wiki.
+The hook is a core command: it installs the same in every build. `--emit` is
+required — `logos hook` alone is a usage error (exit `2`) — and the command
+prints one JSON object describing what it did (`script`, `settings`, `action`,
+`notice`, `retired_removed`, `retired_skipped`; compact under `--json`).
 
 Installs the **session-start quality-report** hook
 ([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
@@ -2562,14 +2534,12 @@ entry sharing that array is left untouched.
 
 The merge is **non-clobbering**: an existing managed entry that already matches
 is left byte-identical, a foreign/unparseable config is never overwritten, and
-the merge is idempotent. `logos init -i` installs it **default-on** alongside
-the embedded skill. Installing or running the hook performs no LLM call and
+the merge is idempotent. `logos init -i` installs it **default-on**. Installing or running the hook performs no LLM call and
 opens no outbound connection inside the binary — the offline boundary holds.
-CLI-only. (The PostToolUse wiki-augmentation hook this command once also
-installed was retired — [CR-070](../requests/CR-070-retire-wiki-augment-hook.md).)
+CLI-only.
 
-`--json` reports what the emit did as `action`, distinguishing the two ways an
-existing entry can be rewritten:
+The `action` field distinguishes the two ways an existing entry can be
+rewritten:
 
 | `action` | Meaning |
 |---|---|
@@ -2581,16 +2551,7 @@ existing entry can be rewritten:
 `reconciled` exists because `forced` was previously reported for both of the
 middle two cases, telling a consumer local edits had been overwritten when the
 caller had passed no flag and nothing of theirs was touched
-([CR-095](../requests/CR-095-session-start-quality-readout.md) §3.5). The same
-`action` field on [`wiki skill --emit`](#wiki-skill---emit-dir---force) never
-takes `reconciled`: the skill is strictly skip-if-present, so it only ever
-writes on a first install or under `--force`.
-
-There is no headless SessionEnd wiki-autogen hook and no `claude -p`
-invocation anymore ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md)):
-`ui` builds regenerate drifted wiki pages in-process when the Wiki tab is
-opened; non-`ui` builds regenerate manually in the user's own Claude Code via
-the materialized `logos-wiki` skill ([`wiki skill --emit`](#wiki-skill---emit-dir---force)).
+([CR-095](../requests/CR-095-session-start-quality-readout.md) §3.5).
 
 ### `session-start` / `session-end`
 
@@ -2865,227 +2826,3 @@ data** (it reads as absent, not as the old number). With nothing ingested, the
 command returns `n/a` plus a notice (`no coverage ingested — run 'logos coverage
 ingest <report>' …`) and exits 0 — absent evidence is never fabricated into a
 zero.
-
----
-
-## Source wiki
-
-> **Build note.** The wiki is the `wiki` extension (S-644): the default and release
-> builds compose it (the default-on `wiki` cargo feature), and a build without it —
-> the slim `--no-default-features --features lang-all` build, for one — has no
-> `logos wiki`, no `wiki_*` MCP tool and no Wiki view, and never opens an existing
-> `.logos/wiki.db`. In-app generation from the Wiki tab joins it under `agents`.
-
-A **gate-immune** store of generated, human-readable pages about the codebase,
-anchored to the symbols and files they describe. It lives in its own store,
-`.logos/wiki.db`, on a forward-only migration track created on demand by the
-first `wiki write` or `wiki status`. Like the evidence tiers, **nothing here
-moves the 0–10000 signal** — `logos gate`/`logos scan` are byte-identical
-whether `wiki.db` is absent, populated, or stale; no governance path holds a
-connection to it.
-
-The wiki serves **three tiers** (CR-062, [ADR-57]): an *extracted* tier
-live-rendered from the graph; a *presented* tier that the binary assembles
-**deterministically** from the project's authored `docs/specs/**` and
-`docs/howto/**` sources (`wiki materialize`, below) — copied verbatim, never
-paraphrased; and a *generated* tier written by an external generator (an LLM, a
-tool) and stored byte-verbatim. Each page carries tier-correct mandatory
-**provenance**: a presented page is labelled `"presented from docs/specs/… — not
-model-generated"` (`generator = logos:doc-present`), while a generated page
-carries the `generator` label plus the explicit `"generated content — not
-extracted by Logos"` marker. Every page records its `written_head` commit and a
-per-anchor `freshness` state. **Anchors** tie a page to entities it describes —
-`file:<path>` or `symbol:<name>` — and each anchor's freshness is recomputed
-against the working tree on every read:
-
-- `fresh` — the anchored file/symbol exists and its defining file is unchanged
-  since `written_head`;
-- `stale` — it still exists but the defining file changed (regenerate the page);
-- `missing` — the file or symbol is gone from the graph.
-
-When **all** of a page's anchors go `missing`, the page is auto-pruned on the
-next read/status and recorded in the pruned log (`wiki status`) — a page never
-outlives every entity it documents.
-
-Generation runs **off the request path**: an external generator works the
-`wiki status` work-list, and `wiki generate` formats that work-list into a
-ready-to-run queue (a prompt block, or `--json`) — a pure, offline read that the
-connected agent's own skill loop or the `ui`-gated in-process generator
-consumes; the binary itself stays offline.
-
-`write`/`read`/`search`/`status`/`materialize` have **payload-identical MCP twins**
-(`wiki_write`/`wiki_read`/`wiki_search`/`wiki_status`/`wiki_materialize`) for
-agents — five wiki tools. `generate`, `delete`, `skill`, and `hook` are
-**CLI-only** — `generate` formats the work-list into a runnable generation queue,
-`delete` is destructive (kept off the agent surface), and `skill`/`hook` are
-local materialization steps.
-
-### SRS mode (Case 1) vs. inference (Case 2)
-
-`wiki materialize` and the generation queue are **bimodal** (CR-062, FR-WK-21):
-
-- **Case 1 — SRS present** (`docs/specs/architecture.md` **and** ≥1
-  `FR-*`/`NFR-*`/`UAT-*` file under `docs/specs/requirements/`): the Design/Specs
-  pages are *presented* deterministically from source, and the connected agent is
-  asked to generate **only** the Summary/Overview tier (grounded on the presented
-  pages). When `docs/howto/` is present, a **User Guide** tier is presented too.
-- **Case 2 — no SRS:** unchanged — the agent infers the full set (Overview +
-  present categories) from the code graph.
-
-Per-file `files/*` pages from earlier schemes are retired by a forward-only
-migration, and a reconciliation sweep (run from `materialize`) purges any stored
-page outside the active-mode valid set (Overview ∪ present categories ∪
-`guide/*`), each removal logged to the pruned log (FR-WK-22).
-
-### `wiki write`
-
-```bash
-logos wiki write <SLUG> --title <TITLE> --generator <LABEL> \
-  [--anchor file:<path>]... [--anchor symbol:<name>]... \
-  [<BODY> | --body-file <PATH>]
-# short flags: -t <title>, -g <generator>
-echo "## Notes" | logos wiki write arch/auth -t "Auth" -g "claude-opus-4-8" \
-  --anchor symbol:authenticate --body-file -
-```
-
-Upserts a page by slug (a path-like id of lowercase/digit/`-`/`_` segments). The
-body is stored **byte-verbatim** up to a 1 MiB cap; pass it as the positional
-argument, or use `--body-file <PATH>` to read from a file (or `-` for stdin) so a
-large markdown body never hits the shell's argv limit. `--generator` is
-**mandatory** (provenance is not optional). Anchors are resolved at write time;
-a `symbol:` anchor that resolves to no graph node is recorded but reads back as
-`missing`. Re-writing the same slug replaces the page.
-
-**Content-validity guard.** The write path rejects a body that is agent-noise
-rather than documentation — one that contains a tool-call token or a
-command-error transcript, opens with a first-person planning or refusal
-preamble, or has no Markdown heading / falls below a minimum length. The check
-is **structural**, so a page that legitimately contains a fenced code block
-(e.g. a ` ```bash ` example) is never rejected on that basis. The tool-call and
-command-error signatures are scanned with fenced code blocks stripped, so a
-page that *quotes* one of those patterns inside a ` ``` ` fence — e.g. docs that
-describe this guard — is accepted; the same token outside a fence is rejected.
-A rejected write
-leaves the store byte-identical and returns an honest per-page failure; it
-applies identically to the positional/`--body-file`/stdin paths and to the
-in-process generator, where a rejected page is recorded and skipped without
-aborting the run.
-
-### `wiki read`
-
-```bash
-logos wiki read <SLUG>
-logos wiki read arch/auth --json
-```
-
-Returns the page body plus its full provenance block and the current per-anchor
-freshness. A slug miss — a never-written slug, or a page whose last anchor just
-went missing and was auto-pruned — is an **exit-zero miss**: the command prints
-`null` (an empty `--json` payload) and exits 0, never an error. This is the
-empty-store posture — absent evidence is never fabricated into a failure, the
-same discipline the rest of Logos follows.
-
-### `wiki search`
-
-```bash
-logos wiki search <QUERY>          # FTS5 bm25 over titles + bodies
-logos wiki search --list           # enumerate all pages (omit the query)
-```
-
-Full-text search (SQLite FTS5, bm25 ranking) over page titles and bodies. Each
-hit carries its staleness flag so a stale page is visibly flagged in results.
-`--list` enumerates every page instead of searching.
-
-### `wiki status`
-
-```bash
-logos wiki status
-logos wiki status --json
-```
-
-The store summary and the **regeneration work-list**: stale pages, pages with
-missing anchors, the pruned-page log, and **page-worthy entities that have no
-page yet** (so a generator knows what to write next).
-
-The work-list is **consolidated and doc-grounded** (CR-034). It seeds exactly
-**one entry per documentation category** whose source files exist on disk —
-ADRs, Components, Integrations (from `docs/specs/architecture/…`), Functional
-Requirements, Non-Functional Requirements, User Acceptance Tests, and Frontend
-Design (from `docs/specs/…`) — rather than one fragmented page per ADR /
-requirement / Story / CR node. A category whose source files are absent is
-simply not seeded (never fabricated); the per-source-file Modules pages are
-unchanged.
-
-### `wiki generate`
-
-```bash
-logos wiki generate          # human prompt block, one ready-to-run item per page
-logos wiki generate --json   # the same queue as machine JSON
-```
-
-Formats the `wiki status` work-list into a deterministically ordered **generation
-queue**. The default output is a prompt block — one entry per absent/stale
-agent-tier section (the Summary/overview pages, the consolidated documentation
-categories, and per-file objectives), each carrying its target slug and a
-runnable `logos wiki write …` skeleton (slug positional, body on stdin, anchors
-and free-text fields prefilled).
-
-Consolidated and overview items also carry a **doc-grounding directive** (CR-034):
-each names the `docs/` source file(s)/glob the generator should summarize into
-that page (e.g. the ADRs page is grounded in `docs/specs/architecture/decisions/*.md`),
-so generated pages reuse the project's own documentation rather than re-deriving
-it. The Summary and Architecture overviews fall back to **code-reading** only
-when their mapped doc is absent. The consolidated items serialize as
-`"category":"consolidated-doc"` in `--json`, each with an optional `grounding`
-object (`sources`, `fallback_to_code`, `directive`).
-
-`--json` emits the same queue as one compact `{"items": […]}` object —
-**byte-identical** for a fixed `wiki.db` + graph revision. Native (extracted)
-sections are never queued. A pure read: no `wiki.db` write, no LLM, no network.
-An empty work-list prints `Nothing to generate — the wiki work-list is empty.`
-and exits 0. CLI-only.
-
-### `wiki materialize`
-
-```bash
-logos wiki materialize
-```
-
-Deterministically assembles the **presented** tier (CR-062, FR-WK-20). In SRS
-mode (Case 1) it presents each present Design/Specs category — and the single-file
-Architecture page — from the project's authored `docs/specs/**` sources into
-`wiki.db`, with `generator = logos:doc-present`, one source-file anchor per
-document, and the current built-at revision; when `docs/howto/` is present it also
-materializes each guide as a `guide/<name>` page (`README.md` → `guide/overview`)
-under the **User Guide** tier. It then runs the reconciliation sweep that purges
-any stored page outside the active-mode valid set.
-
-A **pure deterministic write** — no LLM, no network (NFR-SE-01) — and
-byte-identical on re-run. Outside SRS mode (Case 2) it is a no-op. It runs
-automatically ahead of the LLM queue in the UI-gated generation flow
-(FR-WK-18); running it manually is safe. Has a payload-identical MCP twin,
-`wiki_materialize`.
-
-### `wiki delete`
-
-```bash
-logos wiki delete <SLUG>
-```
-
-Explicitly deletes a page by slug. An unknown slug exits non-zero. CLI-only —
-not exposed over MCP.
-
-### `wiki skill --emit [DIR] [--force]`
-
-```bash
-logos wiki skill --emit               # materialize into the project root
-logos wiki skill --emit --force       # overwrite an existing install
-logos wiki skill --emit path/to/dir   # target a specific base directory
-```
-
-Materializes the **embedded wiki-generation skill** — the canonical
-`.agents/skills/logos-wiki/SKILL.md` (stamped with the binary version) plus the
-`.claude/skills/logos-wiki` symlink that points at it. This is the same skill
-`logos init -i` offers to materialize; run it standalone to install or, with
-`--force`, restore the skill after an upgrade. Without `--force` an existing
-install is left untouched (local edits survive). CLI-only.

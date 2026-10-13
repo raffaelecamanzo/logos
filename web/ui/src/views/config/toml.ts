@@ -50,10 +50,9 @@ export function tomlValue(type: TomlFieldType, value: string): string | null {
     return value.trim() === "" ? null : value.trim();
   }
   if (type === "str") {
-    // An optional string scalar (the [chat] provider/model/base_url fields): a
-    // blank field removes the key (revert to default/unset); a non-blank value is
-    // a quoted TOML basic string. The provider <select> has no blank option, so it
-    // always writes one of its two enumerated values.
+    // An optional string scalar (a manifest's `default`, say): a blank field
+    // removes the key (revert to default/unset); a non-blank value is a quoted
+    // TOML basic string.
     return value.trim() === "" ? null : tomlString(value.trim());
   }
   return tomlString(value);

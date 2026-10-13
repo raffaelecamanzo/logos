@@ -5,11 +5,11 @@
  *
  * Every figure is the read-model's own (NFR-CC-04); these sentences say what it
  * shows and why it matters, and each absence names the command that fills it
- * (CR-206). Project Overview is the one entry with no explanation (CR-208).
+ * (CR-206).
  */
 
 import { COVERAGE_VIEW_ABSENCE } from "./coverageView.copy.ts";
-import { gloss, type CopyEntry, type NoExplanationEntry } from "./types.ts";
+import { gloss, type CopyEntry } from "./types.ts";
 
 export const qualityIndex: CopyEntry = {
   what: ["The quality signal from the last scan, out of 10,000, and whether it holds its ", gloss("baseline"), "."],
@@ -36,10 +36,6 @@ export const activity: CopyEntry = {
   why: "It shows whether Logos is in use here, and roughly what it saves.",
 };
 
-/** The one entry with no explanation (CR-208): the wiki snippet says what it is,
- *  so the widget renders its title and its snippet — or its absence — alone. */
-export const projectOverview: NoExplanationEntry = { noExplanation: "project-overview" };
-
 /** The named absences each widget states in its figure row. */
 export const DASHBOARD_ABSENCE = {
   noSignal: "No quality signal recorded yet; run logos scan to record one.",
@@ -49,6 +45,4 @@ export const DASHBOARD_ABSENCE = {
   noLines: "Lines of code not yet counted; a full logos index counts them.",
   noTelemetry:
     "No telemetry yet; use Logos from your agent or the command line, and logos stats shows what has been recorded.",
-  noOverview:
-    "No project overview generated yet; have an agent write it — the logos-wiki skill does this with logos wiki write overview/project-overview.",
 } as const;

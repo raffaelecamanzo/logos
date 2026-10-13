@@ -8,16 +8,16 @@
 //! non-secret chat policy only — the **API key is never here**; it lives in the
 //! gitignored [`secrets.toml`](super::secrets) ([NFR-SE-07]).
 //!
-//! # Why the provider lives in the core, not `agent-core`
+//! # Why the provider lives in the core, not the agent substrate
 //! Parsing `[chat]` is **policy**, not networking, so it belongs in the
 //! default-tree [config component] alongside every other `config.toml` table —
-//! it must be readable without the `ui` feature. The `agent-core` crate (which
-//! owns the `rig` clients and its `reqwest` HTTP backend) is `ui`-only; if the
-//! core depended on it, the HTTP client would leak into the default dependency
-//! tree and break the byte-identical no-networking fitness function
-//! ([NFR-SE-01]). So [`ChatProvider`] is a **core-local** enum whose serde names
-//! match `agent-core`'s `ProviderKind` (`"anthropic"` / `"openai"`); the `ui`
-//! layer bridges the two when it constructs a provider.
+//! it must be readable without the `ui` feature. The agent substrate (which
+//! owns the `rig` clients and its `reqwest` HTTP backend) is never a core
+//! dependency; if the core depended on it, the HTTP client would leak into the
+//! default dependency tree and break the byte-identical no-networking fitness
+//! function ([NFR-SE-01]). So [`ChatProvider`] is a **core-local** enum whose
+//! serde names match the substrate's `ProviderKind` (`"anthropic"` /
+//! `"openai"`); the substrate bridges the two when it constructs a provider.
 //!
 //! [config component]: ../../../docs/specs/architecture/components/config.md
 //! [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
@@ -38,7 +38,7 @@ use super::secrets::{load_secrets_from_root, MaskedSecret, Secrets};
 
 /// The default OpenAI-compatible endpoint: **OpenRouter** ([FR-CF-06], [ADR-41]).
 ///
-/// Kept byte-identical to `agent-core`'s `DEFAULT_OPENAI_BASE_URL` so the policy
+/// Kept byte-identical to the agent substrate's `DEFAULT_OPENAI_BASE_URL` so the policy
 /// default the editor renders is the endpoint the substrate dials. The headline
 /// use case is reaching open models through a gateway, not committing to one
 /// vendor — so the OpenAI-compatible provider defaults here rather than to
@@ -59,7 +59,7 @@ pub const DEFAULT_MAX_REPLANS: u32 = 3;
 
 /// Provider-retry count default — **2** attempts beyond the first ([CR-060],
 /// [S-240], [FR-CF-06]). `0` disables retries (a single attempt). Kept
-/// byte-identical to `agent-core`'s `DEFAULT_MAX_PROVIDER_RETRIES` so the policy
+/// byte-identical to the agent substrate's `DEFAULT_MAX_PROVIDER_RETRIES` so the policy
 /// the editor renders is the policy the retry decorator applies.
 ///
 /// [CR-060]: ../../../docs/requests/CR-060-chat-resilience-recoverable-faults.md
@@ -67,7 +67,7 @@ pub const DEFAULT_MAX_PROVIDER_RETRIES: u32 = 2;
 
 /// Provider-retry base backoff default — **200 ms** ([CR-060], [S-240]). The
 /// first retry interval, doubled (with jitter) each subsequent retry. Kept
-/// byte-identical to `agent-core`'s `DEFAULT_PROVIDER_RETRY_BASE_MS`.
+/// byte-identical to the agent substrate's `DEFAULT_PROVIDER_RETRY_BASE_MS`.
 pub const DEFAULT_PROVIDER_RETRY_BASE_MS: u32 = 200;
 
 /// Prior-turn window default turn count — **6** ([S-483], [FR-UI-20]): the number
@@ -133,7 +133,7 @@ fn default_provider_retry_base_ms() -> u32 {
 
 /// Which provider family the chat agent talks to ([FR-CF-06]).
 ///
-/// A **core-local** mirror of `agent-core`'s `ProviderKind` — same serde wire
+/// A **core-local** mirror of the agent substrate's `ProviderKind` — same serde wire
 /// names (`"anthropic"` / `"openai"`) so a `[chat] provider` value round-trips
 /// to the substrate's enum, but defined here so `[chat]` parsing needs no
 /// `ui`-only dependency (see the module docs).
@@ -274,7 +274,7 @@ pub struct ChatConfig {
     /// the first attempt ([CR-060], [S-240]); default
     /// [`DEFAULT_MAX_PROVIDER_RETRIES`] (2). `0` disables retries (a single
     /// attempt). Bounded above by an internal ceiling so a misconfiguration can
-    /// never amplify load against the provider. The wiki-agent inherits this via
+    /// never amplify load against the provider. The in-app wiki generator inherits this via
     /// [`EffectiveWikiModel`](super::EffectiveWikiModel).
     ///
     /// [CR-060]: ../../../docs/requests/CR-060-chat-resilience-recoverable-faults.md
@@ -829,7 +829,7 @@ mod tests {
         assert_eq!(cfg.chat.provider, ChatProvider::OpenAi);
     }
 
-    /// The provider serde wire names match `agent-core`'s `ProviderKind`:
+    /// The provider serde wire names match the agent substrate's `ProviderKind`:
     /// `"anthropic"` and `"openai"` (the alias for the OpenAI-compatible family).
     #[test]
     fn provider_serde_wire_names() {

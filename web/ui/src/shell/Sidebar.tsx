@@ -73,8 +73,7 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // S-430: the app-level Config editor answers "what is configured", one scope up
   // from the member-scoped Config tab, so it carries the same icon (FR-UI-38).
   "workspace-config": IconConfig,
-  // The member Chat and the Workspace Chat are the `chat` extension's entries
-  // (S-643); their icon comes with its registration (`views/chat/extension.tsx`).
+  // An extension entry's icon comes with its registration (`ExtensionUi.icons`).
 };
 
 /** The icon for nav id `id`: the built-in map first, so an extension never re-skins a
@@ -145,9 +144,8 @@ function NavGroups({
               <NavLink
                 key={v.id}
                 item={v}
-                // Exact match, or — for a tab that owns client sub-routes
-                // (the Wiki reader's `/wiki/page/*`) — any path under it, so the
-                // tab stays highlighted while reading one of its pages. The rule
+                // Exact match, or — for a tab that owns client sub-routes — any
+                // path under it, so the tab stays highlighted on one of its pages. The rule
                 // (and the `/`-depth guard that keeps the root Dashboard from
                 // prefix-matching `/health`) lives in `nav.ts`, which is also what
                 // `scopeForPath` asks.

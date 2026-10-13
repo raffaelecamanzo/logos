@@ -1,5 +1,5 @@
 //! Shared SQLite open helpers for the side stores that are created on demand by
-//! concurrent requests (`history.db` here, `chat.db` in `chat-agent`).
+//! concurrent requests (`history.db` here, `chat.db` in the chat extension).
 
 use std::time::Duration;
 

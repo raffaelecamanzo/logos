@@ -265,11 +265,11 @@ impl WikiConfig {
 
 /// The resolved wiki generation policy ([FR-CF-07], [ADR-42]): the effective
 /// model plus the `provider`/`base_url`/key **inherited** from `[chat]`/
-/// `secrets.toml` verbatim — the input the wiki-agent's provider construction
+/// `secrets.toml` verbatim — the input the in-app wiki generator's provider construction
 /// needs, with no separate wiki provider/endpoint/secret to resolve.
 ///
 /// Carries the raw API key ([`api_key`](Self::api_key)) at rest for the
-/// wiki-agent's egress call — so, like [`Secrets`], its `Debug` is
+/// in-app wiki generator's egress call — so, like [`Secrets`], its `Debug` is
 /// **hand-written** to redact it ([NFR-SE-07]); it is not [`Serialize`], so it
 /// can never be JSON-encoded into a response either.
 ///
@@ -286,7 +286,7 @@ pub struct EffectiveWikiModel {
     /// The chat API key, inherited from `secrets.toml`; `None` when unset.
     pub api_key: Option<String>,
     /// The bounded provider-retry count, inherited from
-    /// [`ChatConfig::max_provider_retries`] ([CR-060], [S-240]): the wiki-agent
+    /// [`ChatConfig::max_provider_retries`] ([CR-060], [S-240]): the in-app wiki generator
     /// reuses the resolved chat retry policy — there is no separate wiki policy.
     ///
     /// [CR-060]: ../../../docs/requests/CR-060-chat-resilience-recoverable-faults.md
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(resolved.api_key.as_deref(), Some("sk-secret-1234"));
     }
 
-    /// [CR-060]/[S-240] AC: the wiki-agent inherits the resolved `[chat]`
+    /// [CR-060]/[S-240] AC: the in-app wiki generator inherits the resolved `[chat]`
     /// provider-retry policy — there is no separate wiki retry policy.
     #[test]
     fn resolve_inherits_the_provider_retry_policy_from_chat() {

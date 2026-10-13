@@ -15,10 +15,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
-import { clearExtensions } from "./extensions/registry.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions } from "./extensions/registry.ts";
 import { navItemsFor } from "./nav.ts";
-import { mountChat } from "./test/chat.ts";
 import { redirect } from "./router.tsx";
+import { extensionsInfo, STUB_ID, StubAppView, StubView, stubInfo } from "./test/extensions.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
 import { ROSTER, stubApi } from "./workspace/testFixtures.ts";
@@ -64,8 +64,8 @@ vi.mock("./views/index.ts", async () => {
 // navigating under it. `currentUrl`/`replaceUrl` are the REAL ones (S-426) — they
 // are the seam the member switch writes the URL through, and a stub would make the
 // URL assertions below pin the stub instead of the behaviour.
-/** Every `app`-scoped client route, spelled out — the chat extension's included, as
- *  every spec here runs with it active.
+/** Every `app`-scoped client route, spelled out — the mounted stub extension's
+ *  included, as every spec here runs with it active.
  *
  *  Deliberately a literal list rather than a filter over the offered navigation:
  *  the shell decides the mount key from the SAME `scope` field that filter would
@@ -85,8 +85,9 @@ const { APP_ROUTES, pathname } = vi.hoisted(() => ({
     "/workspace-health",
     "/workspace-statistics",
     "/workspace-config",
-    // S-485: the Workspace Chat — app-scoped, so a member switch must not remount it.
-    "/workspace-chat",
+    // The stub extension's app entry (S-485's replacement shape) — app-scoped, so a
+    // member switch must not remount it.
+    "/stub-app",
   ] as string[],
   pathname: { current: "/" },
 }));
@@ -97,9 +98,33 @@ vi.mock("./router.tsx", async (importOriginal) => ({
   redirect: vi.fn(),
 }));
 
-// The release (`agents`) build's shell: the `chat` extension active, as its server
-// reports it (S-643) — the Workspace Chat and the /chat replacement are its.
-beforeEach(mountChat);
+// A shell with an extension mounted: a member entry at /stub that a workspace
+// replaces with the extension's app entry at /stub-app (S-485, S-642), as its server
+// would report it.
+beforeEach(() => {
+  registerExtensionUi({ id: STUB_ID, views: { "/stub": StubView, "/stub-app": StubAppView } });
+  setActiveExtensions(
+    extensionsInfo(
+      stubInfo({
+        ui: {
+          nav: [
+            {
+              id: "stub",
+              label: "Stub",
+              path: "/stub",
+              group: "A",
+              scope: "member",
+              replaced_in_workspace_by: "stub-app",
+            },
+            { id: "stub-app", label: "Stub app", path: "/stub-app", group: "A", scope: "app" },
+          ],
+          views: [],
+          config_panels: [],
+        },
+      }),
+    ),
+  );
+});
 
 afterEach(() => {
   cleanup();
@@ -325,7 +350,7 @@ describe("the retired-route migrations keep the member (S-426, S-194, S-612)", (
   });
 });
 
-describe("/chat lands on the Workspace Chat in a workspace (S-485, FR-UI-35, ADR-71)", () => {
+describe("a replaced member route lands on its app replacement in a workspace (S-485, FR-UI-35, ADR-71)", () => {
   const realRouter = async () => await vi.importActual<typeof import("./router.tsx")>("./router.tsx");
 
   /** Route `redirect` through the REAL one, and move the pinned pathname with it. */
@@ -339,17 +364,17 @@ describe("/chat lands on the Workspace Chat in a workspace (S-485, FR-UI-35, ADR
     });
   }
 
-  it.each(["/chat", "/chat?repo=web"])("redirects %s to /workspace-chat, keeping the member", async (url) => {
+  it.each(["/stub", "/stub?repo=web"])("redirects %s to /stub-app, keeping the member", async (url) => {
     await followRedirects();
-    pathname.current = "/chat";
+    pathname.current = "/stub";
     openAt(url);
     const calls = stubApi();
     render(app());
 
-    // The app-scoped Workspace Chat mounted — not the member chat — on its own route.
+    // The app-scoped replacement mounted — not the member view — on its own route.
     await waitFor(() => expect(appViewCalls(calls())).toHaveLength(1));
     expect(viewCalls(calls())).toEqual([]);
-    expect(window.location.pathname).toBe("/workspace-chat");
+    expect(window.location.pathname).toBe("/stub-app");
     // A replace, carrying the member the URL named (or the default's stamp).
     expect(window.location.search).toBe(url.includes("repo=web") ? "?repo=web" : "?repo=api");
     expect(vi.mocked(redirect)).toHaveBeenCalledTimes(1);
@@ -357,8 +382,8 @@ describe("/chat lands on the Workspace Chat in a workspace (S-485, FR-UI-35, ADR
 
   it("carries an UNKNOWN ?repo= across, so the refusal is not bypassed", async () => {
     await followRedirects();
-    pathname.current = "/chat";
-    openAt("/chat?repo=ghost");
+    pathname.current = "/stub";
+    openAt("/stub?repo=ghost");
     stubApi();
     render(app());
 
@@ -367,10 +392,10 @@ describe("/chat lands on the Workspace Chat in a workspace (S-485, FR-UI-35, ADR
     expect(screen.queryByTestId("view")).toBeNull();
   });
 
-  it("does not redirect /chat in a single-root serve — the member chat is served as always", async () => {
+  it("does not redirect /stub in a single-root serve — the member view is served as always", async () => {
     vi.mocked(redirect).mockReset();
-    pathname.current = "/chat";
-    openAt("/chat");
+    pathname.current = "/stub";
+    openAt("/stub");
     const calls = stubApi({ probeStatus: 404 });
     render(app());
 

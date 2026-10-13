@@ -53,19 +53,6 @@ export const IconGraph = (p: IconProps) => (
   </Svg>
 );
 
-export const IconChat = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z" />
-  </Svg>
-);
-
-export const IconWiki = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M4 4h11a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z" />
-    <path d="M18 7h2v13H7" />
-  </Svg>
-);
-
 export const IconArchitecture = (p: IconProps) => (
   <Svg {...p}>
     <rect x="3" y="3" width="6" height="6" />
@@ -120,87 +107,6 @@ export const IconStatistics = (p: IconProps) => (
     <rect x="7" y="12" width="3" height="6" />
     <rect x="12" y="8" width="3" height="10" />
     <rect x="17" y="4" width="3" height="14" />
-  </Svg>
-);
-
-/* The "+ New chat" action's leading glyph (S-308, FR-UI-33): a plain plus, the
-   set's only additive-action icon. */
-export const IconPlus = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M12 5v14M5 12h14" />
-  </Svg>
-);
-
-/* The chat's pill composer and cardless rail (S-619, FR-UI-45, CR-204 L3/L6): Send's
-   up-arrow, Stop's square, the rail row's trash, the rail's collapse toggle and the
-   consent chip's disclosure chevron. Decorative like every glyph here — each control
-   carries its own accessible name. */
-export const IconArrowUp = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M12 19V5M5 12l7-7 7 7" />
-  </Svg>
-);
-
-export const IconStop = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x="6" y="6" width="12" height="12" rx="1.5" />
-  </Svg>
-);
-
-export const IconTrash = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M4 7h16M10 11v6M14 11v6" />
-    <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />
-  </Svg>
-);
-
-export const IconPencil = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z" />
-    <path d="M13.5 6.5l4 4" />
-  </Svg>
-);
-
-export const IconPanelLeft = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x="3" y="4" width="18" height="16" rx="2" />
-    <path d="M9 4v16" />
-  </Svg>
-);
-
-export const IconChevronDown = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M6 9l6 6 6-6" />
-  </Svg>
-);
-
-/* The chat turn's icon action bar and its scroll-to-bottom control (S-620, FR-UI-46,
-   CR-204 C10): Copy, the check Copy shows for 1.5 s once it has copied, Regenerate's
-   circular arrow, and the floating down-arrow. Decorative like every glyph here — each
-   control carries its own accessible name. */
-export const IconCopy = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x="9" y="9" width="11" height="11" rx="2" />
-    <path d="M5 15V6a2 2 0 0 1 2-2h8" />
-  </Svg>
-);
-
-export const IconCheck = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M5 12.5l4.5 4.5L19 7.5" />
-  </Svg>
-);
-
-export const IconRefresh = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M20 12a8 8 0 1 1-2.5-5.8" />
-    <path d="M20 4v5h-5" />
-  </Svg>
-);
-
-export const IconArrowDown = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M12 5v14M5 12l7 7 7-7" />
   </Svg>
 );
 

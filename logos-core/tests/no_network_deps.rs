@@ -16,8 +16,8 @@
 //! denying `hyper`/`h2`/`socket2` in the default tree was exactly right.
 //!
 //! CR-078/[ADR-60] made the dashboard the shipped **default** (S-287) while
-//! keeping the LLM egress *client* behind a separate, opt-in `agents` feature.
-//! The default binary now *legitimately links the loopback HTTP server*
+//! keeping every egress *client* out of it. The default binary now
+//! *legitimately links the loopback HTTP server*
 //! (`hyper`/`hyper-util`/`socket2`) so it can **listen** — but it still links no
 //! HTTP *client*, so it can never **dial**. A single all-or-nothing denylist can
 //! no longer express that: `hyper` is a false positive against the shipped
@@ -37,23 +37,15 @@
 //!   listener at all. This is the absolute-offline anchor: it links **nothing**
 //!   that can open or accept a socket, and this check keeps that honest.
 //!
-//! # Four builds (CR-213, S-645)
+//! # The default build composes no extension (CR-213, CR-214, S-645, S-651)
 //!
-//! Since chat and the wiki became extensions, the default tree's check also runs
-//! over the other two builds the project ships or tests:
+//! The default tree is also the build that composes no extension ([FR-DS-05]):
+//! chat and the wiki are not part of this repository, so no build of it links an
+//! egress client at all. The behavioral zero-egress proofs get their own carve-out
+//! tests (web/tests/carve_out.rs and the sandboxed session, [UAT-UI-02] steps
+//! 2–4); this file owns the two structural denylist anchors.
 //!
-//! - the **no-extension** tree (`--no-default-features --features lang-all,ui`,
-//!   [`no_extension_tree_denies_only_egress_client_crates`]) is the listen-only
-//!   dashboard with no extension composed — the default check, verbatim;
-//! - the **`agents`** tree (the release build) legitimately links the egress
-//!   client, but only through the consent-gated agent substrate: with `agent-core`
-//!   pruned, the default check holds verbatim
-//!   ([`agents_tree_reaches_egress_clients_only_through_agent_core`]).
-//!
-//! The `ui`-vs-default `rig`/`reqwest` boundary and the behavioral zero-egress
-//! proofs get their own carve-out tests (agent-core/tests/carve_out.rs,
-//! web/tests/carve_out.rs, and the sandboxed session, [UAT-UI-02] steps 2–4);
-//! this file owns the two structural denylist anchors.
+//! [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
 //!
 //! # Why the resolved *tree*, not the raw `Cargo.lock` (CR-012, ADR-27)
 //!
@@ -67,8 +59,8 @@
 use std::process::Command;
 
 /// Egress **client** crates — the ones that open an *outbound* connection. These
-/// are denied in **both** trees: they must never enter the shipped binary, in
-/// any build short of the opt-in `agents` feature.
+/// are denied in **both** trees: they must never enter a binary this repository
+/// builds.
 ///
 /// HTTP clients (`reqwest`, `ureq`, `attohttpc`, `isahc`, `surf`) and the `tonic`
 /// gRPC client stack. Matched exactly as atomic crate names. The `aws-sdk-*`
@@ -123,9 +115,8 @@ fn is_denied_offline(name: &str) -> bool {
 /// this to a specific build rather than the union lock.
 ///
 /// `no_default` drops the default feature set (the slim build); `extra_features`
-/// adds an explicit feature list on top (e.g. `lang-all` for the grammars);
-/// `prune` drops one package's subtree from the resolution (`cargo tree --prune`).
-fn logos_tree_crates(no_default: bool, extra_features: Option<&str>, prune: Option<&str>) -> Vec<String> {
+/// adds an explicit feature list on top (e.g. `lang-all` for the grammars).
+fn logos_tree_crates(no_default: bool, extra_features: Option<&str>) -> Vec<String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut args = vec![
         "tree",
@@ -147,10 +138,6 @@ fn logos_tree_crates(no_default: bool, extra_features: Option<&str>, prune: Opti
     if let Some(features) = extra_features {
         args.push("--features");
         args.push(features);
-    }
-    if let Some(package) = prune {
-        args.push("--prune");
-        args.push(package);
     }
 
     let output = Command::new(cargo)
@@ -179,8 +166,7 @@ fn logos_tree_crates(no_default: bool, extra_features: Option<&str>, prune: Opti
 /// The listen-only check: `crates` (the resolved tree of the `build` named in the
 /// message) links the loopback dashboard server and **no egress client crate**.
 ///
-/// Shared by every tree that may listen but must never dial — the default, the
-/// no-extension build, and the `agents` build less its consent-gated substrate.
+/// The check for a tree that may listen but must never dial — the default build.
 fn assert_listen_only(build: &str, crates: Vec<String>) {
     // Non-vacuity anchor: the tree must actually resolve non-empty, or the
     // offender filter below would pass trivially (e.g. a `cargo tree` format/parse
@@ -206,50 +192,27 @@ fn assert_listen_only(build: &str, crates: Vec<String>) {
          tree of the shipped `logos` binary contains egress-client crate(s) \
          {offenders:?}. A listen-only build ships the loopback dashboard (`ui`) and \
          may link an HTTP *server* to listen, but it must link no HTTP/gRPC *client* \
-         — it can never dial out. The LLM egress client is opt-in behind the \
-         `agents` feature, through `agent-core` alone (ADR-60); if this dependency is \
+         — it can never dial out (ADR-60). If this dependency is \
          genuinely required here, the invariant — and \
          docs/security/trusted-input-boundary.md — must be revisited deliberately, \
          not silently."
     );
 }
 
-/// **Default-tree anchor** (CR-078, ADR-60): the shipped `logos` binary — default
-/// features (`lang-all` + `ui`) — must link **no egress client crate**. It links
-/// the loopback dashboard server (`hyper`/`socket2`) to *listen*, but nothing
-/// that can *dial*, so it can never phone home even though `ui` is now default.
+/// **Default-tree anchor** (CR-078, ADR-60, [FR-DS-05]): the shipped `logos`
+/// binary — default features (`lang-all` + `ui`), composing no extension — must
+/// link **no egress client crate**. It links the loopback dashboard server
+/// (`hyper`/`socket2`) to *listen*, but nothing that can *dial*, so it can never
+/// phone home even though `ui` is default.
 ///
-/// Passes on the current default tree (`ui` on, `agents` off). It fails the
-/// moment any egress client enters — e.g. flipping `agents` into the default set
-/// would pull `reqwest` in; the non-vacuity guard below proves this check *does*
-/// fire on such a tree.
-#[test]
-fn default_tree_denies_only_egress_client_crates() {
-    assert_listen_only("DEFAULT-feature", logos_tree_crates(false, None, None));
-}
-
-/// **No-extension anchor** (CR-213, S-645, [FR-DS-05]): the build that composes no
-/// extension (`--no-default-features --features lang-all,ui`) — the dashboard
-/// without chat or the wiki — is listen-only, held to the default check verbatim.
+/// It fails the moment any egress client enters the tree;
+/// [`the_listen_only_check_fires_on_an_egress_client`] proves the check itself
+/// does fire on such a tree.
 ///
 /// [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
 #[test]
-fn no_extension_tree_denies_only_egress_client_crates() {
-    assert_listen_only("NO-EXTENSION (`lang-all,ui`)", logos_tree_crates(true, Some("lang-all,ui"), None));
-}
-
-/// **`agents` anchor** (CR-213, S-645): the release build links the egress client,
-/// and must reach it only through `agent-core` — the consent-gated agent substrate
-/// (ADR-40, ADR-60). Pruning that one package must leave a listen-only tree: an
-/// egress client that an extension crate, `web` or the core pulled in directly would
-/// survive the prune and fail here. [`egress_client_filter_fires_on_the_agents_tree`]
-/// is the other half — unpruned, the same tree does carry `reqwest`.
-#[test]
-fn agents_tree_reaches_egress_clients_only_through_agent_core() {
-    assert_listen_only(
-        "`agents` (less `agent-core`)",
-        logos_tree_crates(false, Some("agents"), Some("agent-core")),
-    );
+fn default_tree_denies_only_egress_client_crates() {
+    assert_listen_only("DEFAULT-feature", logos_tree_crates(false, None));
 }
 
 /// **Slim-tree anchor** (NFR-SE-01): the genuine headless binary
@@ -259,11 +222,10 @@ fn agents_tree_reaches_egress_clients_only_through_agent_core() {
 /// `h3` / `socket2`) and is the absolute-offline guarantee CR-078 preserves.
 ///
 /// `lang-all` only turns on the tree-sitter grammars (pure parsers, no network),
-/// so this is exactly the shipped slim binary — the same scope
-/// `agent-core/tests/carve_out.rs` resolves for its `--no-default-features` case.
+/// so this is exactly the shipped slim binary.
 #[test]
 fn slim_tree_denies_the_full_network_stack() {
-    let offenders: Vec<String> = logos_tree_crates(true, Some("lang-all"), None)
+    let offenders: Vec<String> = logos_tree_crates(true, Some("lang-all"))
         .into_iter()
         .filter(|name| is_denied_offline(name))
         .collect();
@@ -279,27 +241,21 @@ fn slim_tree_denies_the_full_network_stack() {
     );
 }
 
-/// Non-vacuity guard for the default-tree check: resolving the **`agents`** tree
-/// — the one build that legitimately links the egress client — proves the
-/// egress-client filter actually *fires* when `reqwest` is present. Without this,
-/// a regression that silently emptied [`DENIED_CLIENT_EXACT`] would let
-/// [`default_tree_denies_only_egress_client_crates`] pass on a tree that had
-/// quietly pulled in an HTTP client. This is the "negative fixture" the default
-/// tree can't provide (it is egress-free by construction): the `agents` tree is a
-/// real tree that *does* contain `reqwest`.
+/// Non-vacuity guard for the default-tree check: [`assert_listen_only`] — the very
+/// check [`default_tree_denies_only_egress_client_crates`] runs — fails on a tree
+/// that links the dashboard server *and* an HTTP client. No build of this
+/// repository links one, so no real tree can be the negative fixture; this one is
+/// built by hand, with the server present so the non-vacuity anchor inside the
+/// check is satisfied and only the egress filter can fail it. Without this, a
+/// regression that silently emptied [`DENIED_CLIENT_EXACT`], or stopped the check
+/// from asserting on its offenders, would let the default-tree check pass on a tree
+/// that had quietly pulled in an HTTP client.
 #[test]
-fn egress_client_filter_fires_on_the_agents_tree() {
-    let agents_offenders: Vec<String> = logos_tree_crates(false, Some("agents"), None)
-        .into_iter()
-        .filter(|name| is_egress_client(name))
-        .collect();
-
-    assert!(
-        agents_offenders.iter().any(|c| c == "reqwest"),
-        "the `agents` tree must contain `reqwest` (the opt-in egress client) and the \
-         egress-client filter must catch it — otherwise the default-tree check could \
-         pass vacuously on a tree that had leaked an HTTP client. Found: \
-         {agents_offenders:?}",
+#[should_panic(expected = "contains egress-client crate(s) [\"reqwest\"]")]
+fn the_listen_only_check_fires_on_an_egress_client() {
+    assert_listen_only(
+        "hand-built",
+        ["hyper", "reqwest", "serde", "tokio"].map(str::to_string).to_vec(),
     );
 }
 

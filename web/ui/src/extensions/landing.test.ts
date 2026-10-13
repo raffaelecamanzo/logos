@@ -35,6 +35,17 @@ describe("extensionDecisionPending", () => {
     expect(inactiveExtensionLanding("/health")).toBeNull();
   });
 
+  it("lands a route nobody registered on the Dashboard, with nothing to wait for", () => {
+    // A build that composes no extension (S-651, FR-UI-51): an old bookmark to an
+    // extension's route is served by no view, and is not held while the read is in flight.
+    for (const path of ["/chat", "/wiki", "/wiki/page/x", "/workspace-chat", "/nope"]) {
+      expect(extensionDecisionPending(path)).toBe(false);
+      expect(inactiveExtensionLanding(path)).toBe("/");
+    }
+    expect(inactiveExtensionLanding("/health")).toBeNull();
+    expect(inactiveExtensionLanding("/")).toBeNull();
+  });
+
   it("does not land a mounted extension's route", () => {
     registerExtensionUi({ id: STUB_ID, views: { "/stub": StubView } });
     setActiveExtensions(extensionsInfo(stubInfo()));

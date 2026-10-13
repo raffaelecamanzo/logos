@@ -30,7 +30,7 @@ const catalogues: CatalogueIndex = new Map(
     path,
     new Map(
       Object.entries(mod).flatMap(([name, value]): [string, CatalogueExport][] =>
-        // The one no-explanation entry (CR-208) is an entry a Widget names too.
+        // A no-explanation entry (CR-208) is an entry a Widget names too.
         isCopyEntry(value) || isNoExplanationEntry(value)
           ? [[name, "entry"]]
           : isEntryRecord(value)
@@ -103,7 +103,7 @@ describe("widget source scan (S-617)", () => {
     // Each top-level view the registry mounts is a file the glob found.
     for (const file of [
       "/src/views/dashboard/DashboardView.tsx",
-      "/src/views/chat/ChatView.tsx",
+      "/src/views/config/ConfigView.tsx",
       "/src/views/workspace/WorkspaceConfigView.tsx",
     ]) {
       expect(Object.keys(sources)).toContain(file);

@@ -6,11 +6,11 @@
 // "Every" is the sidebar's own list (`WORKSPACE_NAV_ITEMS` in src/nav.ts) plus the
 // app-level views the served build's active extensions add (`GET /api/v1/extensions`,
 // S-642): the first test fails until a new workspace view has a case here.
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { WORKSPACE_NAV_ITEMS } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
-import { configuredChat, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
+import { extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
 const CASES: Record<string, ViewCase> = {
   "/workspace-dashboard": { ready: "Members" },
@@ -18,13 +18,8 @@ const CASES: Record<string, ViewCase> = {
   // The Service map tab, which the view opens on; the coverage tab is
   // `workspace-widgets.workspace.spec.ts`'s.
   "/workspace": { ready: "Cross-service bindings" },
-  // The fixture declares no workspace chat tier; the configured chat is served.
-  "/workspace-chat": {
-    ready: "Conversation",
-    setup: (page: Page) => configuredChat(page, "/api/v1/workspace/config"),
-  },
   "/workspace-statistics": { ready: "Estimated value" },
-  "/workspace-config": { ready: "Workspace chat policy and credential" },
+  "/workspace-config": { ready: "Workspace manifest" },
 };
 
 test("a layout case exists for every view the workspace sidebar adds", async ({ request }) => {

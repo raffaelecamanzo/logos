@@ -44,17 +44,17 @@ describe("patch — typed field into the raw candidate (S-191, FR-UI-12)", () =>
   });
 
   it("replaces a key inside its owning [table], not a same-named top-level key", () => {
-    const raw = 'model = "top"\n\n[chat]\nprovider = "openai"\nmodel = "old"\n';
-    const next = patch(raw, "chat", "model", "str", "claude-x");
-    expect(next).toContain('[chat]\nprovider = "openai"\nmodel = "claude-x"');
+    const raw = 'model = "top"\n\n[tool]\nprovider = "openai"\nmodel = "old"\n';
+    const next = patch(raw, "tool", "model", "str", "claude-x");
+    expect(next).toContain('[tool]\nprovider = "openai"\nmodel = "claude-x"');
     // The top-level same-named key is untouched (region-scoped replace).
     expect(next).toContain('model = "top"');
   });
 
   it("inserts a new key right after an existing table header", () => {
-    const raw = '[chat]\nprovider = "openai"\n';
-    expect(patch(raw, "chat", "model", "str", "claude-x")).toBe(
-      '[chat]\nmodel = "claude-x"\nprovider = "openai"\n',
+    const raw = '[tool]\nprovider = "openai"\n';
+    expect(patch(raw, "tool", "model", "str", "claude-x")).toBe(
+      '[tool]\nmodel = "claude-x"\nprovider = "openai"\n',
     );
   });
 
@@ -73,9 +73,9 @@ describe("patch — typed field into the raw candidate (S-191, FR-UI-12)", () =>
   });
 
   it("round-trips: a value set then cleared returns the original document", () => {
-    const raw = '[chat]\nprovider = "openai"\n';
-    const set = patch(raw, "chat", "model", "str", "claude-x");
-    const cleared = patch(set, "chat", "model", "str", "");
+    const raw = '[tool]\nprovider = "openai"\n';
+    const set = patch(raw, "tool", "model", "str", "claude-x");
+    const cleared = patch(set, "tool", "model", "str", "");
     expect(cleared).toBe(raw);
   });
 });
@@ -171,34 +171,34 @@ describe("dropEmptyTable — a table whose presence is a value (S-430, FR-UI-38)
   });
 });
 
-describe("patch — [chat] read_roots survives the typed chat fields (sprint-79 HF-1)", () => {
+describe("patch — a multi-line array survives a typed edit of its table's other keys (sprint-79 HF-1)", () => {
   // `read_roots` has no typed control: it is edited in the raw pane, so a typed
   // provider/model/base_url edit must carry it through byte-for-byte — including
   // the multi-line array shape `toml::to_string_pretty` writes.
   const raw =
-    '[chat]\nread_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\nmodel = "old/model"\nbase_url = "https://x.example/v1"\n';
+    '[tool]\nread_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\nmodel = "old/model"\nbase_url = "https://x.example/v1"\n';
   const roots = 'read_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\n';
 
   it("replaces model after the array without touching it", () => {
-    const out = patch(raw, "chat", "model", "str", "new/model");
+    const out = patch(raw, "tool", "model", "str", "new/model");
     expect(out).toContain(roots);
     expect(out).toContain('model = "new/model"');
     expect(out).not.toContain("old/model");
   });
 
   it("removes a cleared base_url without touching the array", () => {
-    const out = patch(raw, "chat", "base_url", "str", "");
-    expect(out).toBe('[chat]\nread_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\nmodel = "old/model"\n');
+    const out = patch(raw, "tool", "base_url", "str", "");
+    expect(out).toBe('[tool]\nread_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\nmodel = "old/model"\n');
   });
 
   it("inserts an absent provider after the header, above the array", () => {
-    const out = patch(raw, "chat", "provider", "str", "anthropic");
-    expect(out.startsWith('[chat]\nprovider = "anthropic"\n' + roots)).toBe(true);
+    const out = patch(raw, "tool", "provider", "str", "anthropic");
+    expect(out.startsWith('[tool]\nprovider = "anthropic"\n' + roots)).toBe(true);
   });
 
   it("never mistakes an array item spelling `model =` for the key (the near miss)", () => {
-    const tricky = '[chat]\nread_roots = [\n  "model = inside",\n]\nmodel = "old/model"\n';
-    const out = patch(tricky, "chat", "model", "str", "new/model");
-    expect(out).toBe('[chat]\nread_roots = [\n  "model = inside",\n]\nmodel = "new/model"\n');
+    const tricky = '[tool]\nread_roots = [\n  "model = inside",\n]\nmodel = "old/model"\n';
+    const out = patch(tricky, "tool", "model", "str", "new/model");
+    expect(out).toBe('[tool]\nread_roots = [\n  "model = inside",\n]\nmodel = "new/model"\n');
   });
 });

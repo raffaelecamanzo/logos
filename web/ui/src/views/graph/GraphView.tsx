@@ -22,7 +22,7 @@ import { GraphExplorer } from "./GraphExplorer.tsx";
 import { DEFAULT_CAP, graphSeedFromSearch, withoutGraphSeed } from "./graphModel.ts";
 
 export function GraphView() {
-  // A `/graph?seed=` deep link (S-622, FR-UI-47 — a chat code reference, or an
+  // A `/graph?seed=` deep link (S-622, FR-UI-47 — a code reference, or an
   // Architecture cycle participant) opens the view focused on that node. It is
   // CONSUMED at mount: read once, then removed from the URL (the member's `repo`
   // stays), so a member switch — which remounts this view and keeps the query —

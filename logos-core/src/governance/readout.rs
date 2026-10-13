@@ -12,7 +12,7 @@
 //! a settings entry — pure install-time filesystem I/O that never touches a
 //! read-model — while this projects a governance read-model for one consumer.
 //! Co-locating them was the only reason the wiki depended on `models` at all
-//! (the wiki has since left the core for the `logos-wiki` crate). The payload is a
+//! (the wiki has since left the core for an extension crate). The payload is a
 //! rendering of the readout, so it belongs with the readout, and the
 //! materializer goes back to owning only the artifacts it writes.
 //!

@@ -1766,15 +1766,13 @@ impl Engine {
 
     /// The resolved worktree root (ADR-15).
     ///
-    /// Public so the `ui`-gated chat surface ([web-surface]/[chat-agent], S-170)
-    /// can resolve the project-root paths it needs beside the engine — the
-    /// gitignored `.logos/chat.db` memory/conversation store and the source-tool
-    /// [`Sandbox`](../../../docs/specs/architecture/components/chat-agent.md) root.
+    /// Public so a chat surface a build composes ([web-surface], S-170) can
+    /// resolve the project-root paths it needs beside the engine — the gitignored
+    /// `.logos/chat.db` memory/conversation store and the source-tool sandbox root.
     /// It exposes a path the engine already resolved; it is **not** a graph or
     /// governance query (the agent adds none, [ADR-41]) and writes nothing.
     ///
     /// [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
-    /// [chat-agent]: ../../../docs/specs/architecture/components/chat-agent.md
     /// [ADR-41]: ../../../docs/specs/architecture/decisions/ADR-41.md
     pub fn root(&self) -> &Path {
         &self.root
@@ -2426,7 +2424,7 @@ impl Engine {
     /// (CR-201, [`ResidueKey`]).
     ///
     /// The revision-keyed memo shape the wiki's native tier also follows (now
-    /// in the `logos-wiki` crate): read the key, answer a hit
+    /// in the wiki extension's crate): read the key, answer a hit
     /// from the memo, and on a miss run
     /// [`call_residue_by_language`](crate::resolve::call_residue_by_language) on
     /// the read-only pool and keep its answer. The key is read **before** the
@@ -2489,9 +2487,8 @@ impl Engine {
     /// the blessed baseline and their delta, and the last recorded rule
     /// violations as a non-blocking readout ([FR-GV-05]); `force` re-emits it.
     ///
-    /// Pure local filesystem I/O behind `logos hook --emit [--force]` and its
-    /// hidden alias `logos wiki hook --emit [--force]` (the `init -i` step runs
-    /// the same engine through [`crate::init`]). Installing
+    /// Pure local filesystem I/O behind `logos hook --emit [--force]` (the
+    /// `init -i` step runs the same engine through [`crate::init`]). Installing
     /// the hook performs **no** LLM call and opens **no** network connection
     /// ([NFR-SE-01]) — it only shells out to `logos quality-report`, whose
     /// read-model is computed without persisting a snapshot

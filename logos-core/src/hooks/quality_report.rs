@@ -179,7 +179,7 @@ const QUALITY_REPORT_HOOK_SCRIPT: &str = r#"#!/bin/sh
 #
 #   off-switch: export LOGOS_QUALITY_REPORT_DISABLE=1
 #
-# Regenerate with `logos wiki hook --emit --force` (or re-run `logos init -i`).
+# Regenerate with `logos hook --emit --force` (or re-run `logos init -i`).
 
 # Off-switch: disable the report without uninstalling the hook.
 [ "${LOGOS_QUALITY_REPORT_DISABLE:-0}" = "1" ] && exit 0
@@ -191,7 +191,7 @@ command -v logos >/dev/null 2>&1 || exit 0
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}" 2>/dev/null || exit 0
 
 # Deliberately NOT `exec`: the hook script and the binary on PATH can be
-# different vintages (a script emitted by a new `logos wiki hook --emit` while
+# different vintages (a script emitted by a new `logos hook --emit` while
 # an older release is still PATH-promoted, which is the normal state mid-
 # upgrade). An older binary does not know this subcommand and would exit 2 with
 # a clap usage error on stderr — which the host surfaces to the user as a failed
@@ -417,7 +417,7 @@ fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmi
                 ?action,
                 retired_removed = removed.len(),
                 retired_skipped = sweep.skipped.len(),
-                "wiki hook materialized"
+                "quality-report hook materialized"
             );
             Ok(summary_base(action, None, removed, sweep.skipped))
         }
@@ -596,7 +596,7 @@ fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge
                 return Merge::Foreign {
                     reason: format!(
                         "existing {settings} is not valid JSON — left untouched; \
-                         run `logos wiki hook --emit` after fixing it"
+                         run `logos hook --emit` after fixing it"
                     ),
                 };
             }

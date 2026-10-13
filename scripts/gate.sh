@@ -42,8 +42,8 @@
 #   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch,
 #                                 public terms (skips the two timing suites;
 #                                 `full` does not)
-#   bash scripts/gate.sh full     # pre-handoff: every package, deny, agents, the
-#                                 no-extension build, public terms, ui, the ui-e2e
+#   bash scripts/gate.sh full     # pre-handoff: every package, the agents-marker
+#                                 leg, deny, public terms, ui, the ui-e2e
 #                                 browser leg (full only, never fast)
 #
 # `full` RESUMES: a gate that already passed for this exact tree is not re-run,
@@ -76,10 +76,11 @@ usage: bash scripts/gate.sh {probe|fast|full}
   fast   clippy + the packages the working tree touches + the architecture
          gate + the public-terms gate. Emits tier "fast", which only
          `verify-evidence.sh --tier fast` accepts.
-  full   all packages, cargo-deny, the agents feature legs, the no-extension
-         build's leg, the public-terms gate, and the web/ui gates, including
-         the ui-e2e browser leg (never run by fast). Emits tier "full", which
-         is what verify-evidence.sh requires.
+  full   all packages, the agents-marker leg (the `observability::` unit
+         tests with logos-core's `agents` marker on), cargo-deny, the
+         public-terms gate, and the web/ui gates, including the ui-e2e
+         browser leg (never run by fast). Emits
+         tier "full", which is what verify-evidence.sh requires.
 EOF
     exit 2
 }
@@ -154,12 +155,31 @@ if ! cargo metadata --no-deps --format-version 1 >"$META" 2>"$EVID/.metadata.err
     exit 2
 fi
 
-# Emits one line per package: name<TAB>expected<TAB>test_targets<TAB>doctests<TAB>has_agents
-PKG_TABLE="$(
-    python3 - "$META" <<'PY'
+# Emits one line per package:
+#   name<TAB>expected<TAB>test_targets<TAB>doctests<TAB>lang_all_off
+# `lang_all_off` is `yes` for a package that declares a `lang-all` feature its
+# DEFAULT build does not enable, directly or through other features of its own.
+# That is the package a per-package `cargo test -p` must hand `--features lang-all`
+# (see pkg_features). A function over a metadata file, so the rule can be run
+# against fixture metadata (scripts/tests/test-gate-pkg-features.sh).
+build_pkg_table() { # metadata-json-path
+    python3 - "$1" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     meta = json.load(fh)
+
+def enabled_by_default(feats):
+    # Own-feature closure of `default`; `dep:x` and `pkg/feat` entries name no
+    # feature of this package, so they never extend it.
+    seen, todo = set(), ["default"]
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        todo.extend(x for x in feats.get(f, []) if x in feats)
+    return seen
+
 rows = []
 for pkg in meta.get("packages", []):
     targets = pkg.get("targets", [])
@@ -167,13 +187,16 @@ for pkg in meta.get("packages", []):
     doctests = sum(
         1 for t in targets if t.get("doctest") and "lib" in (t.get("kind") or [])
     )
-    has_agents = "agents" in (pkg.get("features") or {})
-    rows.append((pkg["name"], tests + doctests, tests, doctests, has_agents))
-for name, expected, tests, doctests, has_agents in sorted(rows):
+    feats = pkg.get("features") or {}
+    lang_all_off = "lang-all" in feats and "lang-all" not in enabled_by_default(feats)
+    rows.append((pkg["name"], tests + doctests, tests, doctests, lang_all_off))
+for name, expected, tests, doctests, lang_all_off in sorted(rows):
     print("%s\t%d\t%d\t%d\t%s" % (name, expected, tests, doctests,
-                                  "yes" if has_agents else "no"))
+                                  "yes" if lang_all_off else "no"))
 PY
-)"
+}
+
+PKG_TABLE="$(build_pkg_table "$META")"
 
 if [ -z "$PKG_TABLE" ]; then
     echo "gate.sh: could not derive package table from cargo metadata" >&2
@@ -218,17 +241,16 @@ if [ "$TIER" = "probe" ]; then
     echo "head:        $HEAD_SHA"
     echo "runner:      $RUNNER"
     echo
-    printf '%-12s %9s %7s %9s %8s %8s\n' package expected tests doctests floor agents
+    printf '%-12s %9s %7s %9s %8s\n' package expected tests doctests floor
     total=0
     pkg_names | while read -r p; do
         exp="$(pkg_field "$p" 2)"
         tst="$(pkg_field "$p" 3)"
         doc="$(pkg_field "$p" 4)"
-        agt="$(pkg_field "$p" 5)"
         flr="$(floor_for "$p")"
         warn=""
         if [ "$exp" -lt "$flr" ]; then warn="  <- BELOW FLOOR"; fi
-        printf '%-12s %9s %7s %9s %8s %8s%s\n' "$p" "$exp" "$tst" "$doc" "$flr" "$agt" "$warn"
+        printf '%-12s %9s %7s %9s %8s%s\n' "$p" "$exp" "$tst" "$doc" "$flr" "$warn"
     done
     echo
     echo "expected total: $(pkg_names | while read -r p; do pkg_field "$p" 2; done |
@@ -376,11 +398,10 @@ record() { # gate verdict [display-note]
 #   finished <  expected     truncation (only reachable if --no-fail-fast is lost)
 #   failed   >  0            genuine failures
 #
-# The build a unit tests is its FLAVOR: `default`, `agents` (the release build), or
-# `noext` — the build that composes no extension (S-645, FR-DS-05): `--no-default-
-# features --features lang-all,ui`, the dashboard without the `wiki` or `agents`
-# feature, so `cli/src/composition.rs` registers nothing. Its suite
-# (`cli/tests/no_extension_surface.rs`) compiles to nothing in any other build.
+# The build a unit tests is its FLAVOR. There is one, `default`: the build this
+# repository ships composes no extension (FR-DS-05), so the no-extension suite
+# (`cli/tests/no_extension_surface.rs`) runs in it, and no other feature set
+# changes what the `logos` package composes.
 #
 # The one mapping from a flavor to its cargo flags, so the command a leg runs and
 # the argv its evidence records cannot drift apart. An unknown flavor is a usage
@@ -389,8 +410,6 @@ record() { # gate verdict [display-note]
 flavor_features() { # flavor -> sets FEAT
     case "$1" in
         default) FEAT=() ;;
-        agents) FEAT=(--features agents) ;;
-        noext) FEAT=(--no-default-features --features lang-all,ui) ;;
         *)
             echo "gate.sh: unknown test flavor '$1'" >&2
             exit 2
@@ -398,22 +417,19 @@ flavor_features() { # flavor -> sets FEAT
     esac
 }
 
-# The flags ONE package's test run takes: its flavor's, plus whatever that package
-# needs on top. `web` needs `lang-all` (CR-167): two of its `workspace_api` tests
-# are `#[cfg(feature = "lang-all")]`, and CI runs them only because
-# `cargo test --workspace` unifies `lang-all` in from other members (cli forwards
-# `web?/lang-all`). A per-package `cargo test -p web` has no such neighbour, so
-# without the flag those tests are compiled out and the gate passes a suite
-# smaller than CI's. Per-package on purpose: every other package's argv is
-# unchanged, and the `noext` flavor already names `lang-all` (not repeated).
-# Sets FEAT.
+# The flags ONE package's test run takes: its flavor's, plus `--features lang-all`
+# for every package that declares `lang-all` and does not enable it by default
+# (pkg_field 5, derived from `cargo metadata` — never a package name). CI runs
+# `cargo test --workspace`, which unifies features across members: cli's default
+# turns `lang-all` on for logos-core, mcp and web, so their `lang-all`-gated tests
+# (CR-167, CR-227) are compiled in. A per-package `cargo test -p <pkg>` has no such
+# neighbour, so without the flag those tests are compiled out and the gate passes
+# a suite smaller than CI's. A package whose default already enables it, or that
+# has no such feature, keeps its flavor's flags unchanged. Sets FEAT.
 pkg_features() { # flavor pkg -> sets FEAT
     flavor_features "$1"
-    if [ "$2" = web ]; then
-        case " ${FEAT[*]+${FEAT[*]}} " in
-            *lang-all*) ;;
-            *) FEAT=(${FEAT[@]+"${FEAT[@]}"} --features lang-all) ;;
-        esac
+    if [ "$(pkg_field "$2" 5)" = yes ]; then
+        FEAT=(${FEAT[@]+"${FEAT[@]}"} --features lang-all)
     fi
 }
 
@@ -429,7 +445,7 @@ run_test_unit() { # gate pkg expected floor flavor -> sets UNIT_VERDICT
     # `--jobs 2` bounds the COMPILE, which is what exhausts memory here — not the
     # test run. Measured on a 16 GiB machine with ~8 GB of swap already in use: an
     # unbounded `cargo test` linking 82 logos-core test binaries, then relinking
-    # all of them for the `agents` feature set, was OOM-killed twice at exactly
+    # all of them for a second feature set, was OOM-killed twice at exactly
     # that transition. RAYON_NUM_THREADS/--test-threads bound the execution;
     # neither touches the link step.
     CARGO_TERM_COLOR=never RAYON_NUM_THREADS=2 \
@@ -483,8 +499,9 @@ EOF
     printf '    %-12s %s  %s/%s binaries, %s passed, %s failed%s\n' \
         "$pkg" "$verdict" "$finished" "$expected" "$p" "$f" \
         "$([ "$trunc" = none ] || echo "  [$trunc]")"
-    # Only a package whose flags differ from its flavor's earns a reproduce line;
-    # one per unit would bury the signal under logos-core's and the rest.
+    # Only a package whose flags differ from its flavor's earns a reproduce line
+    # (today the packages with `lang-all` off by default, pkg_field 5); one per
+    # unit would bury the signal under every other package's.
     flavor_features "$flavor"
     if [ "${feat[*]+${feat[*]}}" != "${FEAT[*]+${FEAT[*]}}" ]; then
         printf '      reproduce: %s\n' "$argv"
@@ -495,16 +512,19 @@ gate_tests() { # gate_name flavor pkg...
     local gate="$1" flavor="$2"
     shift 2
     if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
-    local pkg expected floor worst=pass ex=0
+    local pkg expected floor worst=pass ex=0 pkgnotes=""
     reset_units
     echo "$gate:"
     for pkg in "$@"; do
         expected="$(pkg_field "$pkg" 2)"
         floor="$(floor_for "$pkg")"
-        if [ "$flavor" = "agents" ] && [ "$(pkg_field "$pkg" 5)" != "yes" ]; then
-            # Passing --features to a package without it exits 101 having run
-            # nothing. Refusing to ask is the fix, not recording the 101.
-            continue
+        # A package with `lang-all` off by default takes `--features lang-all` on
+        # top of the flavor's flags (pkg_features); the gate-level argv below is a
+        # template, so it names each such package's flags rather than hiding them.
+        # Each unit's own `argv` in the evidence is the per-package ground truth.
+        if [ "$(pkg_field "$pkg" 5)" = yes ]; then
+            pkg_features "$flavor" "$pkg"
+            pkgnotes="$pkgnotes; $pkg: ${FEAT[*]}"
         fi
         run_test_unit "$gate" "$pkg" "$expected" "$floor" "$flavor"
         if [ "$UNIT_VERDICT" != "pass" ]; then
@@ -513,20 +533,11 @@ gate_tests() { # gate_name flavor pkg...
         fi
     done
     cat "$EVID/$gate"--*.log >"$EVID/$gate.log" 2>/dev/null
-    flavor_features "$flavor"
-    # `web` takes `--features lang-all` on top of the flavor's flags (pkg_features);
-    # the gate-level argv is a template, so it names that rather than hiding it.
-    # Each unit's own `argv` in the evidence is the per-package ground truth.
-    local webnote=""
-    for pkg in "$@"; do
-        if [ "$pkg" = web ] && { [ "$flavor" != agents ] || [ "$(pkg_field web 5)" = yes ]; }; then
-            pkg_features "$flavor" web
-            webnote="; web: ${FEAT[*]}"
-        fi
-    done
+    # The template names the FLAVOR's flags only; the loop above left FEAT holding
+    # the last selected package's.
     flavor_features "$flavor"
     write_evidence "$gate" \
-        "cargo test -p <pkg> --jobs 2 --no-fail-fast${FEAT[*]:+ ${FEAT[*]}} -- --test-threads=2 ${SKIPS[*]:-}${webnote}" \
+        "cargo test -p <pkg> --jobs 2 --no-fail-fast${FEAT[*]:+ ${FEAT[*]}} -- --test-threads=2 ${SKIPS[*]:-}${pkgnotes}" \
         "$ex" "$worst" none
     record "$gate" "$worst"
 }
@@ -543,20 +554,53 @@ gate_clippy() {
     CARGO_TERM_COLOR=never cargo clippy --workspace --all-targets --jobs 4 -- -D warnings \
         >"$log" 2>&1
     rc=$?
-    # The FULL tier also lints the no-extension build (S-645), as CI does: its suite
-    # (`cli/tests/no_extension_surface.rs`) and any `not(feature = "wiki")` code
-    # compile to nothing in the workspace pass above, so without this a lint there
-    # passes a green full gate and reddens CI. ~20 s once the `test-noext` leg's
-    # crates are checked; the fast tier skips it, like that leg.
-    if [ "$TIER" = "full" ] && [ $rc -eq 0 ]; then
-        argv="$argv && cargo clippy -p logos --no-default-features --features lang-all,ui --all-targets --jobs 4 -- -D warnings"
-        CARGO_TERM_COLOR=never cargo clippy -p logos --no-default-features --features lang-all,ui \
-            --all-targets --jobs 4 -- -D warnings >>"$log" 2>&1
-        rc=$?
-    fi
     if [ $rc -eq 0 ]; then verdict=pass; else verdict=fail; fi
     write_evidence clippy "$argv" "$rc" "$verdict" none
     record clippy "$verdict"
+}
+
+# --------------------------------------------------------------- agents marker
+#
+# logos-core's `agents` marker declares `observability::Surface::Chat`, and no
+# crate of this workspace turns it on, so the test gate never compiles that code.
+# scripts/agents-marker.sh runs the `observability::` unit tests with it on and
+# prints the run's denominator as its last line; this leg records that line as one
+# unit, keyed by name so a reordering cannot shift a count:
+#   expected / started / finished  the gated tests the script names, and how many
+#                                  printed a result line (zero is `started == 0`,
+#                                  which verify-evidence.sh rejects from counters)
+#   passed / failed / ignored      the whole filtered run, for the reader
+# The script's own exit code and truncation (build error, killed binary, gated
+# test absent) are recorded as they are. FULL tier only: it recompiles logos-core
+# under a feature set no other leg builds.
+gate_agents_marker() {
+    local gate=agents-marker
+    local log="$EVID/$gate.log" rc verdict=pass trunc
+    local g_exp g_start g_fin passed failed ignored summary
+    local argv="bash scripts/agents-marker.sh"
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
+    reset_units
+    bash scripts/agents-marker.sh --log "$EVID/$gate.cargo.log" >"$log" 2>&1
+    rc=$?
+    summary="$(tail -n 1 "$log")"
+    read -r _ _ _ g_exp g_start g_fin passed failed ignored _ trunc <<EOF
+$(printf '%s\n' "$summary" | awk '/^agents-marker: / {
+         for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+         printf "%d %d %d %d %d %d %d %d %d %d %s\n", v["expected"], v["started"], v["finished"],
+           v["gated_expected"], v["gated_started"], v["gated_finished"], v["passed"], v["failed"],
+           v["ignored"], v["rc"], (v["trunc"] == "" ? "unreadable" : v["trunc"])
+       }')
+EOF
+    # No summary line is a run that reported nothing: a failure, never a pass.
+    if [ -z "${trunc:-}" ]; then
+        trunc=no_summary
+        g_exp=0 g_start=0 g_fin=0 passed=0 failed=0 ignored=0
+    fi
+    if [ "$rc" -ne 0 ] || [ "$trunc" != none ]; then verdict=fail; fi
+    add_unit gated "$g_exp" 1 "$g_start" "$g_fin" "$passed" "$failed" "$ignored" \
+        "$rc" "$verdict" "$trunc" "cargo test -p logos-core --jobs 2 --no-fail-fast --lib --features agents observability:: -- --test-threads=2"
+    write_evidence "$gate" "$argv" "$rc" "$verdict" "$trunc"
+    record "$gate" "$verdict" "($g_fin of $g_exp gated tests ran; $passed passed, $failed failed, $ignored ignored$([ "$trunc" = none ] || echo "; $trunc"))"
 }
 
 # ------------------------------------------------------------------- cargo-deny
@@ -760,23 +804,21 @@ gate_ui_e2e() {
     # The binary must embed a real SPA build: build the bundle, then the binary,
     # then restore the tracked dist placeholder (rust-embed's debug-embed has
     # already copied the bundle into the binary, so the restore cannot undo it).
-    # The binary is the release feature set (`agents`, cli/Cargo.toml's dist
-    # metadata): the specs drive the shipped surface, and since S-643 chat is an
-    # extension only an `agents` build's `main` composes — a default build serves
-    # no chat view for the chat specs to open.
+    # The binary is the default build, the one this repository ships: the specs
+    # drive the shipped surface.
     {
         echo "== npm run build"
         (cd "$ui" && npm run build)
     } >"$log" 2>&1
     rc=$?
     if [ $rc -eq 0 ]; then
-        echo "== cargo build -p logos --bin logos --features agents" >>"$log"
-        CARGO_TERM_COLOR=never cargo build -p logos --bin logos --features agents --jobs 4 >>"$log" 2>&1
+        echo "== cargo build -p logos --bin logos" >>"$log"
+        CARGO_TERM_COLOR=never cargo build -p logos --bin logos --jobs 4 >>"$log" 2>&1
         rc=$?
     fi
     git checkout -- web/ui/dist 2>/dev/null
     if [ $rc -ne 0 ]; then
-        write_evidence "$gate" "npm run build && cargo build -p logos --features agents" "$rc" fail build_error
+        write_evidence "$gate" "npm run build && cargo build -p logos" "$rc" fail build_error
         record "$gate" fail "(build failed)"
         return
     fi
@@ -895,17 +937,7 @@ case "$TIER" in
         gate_clippy
         # shellcheck disable=SC2086
         gate_tests test default $(pkg_names)
-        # shellcheck disable=SC2086
-        gate_tests test-agents agents $(pkg_names)
-        # The no-extension build (S-645): the `logos` package, the one whose
-        # composition that build changes, with every test target, so its CLI suites
-        # run there too and not only the fitness tests (S-644's review found four of
-        # them red in that build behind clippy-only coverage). FULL tier only: it
-        # recompiles logos-core, mcp, web and the cli in a feature set no other leg
-        # builds. Measured on the reference machine: a cold `--no-run` build of that
-        # feature set takes 64 s (`--jobs 4`); the leg as run here, those crates then
-        # built, 99 s (20 binaries, 210 tests). ~2.5 min the fast loop does not carry.
-        gate_tests test-noext noext logos
+        gate_agents_marker
         gate_deny
         gate_arch
         gate_public_terms

@@ -1364,7 +1364,7 @@ mod tests {
         let inherited = read_documents(&member, Some(ws.path())).unwrap();
         assert_eq!(inherited.effective_wiki.model.as_deref(), Some("workspace/wiki"));
         assert_eq!(inherited.config.parsed.wiki.model, None, "the literal document declares none");
-        // The wire shape the Wiki tab reads (`effective_wiki.model`, wikiGenModel.ts):
+        // The wire shape a composed wiki view reads (`effective_wiki.model`):
         // pinned on the serialized payload, since the SPA's fixtures are hand-built.
         let payload = serde_json::to_string(&inherited).unwrap();
         assert!(

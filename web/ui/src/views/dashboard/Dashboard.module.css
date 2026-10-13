@@ -15,11 +15,6 @@
   font-size: var(--text-sm);
 }
 
-.snippet {
-  color: var(--text-1);
-  line-height: var(--leading-base);
-}
-
 /* ── Languages bar list ───────────────────────────────────────────────────── */
 .langRow {
   display: grid;

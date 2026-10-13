@@ -10,7 +10,8 @@
  * entry, bookmarks survive). A view the hidden-widget register hides (CR-208 —
  * the Architecture view) lands where its register entry says, `/dsm` included,
  * by the same silent redirect. So does a route an extension owns while the server
- * does not report that extension active (S-642, FR-UI-51): it lands on the Dashboard.
+ * does not report that extension active, and a route no view serves at all (S-642,
+ * S-651, FR-UI-51): it lands on the Dashboard.
  *
  * S-250 (CR-061, FR-UI-29) wraps the shell in the WorkspaceProvider and keys the
  * mounted view on the workspace cache key — the member. Switching members remounts
@@ -83,8 +84,9 @@ function Shell() {
   // (`/dsm` → `/architecture`, CR-208), so the register is asked about the path the
   // migration produced, and the one redirect goes straight to where it lands.
   //
-  // A route of an extension the server does not report active lands the same way
-  // (`inactiveExtensionLanding`, S-642): the Dashboard. Subscribing re-renders this
+  // A route of an extension the server does not report active, or a route no view
+  // serves, lands the same way (`inactiveExtensionLanding`, S-642, S-651): the
+  // Dashboard. Subscribing re-renders this
   // shell when the boot read of `GET /api/v1/extensions` settles, which is what moves
   // such a route from "wait" to either its view or the Dashboard.
   useExtensions();
@@ -97,11 +99,11 @@ function Shell() {
     }
   }, [retiredTo]);
 
-  // S-485 (FR-UI-35, ADR-71): in a workspace the member Chat is not offered — the
-  // chat there is the Workspace Chat — so `/chat` (and `/chat?repo=x`) lands on it.
+  // S-485 (FR-UI-35, ADR-71): in a workspace a member entry an app entry replaces is
+  // not offered, so its route (and `?repo=x` on it) lands on the replacement.
   // Which routes are replaced, and by what, is READ off `nav.ts`, the same
   // declaration the sidebar drops the entry by. Workspace mode only, and only once
-  // the probe has said so: single-root and `--standalone` serve `/chat` as always.
+  // the probe has said so: single-root and `--standalone` serve the route as always.
   // The query and fragment ride across verbatim, as for the retired routes above — an
   // unknown `?repo=` must reach the refusal rather than be dropped on the way.
   const replacement = mode === "workspace" ? workspaceReplacementPath(rawPathname) : null;

@@ -14,7 +14,7 @@
 import * as ts from "typescript";
 
 /** The commands the reference documents: each row of its index table names one
- *  (`init`, `workspace status`, `coverage ingest`, `wiki skill --emit` → `wiki skill`). */
+ *  (`init`, `workspace status`, `coverage ingest`, `hook --emit` → `hook`). */
 export function documentedCommands(reference: string): Set<string> {
   const commands = new Set<string>();
   for (const [, cell] of reference.matchAll(/^\|\s*\[`([^`]+)`\]\(#[^)]*\)\s*\|/gm)) {
@@ -54,7 +54,7 @@ export function commandsIn(file: string, source: string): NamedCommand[] {
  * Whether the reference documents `cmd`: the pair of words is a listed
  * subcommand (`workspace status`), or the first word is itself a listed command
  * and the second is its argument (`logos node <symbol>`, `logos xservice impact`).
- * A group the reference lists only by its subcommands (`coverage`, `wiki`) is
+ * A group the reference lists only by its subcommands (`coverage`) is
  * not a command on its own, so `logos coverage <anything unlisted>` fails.
  */
 export function isDocumented(cmd: NamedCommand, documented: ReadonlySet<string>): boolean {

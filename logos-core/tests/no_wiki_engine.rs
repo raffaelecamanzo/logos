@@ -1,73 +1,18 @@
-//! `logos-core` holds no wiki engine ([S-644], CR-213, [ADR-74]).
+//! `logos-core` holds no wiki engine ([S-644], CR-213, CR-214, [ADR-74]).
 //!
-//! The wiki left the core for the `logos-wiki` crate, which works over
-//! `&Engine` and therefore sits above it. Two things keep it out, and each is
-//! pinned here because each can come back without a compile error:
-//!
-//! - **No edge.** The core depending on `logos-wiki` — even as a
-//!   dev-dependency, which cargo permits despite the cycle — would let core code
-//!   or core tests reach back into the wiki. `cargo tree` reads every edge kind.
-//! - **No engine.** No crate-root `wiki` module and no `wiki_*` method on the
-//!   core's façade. `WikiConfig` (`config/wiki.rs`) is the one named
-//!   exception: since S-644 T2 the `wiki` extension claims and validates the
-//!   `[wiki]` table, but the type stays in the core because the config
-//!   read-model (`effective_wiki`) carries it, until CR-214 moves it. It is a
-//!   config type, not the engine.
+//! The wiki is not part of this repository: it is an extension a build composes
+//! over `&Engine`, above the core. What keeps the engine out of the core is pinned
+//! here, because it can come back without a compile error: no crate-root `wiki`
+//! module and no `wiki_*` method on the core's façade. `WikiConfig`
+//! (`config/wiki.rs`) is the one named exception: the config read-model
+//! (`effective_wiki`) carries it, so the type stays in the core while a build that
+//! composes no extension ignores the `[wiki]` table. It is a config type, not the
+//! engine.
 //!
 //! [S-644]: ../../docs/planning/journal.md#s-644-the-wiki-is-its-own-crate-and-a-registered-extension
 //! [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-/// The crate names in `logos-core`'s dependency tree over every edge kind
-/// (normal, build and dev). `--offline` keeps it network-free: the registry
-/// cache is warm after the build that precedes `cargo test`.
-fn core_tree_crates() -> Vec<String> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let output = Command::new(cargo)
-        .args([
-            "tree",
-            "--package",
-            "logos-core",
-            "--edges",
-            "normal,build,dev",
-            "--prefix",
-            "none",
-            "--format",
-            "{p}",
-            "--color",
-            "never",
-            "--offline",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("cargo runs");
-    assert!(
-        output.status.success(),
-        "cargo tree failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_string)
-        .collect()
-}
-
-#[test]
-fn logos_core_depends_on_no_logos_wiki_on_any_edge() {
-    let crates = core_tree_crates();
-    // The denominator: a tree that read nothing would pass the check below.
-    assert!(
-        crates.iter().any(|c| c == "logos-core") && crates.iter().any(|c| c == "tempfile"),
-        "the tree was read, dev edges included: {crates:?}"
-    );
-    assert!(
-        !crates.iter().any(|c| c == "logos-wiki"),
-        "logos-core must not depend on logos-wiki on any edge (ADR-74): {crates:?}"
-    );
-}
 
 /// Whether a line of Rust declares a **visible** `wiki_*` function — a façade
 /// method (`pub fn wiki_read(`, `pub(crate) fn wiki_x(`), not a private test

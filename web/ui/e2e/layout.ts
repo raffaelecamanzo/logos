@@ -159,7 +159,7 @@ export async function expectWidgetStackLayout(stack: Locator, opts: StackLayoutO
   }
   for (const [i, s] of m.bodySizes.entries()) {
     if (s.noExplanation) {
-      // Project Overview (CR-208): declared on its frame, and it renders neither.
+      // A no-explanation widget (CR-208): declared on its frame, and it renders neither.
       expect([s.what, s.why], `widget ${i + 1}: the no-explanation widget renders no what or why`).toEqual([
         "missing",
         "missing",

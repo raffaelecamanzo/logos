@@ -17,30 +17,47 @@ import {
   WORKSPACE_NAV_ITEMS,
   workspaceReplacementPath,
 } from "./nav.ts";
-import { CHAT_ACTIVE } from "./test/chat.ts";
 import { extensionsInfo, STUB_ID, StubAppView, StubView, stubInfo } from "./test/extensions.tsx";
-import { CHAT_EXTENSION_UI } from "./views/chat/extension.tsx";
 
 afterEach(clearExtensions);
 
 const MEMBER: ExtensionNavEntry = { id: "stub", label: "Stub", path: "/stub", group: "A", scope: "member" };
 const APP: ExtensionNavEntry = { id: "stub-app", label: "Stub app", path: "/stub-app", group: "A", scope: "app" };
 
+/** A second extension, registered ahead of the stub: a member entry it places after
+ *  Graph and replaces in a workspace by its own app entry. */
+const OTHER_MEMBER: ExtensionNavEntry = {
+  id: "other",
+  label: "Other",
+  path: "/other",
+  group: "A",
+  scope: "member",
+  replaced_in_workspace_by: "other-app",
+};
+const OTHER_APP: ExtensionNavEntry = { id: "other-app", label: "Other app", path: "/other-app", group: "A", scope: "app" };
+
 /** Mount the stub with exactly `nav` as its sidebar entries (a view registered for each
- *  path), placed by `navAfter` when given — beside the chat extension when `withChat`. */
+ *  path), placed by `navAfter` when given — beside the second extension when `withOther`. */
 function mountStub(...nav: ExtensionNavEntry[]): void {
   mountStubPlaced({}, false, ...nav);
 }
 
-function mountStubPlaced(navAfter: Record<string, string>, withChat: boolean, ...nav: ExtensionNavEntry[]): void {
-  if (withChat) registerExtensionUi(CHAT_EXTENSION_UI);
+function mountStubPlaced(navAfter: Record<string, string>, withOther: boolean, ...nav: ExtensionNavEntry[]): void {
+  if (withOther) {
+    registerExtensionUi({
+      id: "other",
+      views: { "/other": StubView, "/other-app": StubAppView },
+      navAfter: { other: "graph" },
+    });
+  }
   registerExtensionUi({
     id: STUB_ID,
     views: Object.fromEntries(nav.map((n) => [n.path, n.scope === "app" ? StubAppView : StubView])),
     navAfter,
   });
   const stub = stubInfo({ ui: { nav, views: [], config_panels: [] } });
-  setActiveExtensions(extensionsInfo(...(withChat ? CHAT_ACTIVE.extensions : []), stub));
+  const other = stubInfo({ id: "other", ui: { nav: [OTHER_MEMBER, OTHER_APP], views: [], config_panels: [] } });
+  setActiveExtensions(extensionsInfo(...(withOther ? [other] : []), stub));
 }
 
 describe("a mounted extension's navigation", () => {
@@ -94,7 +111,7 @@ function mountTwo(a: ExtensionNavEntry[], b: ExtensionNavEntry[]): void {
 }
 
 describe("a mounted extension's replacement in workspace mode", () => {
-  it("accepts a replacement by a BUILT-IN app entry (the member Chat's shape)", () => {
+  it("accepts a replacement by a BUILT-IN app entry", () => {
     mountStub({ ...MEMBER, replaced_in_workspace_by: "workspace-health" });
     expect(navItemsFor(true).some((i) => i.id === "stub")).toBe(false);
     expect(workspaceReplacementPath("/stub")).toBe("/workspace-health");
@@ -120,9 +137,9 @@ describe("a mounted extension's replacement in workspace mode", () => {
     expect(workspaceReplacementPath("/stub-app")).toBeNull();
   });
 
-  it("keeps another extension's replacement (member Chat → Workspace Chat, S-643) beside it", () => {
+  it("keeps another extension's replacement beside it", () => {
     mountStubPlaced({}, true, { ...MEMBER, replaced_in_workspace_by: "stub-app" }, APP);
-    expect(workspaceReplacementPath("/chat")).toBe("/workspace-chat");
+    expect(workspaceReplacementPath("/other")).toBe("/other-app");
     expect(workspaceReplacementPath("/stub")).toBe("/stub-app");
   });
 
@@ -232,10 +249,10 @@ describe("an entry its extension places (navAfter, S-643)", () => {
   });
 
   it("follows an entry another extension placed after the same anchor, in registration order", () => {
-    // Chat is anchored after Graph; a later extension anchored there too follows it,
-    // so the two keep the order the composition registered them in.
+    // The other extension is anchored after Graph; a later extension anchored there
+    // too follows it, so the two keep the order the composition registered them in.
     mountStubPlaced({ stub: "graph" }, true, MEMBER);
-    expect(navItemsFor(false).map((i) => i.id).slice(2, 6)).toEqual(["graph", "chat", "stub", "files"]);
+    expect(navItemsFor(false).map((i) => i.id).slice(2, 6)).toEqual(["graph", "other", "stub", "files"]);
   });
 
   it("is appended when its anchor is not offered — never placed into another section", () => {

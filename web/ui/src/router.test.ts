@@ -1,7 +1,6 @@
-import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { currentUrl, navigate, redirect, replaceUrl, useNavigationState } from "./router.tsx";
+import { currentUrl, navigate, redirect, replaceUrl } from "./router.tsx";
 import { setScopedMember } from "./workspace/scope.ts";
 
 afterEach(() => {
@@ -39,34 +38,9 @@ describe("navigate", () => {
 
   it("carries an explicit state payload into history.state (FR-WK-28)", () => {
     const pushSpy = vi.spyOn(window.history, "pushState");
-    navigate("/wiki/page/overview/architecture", { q: "sandbox" });
-    expect(pushSpy).toHaveBeenCalledWith({ q: "sandbox" }, "", "/wiki/page/overview/architecture");
+    navigate("/health/page/overview", { q: "sandbox" });
+    expect(pushSpy).toHaveBeenCalledWith({ q: "sandbox" }, "", "/health/page/overview");
     expect(window.history.state).toEqual({ q: "sandbox" });
-  });
-});
-
-describe("useNavigationState (FR-WK-28)", () => {
-  it("reads the current history.state on mount", () => {
-    window.history.pushState({ q: "term" }, "", "/wiki/page/x");
-    const { result } = renderHook(() => useNavigationState<{ q?: string }>());
-    expect(result.current).toEqual({ q: "term" });
-  });
-
-  it("returns null when the current history entry carries no state", () => {
-    window.history.pushState(null, "", "/wiki/page/x");
-    const { result } = renderHook(() => useNavigationState());
-    expect(result.current).toBeNull();
-  });
-
-  it("updates when a popstate event fires (navigate/back/forward)", () => {
-    window.history.pushState({ q: "first" }, "", "/wiki/page/x");
-    const { result } = renderHook(() => useNavigationState<{ q?: string }>());
-    expect(result.current).toEqual({ q: "first" });
-
-    act(() => {
-      navigate("/wiki/page/y", { q: "second" });
-    });
-    expect(result.current).toEqual({ q: "second" });
   });
 });
 
@@ -110,13 +84,13 @@ describe("history writes carry the active member (S-426)", () => {
 
 describe("replaceUrl (S-426)", () => {
   it("replaces the entry in place, keeping history.state and firing no popstate", () => {
-    window.history.replaceState({ q: "term" }, "", "/wiki/page/x");
+    window.history.replaceState({ q: "term" }, "", "/health/page/x");
     const pushSpy = vi.spyOn(window.history, "pushState");
     const dispatchSpy = vi.spyOn(window, "dispatchEvent");
 
-    replaceUrl("/wiki/page/x?repo=web");
+    replaceUrl("/health/page/x?repo=web");
 
-    expect(window.location.pathname + window.location.search).toBe("/wiki/page/x?repo=web");
+    expect(window.location.pathname + window.location.search).toBe("/health/page/x?repo=web");
     // No new back-stack entry: a member switch on the view you are looking at must
     // not cost a press of Back.
     expect(pushSpy).not.toHaveBeenCalled();

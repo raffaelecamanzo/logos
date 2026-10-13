@@ -108,9 +108,7 @@
         "min_sync_interval_ms": 3000,
         "settle_ms": 1500
       },
-      "wiki": {
-        "model": "snapshot-wiki-model"
-      }
+      "wiki": {}
     },
     "path": ".logos/config.toml"
   },
@@ -269,7 +267,7 @@
     "policy_origin": "member"
   },
   "effective_wiki": {
-    "model": "snapshot-wiki-model"
+    "model": "snapshot-chat-model"
   },
   "rules": {
     "content": "[constraints]\nmax_cycles = 0\n",

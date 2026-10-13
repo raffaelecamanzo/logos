@@ -12,8 +12,8 @@ export default defineConfig({
   plugins: [react()],
   // The same alias as `vite.config.ts` (S-642), from the same constant:
   // `virtual:logos-extensions` is not a file, so vitest must resolve it too — to the
-  // composed entry (the `chat` extension's registration, S-643); a test that needs a
-  // different registration `vi.mock`s it.
+  // composed entry, which registers no extension; a test that needs a registration
+  // registers a stub (`src/test/extensions.tsx`) or `vi.mock`s it.
   resolve: { alias: { "virtual:logos-extensions": EXTENSIONS_ENTRY } },
   test: {
     environment: "jsdom",

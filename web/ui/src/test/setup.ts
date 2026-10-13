@@ -41,8 +41,8 @@ if (!window.matchMedia) {
 }
 
 // An in-memory localStorage shim for the jsdom environments that omit Storage (the
-// Chat consent gate, S-190, persists its first-use acknowledgement there). Mirrors
-// the matchMedia shim above — installed only when the runtime lacks it.
+// theme persists its choice there, `theme/theme.ts`). Mirrors the matchMedia shim
+// above — installed only when the runtime lacks it.
 if (!window.localStorage) {
   const store = new Map<string, string>();
   window.localStorage = {
@@ -55,29 +55,4 @@ if (!window.localStorage) {
       return store.size;
     },
   } as Storage;
-}
-
-// jsdom shims the assistant-ui chat surface (S-200) touches: its thread viewport
-// observes resize and scrolls the newest turn into view, and the message-level
-// copy control writes to the clipboard. jsdom provides none of these; install
-// inert shims so the component tree mounts and the copy/scroll paths no-op safely.
-if (!("ResizeObserver" in globalThis)) {
-  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  };
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
-if (!Element.prototype.scrollTo) {
-  // assistant-ui's thread viewport auto-scrolls via `el.scrollTo`; jsdom omits it.
-  Element.prototype.scrollTo = () => {};
-}
-if (!navigator.clipboard) {
-  Object.defineProperty(navigator, "clipboard", {
-    configurable: true,
-    value: { writeText: () => Promise.resolve() },
-  });
 }

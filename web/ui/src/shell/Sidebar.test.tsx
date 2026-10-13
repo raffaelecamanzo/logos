@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 
 import type { StatsInfo } from "../api/types.ts";
 import { NAV_GROUPS, NAV_ITEMS, navItemsFor, WORKSPACE_NAV_ITEMS } from "../nav.ts";
-import { clearExtensions } from "../extensions/registry.ts";
-import { mountChat } from "../test/chat.ts";
-import { mountWiki } from "../test/wiki.ts";
+import type { ExtensionNavEntry } from "../api/extensionsClient.ts";
+import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../extensions/registry.ts";
+import { extensionsInfo, STUB_ID, StubAppView, StubIcon, StubView, stubInfo } from "../test/extensions.tsx";
 import { removeHiddenWidgetEntry } from "../test/hiddenWidgets.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import styles from "./Sidebar.module.css";
@@ -202,12 +202,9 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(names("Workspace")).toEqual(WORKSPACE_NAV_ITEMS.map((i) => i.label));
     // …and every member-scoped tab below it. Same order as the single-root
     // sidebar: the CR-042 A/B/C groups survive INSIDE the section rather than
-    // being re-ordered by it — less the member Chat, which a workspace replaces
-    // with the Workspace Chat (S-485), and the Architecture view, which the
+    // being re-ordered by it — less the Architecture view, which the
     // hidden-widget register hides (CR-208).
-    expect(names("Service")).toEqual(
-      NAV_ITEMS.filter((i) => i.id !== "chat" && i.id !== "architecture").map((i) => i.label),
-    );
+    expect(names("Service")).toEqual(NAV_ITEMS.filter((i) => i.id !== "architecture").map((i) => i.label));
   });
 
   it("keeps each section's CR-042 groups as separate lists in the markup (S-454)", async () => {
@@ -367,16 +364,13 @@ describe("the Architecture view is hidden from the sidebar (CR-208, FR-UI-41)", 
     expect(document.querySelector('a[href="/architecture"]')).toBeNull();
   });
 
-  it("lists it again, after Wiki, once its register entry is removed", async () => {
+  it("lists it again, after Graph, once its register entry is removed", async () => {
     onTestFinished(removeHiddenWidgetEntry("architecture-view"));
-    // The default build: the wiki extension's entry precedes it (S-644).
-    mountWiki();
-    onTestFinished(clearExtensions);
     mountWithMode(404);
     const link = await screen.findByRole("link", { name: /Architecture/ });
     expect(link).toHaveAttribute("href", "/architecture");
     const labels = [...document.querySelectorAll("nav a")].map((a) => a.textContent);
-    expect(labels.indexOf("Architecture")).toBe(labels.indexOf("Wiki") + 1);
+    expect(labels.indexOf("Architecture")).toBe(labels.indexOf("Graph") + 1);
   });
 });
 
@@ -386,47 +380,67 @@ describe("the Architecture view is hidden from the sidebar (CR-208, FR-UI-41)", 
 // nothing in the SPA tree asserted the muting behaviour at all, and the icon count
 // covered only the member roster.
 
-describe("the Workspace Chat replaces the member Chat in a workspace (S-485, FR-WS-34)", () => {
-  // Chat is the `chat` extension's (S-643): these are the release build's, with it active.
-  beforeEach(mountChat);
+/** A mounted extension's member entry ("Item"), replaced in a workspace by its own
+ *  app entry ("Item app") — the shape S-485 gives a replaced view. */
+const REPLACED: ExtensionNavEntry = {
+  id: "stub",
+  label: "Item",
+  path: "/stub",
+  group: "A",
+  scope: "member",
+  replaced_in_workspace_by: "stub-app",
+};
+const REPLACEMENT: ExtensionNavEntry = { id: "stub-app", label: "Item app", path: "/stub-app", group: "A", scope: "app" };
+
+function mountReplacingStub(): void {
+  registerExtensionUi({
+    id: STUB_ID,
+    icons: { stub: StubIcon, "stub-app": StubIcon },
+    views: { "/stub": StubView, "/stub-app": StubAppView },
+  });
+  setActiveExtensions(extensionsInfo(stubInfo({ ui: { nav: [REPLACED, REPLACEMENT], views: [], config_panels: [] } })));
+}
+
+describe("an app entry replaces a member entry in a workspace (S-485, FR-WS-34)", () => {
+  beforeEach(mountReplacingStub);
   afterEach(clearExtensions);
 
-  it("lists Chat in the Workspace section at /workspace-chat, and none under Service", async () => {
+  it("lists the replacement in the Workspace section, and the replaced entry under no section", async () => {
     mountWithMode(200);
-    await screen.findByRole("link", { name: /Workspace/ });
-    expect(within(region("Workspace")).getByRole("link", { name: /^Chat$/ })).toHaveAttribute(
+    await screen.findByRole("link", { name: /^Workspace$/ });
+    expect(within(region("Workspace")).getByRole("link", { name: /^Item app$/ })).toHaveAttribute(
       "href",
-      "/workspace-chat",
+      "/stub-app",
     );
-    expect(within(region("Service")).queryByRole("link", { name: /^Chat$/ })).toBeNull();
-    // Exactly one Chat in the whole sidebar — never the member one beside it.
-    expect(screen.getAllByRole("link", { name: /^Chat$/ })).toHaveLength(1);
+    expect(within(region("Service")).queryByRole("link", { name: /^Item$/ })).toBeNull();
+    expect(document.querySelector('a[href="/stub"]')).toBeNull();
   });
 
-  it("offers the member Chat at /chat and no /workspace-chat in a single-root serve", async () => {
+  it("offers the member entry and no replacement in a single-root serve", async () => {
     mountWithMode(404);
-    await waitFor(() => expect(screen.getByRole("link", { name: /^Chat$/ })).toBeInTheDocument());
-    expect(screen.getAllByRole("link", { name: /^Chat$/ }).map((a) => a.getAttribute("href"))).toEqual([
-      "/chat",
-    ]);
+    await waitFor(() => expect(screen.getByRole("link", { name: /^Item$/ })).toHaveAttribute("href", "/stub"));
+    expect(screen.queryByRole("link", { name: /^Item app$/ })).toBeNull();
   });
 
-  it("carries the chat icon on both entries — the extension's, as the built-in map has none", async () => {
-    for (const status of [404, 200] as const) {
+  it("carries the extension's icon on both entries, as the built-in map has none", async () => {
+    for (const [status, name] of [
+      [404, /^Item$/],
+      [200, /^Item app$/],
+    ] as const) {
       mountWithMode(status);
-      const link = await screen.findByRole("link", { name: /^Chat$/ });
+      const link = await screen.findByRole("link", { name });
       expect(link.querySelector("svg")).not.toBeNull();
       cleanup();
     }
   });
 });
 
-describe("a build without the chat extension (S-643)", () => {
-  it("offers no Chat entry in either mode", async () => {
+describe("the build that composes no extension (FR-DS-05)", () => {
+  it("offers no Chat or Wiki entry in either mode", async () => {
     for (const status of [404, 200] as const) {
       mountWithMode(status);
       await screen.findAllByRole("link", { name: /^Dashboard$/ });
-      expect(screen.queryByRole("link", { name: /^Chat$/ })).toBeNull();
+      expect(screen.queryByRole("link", { name: /chat|wiki/i })).toBeNull();
       cleanup();
     }
   });
@@ -467,7 +481,7 @@ describe("the app-scoped Statistics tab (S-429, FR-UI-37)", () => {
 
     for (const [scope, roster] of [
       ["Workspace", WORKSPACE_NAV_ITEMS],
-      // What a workspace's Service section renders (less the replaced member Chat).
+      // What a workspace's Service section renders (less any replaced member entry).
       ["Service", navItemsFor(true).filter((i) => i.scope === "member")],
     ] as const) {
       expect(roster.length).toBeGreaterThan(0);

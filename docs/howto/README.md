@@ -90,31 +90,12 @@ per-file coverage and the *untested-hotspots* join. Both are **non-gated and
 advisory** — they never move the quality signal and the quality gate never reads
 `history.db`.
 
-A **source wiki** layers over the graph from a third store (`.logos/wiki.db`):
-anchored, human-readable pages about the codebase, searchable (FTS5) and
-self-pruning. It is **gate-immune** — the quality gate never opens `wiki.db`, so
-the signal is byte-identical whether a wiki exists or not. Since CR-062 the wiki
-serves **three tiers** ([ADR-57]): an *extracted* tier live-rendered from the
-graph; a *presented* tier the binary assembles **deterministically** from the
-project's authored `docs/specs/**` and `docs/howto/**` sources (`logos wiki
-materialize`) — copied verbatim, `generator = logos:doc-present`, never
-paraphrased; and a *generated* tier of LLM prose. When the project ships an SRS
-(`docs/specs/architecture.md` + a requirement — "SRS mode"), the Design/Specs and
-User Guide pages are presented and the connected agent generates only the
-Summary/Overview tier; otherwise the agent infers the full set from the code
-graph. Generated prose is written **in-process** when the Wiki tab is opened
-(`--features agents` builds — the egress tier carved out of `ui` by CR-078), on the same `rig` agent substrate as Chat and honoring a
-dedicated `[wiki].model`. The CLI surface is
-`logos wiki write|read|search|status|generate|materialize|delete` plus `logos wiki
-skill --emit`; `write`/`read`/`search`/`status`/`materialize`
-have payload-identical MCP twins (five wiki tools).
-
 ## Contents
 
-1. [Installation](installation.md) — building the `logos` binary, feature flags, verification
+1. [Installation](installation.md) — building the `logos` binary, the default and slim builds, feature flags, verification
 2. [Configuration](configuration.md) — `.logos/`, `config.toml`, `rules.toml`, logging, query overrides
 3. [Usage](usage.md) — indexing workflow, navigation, agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
-4. [Commands](commands.md) — the full 39-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots` and the `logos wiki …` / `logos coverage …` families)
+4. [Commands](commands.md) — the full 38-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots`, the `logos coverage …` family and `logos hook --emit`, the session-start quality-report hook)
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)
@@ -149,8 +130,9 @@ automatically.
 
 ## Design guarantees worth knowing up front
 
-- **Offline by construction** — no network crate exists in the dependency
-  graph (enforced by a fitness test). Nothing phones home.
+- **Offline by construction** — no outbound-HTTP client crate exists in the
+  dependency graph, and the slim build links no socket stack at all (both
+  enforced by a fitness test). Nothing phones home.
 - **`.logos/` is the only write target** — derived databases live there, and
   the only non-derived writes are the policy files `.logos/config.toml` /
   `.logos/rules.toml` when you explicitly Save them (CLI, or the Config view in
@@ -174,9 +156,6 @@ automatically.
 - **Evidence tiers never move the gate** — `hotspots` and `coverage` live in a
   separate `.logos/history.db` the gate never opens, so the 0–10000 signal is
   byte-identical before and after they run, and after `history.db` is deleted.
-- **The wiki never moves the gate** — generated pages live in a separate
-  `.logos/wiki.db` the gate never opens, so the signal is byte-identical whether
-  the wiki is absent, populated, or stale.
 - **The graph self-corrects on config change** — narrowing admission (an added
   `exclude`, a disabled layer) purges the now-unadmitted nodes on the next
   index/reconcile/navigation, so a narrowed config can never keep serving stale

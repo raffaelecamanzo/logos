@@ -14,8 +14,8 @@
 #
 # WHAT IT CHECKS FIRST
 #   - X.Y.Z is newer than origin's newest version, and the release tree's
-#     Cargo.toml carries version X.Y.Z (the release workflow refuses a tag the
-#     workspace version does not match);
+#     Cargo.toml carries version X.Y.Z (the tag names the product version, and a
+#     tag the workspace version does not match would name a different one);
 #   - CHANGELOG.md in the release tree has a `## [X.Y.Z]` section and a section
 #     for origin's newest version below it;
 #   - no local tag vX.Y.Z exists (creating it would move an existing tag);
@@ -36,12 +36,11 @@
 #   push that fails or is interrupted deletes the tag this run created. Only the
 #   owner runs --push.
 #
-# HOW THE RELEASE WORKFLOW CONSUMES IT
-#   .github/workflows/release.yml runs on a pushed tag shaped like a version.
-#   Every job that builds checks out the ref that triggered it (the tag, so the
-#   squash commit's tree; the formula job checks out the tap repository instead),
-#   `dist` builds with --tag=vX.Y.Z, and the GitHub Release is created with
-#   --target set to the squash commit. See docs/howto/ci-integration.md.
+# WHAT A PUBLIC TAG IS
+#   A source release. No workflow in this repository runs on a pushed tag, builds
+#   a binary, creates a GitHub Release or updates a package tap: the tag marks the
+#   squash commit, and the commit is what a build pins. Binaries are built and
+#   published elsewhere, from a pin of this tag.
 #
 # Usage:
 #   bash scripts/publish-public.sh --version X.Y.Z [--from REV] [--push]

@@ -13,6 +13,70 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.16.1] — 2026-10-13
+
+## [1.16.0] — 2026-10-13
+
+### Removed
+
+- **Chat and the source wiki leave this repository (S-651).** The build this
+  repository ships is the open-source build: it composes no extension, so it
+  serves no chat or wiki surface on any channel, and nothing stands in their
+  place. Gone with them:
+  - the crates `logos-wiki`, `agent-core`, `chat-agent`, `wiki-agent` and
+    `logos-chat`, and the `wiki` and `agents` features of the `logos` package —
+    the default build is `lang-all` + `ui`, and no build of this repository links
+    an outbound HTTP client;
+  - the `logos wiki` command and its hidden `logos wiki hook --emit` alias
+    (`logos hook --emit` is the one spelling), the five `wiki_*` MCP tools and the
+    `/api/v1/wiki*` routes;
+  - the SPA's Chat, Workspace Chat and Wiki views, the chat-key, chat-tier and
+    wiki config panels, the Dashboard's Project Overview card, their tests, and
+    the dependencies only they used (`@assistant-ui/react`, `react-markdown`,
+    `remark-gfm`, `highlight.js`). The SPA's `virtual:logos-extensions` entry
+    registers no extension.
+
+  `GET /api/v1/extensions` answers `{"extensions":[]}`. `logos status` and
+  `logos serve --ui` still start on a project whose `config.toml` has `[chat]` or
+  `[wiki]`, reporting the ignored `[wiki]` table once, and an existing
+  `.logos/wiki.db` is never opened. `logos init -i` asks about materializing
+  skills only when a composed extension contributes an init step, so this build
+  no longer asks.
+- **This repository no longer builds or publishes binaries (S-652).** A version
+  tag here is a source release: it marks the single commit
+  `scripts/publish-public.sh` publishes, and no workflow reacts to it. Gone:
+  `.github/workflows/release.yml`, `dist-workspace.toml`, the cargo-dist metadata
+  of the `logos` package and the `dist` build profile. CI builds, tests and
+  cross-links, and uploads, releases and publishes nothing. Release archives, the
+  shell installer and the Homebrew formula are produced outside this repository,
+  from a pin of the tag.
+
+### Changed
+
+- **The no-extension fitness suite runs on the default build (S-651).**
+  `cli/tests/no_extension_surface.rs` holds the default build to the rule that
+  nothing on it names chat or the wiki; the committed surface snapshots were
+  regenerated to that build — the earlier default snapshots less exactly the five
+  wiki routes, the `wiki` command, the alias note on `hook`, the five `wiki_*`
+  tools, and the `[wiki]` values the build now ignores. The `agents` snapshots
+  and the dependency test over the removed crates are gone. CI drops its separate
+  no-extension step, `scripts/gate.sh` its `agents` and no-extension test legs
+  (the full tier has one test leg), and `scripts/verify-evidence.sh` requires
+  neither. `scripts/swe-build.sh` builds the default features, and
+  `THIRD-PARTY-NOTICES.md` is regenerated over the smaller dependency set.
+- **The code behind logos-core's `agents` marker is tested with the marker on
+  (S-652).** No crate of the workspace enables the marker, so
+  `observability::Surface::Chat`, its wire value and the test that pins it were
+  compiled out of every leg. `scripts/agents-marker.sh` runs
+  `cargo test -p logos-core --lib --features agents observability::` and refuses a
+  run in which the gated test never printed a result line. CI runs it as a step;
+  the full tier of `scripts/gate.sh` runs it as the `agents-marker` leg with its
+  own evidence unit (the gated tests expected against those that reported), which
+  `scripts/verify-evidence.sh` requires at that tier only. The marker itself is
+  unchanged.
+
+## [1.15.9] — 2026-10-12
+
 ## [1.15.8] — 2026-10-12
 
 ### Added

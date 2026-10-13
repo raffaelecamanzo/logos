@@ -31,10 +31,6 @@ import type {
   OverviewModel,
   QueryResponse,
   StatusInfo,
-  WikiHit,
-  WikiNav,
-  WikiPageView,
-  WikiStatus,
 } from "./types.ts";
 
 export { ApiError };
@@ -145,8 +141,8 @@ export function fetchNode(symbol: string): Promise<NodeInfo> {
 }
 
 /**
- * `GET /api/v1/code-refs?ref=<span>&ref=…` — resolve a finalized chat answer's
- * backticked spans against the graph in ONE batched read (S-622, FR-UI-47). `ref`
+ * `GET /api/v1/code-refs?ref=<span>&ref=…` — resolve backticked code spans against
+ * the graph in ONE batched read (S-622, FR-UI-47). `ref`
  * repeats, which the params bag cannot express, so the spans are appended to the
  * scoped URL `apiUrl` builds — keeping the workspace member's `?repo=`, so the
  * addressed member's graph answers.
@@ -198,7 +194,7 @@ export function fetchCoverage(): Promise<CoverageModel> {
   return apiFetch<CoverageModel>("coverage");
 }
 
-// ── Display-tab read-models (S-189: Architecture / Gaps / Wiki) ────────────────
+// ── Display-tab read-models (S-189: Architecture / Gaps) ──────────────────────
 
 /** `GET /api/v1/architecture` — the Architecture / Cycles (DSM) bundle (FR-UI-21). */
 export function fetchArchitecture(): Promise<ArchitectureModel> {
@@ -208,28 +204,4 @@ export function fetchArchitecture(): Promise<ArchitectureModel> {
 /** `GET /api/v1/gaps` — the Rule-findings bundle (status + rules, CR-079). */
 export function fetchGaps(): Promise<GapsModel> {
   return apiFetch<GapsModel>("gaps");
-}
-
-/** `GET /api/v1/wiki` — the dual-axis `wiki status` freshness read-model (FR-UI-06). */
-export function fetchWikiStatus(): Promise<WikiStatus> {
-  return apiFetch<WikiStatus>("wiki");
-}
-
-/** `GET /api/v1/wiki/nav` — the four-tier wiki menu IA (FR-UI-06, S-189). */
-export function fetchWikiNav(): Promise<WikiNav> {
-  return apiFetch<WikiNav>("wiki/nav");
-}
-
-/** `GET /api/v1/wiki/search?q=<term>` — the FTS hits over the wiki (FR-WK-05). An
- *  empty term is an honest empty list at the surface, so the caller need not guard. */
-export function searchWiki(q: string): Promise<WikiHit[]> {
-  return apiFetch<WikiHit[]>("wiki/search", { q });
-}
-
-/** `GET /api/v1/wiki/page/*slug` — the agent wiki-page presentation bundle with the
- *  server-rendered safe HTML body (FR-UI-06, S-189). The path-like slug rides the
- *  `*slug` wildcard; each segment is URL-encoded but the `/` separators are kept. */
-export function fetchWikiPage(slug: string): Promise<WikiPageView> {
-  const encoded = slug.split("/").map(encodeURIComponent).join("/");
-  return apiFetch<WikiPageView>(`wiki/page/${encoded}`);
 }

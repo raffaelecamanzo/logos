@@ -17,8 +17,8 @@
 //!
 //! 1. [`Secrets`] and [`ChatSecrets`] carry **hand-written `Debug`** impls that
 //!    render presence + last-4 only, so a `{:?}` in a `tracing` event or an
-//!    `anyhow` context can never leak the key (the same defense `agent-core`'s
-//!    `ProviderConfig` uses).
+//!    `anyhow` context can never leak the key (the same defense the agent
+//!    substrate's `ProviderConfig` uses).
 //! 2. The read-model the editor renders is the [`MaskedSecret`] — presence +
 //!    last-4, `Serialize`-safe — **not** the raw [`Secrets`]. The raw key is
 //!    never placed in a serialisable read-model, so it cannot be JSON-encoded

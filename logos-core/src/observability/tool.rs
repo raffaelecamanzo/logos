@@ -35,8 +35,8 @@
 //!    [`Tool`], [`traced`](super::traced) and
 //!    [`traced_infallible`](super::traced_infallible) are `pub(crate)`: no
 //!    crate outside the core emits under a core name. The `wiki` extension
-//!    (`logos-wiki`, S-644), which emitted through them while it was being
-//!    extracted, declares its names as [`ExtensionTool`]s like any extension.
+//!    (S-644), which emitted through them while it was being extracted,
+//!    declares its names as [`ExtensionTool`]s like any extension.
 //! 2. [`Tool::event_class`] is an **exhaustive match with no wildcard arm**, so
 //!    a new variant fails the build until it is classified. `unclassified_tool_
 //!    fails_the_build` (in [`super::tests`]) additionally scans this file's

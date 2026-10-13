@@ -63,7 +63,7 @@
 //! right in intent — but `surface` is stamped once per process
 //! ([FR-OB-03]), so it could not tell a dashboard render from a graph query
 //! issued by the same `serve --ui` process. It therefore discarded all SPA
-//! navigation and every in-process chat-agent tool call as collateral, and the
+//! navigation and every in-process chat agent tool call as collateral, and the
 //! remainder was reported as adoption ([CR-091]).
 //!
 //! The predicate **does** name a surface — `shell` ([CR-097]) — and that is not

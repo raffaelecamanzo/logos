@@ -1,10 +1,10 @@
 //! A build with no extension serves no chat or wiki surface, and still starts on a
-//! chat- or wiki-configured project (S-645, [FR-DS-05], CR-213).
+//! chat- or wiki-configured project (S-645, S-651, [FR-DS-05], CR-213, CR-214).
 //!
-//! The build is `cargo test -p logos --no-default-features --features lang-all,ui`:
-//! the web surface without the `wiki` or `agents` feature, so the composition
-//! (`cli/src/composition.rs`) registers nothing. This file compiles to nothing in any
-//! other build. `scripts/gate.sh` (full tier) and CI run it.
+//! The build is the default one, the build this repository ships: the composition
+//! (`cli/src/composition.rs`) registers nothing. It needs the web surface, so this
+//! file compiles to nothing in the slim build. `scripts/gate.sh` and CI run it with
+//! every other `logos` suite.
 //!
 //! Every surface is read the way `surface_snapshots.rs` reads it — through the same
 //! readers (`support/surface.rs`) over the host this build's `main` composes — and
@@ -13,9 +13,10 @@
 //! - **nothing on it names chat or the wiki** ([`names_chat_or_wiki`]), except an
 //!   entry of [`KNOWN_EXCEPTIONS`], each listed with its reason and the decision that
 //!   made it; and
-//! - **it is the default build's Sprint 96 surface less exactly the chat and wiki
-//!   entries** — read from the committed `surface_snapshots/default/` files, never
-//!   regenerated — so removing the extensions took nothing else with them.
+//! - **it is the committed default-build surface less exactly its chat and wiki
+//!   entries** — read from the `surface_snapshots/default/` files, never written
+//!   here — so nothing else went missing with them. When chat and the wiki left this
+//!   repository those files were regenerated to exactly that (S-651).
 //!
 //! The SPA's half is `web/ui/src/nav.snapshot.test.ts`, which boots the shipped
 //! bundle's registrations over the body this build serves for `GET
@@ -24,7 +25,7 @@
 //!
 //! [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
 
-#![cfg(all(feature = "ui", not(feature = "wiki")))]
+#![cfg(feature = "ui")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -178,14 +179,6 @@ const KNOWN_EXCEPTIONS: &[KnownException] = &[
         decision: WIKI_T2_LIMITATIONS,
     },
     KnownException {
-        surface: Surface::InitPrompts,
-        item: "materialize the logos-wiki generation skill?",
-        reason: "InitOptions::materialize_skill is the core's; without the wiki no step reads \
-                 the answer. Removing the question needs the CLI to know which options a \
-                 composed step reads — a contract change left for CR-214 (Limitation 2)",
-        decision: WIKI_T2_LIMITATIONS,
-    },
-    KnownException {
         surface: Surface::MethodGuard,
         item: "the Logos web UI is read-only except the enumerated config-write/apply, chat, \
                wiki-generation, and verify routes",
@@ -225,7 +218,7 @@ fn assert_only_known_exceptions(surface: Surface, observed: &[String]) {
 /// The matcher, probed with what it must catch and its near misses.
 #[test]
 fn the_matcher_catches_every_spelling_and_nothing_else() {
-    for named in ["wiki_read", "/api/v1/chat/threads", "Workspace Chat", "[wiki]", "WIKI", "logos-chat"] {
+    for named in ["wiki_read", "/api/v1/chat/threads", "Workspace Chat", "[wiki]", "WIKI", "/workspace-chat"] {
         assert!(names_chat_or_wiki(named), "{named} names chat or the wiki");
     }
     for clean in ["/api/v1/workspace/config/secret", "hook", "wik", "cha t", "/config/apply", "w-iki"] {
@@ -243,10 +236,10 @@ fn the_matcher_catches_every_spelling_and_nothing_else() {
     }
 }
 
-// ── The default build's committed Sprint 96 surface ────────────────────────
+// ── The committed default-build surface ────────────────────────────────────
 
 /// A committed default-build snapshot (`surface_snapshots/default/`). Read, never
-/// written: these are the pre-S-639 baseline.
+/// written here: `surface_snapshots.rs` owns them.
 fn default_snapshot(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/surface_snapshots/default").join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
@@ -262,7 +255,7 @@ fn less_chat_and_wiki_lines(text: &str) -> String {
 /// The body this build serves for `GET /api/v1/extensions`, which the SPA's
 /// no-extension tests boot from (`web/ui/src/nav.snapshot.test.ts`). This test is its
 /// generator and its guard; regenerate with `LOGOS_UPDATE_FIXTURES=1 cargo test -p
-/// logos --no-default-features --features lang-all,ui --test no_extension_surface`.
+/// logos --test no_extension_surface`.
 const SERVED_FIXTURE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../web/ui/src/extensions/fixtures/no-extension.real.json");
 
@@ -300,8 +293,8 @@ async fn the_route_census_names_no_chat_or_wiki_route() {
     let (census, admitted) = composed_web_surface(&public_host()).await;
     assert_only_known_exceptions(Surface::Routes, &census_items(&census));
 
-    // The default build's committed census less exactly its chat and wiki rows (it
-    // carries the wiki's; chat's are the `agents` build's): nothing else is missing.
+    // The committed census less exactly its chat and wiki rows: nothing else is
+    // missing.
     assert_eq!(render_census(&census), less_chat_and_wiki_lines(&default_snapshot("web-routes.txt")));
     assert_eq!(
         admitted.join("\n") + "\n",
@@ -310,28 +303,47 @@ async fn the_route_census_names_no_chat_or_wiki_route() {
     );
 }
 
+/// Every chat and wiki route a build composing both extensions serves, as its route
+/// census renders them: 12 chat rows (five member and five workspace thread routes,
+/// `/chat`, `/workspace/chat`), five wiki reads and `/wiki/generate`. Copied from that
+/// build's committed census when the extensions left this repository (S-651), so the
+/// router below is asked about every one of them.
+const COMPOSED_CHAT_AND_WIKI_ROUTES: &[&str] = &[
+    "GET      /api/v1/chat/threads",
+    "GET      /api/v1/chat/threads/:id",
+    "POST     /api/v1/chat/threads/:id/delete",
+    "POST     /api/v1/chat/threads/:id/rename",
+    "POST     /api/v1/chat/threads/:id/truncate",
+    "GET      /api/v1/wiki",
+    "GET      /api/v1/wiki/asset/*path",
+    "GET      /api/v1/wiki/nav",
+    "GET      /api/v1/wiki/page/*slug",
+    "GET      /api/v1/wiki/search",
+    "GET      /api/v1/workspace/chat/threads",
+    "GET      /api/v1/workspace/chat/threads/:id",
+    "POST     /api/v1/workspace/chat/threads/:id/delete",
+    "POST     /api/v1/workspace/chat/threads/:id/rename",
+    "POST     /api/v1/workspace/chat/threads/:id/truncate",
+    "GET POST /chat",
+    "GET POST /wiki/generate",
+    "POST     /workspace/chat",
+];
+
 /// The census is read from source plus the composed host; this asks the router
-/// itself. Every chat and wiki route of the release build is unrouted here: a `GET`
-/// finds nothing (`404`), a `POST` is refused by the method guard (`405`) — whose text
-/// is the one [`KNOWN_EXCEPTIONS`] entry on that surface.
+/// itself. Every chat and wiki route a composing build serves is unrouted here: a
+/// `GET` finds nothing (`404`), a `POST` is refused by the method guard (`405`) —
+/// whose text is the one [`KNOWN_EXCEPTIONS`] entry on that surface.
 #[tokio::test]
 async fn the_router_answers_no_chat_or_wiki_route() {
-    let release = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/surface_snapshots/agents/web-routes.txt"),
-    )
-    .expect("the agents build's committed census");
-    let routes: Vec<(Vec<&str>, &str)> = release
-        .lines()
-        .filter(|l| names_chat_or_wiki(l))
+    let routes: Vec<(Vec<&str>, &str)> = COMPOSED_CHAT_AND_WIKI_ROUTES
+        .iter()
         .map(|l| {
             let path = l.rsplit(' ').next().expect("a path");
             (l[..l.len() - path.len()].split_whitespace().collect(), path)
         })
         .collect();
-    // 12 chat rows (five member and five workspace thread routes, `/chat`,
-    // `/workspace/chat`), five wiki reads and `/wiki/generate`: the committed snapshot,
-    // which never changes.
-    assert_eq!(routes.len(), 18, "the release census's chat and wiki rows");
+    assert!(routes.iter().all(|(_, path)| names_chat_or_wiki(path)), "each row is a chat or wiki route");
+    assert_eq!(routes.len(), 18, "the composed build's chat and wiki rows");
 
     let project = configured_project();
     let engine = std::sync::Arc::new(Engine::start(project.path()).expect("the engine starts"));
@@ -410,7 +422,8 @@ fn logos_help_names_no_chat_or_wiki_command() {
     let named: Vec<&str> = help.lines().filter(|l| names_chat_or_wiki(l)).collect();
     assert!(named.is_empty(), "`logos --help` names chat or the wiki: {named:?}");
 
-    // The default build's commands less exactly `wiki`, in the same order.
+    // The committed default-build commands less any chat or wiki one, in the same
+    // order.
     let expected: Vec<String> = subcommands(&default_snapshot("logos-help.txt"))
         .into_iter()
         .filter(|c| !names_chat_or_wiki(c))
@@ -501,7 +514,7 @@ const BUILT_ELSEWHERE: &[(&str, &str, &str)] = &[(
 /// an argument built elsewhere, the literals of the function that builds it. A TTY
 /// prompt cannot be driven from a test, so its text is read where it is written.
 #[test]
-fn init_asks_only_the_known_wiki_question() {
+fn init_asks_no_chat_or_wiki_question() {
     let mut questions = Vec::new();
     for (file, source) in [("lib.rs", include_str!("../src/lib.rs")), ("workspace_init.rs", include_str!("../src/workspace_init.rs"))] {
         let before = questions.len();

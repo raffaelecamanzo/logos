@@ -83,8 +83,8 @@ describe("copy catalogues", () => {
     console.info(`copy catalogues: ${entries.length} entries in ${Object.keys(modules).length} modules`);
   });
 
-  it("holds exactly one entry with no explanation: Project Overview (CR-208)", () => {
-    expect(noExplanation).toEqual(["/src/copy/dashboard.copy.ts#projectOverview"]);
+  it("holds no entry with no explanation: the one widget allowed it is an extension's card (CR-208)", () => {
+    expect(noExplanation).toEqual([]);
   });
 
   it.each(entries)("%s glosses every internal term at its first use", (_key, entry) => {

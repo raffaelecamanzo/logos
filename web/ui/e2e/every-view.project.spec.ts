@@ -8,20 +8,16 @@
 // less what the hidden-widget register hides) plus the member views the served
 // build's active extensions add (`GET /api/v1/extensions`, S-642), not a hand-kept
 // one: the first test fails until a new view has a case here.
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { navItemsFor } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
-import { configuredChat, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
+import { extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
 const CASES: Record<string, ViewCase> = {
   "/": { ready: "Code coverage" },
   "/health": { ready: "Gate" },
   "/graph": { ready: "Query the whole graph" },
-  // The fixture declares no chat model or key, which renders the configure-first
-  // advisory and no widget at all; the configured chat is served instead.
-  "/chat": { ready: "Conversation", setup: (page: Page) => configuredChat(page, "/api/v1/config") },
-  "/wiki": { ready: "Welcome to the wiki" },
   "/files": { ready: "Files ranked by risk" },
   "/gaps": { ready: "Rule findings" },
   "/coverage": { ready: "Per-file coverage" },

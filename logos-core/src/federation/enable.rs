@@ -509,13 +509,14 @@ pub fn candidates_for_approval(
 }
 
 /// The workspace chat's conversation store at the workspace root and its WAL
-/// sidecars ([FR-WS-34], S-482): `chat-agent`'s `db_path` of the workspace root
+/// sidecars ([FR-WS-34], S-482): the chat store's `db_path` of the workspace root
 /// is `.logos/chat.db`, and SQLite's WAL mode writes `-wal`/`-shm` beside it.
 /// The same `chat.db*` shape a member's `.logos/.gitignore` carries
 /// ([FR-IN-04]), spelled from the root because this entry lives in the root's
-/// `.gitignore`. `logos-core` cannot name `chat-agent`'s path (the dependency
-/// runs the other way), so the drift guard is behavioural: the web suite runs a
-/// real workspace turn through the real store and asserts the root stays clean.
+/// `.gitignore`. `logos-core` cannot name the chat store's path (the dependency
+/// runs the other way), so the drift guard is behavioural and lives with the
+/// chat extension's suites: a real workspace turn through the real store, with
+/// the root asserted clean.
 ///
 /// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
 /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
@@ -1126,7 +1127,7 @@ mod tests {
     /// root clean. Root-anchored for the reason the credential entry is: a
     /// DB-only member's own `.logos/chat.db` is its own managed ignore's
     /// business, not this one's. (The end-to-end twin — a real workspace turn
-    /// through the real store — is `logos-chat/tests/workspace_chat.rs`.)
+    /// through the real store — is the chat extension's own.)
     ///
     /// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
     #[test]

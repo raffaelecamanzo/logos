@@ -17,8 +17,8 @@ import type { GraphElementEdge, GraphElementNode, GraphGranularity, GraphLayer }
 export const DEFAULT_CAP = 250;
 
 // ── The `/graph?seed=` deep link (S-622, FR-UI-47) ───────────────────────────
-// Written by the chat's verified code-reference links, read by `GraphView` when it
-// opens. Both directions live here so the spelling has one definition.
+// Written by a verified code-reference link or an Architecture cycle participant,
+// read by `GraphView` when it opens. Both directions live here so the spelling has one definition.
 
 /** A deep link into the Graph view: the seed and the tier it is a key of. */
 export interface GraphSeedLink {

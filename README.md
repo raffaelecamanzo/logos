@@ -40,8 +40,7 @@ of the search.
 - **One static binary.** No daemon, no account, no cloud, no runtime dependencies.
   SQLite and twelve tree-sitter grammars are compiled in.
 - **Local by default.** The graph lives in `.logos/` next to your code. Nothing
-  leaves your machine unless you switch on the optional LLM chat and point it at
-  an endpoint yourself.
+  leaves your machine: the build links no outbound HTTP client.
 - **Never guesses.** A call edge is recorded only when exactly one candidate
   matches. An ambiguous reference yields no edge, not a plausible wrong one.
 - **Deterministic.** Same tree in, same graph and same metrics out, bit for bit.
@@ -92,11 +91,10 @@ you want the web dashboard compiled in:
 ```bash
 git clone https://github.com/raffaelecamanzo/logos.git && cd logos
 (cd web/ui && npm ci && npm run build)          # the dashboard bundle
-cargo install --path cli --features agents      # CLI + MCP + dashboard + chat
+cargo install --path cli                        # CLI + MCP + dashboard
 ```
 
-Drop `--features agents` for a build with no outbound HTTP client at all. The
-dashboard still works; only the LLM-backed Chat and wiki generation go away. See
+The build links no outbound HTTP client at all. See
 [Installation](docs/howto/installation.md) for every build variant.
 
 </details>
@@ -190,10 +188,6 @@ logos gate           # ...and fail CI when a change regresses it
   and rule findings at a glance.
 - **Graph** — an interactive, filterable view of symbols, docs and config.
 - **Files & Risk** — churn × complexity hotspots, joined with coverage.
-- **Chat** — ask compound questions about your codebase. A planner sends read-only
-  sub-agents over the graph and the source, then writes back an answer with
-  tables and diagrams.
-- **Wiki** — a generated, always-anchored explanation of your codebase.
 - **Workspace** — index a folder of sibling repos (`logos init --workspace`) and
   see the REST and message-broker couplings *between* services.
 
@@ -206,20 +200,14 @@ It listens on loopback only, and the whole app is embedded in the binary.
 
 | File | What it holds | Commit it? |
 |---|---|---|
-| `.logos/config.toml` | What to index, and the Chat/wiki model settings | Yes |
+| `.logos/config.toml` | What to index, and how references resolve | Yes |
 | `.logos/rules.toml` | Your architecture contract: budgets, layers, boundaries | Yes |
-| `.logos/secrets.toml` | The chat API key (written `0600`, gitignored by `init`) | **No** |
-| `.logos/*.db` | The derived graph, history and wiki stores | No |
+| `.logos/*.db` | The derived graph, history and telemetry stores | No |
 
 A typical `config.toml`:
 
 ```toml
 exclude = ["vendor/**", "**/*.generated.ts"]    # unioned with .gitignore
-
-[chat]                                          # optional: the LLM-backed Chat tab
-provider = "openai"                             # "openai" (any OpenAI-compatible API) | "anthropic"
-base_url = "https://openrouter.ai/api/v1"       # the default
-model    = "anthropic/claude-sonnet-4"
 ```
 
 A starting `rules.toml`:
@@ -231,8 +219,7 @@ max_cc       = 15    # cyclomatic complexity per function
 max_fn_lines = 80    # lines per function
 ```
 
-Set the chat API key in the dashboard's **Config** tab, which stores it masked and
-never shows it again. The same tab edits both policy files with validation, so an
+The dashboard's **Config** tab edits both policy files with validation, so an
 invalid value is rejected before it is saved. Full reference:
 [Configuration](docs/howto/configuration.md).
 
@@ -243,7 +230,7 @@ invalid value is rejected before it is saved. Full reference:
 | [Installation](docs/howto/installation.md) | Platforms, build variants, verification |
 | [Usage](docs/howto/usage.md) | Indexing, navigation, MCP setup, the dashboard, worktrees |
 | [Commands](docs/howto/commands.md) | Every subcommand, with its flags and JSON shape |
-| [Configuration](docs/howto/configuration.md) | `config.toml`, `rules.toml`, workspaces, Chat |
+| [Configuration](docs/howto/configuration.md) | `config.toml`, `rules.toml`, workspaces |
 | [Metrics](docs/howto/metrics.md) | The ten dimensions behind the quality signal |
 | [CI integration](docs/howto/ci-integration.md) | The freshen → enforce → report → bless loop |
 | [Error handling](docs/howto/error-handling.md) | Exit codes and troubleshooting |

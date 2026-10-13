@@ -40,7 +40,7 @@
 //! markdown body never hits argv limits), and S-054's `wiki skill --emit [dir]
 //! [--force]` arm (FR-WK-08, one `Engine::wiki_skill_emit` call) with the `-i`
 //! wiki-skill materialization prompt (the materialization logic itself lives in
-//! `logos_core::wiki`, since S-644 the `logos-wiki` crate) — all one-Engine-call
+//! `logos_core::wiki`, since S-644 the wiki extension's crate) — all one-Engine-call
 //! delegations, no logic in the adapter. Combined Iteration-2 budget 395→500.
 //!
 //! Uses `include_str!` so the check is hermetic (no filesystem I/O at runtime)
@@ -490,7 +490,7 @@ fn adapter_lines() -> usize {
 ///
 /// | Region | Δ |
 /// |---|---|
-/// | `composition.rs`: `host()` binds the host, registers `logos_chat::ChatExtension` under `#[cfg(feature = "agents")]`, returns it (1 line → 4) | **+3** |
+/// | `composition.rs`: `host()` binds the host, registers the `chat` extension under `#[cfg(feature = "agents")]`, returns it (1 line → 4) | **+3** |
 /// | | **+3** |
 ///
 /// Composition, not logic: the registration is the one line the composition root
@@ -498,17 +498,17 @@ fn adapter_lines() -> usize {
 ///
 /// [S-643]: ../../docs/planning/journal.md#s-643-chat-is-a-registered-extension
 ///
-/// **S-644 T1 1012→1016** for the wiki leaving `logos-core` for the
-/// `logos-wiki` crate ([ADR-74]): measured 1010→1014 (+4), 2 lines of headroom.
+/// **S-644 T1 1012→1016** for the wiki leaving `logos-core` for a crate of its
+/// own ([ADR-74]): measured 1010→1014 (+4), 2 lines of headroom.
 ///
 /// | Region | Δ |
 /// |---|---|
-/// | `dispatch.rs`: `use logos_wiki::WikiEngine as _` — the `wiki_*` calls are the crate's trait methods now | **+1** |
+/// | `dispatch.rs`: the wiki crate's `WikiEngine` trait import — the `wiki_*` calls are its trait methods now | **+1** |
 /// | `dispatch.rs`: `init_steps`, the wiki's `-i` skill step (no longer a core step) ahead of the host's | **+3** |
 /// | `workspace_init.rs`: the fallback `init` passes `init_steps(host)` instead of `host.init_steps()` | **0** |
 /// | | **+4** |
 ///
-/// Composition, not logic: the step itself is `logos_wiki::SkillInit`, and one
+/// Composition, not logic: the step itself is the wiki crate's `SkillInit`, and one
 /// list feeds both `init` paths so they cannot disagree. Interim: T2 registers
 /// the wiki as an extension, its step arrives through `host.init_steps()`, and
 /// all four lines go.
@@ -528,24 +528,39 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: the `Commands::Wiki` variant | **−4** |
-/// | `lib.rs`: the `WikiCommands` enum — moved verbatim to `logos-wiki/src/cli.rs` | **−38** |
+/// | `lib.rs`: the `WikiCommands` enum — moved verbatim to the wiki crate's `cli.rs` | **−38** |
 /// | `lib.rs`: `read_wiki_body` — moved with it | **−15** |
 /// | `lib.rs`: `engine()` delegates its index guard to `logos_ext::cli::indexed_engine`, the one body extension subcommands share | **−5** |
 /// | `lib.rs`: `EXTENSION_SLOT_AFTER` + `place_extensions` — extension subcommands listed after `coverage` in `--help`, where `wiki` stood | **+16** |
-/// | `dispatch.rs`: the `wiki` dispatch function, its arm and the `logos_wiki` import | **−38** |
+/// | `dispatch.rs`: the `wiki` dispatch function, its arm and the wiki crate's import | **−38** |
 /// | `dispatch.rs`: T1's interim `init_steps` (the four lines go) | **−3** |
-/// | `composition.rs`: registers the `wiki` extension under `wiki`, with the `wiki-agent` generator under `agents` | **+6** |
+/// | `composition.rs`: registers the `wiki` extension under `wiki`, with the in-app generator under `agents` | **+6** |
 /// | | **−81** |
 ///
 /// Composition, not logic: the wiki's commands and their handlers are the
 /// extension's, outside this budget; what is left here is the one registration
 /// and the one help-placement rule every extension's subcommand shares.
+///
+/// **S-651 938→936** for chat and the wiki leaving this repository ([FR-DS-05]):
+/// the composition registers nothing, and `init -i` asks about skills only when
+/// a composed extension contributes an init step. Measured 937→934 (−3); the
+/// budget is lowered to the measurement plus the usual 2 lines.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `composition.rs`: `host()` registers nothing — the `chat` and `wiki` registrations and their `cfg` arms go | **−9** |
+/// | `lib.rs`: `init_options` takes the composed `steps` and its prompt, and asks the skill question only with a step (1 line → 3) | **+2** |
+/// | `dispatch.rs`: the `init` arm binds the host's steps once, for the question and the run | **+1** |
+/// | `workspace_init.rs`: the fallback `init` arm does the same, as a block | **+3** |
+/// | | **−3** |
+///
+/// [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 938,
-        "cli adapter exceeds the 938 production-LOC budget (NFR-MA-02): \
+        lines <= 936,
+        "cli adapter exceeds the 936 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

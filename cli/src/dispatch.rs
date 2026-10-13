@@ -13,9 +13,8 @@
 //! lives once in the [`Output::query`]/[`Output::try_query`]/
 //! [`Output::report_gate`]/[`Output::report_check`] chokepoints (the CLI twin
 //! of the MCP adapter's `run`/`run_result` delegators), so the arms below are
-//! mostly zero-`?` one-liners. The `wiki` command group, once peeled into its own
-//! function here, is the `wiki` extension's subcommand since S-644, dispatched by
-//! the library's composed command like any extension's.
+//! mostly zero-`?` one-liners. An extension's subcommands are not routed here:
+//! the library's composed command dispatches them (S-644).
 
 use std::path::Path;
 
@@ -60,7 +59,8 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             if let Some(nudged) = crate::workspace_init::nudge(root, workspace, interactive || hooks, crate::ask) {
                 crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor, host)
             } else {
-                out.print(&Engine::init_with_contributions(root, &init_options(interactive, hooks), &host.init_steps())?)?;
+                let steps = host.init_steps();
+                out.print(&Engine::init_with_contributions(root, &init_options(interactive, hooks, &steps, crate::ask), &steps)?)?;
                 Ok(0)
             }
         }
@@ -214,8 +214,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
         },
         // The session-start quality-report hook (S-638): a core command, not a
-        // wiki one. `wiki hook` is its hidden alias, the `wiki` extension's, and
-        // makes the same core call.
+        // wiki one.
         Commands::Hook(args) => hook_emit(root, args, out),
         // The cross-service query surface (FR-WS-05): each discovers the
         // workspace and serialises one `query::*` read-model over the member
@@ -251,8 +250,8 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
 /// Emit the session-start quality-report hook into the shared
 /// .claude/settings.json and sweep the retired SessionEnd entry (CR-095; CR-070
 /// retired the PostToolUse augment hook this once also emitted) — `logos hook
-/// --emit`. Its hidden alias `logos wiki hook --emit` is the `wiki` extension's,
-/// and makes the same core call.
+/// --emit`. A composed extension that re-exposes it as a hidden alias makes the
+/// same core call.
 fn hook_emit(root: &Path, args: crate::HookArgs, out: &Output) -> Result<i32> {
     let engine = Engine::open(root);
     out.print(&engine.quality_report_hook_emit(args.force)?)?;

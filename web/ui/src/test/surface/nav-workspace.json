@@ -21,13 +21,6 @@
     "scope": "member"
   },
   {
-    "id": "wiki",
-    "label": "Wiki",
-    "path": "/wiki",
-    "group": "A",
-    "scope": "member"
-  },
-  {
     "id": "files",
     "label": "Files & Risk",
     "path": "/files",
@@ -80,13 +73,6 @@
     "id": "workspace",
     "label": "Workspace",
     "path": "/workspace",
-    "group": "A",
-    "scope": "app"
-  },
-  {
-    "id": "workspace-chat",
-    "label": "Chat",
-    "path": "/workspace-chat",
     "group": "A",
     "scope": "app"
   },

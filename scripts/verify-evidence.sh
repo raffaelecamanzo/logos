@@ -150,7 +150,7 @@ evid, tree_now, mode, expect_tier = sys.argv[1], sys.argv[2], sys.argv[3], sys.a
 
 # The full tier's contract. A gate absent from disk is a gate that did not run.
 ALL_GATES = [
-    "clippy", "test", "test-agents", "test-noext", "deny", "arch", "public-terms",
+    "clippy", "test", "agents-marker", "deny", "arch", "public-terms",
     "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
 ]
 # What `gate.sh fast` actually runs. Its two UI legs are conditional on web/ui
@@ -176,6 +176,17 @@ DEFAULT_WORDS = {
     "row_field": "passed", "row_extra": "%d passed",
 }
 UNIT_WORDS = {
+    # The agents-marker gate's one unit counts the gated tests scripts/agents-marker.sh
+    # names (expected) against those that printed a result line; `passed` is the
+    # whole filtered run, for the reader.
+    "agents-marker": {
+        "things": "gated tests", "short": "gated",
+        "killed": "a gated test started and never reported",
+        "failures": "test(s) failed",
+        "nothing_ran": "the agents-gated test did not execute",
+        "floor": None,
+        "row_field": "passed", "row_extra": "%d passed",
+    },
     "public-terms": {
         "things": "text files", "short": "files",
         "killed": "the scan was killed mid-walk",
@@ -294,7 +305,7 @@ for gate in REQUIRED + OPTIONAL:
     else:
         rows.append((gate, tier, verdict, "exit %s" % doc.get("exit_code"), ""))
 
-    if gate in ("test", "test-agents", "test-noext"):
+    if gate == "test":
         # The denominator, carried into the marker. A test gate with no units is
         # a pass over ZERO binaries; the marker must say so rather than let a
         # reader infer a suite ran.

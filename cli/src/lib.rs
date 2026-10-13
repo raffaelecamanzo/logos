@@ -27,7 +27,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use logos_core::{
     error::{self, CoreError},
     governance::DsmGranularity,
-    init::InitOptions,
+    init::{InitContribution, InitOptions},
     model::NodeKind,
     observability, workspace, Engine,
 };
@@ -81,9 +81,9 @@ pub(crate) enum Commands {
     /// Initialise `.logos/` (config.toml, rules.toml, .gitignore) and the store.
     Init {
         /// Interactive setup: also inject the MCP server block into .mcp.json,
-        /// write the managed CLAUDE.md block, and materialize the logos-wiki
-        /// generation skill, prompting per step on a TTY (non-TTY takes those
-        /// as yes and hooks as no).
+        /// write the managed CLAUDE.md block and install the session-start
+        /// quality-report hook, prompting per step on a TTY (non-TTY takes those
+        /// as yes and git hooks as no).
         #[arg(short = 'i', long = "interactive")]
         interactive: bool,
         /// Install git hooks (core.hooksPath) syncing on commit/checkout/merge.
@@ -479,8 +479,8 @@ pub(crate) enum CoverageCommands {
 }
 
 /// The arguments of the session-start quality-report hook install (`logos hook`,
-/// S-638). Its hidden alias `logos wiki hook` is the `wiki` extension's (S-644),
-/// declared beside its other subcommands with the same two flags.
+/// S-638). A composed extension that re-exposes it as a hidden subcommand of its
+/// own takes the same two flags, and `hook`'s help then names that alias (S-645).
 #[derive(clap::Args)]
 pub(crate) struct HookArgs {
     /// Emit the hook (the only `hook` operation; required so the verb reads
@@ -616,10 +616,9 @@ impl Composed {
 /// would trail the integration and serving commands after `serve`. They are listed
 /// instead in one fixed slot, in registration order: after the core's evidence
 /// tiers (`hotspots`, `coverage`) and before the integration commands (`hook`,
-/// `xservice`, `workspace`, …) — where `wiki` stood while it was a core command,
-/// so the `wiki` extension's help reads as it always did (S-644). The slot is the
-/// core's, like the Config view's extension panel slot (S-643): an extension says
-/// what it adds, not where the core lists it.
+/// `xservice`, `workspace`, …) — where `wiki` stood while it was a core command
+/// (S-644). The slot is the core's, like the Config view's extension panel slot
+/// (S-643): an extension says what it adds, not where the core lists it.
 const EXTENSION_SLOT_AFTER: &str = "coverage";
 
 /// `command` with `extensions` listed in the [`EXTENSION_SLOT_AFTER`] slot of its
@@ -741,19 +740,30 @@ pub(crate) fn engine(root: &Path, bootstrap: bool) -> Result<Engine> {
     }
 }
 
-/// Resolve which init steps run (S-023, FR-IN-02/03, FR-WK-08, FR-IN-07) —
-/// pure surface UX, the step logic itself lives in the core. `-i` enables the
+/// Resolve which init steps run (S-023, FR-IN-02/03, FR-IN-07) — pure surface
+/// UX, the step logic itself lives in the core. `-i` enables the
 /// host-integration steps, prompting per step on a TTY; non-TTY takes the safe
-/// defaults (MCP + CLAUDE.md + the wiki skill + the session-start
-/// quality-report hook — yes, that's what `-i` asks for — git hooks no: they rewire
-/// core.hooksPath, so they stay opt-in via --hooks). The PostToolUse
-/// wiki-augmentation hook `-i` once also installed here was retired (CR-070).
-pub(crate) fn init_options(interactive: bool, hooks: bool) -> InitOptions {
+/// defaults (MCP + CLAUDE.md + the session-start quality-report hook — yes,
+/// that's what `-i` asks for — git hooks no: they rewire core.hooksPath, so they
+/// stay opt-in via --hooks). The PostToolUse wiki-augmentation hook `-i` once
+/// also installed here was retired (CR-070).
+///
+/// `steps` are the init steps the composed extensions contribute. Only such a
+/// step reads [`InitOptions::materialize_skill`] — the core materializes no skill
+/// of its own — so a build composing none never asks about one ([FR-DS-05]: no
+/// question about a surface it does not have). `ask` is the prompt — [`ask`] at
+/// both call sites, as `workspace_init::nudge` takes it — so a test can record
+/// which questions are asked without a TTY.
+///
+/// [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
+pub(crate) fn init_options(interactive: bool, hooks: bool, steps: &[std::sync::Arc<dyn InitContribution>], mut ask: impl FnMut(&str, bool) -> bool) -> InitOptions {
     InitOptions {
         inject_mcp: interactive && ask("inject the logos MCP server block into .mcp.json?", true),
         write_claude_md: interactive && ask("generate the managed CLAUDE.md block?", true),
         install_hooks: hooks || (interactive && ask("install git hooks (core.hooksPath)?", false)),
-        materialize_skill: interactive && ask("materialize the logos-wiki generation skill?", true),
+        materialize_skill: interactive
+            && !steps.is_empty()
+            && ask("materialize the agent skills the composed extensions ship?", true),
         install_quality_report_hook: interactive
             && ask("install the Claude Code session-start quality-report hook?", true),
         // The plain single-repo `init` path — never the workspace-member
@@ -896,6 +906,40 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    /// `init -i` asks the skill question only when a composed extension contributes
+    /// an init step — the only reader of the answer (S-651, FR-DS-05): with none it
+    /// asks the four core questions and never the skill one, and a plain `init`
+    /// asks nothing.
+    #[test]
+    fn init_asks_the_skill_question_only_for_a_composed_step() {
+        struct Step;
+        impl InitContribution for Step {
+            fn run(&self, _: &Path, _: &InitOptions) -> Result<Vec<logos_core::models::pipeline::InitStep>> {
+                Ok(Vec::new())
+            }
+        }
+        let run = |interactive: bool, steps: &[std::sync::Arc<dyn InitContribution>]| {
+            let mut questions = Vec::new();
+            let options = init_options(interactive, false, steps, |question, default| {
+                questions.push(question.to_string());
+                default
+            });
+            (options.materialize_skill, questions)
+        };
+        let (skill, questions) = run(true, &[]);
+        assert!(!skill, "nothing reads the answer, so it is no");
+        assert_eq!(questions.len(), 4, "the four core questions: {questions:?}");
+        assert!(!questions.iter().any(|q| q.contains("skill")), "{questions:?}");
+
+        let composed: [std::sync::Arc<dyn InitContribution>; 1] = [std::sync::Arc::new(Step)];
+        let (skill, questions) = run(true, &composed);
+        assert!(skill, "a composed step reads the question's default, yes");
+        assert_eq!(questions.len(), 5, "{questions:?}");
+        assert!(questions.iter().any(|q| q.contains("skill")), "{questions:?}");
+
+        assert_eq!(run(false, &composed), (false, Vec::new()), "a plain `init` asks nothing");
+    }
+
     /// clap's own self-check: argument ids, conflicts, and requirements are
     /// consistent across the whole derive (catches a bad `conflicts_with` at
     /// test time instead of first invocation).
@@ -1030,11 +1074,10 @@ mod surface_parity {
     /// Every tool the shipped MCP server registers, and its CLI reachability.
     ///
     /// Ordered as the server registers them (navigation, quality, temporal,
-    /// coverage, the `wiki` extension's, then the federated
-    /// `xservice_*`/`workspace_*` family). Read through the binary's own
-    /// composition ([`composition`]), so an extension's tools are reconciled
-    /// here like the core's — under its build feature, since a build without
-    /// the extension ships neither the tool nor its twin. **Adding a tool means adding a line here** — that is the whole
+    /// coverage, then the federated `xservice_*`/`workspace_*` family). Read
+    /// through the binary's own composition ([`composition`]), so a composed
+    /// extension's tools would be reconciled here like the core's; this binary
+    /// composes none. **Adding a tool means adding a line here** — that is the whole
     /// contract, and the assertions below name the tool you forgot.
     const MCP_SURFACE: &[(&str, Reach)] = &[
         // Navigation.
@@ -1073,17 +1116,6 @@ mod surface_parity {
         ("coverage_ingest", Twin("coverage ingest")),
         ("coverage_status", Twin("coverage status")),
         ("coverage_refresh", Twin("coverage refresh")),
-        // Source wiki — the `wiki` extension's (S-644).
-        #[cfg(feature = "wiki")]
-        ("wiki_write", Twin("wiki write")),
-        #[cfg(feature = "wiki")]
-        ("wiki_read", Twin("wiki read")),
-        #[cfg(feature = "wiki")]
-        ("wiki_search", Twin("wiki search")),
-        #[cfg(feature = "wiki")]
-        ("wiki_status", Twin("wiki status")),
-        #[cfg(feature = "wiki")]
-        ("wiki_materialize", Twin("wiki materialize")),
         // Cross-service family — registered only by the federated backing.
         ("xservice_route_providers", Twin("xservice route-providers")),
         ("xservice_callers", Twin("xservice callers")),
@@ -1180,31 +1212,11 @@ mod surface_parity {
             "the command that STARTS the MCP server. A tool for it would be the \
              server asking itself to exist.",
         ),
-        #[cfg(feature = "wiki")]
-        (
-            "wiki generate",
-            "CLI-only by FR-WK-07: it formats the regeneration work-list into an \
-             offline prompt block for a human or an agent session to act on — \
-             the queue, not a store operation.",
-        ),
-        #[cfg(feature = "wiki")]
-        (
-            "wiki delete",
-            "CLI-only: a destructive store operation kept off the agent surface \
-             (CR-008, the same rule that keeps `wiki skill`/`hook` off it).",
-        ),
-        #[cfg(feature = "wiki")]
-        (
-            "wiki skill",
-            "CLI-only: an INSTALL operation (materialize the embedded skill into \
-             `.agents/`/`.claude/`), not a question about the code.",
-        ),
         (
             "hook",
             "CLI-only: an INSTALL operation (write the Claude Code session-start \
-             quality-report hook and merge `.claude/settings.json`). `wiki hook` \
-             is its hidden alias, the `wiki` extension's, and exempt from the \
-             roster like any hidden command.",
+             quality-report hook and merge `.claude/settings.json`), not a \
+             question about the code.",
         ),
     ];
 
@@ -1562,7 +1574,6 @@ mod surface_parity {
     ///
     /// Only `docs/` needs this: it belongs to no crate, so there is no constant
     /// to read it from. The other two texts come from the shipped binary itself.
-    #[cfg_attr(not(feature = "wiki"), allow(dead_code))]
     fn repo_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1588,8 +1599,7 @@ mod surface_parity {
         let read = |path: std::path::PathBuf| {
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
         };
-        #[cfg_attr(not(feature = "wiki"), allow(unused_mut))]
-        let mut guidance = vec![
+        vec![
             Guidance {
                 label: "the managed CLAUDE.md block",
                 text: read(tmp.path().join("CLAUDE.md")),
@@ -1612,23 +1622,18 @@ mod surface_parity {
                 hypothesis_marker: "hypothesis, not a finding",
                 min_reconciled_claims: 16,
             },
-        ];
-        // The user guide documents the default build, whose `wiki` extension it
-        // names (`logos wiki …`, S-644); a build without the extension is not the
-        // surface it describes, so it is reconciled only where it is shipped.
-        #[cfg(feature = "wiki")]
-        guidance.push(Guidance {
-            // FR-IN-09 says "the README"; no top-level one exists, and this
-            // user guide is the README the AC means (CR-143 §3.8, S-444).
-            label: "the user guide (docs/howto/README.md)",
-            text: read(repo_root().join("docs/howto/README.md")),
-            bare_names_are_tools: false,
-            scoping_marker: "## What it is primarily for: scoping work before you decompose it",
-            navigation_marker: "is the secondary mode",
-            hypothesis_marker: "hypothesis under measurement, not a settled finding",
-            min_reconciled_claims: 10,
-        });
-        guidance
+            Guidance {
+                // FR-IN-09 says "the README"; no top-level one exists, and this
+                // user guide is the README the AC means (CR-143 §3.8, S-444).
+                label: "the user guide (docs/howto/README.md)",
+                text: read(repo_root().join("docs/howto/README.md")),
+                bare_names_are_tools: false,
+                scoping_marker: "## What it is primarily for: scoping work before you decompose it",
+                navigation_marker: "is the secondary mode",
+                hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                min_reconciled_claims: 10,
+            },
+        ]
     }
 
     /// The inline `` `code` `` spans of a markdown text, whitespace-normalised so
@@ -1868,9 +1873,7 @@ mod surface_parity {
                 }
             }
         }
-        // The user guide documents the default build, so it is read only where the
-        // `wiki` extension it names is composed (`shipped_guidance`, S-644).
-        assert_eq!(guidance.len(), if cfg!(feature = "wiki") { 3 } else { 2 }, "FR-IN-09 governs three texts");
+        assert_eq!(guidance.len(), 3, "FR-IN-09 governs three texts");
         assert!(
             failures.is_empty(),
             "the shipped guidance overclaims its relational reach (FR-IN-09 AC 4, \
@@ -2241,14 +2244,11 @@ mod surface_parity {
     /// carries the same figure in its opening line and is checked with it.
     ///
     /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
-    // The guide counts the default build's commands, the `wiki` extension's
-    // among them (S-644): only that build is the surface it states a count for.
-    #[cfg(feature = "wiki")]
     #[test]
     fn the_user_guide_subcommand_count_matches_the_shipped_surface() {
         // Top-level, public, clap's generated `help` excluded — the set a reader
         // of `logos --help` counts. `command_paths` returns leaves, so a group
-        // (`wiki write`) would be counted once per leaf; go to clap directly.
+        // (`coverage ingest`) would be counted once per leaf; go to clap directly.
         let shipped = shipped_command()
             .get_subcommands()
             .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
@@ -2318,11 +2318,11 @@ mod surface_parity {
     /// only global flags (`logos --version`) reconciles nothing and is not a
     /// failure — it names no subcommand by design.
     ///
-    /// A *group* (`wiki`, `coverage`) is accepted only as an intermediate step.
-    /// clap rejects `logos wiki` on its own, so a span that RUNS OUT of tokens on
-    /// a group is a false claim — unless the walk was cut short by a placeholder
-    /// or an alternation (`logos wiki write|read|…`), where the group is as far
-    /// as this parser can honestly get.
+    /// A *group* (`coverage`, `xservice`) is accepted only as an intermediate
+    /// step. clap rejects `logos coverage` on its own, so a span that RUNS OUT of
+    /// tokens on a group is a false claim — unless the walk was cut short by a
+    /// placeholder or an alternation (`logos coverage ingest|status|…`), where the
+    /// group is as far as this parser can honestly get.
     fn assert_command_path_exists(
         commands: &BTreeSet<String>,
         rest: &str,

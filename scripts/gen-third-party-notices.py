@@ -3,9 +3,9 @@
 
 The compliance artifact NFR-CR-02 requires: a single file aggregating
 third-party attributions (crates, tree-sitter grammars, bundled SQLite) that
-ships with every release (wired via `include` in dist-workspace.toml).
+is kept at the repository root and ships with the source.
 
-Scope = exactly the dependencies that can reach the distributed `logos`
+Scope = exactly the dependencies that can reach the shipped `logos`
 binary: `cargo tree -p logos -e normal,build` (default features — the shipped
 artifact, ADR-16), resolved against `cargo metadata` for license/repository
 fields. Dev-dependencies never ship and are excluded by construction.

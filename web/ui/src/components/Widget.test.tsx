@@ -142,7 +142,7 @@ describe("Widget in panel mode (S-617, a tool panel)", () => {
   });
 
   it("places the same classes as a figure widget: one frame, one body size", () => {
-    const { container } = render(<Widget panel="chatKey" title="Chat API key" />);
+    const { container } = render(<Widget panel="policyFile" title="Policy file editor" />);
     expect(container.querySelector("section")).toHaveClass(styles.widget);
     expect(container.querySelector("[data-widget]")).toHaveClass(styles.frame);
     expect(container.querySelector('[data-widget-part="explanation"]')).toHaveClass(styles.explanation);

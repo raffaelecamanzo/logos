@@ -7,7 +7,6 @@ import {
   freshnessStatement,
   humanizeAge,
   pctBp,
-  snippetOf,
 } from "./dashboardModel.ts";
 
 /** A minimal StatusInfo for the freshness tests. */
@@ -148,40 +147,5 @@ describe("freshnessStatement", () => {
     expect(freshnessStatement(s, 1000)).toBe(
       `Last synced at an unknown age (recorded ahead of now — check the clock) — ${CAVEAT}`,
     );
-  });
-});
-
-describe("snippetOf", () => {
-  it("takes the first prose paragraph, stripping structure and links", () => {
-    const body = "# Title\n\nThe [project](/x) does **things** well.\n\nSecond paragraph.";
-    expect(snippetOf(body)).toBe("The project does things well.");
-  });
-  it("skips a fenced code block before the prose", () => {
-    const body = "```\ncode();\n```\n\nReal prose here.";
-    expect(snippetOf(body)).toBe("Real prose here.");
-  });
-  it("returns an empty string for a prose-less body (caller falls back honestly)", () => {
-    expect(snippetOf("# Only a heading\n")).toBe("");
-    expect(snippetOf("")).toBe("");
-  });
-  it("truncates at a word boundary with an ellipsis", () => {
-    const long = `${"word ".repeat(150)}`.trim();
-    const out = snippetOf(long);
-    expect(out.endsWith("…")).toBe(true);
-    expect([...out].length).toBeLessThanOrEqual(481);
-  });
-  it("skips a setext-underlined title and leads with the body prose", () => {
-    expect(snippetOf("Title\n===\n\nReal prose.")).toBe("Real prose.");
-  });
-  it("strips a leading list / quote / ordered marker from the first prose line", () => {
-    expect(snippetOf("- A bullet of prose.")).toBe("A bullet of prose.");
-    expect(snippetOf("> A quoted line.")).toBe("A quoted line.");
-    expect(snippetOf("1. An ordered item.")).toBe("An ordered item.");
-  });
-  it("skips a thematic break (HR) before the prose", () => {
-    expect(snippetOf("---\n\nProse after a rule.")).toBe("Prose after a rule.");
-  });
-  it("skips a ~~~ fenced block as well as a ``` one", () => {
-    expect(snippetOf("~~~\ncode\n~~~\n\nProse here.")).toBe("Prose here.");
   });
 });

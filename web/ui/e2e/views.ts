@@ -59,32 +59,3 @@ export async function layoutCase(page: Page, path: string, view: ViewCase) {
   expect(titles, "the view's widgets").toContain(view.ready);
   return { stack, titles };
 }
-
-/**
- * Serves the chat configuration read as CONFIGURED: the real answer, with its
- * effective chat set to a declared model and a present key. The chat then shows
- * its consent banner and the conversation panel. Nothing is sent anywhere: no
- * question is asked, and the composer stays disabled until consent.
- */
-export async function configuredChat(page: Page, path: string): Promise<void> {
-  await page.route(`**${path}`, async (route) => {
-    if (route.request().method() !== "GET") return route.fallback();
-    const response = await route.fetch();
-    const body = (await response.json()) as Record<string, unknown>;
-    body.effective_chat = {
-      policy: {
-        provider: "openai",
-        model: "e2e-model",
-        base_url: "https://example.invalid/v1",
-        max_tool_calls: 24,
-        max_subagent_tool_calls: 8,
-        max_replans: 3,
-      },
-      policy_origin: path.includes("workspace") ? "workspace" : "member",
-      credential: { present: true, last4: "e2e0" },
-      credential_origin: path.includes("workspace") ? "workspace" : "member",
-      member_key_withheld: false,
-    };
-    await route.fulfill({ response, json: body });
-  });
-}

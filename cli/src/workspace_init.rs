@@ -136,7 +136,10 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
         // member gained anything. stdout carries exactly one machine document
         // either way (FR-CL-02).
         match fallback {
-            Some((interactive, hooks)) => out.print(&logos_core::Engine::init_with_contributions(root, &crate::init_options(interactive, hooks), &host.init_steps())?)?,
+            Some((interactive, hooks)) => {
+                let steps = host.init_steps();
+                out.print(&logos_core::Engine::init_with_contributions(root, &crate::init_options(interactive, hooks, &steps, crate::ask), &steps)?)?
+            }
             None => eprintln!("logos init --workspace: no candidate member repositories found under {} — nothing to do", workspace_root.display()),
         }
         return Ok(0);
@@ -945,8 +948,8 @@ mod tests {
 
     /// **The payload, not just the branch.** `fallback` carries the flags the
     /// `logos init` was typed with, and dropping them — `InitOptions::default()`
-    /// instead of `crate::init_options(interactive, hooks)` — is invisible to
-    /// every other test here, because `init_options(false, false)` is
+    /// instead of `crate::init_options(interactive, hooks, …)` — is invisible to
+    /// every other test here, because `init_options(false, false, _, _)` is
     /// field-for-field `InitOptions::default()`. That silent drop is the exact
     /// bug class CR-103 exists to fix, one flag further in, so it gets its own
     /// witness.
@@ -954,7 +957,7 @@ mod tests {
     /// `hooks` is the assertable half and `interactive` deliberately is not:
     /// `install_hooks` is the one `InitOptions` field with a non-prompting
     /// producer (`hooks || (interactive && ask(..))`) and a filesystem-visible
-    /// effect. `interactive: true` would call `crate::ask` five times in this
+    /// effect. `interactive: true` would call `crate::ask` up to five times in this
     /// process, against a stdin that is a terminal whenever the suite is run
     /// from one — do not be the first test to do that.
     ///

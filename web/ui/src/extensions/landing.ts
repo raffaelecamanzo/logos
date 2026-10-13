@@ -1,7 +1,8 @@
 /*
- * What the shell does with a route an extension owns (S-642, FR-UI-51): wait for the
- * server's answer, then mount the view if the extension is active, or land on the
- * Dashboard — the landing a hidden view gets — if it is not. Kept beside the registry
+ * What the shell does with a route no built-in view serves (S-642, S-651, FR-UI-51):
+ * for a route an extension owns, wait for the server's answer, then mount the view if
+ * the extension is active, or land on the Dashboard — the landing a hidden view gets —
+ * if it is not; a route nobody serves at all lands there too. Kept beside the registry
  * rather than in `views/index.ts` so the view registry stays one thing: path → component.
  */
 
@@ -9,16 +10,19 @@ import { viewForPath } from "../views/index.ts";
 import { getExtensions, ownsRegisteredPath } from "./registry.ts";
 
 /**
- * Where a visit to `pathname` lands because it names a route a REGISTERED extension
- * owns but that extension is not mounted for this serve (S-642, FR-UI-51): the
- * Dashboard, the same landing a hidden view gets (`hiddenViewLanding`). `null` for
- * every other path — a built-in route, a mounted extension's, or one nobody owns —
- * and until the boot read has settled, when {@link extensionDecisionPending} holds
- * the shell instead: the answer depends on what the server reports.
+ * Where a visit to `pathname` lands because no view serves it (S-642, S-651,
+ * FR-UI-51): the Dashboard, the same landing a hidden view gets (`hiddenViewLanding`).
+ * That is a route a REGISTERED extension owns while the server does not report it
+ * active, and equally a route nobody registered — so a build that composes no
+ * extension lands a direct visit to `/chat` or `/wiki` on the Dashboard rather than
+ * on an empty content slot. `null` for a route a view serves (a built-in, or a
+ * mounted extension's), and until the boot read has settled for a registered
+ * extension's route, when {@link extensionDecisionPending} holds the shell instead:
+ * the answer depends on what the server reports.
  */
 export function inactiveExtensionLanding(pathname: string): string | null {
   if (extensionDecisionPending(pathname)) return null;
-  return ownsRegisteredPath(pathname) && viewForPath(pathname) === null ? "/" : null;
+  return viewForPath(pathname) === null ? "/" : null;
 }
 
 /**

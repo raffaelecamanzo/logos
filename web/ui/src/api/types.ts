@@ -184,7 +184,7 @@ export interface NodeInfo {
   warnings: string[];
 }
 
-/** How one chat code-reference span resolved (mirrors `CodeRefOutcome`, S-622,
+/** How one code-reference span resolved (mirrors `CodeRefOutcome`, S-622,
  *  FR-UI-47). Only `file` and `symbol` carry a seed, and only they become links. */
 export type CodeRefOutcome = "file" | "symbol" | "ambiguous" | "unresolved";
 
@@ -239,8 +239,8 @@ export interface QueryResponse {
 // ── Dashboard / Health read-models (S-187, FR-UI-09, FR-UI-04) ────────────────
 // The wire mirrors the Dashboard (`/api/v1/overview`) and Health (`/api/v1/health`)
 // bundles consume. Every field traces to a Rust read-model struct (mirrors
-// `logos-core/src/models/navigation.rs`, `models/quality.rs`, `history.rs`,
-// `wiki/*`). `Option<T>` is `T | null`; enums serialize to snake_case tokens.
+// `logos-core/src/models/navigation.rs`, `models/quality.rs`, `history.rs`).
+// `Option<T>` is `T | null`; enums serialize to snake_case tokens.
 
 /** Index health + freshness (mirrors `StatusInfo`). Carried inside the Dashboard /
  *  Health / Architecture / Gaps / Files / Coverage bundles, and served verbatim by
@@ -464,17 +464,6 @@ export interface StatsInfo {
   warnings: string[];
 }
 
-/** One agent wiki page (mirrors `WikiPage`); the Dashboard renders a prose snippet of `body`. */
-export interface WikiPage {
-  slug: string;
-  title: string;
-  body: string;
-  generator: string;
-  built_at_revision: number;
-  stale: boolean;
-  has_missing: boolean;
-}
-
 /** The Dashboard bundle (mirrors `api_v1::OverviewModel`, [FR-UI-09]). */
 export interface OverviewModel {
   status: StatusInfo;
@@ -486,11 +475,6 @@ export interface OverviewModel {
    *  (CR-079). Replaces the retired `gaps`/`cross`/`hotspots` roll-ups. */
   rules: RulesReport;
   stats: StatsInfo;
-  /** The Project-Overview wiki page, or `null` when none is written yet (honest
-   *  absence) — the field the `wiki` extension adds to the bundle (S-644), so it is
-   *  absent from a server without the extension. Its Dashboard card is the
-   *  extension's too (`views/wiki/extension.tsx`). */
-  overview_page?: WikiPage | null;
 }
 
 /** A normalized + raw metric pair (mirrors `MetricValue`). */
@@ -839,88 +823,6 @@ export interface GapsModel {
   rules: RulesReport;
 }
 
-// ── Wiki (mirrors the wiki read-models + the S-189 presentation bundles) ──────────
-
-/** Per-anchor freshness verdict (mirrors `Freshness`, lowercase wire tokens). */
-export type AnchorFreshness = "fresh" | "stale" | "missing";
-
-/** One page anchor's provenance + freshness (mirrors `AnchorProvenance`). */
-export interface AnchorProvenance {
-  kind: string;
-  entity_id: string;
-  freshness: AnchorFreshness;
-}
-
-/** The dual-axis `wiki status` freshness read-model (mirrors `WikiStatus`). Only the
- *  fields the landing reads are mirrored; the wire carries the work-list too. */
-export interface WikiStatus {
-  page_count: number;
-  fresh_count: number;
-  stale_count: number;
-  missing_anchor_count: number;
-  /** Pages whose built-at revision the graph has advanced past (regen-pending). */
-  revision_stale_count: number;
-  /** The graph revision the counts were computed against. */
-  current_revision: number;
-  freshness_fraction: number;
-}
-
-/** One wiki full-text search hit (mirrors `WikiHit`). */
-export interface WikiHit {
-  slug: string;
-  title: string;
-  generator: string;
-  written_head: string;
-  stale: boolean;
-  has_missing: boolean;
-  built_at_revision: number;
-  /** Whether the graph has advanced past the page's built-at revision. */
-  revision_pending: boolean;
-}
-
-/** The agent wiki-page presentation bundle (mirrors `api_v1::WikiPageView`, S-189):
- *  provenance + per-anchor freshness + the **server-rendered, already-safe HTML
- *  body** the SPA mounts. `rendered_html` is comrak output (the XSS boundary is
- *  server-side); the SPA renders its `.mermaid` blocks client-side. */
-export interface WikiPageView {
-  slug: string;
-  title: string;
-  /** Server-rendered, comrak-sanitized HTML; empty for a `placeholder`. */
-  rendered_html: string;
-  /** A known scaffold slug with no prose yet — the honest "not yet generated" state. */
-  placeholder: boolean;
-  generator: string | null;
-  written_head: string | null;
-  marker: string | null;
-  built_at_revision: number | null;
-  anchors: AnchorProvenance[];
-  stale: boolean;
-  has_missing: boolean;
-  /** Derived "stale — regeneration pending" verdict. */
-  regen_pending: boolean;
-  /** The graph revision the verdict was derived against. */
-  current_revision: number;
-}
-
-/** One leaf of a {@link WikiNavTier} (mirrors `api_v1::WikiNavItem`). */
-export interface WikiNavItem {
-  slug: string;
-  label: string;
-}
-
-/** One tier of the wiki menu (mirrors `api_v1::WikiNavTier`). */
-export interface WikiNavTier {
-  title: string;
-  items: WikiNavItem[];
-}
-
-/** The four-tier wiki menu IA (mirrors `api_v1::WikiNav`, S-189) — the Summary,
- *  Design, and Specs tiers plus a top-level Search link. */
-export interface WikiNav {
-  tiers: WikiNavTier[];
-  search_label: string;
-}
-
 // ── Config editor (S-191, FR-UI-12/13, FR-CF-06, ADR-31) ──────────────────────
 // The wire mirrors of `logos-core/src/config/writeback.rs` + `secrets.rs`. The
 // editor's authoritative document is each file's raw `content`; the `parsed`
@@ -1032,8 +934,8 @@ export interface ConfigDefaults {
 export type ChatOrigin = "member" | "workspace" | "unset";
 
 /** The effective chat policy and masked credential with each half's origin
- *  (mirrors `EffectiveChat`, S-448/FR-WS-30) — the resolution the Chat tab's
- *  gate reads. `policy` mirrors the typed subset of `ChatConfig`, as
+ *  (mirrors `EffectiveChat`, S-448/FR-WS-30) — the resolution a config panel the
+ *  extension host mounts reads ({@link ConfigReadModel}). `policy` mirrors the typed subset of `ChatConfig`, as
  *  `ParsedChatConfig` does; the credential is presence + last-4 only
  *  (NFR-SE-07). */
 export interface EffectiveChat {
@@ -1051,8 +953,7 @@ export interface EffectiveChat {
  *  ADR-67, Sprint 77 HF-1): the member's own `[wiki].model`, else the workspace
  *  root's — only when the member inherits the chat policy half — else the
  *  effective chat model; `null` in the configure-first state. Resolved by the
- *  server with the wiki run's own function, so the Wiki tab reads it rather than
- *  re-deriving the rule. */
+ *  server, so a reader takes it rather than re-deriving the rule. */
 export interface EffectiveWiki {
   model: string | null;
 }
@@ -1067,13 +968,13 @@ export interface ConfigReadModel {
   chat_key: MaskedSecret;
   defaults: ConfigDefaults;
   /** Carried BESIDE `config` and `chat_key`, which stay the member's literal
-   *  document and its own key. The Chat tab's readiness verdict reads it (S-452);
-   *  the editor reads it only for its read-only inheritance note, and never
-   *  pre-fills or posts it: an inherited value must not be written back into the
-   *  member's `config.toml` (NFR-RA-05). */
+   *  document and its own key. The core read-model serves it in every build; this
+   *  build's editor reads none of it, and nothing may pre-fill or post it: an
+   *  inherited value must not be written back into the member's `config.toml`
+   *  (NFR-RA-05). The Config view hands the whole read-model to the config panels
+   *  the extension host mounts (`ConfigPanelHost`). */
   effective_chat: EffectiveChat;
-  /** Beside the literal document for the same reason; the Wiki tab's model,
-   *  readiness verdict and consent disclosure read it (Sprint 77 HF-1). */
+  /** Beside the literal document for the same reason (Sprint 77 HF-1). */
   effective_wiki: EffectiveWiki;
 }
 

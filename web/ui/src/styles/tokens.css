@@ -65,26 +65,6 @@
   --graph-layer-code: #2563eb; /* code layer (blue) */
   --graph-layer-artifact: #d97706; /* artifact layer (amber) */
 
-  /* Syntax-highlight hues (S-622, CR-204 C4, FR-UI-47) — a light step for the
-     dark code-block fill and a deep step for the light one. Each clears WCAG 2.1
-     AA (4.5:1) on its theme's code-block fill (`--surface-2`); the arithmetic is
-     in sprint-impl-95 and `spa_design_system.rs` re-measures it. No red: the
-     signal red stays signal-only. */
-  --hl-violet-300: #c792ea;
-  --hl-violet-700: #7c3aed;
-  --hl-green-300: #9ece6a;
-  --hl-green-700: #15803d;
-  --hl-orange-300: #f2a65a;
-  --hl-orange-700: #b45309;
-  --hl-slate-400: #8b95a5;
-  --hl-slate-600: #6a6f78;
-  --hl-blue-300: #82aaff;
-  --hl-blue-700: #1d4ed8;
-  --hl-teal-300: #4fd1c5;
-  --hl-teal-700: #0f766e;
-  --hl-sand-300: #e6c07b;
-  --hl-sand-700: #8a5a00;
-
   /* ── Layer 2: semantic tokens — DARK theme (canonical default) ───────────── */
   --surface-0: var(--neutral-950); /* page background */
   --surface-1: var(--neutral-900); /* card / panel */
@@ -107,16 +87,6 @@
   --tint-hover: rgba(255, 255, 255, 0.06);
   --tint-selected: rgba(218, 41, 28, 0.16); /* faint signal-red wash for active rows */
 
-  /* Syntax-highlight palette for chat code blocks (S-622, CR-204 C4) — THEMED,
-     like the surfaces it sits on. */
-  --syntax-keyword: var(--hl-violet-300);
-  --syntax-string: var(--hl-green-300);
-  --syntax-number: var(--hl-orange-300);
-  --syntax-comment: var(--hl-slate-400);
-  --syntax-function: var(--hl-blue-300);
-  --syntax-type: var(--hl-teal-300);
-  --syntax-attribute: var(--hl-sand-300);
-
   color-scheme: dark;
 
   /* ── Layer 3: scale tokens (theme-independent) ──────────────────────────── */
@@ -137,13 +107,6 @@
   --leading-tight: 1.25;
   --leading-base: 1.55;
   --tracking-label: 0.07em; /* the brand's uppercase section-label voice */
-  /* Chat prose scale (CR-204 L1/L8, FR-UI-45) — chat-scoped, so the app-wide
-     `--text-base` (15px) is untouched. 16px / 1.75 = a 28px line box; answer
-     headings track tighter; the measure is the left-anchored reading width. */
-  --text-chat: 1rem;
-  --leading-chat: 1.75;
-  --tracking-heading: -0.025em;
-  --measure-prose: 72ch;
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
@@ -162,7 +125,6 @@
   --radius-sm: 3px;
   --radius-1: 4px;
   --radius-2: 8px;
-  --radius-3: 24px; /* chat bubbles (CR-204 L4) */
   --radius-pill: 999px;
 
   /* Elevation. In dark mode depth is carried mostly by lighter surfaces; the
@@ -170,10 +132,6 @@
   --elevation-0: none;
   --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.35);
   --elevation-2: 0 6px 20px rgba(0, 0, 0, 0.45);
-  /* The chat composer's lift (CR-204 L3). THEMED: dark carries depth on the lighter
-     surface and keeps the shadow deep; light leans on a softer warm-neutral shadow
-     (below, in each light block). */
-  --elevation-composer: 0 4px 16px rgba(0, 0, 0, 0.45);
 
   /* Motion. */
   --motion-fast: 120ms;
@@ -198,14 +156,6 @@
     --border-strong: var(--light-border-strong);
     --tint-hover: var(--so-merlin-50);
     --tint-selected: rgba(218, 41, 28, 0.1);
-    --elevation-composer: 0 4px 16px rgba(61, 57, 53, 0.12);
-    --syntax-keyword: var(--hl-violet-700);
-    --syntax-string: var(--hl-green-700);
-    --syntax-number: var(--hl-orange-700);
-    --syntax-comment: var(--hl-slate-600);
-    --syntax-function: var(--hl-blue-700);
-    --syntax-type: var(--hl-teal-700);
-    --syntax-attribute: var(--hl-sand-700);
     color-scheme: light;
   }
 }
@@ -224,14 +174,6 @@
   --border-strong: var(--light-border-strong);
   --tint-hover: var(--so-merlin-50);
   --tint-selected: rgba(218, 41, 28, 0.1);
-  --elevation-composer: 0 4px 16px rgba(61, 57, 53, 0.12);
-  --syntax-keyword: var(--hl-violet-700);
-  --syntax-string: var(--hl-green-700);
-  --syntax-number: var(--hl-orange-700);
-  --syntax-comment: var(--hl-slate-600);
-  --syntax-function: var(--hl-blue-700);
-  --syntax-type: var(--hl-teal-700);
-  --syntax-attribute: var(--hl-sand-700);
   color-scheme: light;
 }
 
@@ -249,13 +191,5 @@
   --border-strong: var(--neutral-600);
   --tint-hover: rgba(255, 255, 255, 0.06);
   --tint-selected: rgba(218, 41, 28, 0.16);
-  --elevation-composer: 0 4px 16px rgba(0, 0, 0, 0.45);
-  --syntax-keyword: var(--hl-violet-300);
-  --syntax-string: var(--hl-green-300);
-  --syntax-number: var(--hl-orange-300);
-  --syntax-comment: var(--hl-slate-400);
-  --syntax-function: var(--hl-blue-300);
-  --syntax-type: var(--hl-teal-300);
-  --syntax-attribute: var(--hl-sand-300);
   color-scheme: dark;
 }

@@ -33,7 +33,7 @@ describe("the commands the catalogues name", () => {
   });
 
   it("reads the reference's command index, subcommands included", () => {
-    for (const cmd of ["init", "index", "scan", "gate", "hotspots", "workspace status", "coverage ingest", "wiki write", "xservice"]) {
+    for (const cmd of ["init", "index", "scan", "gate", "hotspots", "workspace status", "coverage ingest", "xservice"]) {
       expect(documented, cmd).toContain(cmd);
     }
     // A group is listed only by its subcommands.
@@ -65,8 +65,8 @@ describe("the check itself (falsifiable)", () => {
     expect(check("Run logos workspace status, then logos coverage ingest <report>.")).toEqual([true, true]);
   });
 
-  it("reads string literals only: a comment, the file logos.workspace.toml and the logos-wiki skill name no command", () => {
-    const src = `// logos frobnicate\nexport const x = "Edit logos.workspace.toml; Use Logos from your agent; the logos-wiki skill does it.";\n`;
+  it("reads string literals only: a comment, the file logos.workspace.toml and the logos-index skill name no command", () => {
+    const src = `// logos frobnicate\nexport const x = "Edit logos.workspace.toml; Use Logos from your agent; the logos-index skill does it.";\n`;
     expect(commandsIn("/src/copy/x.copy.ts", src)).toEqual([]);
   });
 });

@@ -1303,7 +1303,7 @@ async fn config_save_secret(
 /// The honest setup-fault text for a chat-resolution read failure ([NFR-CC-04]),
 /// worded for `subject` (`"chat"` or `"wiki"`) and shared by both agents that
 /// read the core's `resolve_chat` seam: the `chat` extension (S-643) and the wiki
-/// generator (`wiki-agent`, S-644), which is why it is public.
+/// generator (S-644), which is why it is public.
 ///
 /// A **parse** fault — of `secrets.toml` *or* `config.toml`, at either root — is
 /// reported by file and position only ([NFR-SE-07]): the TOML error's `Display`
@@ -1373,7 +1373,7 @@ pub fn not_a_workspace() -> Response {
 /// So the surface is a **parameter, not a default**: a handler added without
 /// one does not compile, which is what makes "an unclassified read is a build
 /// failure, never a silent inclusion" ([BR-42]) true at this boundary and not
-/// merely intended. `agent-core`'s chat bridges hardcode [`Surface::Chat`] —
+/// merely intended. The agent substrate's chat bridges hardcode [`Surface::Chat`] —
 /// correctly, since only one agent reaches that module — and their
 /// `in_chat_surface` doc prescribes this shape for the next caller: "give the
 /// bridges a surface parameter and let each caller name itself". This is that
@@ -1448,6 +1448,71 @@ where
 mod tests {
     use super::*;
 
+    /// [`config_resolution_fault`] reports a parse fault of either file by name and
+    /// position only, never by its quoted content ([NFR-SE-07]): a key pasted into
+    /// `config.toml` is quoted in the TOML error, and does not reach the text, which
+    /// keeps the error's position; a broken `secrets.toml`, whose error the core has
+    /// already redacted, is named the same way. Any other fault keeps its detail. Driven
+    /// through the core's real `resolve_chat`, so the errors are the ones a chat
+    /// surface a build composes would receive.
+    ///
+    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+    #[test]
+    fn a_config_resolution_fault_names_file_and_position_never_content() {
+        const KEY: &str = "sk-never-echo-0123456789";
+        for (file, body, what) in [
+            ("config.toml", format!("[chat]\napi_key = \"{KEY}\"\n"), "configuration"),
+            ("secrets.toml", format!("[chat]\napi_key = \"{KEY}\n"), "secret"),
+        ] {
+            let dir = tempfile::tempdir().expect("a temp project");
+            std::fs::create_dir_all(dir.path().join(".logos")).expect("create .logos");
+            std::fs::write(dir.path().join(".logos").join(file), body).expect("write the file");
+            let err = logos_core::config::resolve_chat(dir.path(), None).expect_err("the file does not parse");
+            assert!(matches!(err, ConfigError::Parse { .. }), "{file}: {err:?}");
+            // `config.toml`'s TOML error quotes the key line, so only this function
+            // keeps it out — the case is vacuous unless the key is really there.
+            // `secrets.toml` errors arrive already redacted by the core
+            // (`parse_secrets`); this function is the second layer there.
+            if file == "config.toml" {
+                let quoted = std::error::Error::source(&err).map(ToString::to_string).unwrap_or_default();
+                assert!(quoted.contains(KEY), "{file}: the TOML error must quote the key, or this proves nothing");
+            }
+
+            let text = config_resolution_fault("chat", &err);
+            assert!(!text.contains(KEY), "{file}: the key is echoed: {text}");
+            assert!(text.starts_with(&format!("could not read the chat {what} — check that ")), "{file}: {text}");
+            assert!(text.contains(file), "{file}: names the file: {text}");
+            if file == "config.toml" {
+                assert!(text.ends_with(')') && text.contains("(line "), "{file}: and the position: {text}");
+            }
+        }
+
+        let io = ConfigError::Io { path: "p/.logos/config.toml".into(), source: std::io::Error::other("disk gone") };
+        let text = config_resolution_fault("wiki", &io);
+        assert!(text.starts_with("could not read the wiki configuration: ") && text.contains("disk gone"), "{text}");
+    }
+
+    /// [`wants_event_stream`] reads the `Accept` header's media ranges, so a client
+    /// that lists Server-Sent Events among others gets a stream, and one that does
+    /// not — or names a near miss — gets the buffered answer ([FR-UI-19]).
+    ///
+    /// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
+    #[test]
+    fn wants_event_stream_reads_the_accept_media_ranges() {
+        let accepting = |value: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert(header::ACCEPT, HeaderValue::from_str(value).expect("a header value"));
+            }
+            wants_event_stream(&headers)
+        };
+        assert!(accepting(Some("text/event-stream")));
+        assert!(accepting(Some("application/json, text/event-stream;q=0.9")));
+        for refused in [None, Some("application/json"), Some("text/eventstream"), Some("text/html, */*")] {
+            assert!(!accepting(refused), "{refused:?}");
+        }
+    }
+
     /// The [`bridge`] installs the boundary scope its caller names, and
     /// installs it **inside** the blocking closure — where the engine (and so
     /// the telemetry event) actually runs ([FR-OB-09], [CR-097]).
@@ -1456,7 +1521,7 @@ mod tests {
     /// proves the scope *works*, this proves the web adapter *enters* it. The
     /// probe closure stands in for a real handler body, which is exactly what
     /// `bridge` hands to the engine. Mirrors
-    /// `both_engine_bridges_run_under_the_chat_surface` in `agent-core`; the
+    /// `both_engine_bridges_run_under_the_chat_surface` in the agent substrate; the
     /// shape itself is prescribed by `in_chat_surface`'s doc, not that test's.
     #[tokio::test]
     async fn the_bridge_runs_the_engine_call_under_the_surface_its_caller_names() {
@@ -1627,7 +1692,7 @@ mod tests {
         // `lib.rs`. The `/api/v1/chat/*` sites moved with chat to its extension
         // crate (S-643), and the wiki's read routes and its generation pass — the
         // one `Surface::WikiGen` site ([CR-139]) — with the wiki to its extension
-        // and the `wiki-agent` (S-644); each pins its own.
+        // and its generator (S-644); each pins its own.
         let sources = [
             ("api_v1.rs", production_code(include_str!("api_v1.rs"))),
             ("lib.rs", production_code(include_str!("lib.rs"))),
@@ -1738,7 +1803,7 @@ mod tests {
     /// [`Surface::WikiGen`]; it left this crate with the wiki (S-644), and the
     /// census that covers it — every engine-reaching site of the generator,
     /// enumerated from its source and compared against a declared table — went
-    /// with it, to `wiki-agent/tests/wikigen_enumeration.rs`. This guard's reach
+    /// with it, to the generator's own suites. This guard's reach
     /// is exactly "a `Surface`/`bridge`/`workspace_fan`/`run_blocking` marker in a
     /// file the census does not read", and it is stated here so the next audit
     /// starts from that rather than from an assumption.

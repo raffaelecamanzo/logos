@@ -654,17 +654,30 @@ fn hooks_outside_a_git_repository_skip_gracefully() {
 
 // ── CR-070 / FR-WK-14 retirement: the PostToolUse augmentation hook is gone ──
 
+/// The file names under `<root>/.claude/hooks/`, sorted — what `init -i` left
+/// there, so an assertion holds the whole directory rather than one known name.
+fn hook_scripts(root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join(".claude/hooks"))
+        .expect(".claude/hooks/ is written")
+        .map(|entry| entry.expect("a directory entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 /// [CR-070] regression: `init -i` installs no PostToolUse augmentation entry
-/// and writes no `logos-wiki-augment.sh` — of the core's steps, only the
-/// [FR-IN-07] session-start quality-report hook installs (the embedded skill is
-/// the `logos-wiki` crate's contributed step, tested there).
+/// and writes no augmentation script — of the core's steps, only the
+/// [FR-IN-07] session-start quality-report hook installs, so its script is the
+/// one file under `.claude/hooks/` (a skill is an extension's contributed step,
+/// tested with that extension).
 #[test]
 fn init_i_installs_no_augmentation_hook() {
     let tmp = TempDir::new().unwrap();
     Engine::init_with(tmp.path(), &interactive()).unwrap();
 
-    assert!(
-        !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
+    assert_eq!(
+        hook_scripts(tmp.path()),
+        ["logos-quality-open.sh"],
         "the retired augmentation hook script is never materialized"
     );
     let settings: serde_json::Value =
@@ -689,13 +702,14 @@ fn init_i_installs_no_autogen_hook_and_no_claude_p_reference_remains() {
         "init -i never creates the per-developer settings.local.json — \
          the retired autogen hook was its only writer"
     );
-    assert!(
-        !tmp.path().join(".claude/hooks/logos-wiki-autogen.sh").exists(),
+    assert_eq!(
+        hook_scripts(tmp.path()),
+        ["logos-quality-open.sh"],
         "the retired autogen hook script is never materialized"
     );
     let settings = read(tmp.path(), ".claude/settings.json");
     assert!(
-        !settings.contains("claude -p") && !settings.contains("logos-wiki-autogen"),
+        !settings.contains("claude -p") && !settings.contains("autogen"),
         "no claude -p invocation and no autogen reference remain: {settings}"
     );
 }

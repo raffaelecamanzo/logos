@@ -502,7 +502,7 @@ fn telemetry_origin_for(primary: Option<&Path>, root: &Path) -> String {
 /// never on the hot path ([NFR-OO-02]) — and copied onto every event the
 /// process emits.
 ///
-/// Dependency-free, following the [`agent_core::retry`] jitter precedent:
+/// Dependency-free, following the agent substrate's retry-jitter precedent:
 /// [`std::collections::hash_map::RandomState`] is reseeded from the OS's CSPRNG
 /// on every construction (it exists to resist HashDoS), so two independently
 /// constructed instances give two independent 64-bit draws with no `rand`

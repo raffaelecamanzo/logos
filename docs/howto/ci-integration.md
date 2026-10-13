@@ -196,8 +196,8 @@ like in CI.
 
 This repository publishes each release to `origin` as **one commit** over
 `origin/main`, whatever local history led to it. `scripts/publish-public.sh`
-builds that commit; the tag-triggered `.github/workflows/release.yml` builds the
-release from it.
+builds that commit and tags it. The tag is a source release: no workflow in
+this repository runs on it.
 
 ```bash
 bash scripts/publish-public.sh --version 1.15.7          # dry run: prints, moves nothing
@@ -230,18 +230,11 @@ Exit codes: `0` done, `1` the term gate found a listed term, `2` usage error or 
 failed precondition, `3` the term gate could not run or read the wrong number of
 files, `4` the push failed (the tag the run created is deleted again).
 
-**How `release.yml` consumes the tag.** Traced through the workflow file:
+**What the tag starts.** Nothing in this repository: no workflow runs on a
+pushed tag, builds a binary, creates a GitHub Release or updates a package
+tap (`.github/workflows/ci.yml` runs on `main` and on pull requests only). The
+tag marks the squash commit, and that commit is what a build pins.
 
-| Step | What it reads | So it builds |
-|---|---|---|
-| Trigger | `on.push.tags: '**[0-9]+.[0-9]+.[0-9]+*'` | the pushed `vX.Y.Z` starts the run |
-| `plan` | `github.ref_name` → `dist host --steps=create --tag=vX.Y.Z` | the release named by the tag; `dist` refuses a tag the workspace version does not match, which is why the script checks `Cargo.toml` first |
-| Every job that builds | `actions/checkout@v6` with no `ref:` override (six of the seven; `publish-homebrew-formula` checks out the tap repository and only commits the formula built from the tag's artifacts) | the triggering ref: the tag, so the squash commit's tree |
-| `build-*` | `dist build --tag=vX.Y.Z` | the artifacts from that tree |
-| `host` | `gh release create vX.Y.Z --target "$RELEASE_COMMIT"`, where `RELEASE_COMMIT` is `github.sha` | a GitHub Release pointing at the squash commit |
-
-Nothing in the workflow reads history behind the tagged commit, so a release
-built from the one squash commit is the same release the local tree would build.
 The tests are `bash scripts/tests/test-publish-public.sh`: every case runs in a
 throwaway clone whose `origin` is a local bare repository.
 

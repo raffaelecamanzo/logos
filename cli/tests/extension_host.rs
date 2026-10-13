@@ -9,10 +9,11 @@
 //! technique that gives a library entry point a real process boundary without a
 //! second, test-only binary target in the shipped package.
 //!
-//! Four hosts: `stub` (the stub extension, `logos_ext::testing`), `disabled`
+//! Five hosts: `stub` (the stub extension, `logos_ext::testing`), `disabled`
 //! (the same stub behind a feature the gate does not enable), `enabled` (that
-//! gated stub with its feature enabled) and `public` (no extension — the host of
-//! a `main` that composes none).
+//! gated stub with its feature enabled), `skill-reader` (an extension whose init
+//! step reports the skill answer, [`SkillReader`]) and `public` (no extension —
+//! the host of a `main` that composes none).
 //!
 //! [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
 //! [FR-CF-09]: ../../docs/specs/requirements/FR-CF-09.md
@@ -45,6 +46,7 @@ fn host(kind: &str) -> ExtensionHost {
             .register(StubExtension::gated(STUB_FEATURE))
             .expect("registers")
             .with_gate(TestGate::enabling(&[STUB_FEATURE])),
+        "skill-reader" => ExtensionHost::new().register(SkillReader).expect("registers"),
         "public" => ExtensionHost::new(),
         other => panic!("test bug: unknown host {other}"),
     }
@@ -197,6 +199,64 @@ fn a_registered_extension_init_step_runs_with_logos_init() {
     let run = logos("enabled", fresh.path(), &["--json", "init"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(init_targets(&run).last(), Some(&(STUB_INIT_TARGET.to_string(), "created".to_string())));
+}
+
+/// An extension whose one init step reads [`InitOptions::materialize_skill`] — the
+/// answer to the skill question — and reports it, so a test sees what `init`
+/// decided without a TTY.
+///
+/// [`InitOptions::materialize_skill`]: logos_core::init::InitOptions::materialize_skill
+struct SkillReader;
+
+/// The init-step target [`SkillReader`] reports under.
+const SKILL_READER_TARGET: &str = "skill-reader";
+
+impl logos_ext::Extension for SkillReader {
+    fn id(&self) -> &'static str {
+        "skill-reader"
+    }
+
+    fn init_steps(&self) -> Vec<std::sync::Arc<dyn logos_ext::InitContribution>> {
+        vec![std::sync::Arc::new(SkillReader)]
+    }
+}
+
+impl logos_ext::InitContribution for SkillReader {
+    fn run(
+        &self,
+        _root: &Path,
+        options: &logos_core::init::InitOptions,
+    ) -> anyhow::Result<Vec<logos_core::models::pipeline::InitStep>> {
+        Ok(vec![logos_core::models::pipeline::InitStep {
+            target: SKILL_READER_TARGET.to_string(),
+            action: logos_core::models::pipeline::InitAction::Unchanged,
+            detail: format!("materialize_skill={}", options.materialize_skill),
+        }])
+    }
+}
+
+/// `init -i` asks whether to materialize skills only for a composed init step —
+/// the only reader of the answer — and a non-TTY run takes the question's
+/// default, yes; a plain `init` answers no. The build that composes no step asks
+/// nothing (`no_extension_surface.rs`, `init_asks_no_chat_or_wiki_question`).
+#[test]
+fn a_composed_init_step_is_asked_the_skill_question() {
+    let reported = |args: &[&str]| -> String {
+        let project = TempDir::new().expect("a temp project");
+        let run = logos("skill-reader", project.path(), args);
+        assert_eq!(run.code, 0, "{args:?}: {}", run.stderr);
+        let report = run.json();
+        let step = report["steps"]
+            .as_array()
+            .expect("the init report's steps")
+            .iter()
+            .find(|s| s["target"] == SKILL_READER_TARGET)
+            .unwrap_or_else(|| panic!("{args:?}: the composed step ran: {report}"))
+            .clone();
+        step["detail"].as_str().expect("a detail").to_string()
+    };
+    assert_eq!(reported(&["--json", "init", "-i"]), "materialize_skill=true", "`-i` asks, and non-TTY says yes");
+    assert_eq!(reported(&["--json", "init"]), "materialize_skill=false", "a plain `init` does not ask");
 }
 
 /// A project whose `config.toml` holds `table_body` as the stub's table.
@@ -403,12 +463,15 @@ fn an_extension_subcommand_is_listed_after_coverage_and_before_hook() {
     assert_eq!(help.lines().count(), public.lines().count() + 1, "one line added, none moved out");
 }
 
-/// A build without the `wiki` feature (S-644 AC4) — composed here as the public host
-/// that registers nothing, which is what `main` hands the library without the
-/// feature — serves no wiki command, route or tool, and never opens, migrates or
-/// deletes an existing `.logos/wiki.db`: the file a build with the wiki left behind
-/// keeps its bytes and its modification time, and gains no SQLite sidecar, through
-/// `init -i`, `index`, `status`, `scan`, the web Dashboard and the MCP roster.
+/// A build that composes no extension (S-644 AC4, [FR-DS-05]) — composed here as
+/// the public host that registers nothing, which is what this repository's `main`
+/// hands the library — serves no wiki command, route or tool, and never opens,
+/// migrates or deletes an existing `.logos/wiki.db`: the file a build composing the
+/// wiki left behind keeps its bytes and its modification time, and gains no SQLite
+/// sidecar, through `init -i`, `index`, `status`, `scan`, the web Dashboard and the
+/// MCP roster.
+///
+/// [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
 ///
 /// The fixture lives in a temp directory outside this checkout, so the project root
 /// never climbs to the enclosing repository.
@@ -436,7 +499,7 @@ fn without_the_wiki_an_existing_wiki_db_is_never_opened_migrated_or_deleted() {
     }
     let run = logos("public", project.path(), &["wiki", "status"]);
     assert_eq!(run.code, 2, "no `logos wiki` without the extension: {}", run.stderr);
-    assert!(!project.path().join(".agents/skills/logos-wiki").exists(), "no skill step ran");
+    assert!(!project.path().join(".agents").exists(), "no skill step ran");
 
     // The web Dashboard and an API probe of the wiki's routes (in a build with the web
     // surface), and the MCP roster.

@@ -538,11 +538,11 @@ For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **30 `logos:*` tools**, all live:
+The host then sees **25 `logos:*` tools**, all live:
 
-| Navigation (11) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
-|---|---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
+| Navigation (11) | Quality & Governance (10) | Evidence tiers (4) |
+|---|---|---|
+| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
 byte-identical payload — `check_rules` is spelled `logos check`, and `rescan` is
@@ -551,8 +551,7 @@ server process*, which a one-shot CLI invocation has no equivalent of; use
 `logos scan`). The session gate is reachable from either surface:
 `logos session-start` / `logos session-end`, with a failing `session-end`
 exiting 1. The four evidence-tier tools are **non-gated** — like
-their CLI counterparts they never move the `session_end` gate signal — and the
-source-wiki tools read/write the gate-immune `wiki.db` store, never the graph.
+their CLI counterparts they never move the `session_end` gate signal.
 
 Server behavior guarantees:
 
@@ -600,8 +599,7 @@ raw file reading. Stats read only `telemetry.db` — they work even before (or
 without) an index. **Self-referential reads are excluded from every figure** —
 `stats` reading the telemetry store and the dashboard shell's own `status`
 readout, because counting them would measure the measurement, not the tool's
-value; the chat's automatic code-refs lookup is excluded too, as app overhead
-that no person asked for. A graph query a person issues *through* the dashboard counts normally
+value. A graph query a person issues *through* the dashboard counts normally
 (see [commands.md § `stats`](commands.md#stats)).
 
 ## The web UI dashboard
@@ -615,8 +613,7 @@ under `/api/v1/*` ([CR-049](../requests/CR-049-decouple-web-ui-into-embedded-spa
 [ADR-43](../specs/architecture/decisions/ADR-43.md)). Since
 [CR-078](../requests/CR-078-ui-default-egress-carve-out.md)/[ADR-60](../specs/architecture/decisions/ADR-60.md)
 the dashboard ships **by default** — a plain `cargo build`/`cargo install` carries
-it — while the outbound LLM egress client stays opt-in behind a separate `agents`
-feature:
+it — and it links no HTTP client:
 
 ```bash
 # Default: the dashboard, egress-free. Listens on loopback, links no HTTP client.
@@ -624,21 +621,19 @@ cargo install --path cli                 # or: cargo build -p logos --release
 logos serve --ui --port 4983             # then open http://127.0.0.1:4983
 ```
 
-### Build matrix — dashboard, chat/wiki generation, or slim headless
+### Build matrix — dashboard or slim headless
 
-CR-078/ADR-60 separates *listening* (the read-only dashboard) from *dialing* (the
-LLM egress client). Three build modes result:
+CR-078/ADR-60 separates *listening* (the read-only dashboard) from *dialing* (an
+outbound HTTP client, which no build links). Two build modes result:
 
-| Build | Command | Dashboard (`serve --ui`) | Chat + in-app wiki generation | Outbound HTTP client |
-|-------|---------|--------------------------|-------------------------------|----------------------|
-| **Default** | `cargo install --path cli` (no explicit features) | ✅ served | ⚠️ **tab visible but inert** — the SPA still renders the Chat tab, but a turn fails `405` (no agent backend); wiki generation likewise absent | ❌ **none** — links the loopback *server* only, never a client |
-| **Agents** | `cargo install --path cli --features agents` | ✅ served | ✅ Chat tab + Wiki-tab generation | ✅ `rig`/`reqwest`, **opt-in**, user-initiated and consent-gated at runtime ([ADR-40](../specs/architecture/decisions/ADR-40.md)) |
-| **Slim headless** | `cargo build -p logos --no-default-features --features lang-all` | ❌ no `--ui`, no listener | ❌ absent | ❌ **none** — the absolute-offline binary; no socket stack at all |
+| Build | Command | Dashboard (`serve --ui`) | Outbound HTTP client |
+|-------|---------|--------------------------|----------------------|
+| **Default** | `cargo install --path cli` (no explicit features) | ✅ served | ❌ **none** — links the loopback *server* only, never a client |
+| **Slim headless** | `cargo build -p logos --no-default-features --features lang-all` | ❌ no `--ui`, no listener | ❌ **none** — the absolute-offline binary; no socket stack at all |
 
-The default and agents builds are the shipped shapes: cargo-dist release artifacts
-enable `agents`, so downloaded binaries carry both the dashboard and chat/wiki
-generation. The slim `--no-default-features` build is the headless CLI/MCP binary
-with no web surface. Two structural fitness checks
+The default build carries the dashboard together with the CLI and the MCP server.
+The slim `--no-default-features` build is the headless CLI/MCP binary with no web
+surface. Two structural fitness checks
 (`logos-core/tests/no_network_deps.rs`) keep the postures honest: the **default**
 tree may link the loopback HTTP *server* but is denied every egress *client* crate
 (it can never phone home), and the **slim** tree is denied the entire socket stack
@@ -649,14 +644,10 @@ The surface binds **`127.0.0.1` only** (a compile-time constant — no flag or
 env var moves it), rejects non-loopback `Host` headers with `403`, and stamps a
 self-only `Content-Security-Policy` on every response. Every non-GET request is
 answered `405` **except** a `POST` to one of a small, enumerated set of mutating
-routes — the config-write/apply routes (`/config/save`, `/config/apply`,
-`/config/secret`), the Chat turn route (`/chat`), and the per-conversation
-delete, rename and truncate (`/api/v1/chat/threads/{id}/delete`, `…/rename`,
-`…/truncate`) — in a workspace serve with `agents`, also the workspace chat's
-`/workspace/chat` and the same three under `/api/v1/workspace/chat/threads/{id}/`;
-those — and only
-those — are additionally gated by a same-origin + per-session intent (CSRF)
-guard, so a request missing the `x-logos-intent` token or arriving cross-origin
+routes — the config save and apply routes (`/config/save`, `/config/apply`),
+the workspace manifest and config saves, and the on-demand `verify`
+(`/api/v1/verify`); those are additionally gated by a
+same-origin + per-session intent (CSRF) guard, so a request missing the `x-logos-intent` token or arriving cross-origin
 is rejected `403` before any handler runs. The whole React app — its hashed
 JS/CSS and fonts — is built at build time (Node/Vite run only during the build,
 never at serve time) and **embedded in the binary**, so a page load fetches
@@ -669,7 +660,7 @@ as explicit in-SPA WCAG 2.1 AA affordances
 ([FR-UI-22](../specs/requirements/FR-UI-22.md),
 [ADR-43](../specs/architecture/decisions/ADR-43.md)).
 
-Twelve views, each sidebar item rendered with an inline-SVG icon and grouped into
+The views, each sidebar item rendered with an inline-SVG icon and grouped into
 three use-driven **navigation groups**. Each tab is a client-side route the SPA
 renders inside the app shell — navigation never reloads the page, and a refresh
 on any client route resolves back to the shell via the server's history fallback.
@@ -702,21 +693,17 @@ selector and the theme toggle survive to the narrowest supported viewport; the b
 subtitle gives way below 768px. Widening the window brings the readout back with the
 figures from the last navigation. The request itself is unaffected — the header still
 reads `/api/v1/status` on navigation at every width, and those reads are classified as
-shell chrome, so they never enter the tool-usage figures. The chat's automatic
-`/api/v1/code-refs` lookup of a finalized answer's backticks is classified the same way.
+shell chrome, so they never enter the tool-usage figures.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
-- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat` (single-root and `--standalone` only — see below), Wiki `/wiki`. The Architecture view is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
+- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`. The Architecture view is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
 - **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
-  Workspace Health `/workspace-health`, Workspace `/workspace`, Chat `/workspace-chat`
-  (the [Workspace Chat](#the-workspace-chat)), Workspace Statistics
+  Workspace Health `/workspace-health`, Workspace `/workspace`, Workspace Statistics
   `/workspace-statistics`, Config `/workspace-config`. These answer for the **whole
   workspace**, not for the selected member, and the member selector does not govern them.
-  In workspace mode the Service section lists **no** Chat: the chat there is the
-  Workspace Chat, and `/chat` (with or without `?repo=`) lands on `/workspace-chat`.
 
 ### Reading a widget
 
@@ -736,17 +723,11 @@ same three parts, top to bottom (CR-203 and CR-206, since S-617 on every view):
    with the keyboard for its meaning in plain words.
 3. **Evidence.** The table, chart or list the figure comes from.
 
-One widget has no explanation: the Dashboard's **Project Overview**, whose wiki
-snippet already says what it is, renders its title and the snippet — or, before
-the overview is written, the sentence naming the command that writes it — and
-nothing else (CR-208).
-
 The widgets on a view are stacked in one column, an equal gap apart, every part
 left-aligned and the explanation set in the body text size.
 
-**Tool panels** — the graph query form, the Graph view's accessible tables and
-Decisions & docs, the wiki's pages and search, the Config editors, the chat API
-key and the chat itself — present no figure. They keep the same frame and say in
+**Tool panels** — the graph query form, the Graph view's accessible tables, Decisions &
+docs and the Config editors — present no figure. They keep the same frame and say in
 one line what they are for, and have no explanation of why and no evidence of
 their own.
 
@@ -807,26 +788,17 @@ No workspace-level quality score is rendered anywhere, and no per-member signal 
 aggregated into one.
 
 The workspace **Config** view (`/workspace-config`, labelled *Config* in the Workspace
-section, beside Statistics) edits the files that configure the workspace itself, in the
+section, beside Statistics) edits the workspace manifest, `logos.workspace.toml`, in the
 same hybrid grammar as the member Config tab — typed fields plus a raw TOML pane, with
-live validation. It holds two groups, each naming the file it writes:
+live validation. It covers `[workspace]` (members, `default`, `autodiscover`),
+`[workspace.warm]` and the full `[governance]` family, shown beside the advisory
+findings `GET /api/v1/workspace/check` reports. The panel states **at the point of
+editing** that workspace governance is advisory and never moves a member's gated
+signal. The running serve keeps the manifest it started with, so after a save that
+changes members, warm concurrency or the rules the view says so; they take effect after
+`logos serve` is restarted.
 
-- **Workspace manifest** — `logos.workspace.toml`: `[workspace]` (members, `default`,
-  `autodiscover`), `[workspace.warm]` and the full `[governance]` family, shown beside
-  the advisory findings `GET /api/v1/workspace/check` reports. The panel states **at the
-  point of editing** that workspace governance is advisory and never moves a member's
-  gated signal. The running serve keeps the manifest it started with, so after a save
-  that changes members, warm concurrency or the rules the view says so; they take effect
-  after `logos serve` is restarted.
-- **Workspace chat** — `<workspace-root>/.logos/config.toml` (`[chat]`, `[wiki].model`)
-  and the masked, write-only chat key in `.logos/secrets.toml`, with a banner stating how
-  members inherit each half (see
-  [configuration.md](configuration.md#workspace-level-chat-configuration)). Its
-  `[wiki].model` is used by a member that inherits this chat policy and declares no wiki
-  model of its own. The group
-  says outright that it has no indexing key, no rules document and no apply action.
-
-Both groups share three properties. **A save is validated before anything is written**
+The view has three properties. **A save is validated before anything is written**
 (a rejected document leaves the file byte-identical, and a document identical to disk
 writes nothing). **A file changed on disk since the view loaded it** — by hand, or by
 `logos init --workspace` — is **not overwritten silently**: the save is refused and the
@@ -1037,10 +1009,7 @@ module dependency matrix (DSM) — is hidden from the web UI (CR-208; see
 
 The root `/` view is the **Dashboard**: a roll-up that leads with the index's
 freshness, then one column of widgets (since S-617; the equal-size pairs of CR-037
-are gone, because every view stacks its widgets in one column): **Project
-Overview** — the `overview/project-overview` wiki page snippet with a link into
-`/wiki` (CR-034), or, when that page has not been generated yet, the statement
-that it is absent and the `logos wiki write` command that writes it; the banded
+are gone, because every view stacks its widgets in one column): the banded
 **Quality index** (the 0–10000 signal) with the gate's `PASS`/`FAIL` badge;
 **Languages**, the per-project language composition; **Graph**; **Activity**;
 **Rule findings**; and **Code coverage** (the overall line-% aggregate) — each
@@ -1075,22 +1044,17 @@ optional `depth`), `/api/v1/precedent` (`target=<symbol|path>`, optional
 `limit`), `/api/v1/branch-overlap` (repeatable `ref=<git-ref>`, optional `base`
 and `merge`), `/api/v1/node`,
 `/api/v1/search`, `/api/v1/code-refs` (repeatable `ref=<span>`, at most 24
-resolved — the chat's code-reference check, below), `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
+resolved), `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
 `/api/v1/coverage`, `/api/v1/status` (the index-health projection the app
-header reads — see below), `/api/v1/wiki`, `/api/v1/wiki/nav`,
-`/api/v1/wiki/search`, `/api/v1/wiki/page/*slug`, `/api/v1/wiki/asset/*path`
-(same-origin, read-only, path-sandboxed doc-image serving — CR-064),
-`/api/v1/config`, and `/api/v1/extensions`.
+header reads — see below), `/api/v1/config`, and `/api/v1/extensions`.
 
 `GET /api/v1/extensions` states which extensions the running server composes
 (CR-213, FR-UI-51): `{"extensions": [...]}`, one entry per **active** extension
 — its `id` and the `ui` manifest it contributes (`nav`, `views`,
 `config_panels`; `null` for an extension with no UI). The single-page app reads
 it once on boot to decide what to mount (S-642), so an extension that goes
-inactive mid-session leaves the shell at the next load. The default build lists
-`wiki`; a build with `agents` lists `chat`, then `wiki`; a build that composes no
-extension (`--no-default-features --features lang-all,ui`) answers
-`{"extensions": []}`. Like every read route it is `GET`-only, loopback-only and
+inactive mid-session leaves the shell at the next load. The default build
+composes no extension and answers `{"extensions": []}`. Like every read route it is `GET`-only, loopback-only and
 same-origin, and it reads the server's composition, not the index — it records
 no telemetry.
 
@@ -1157,7 +1121,7 @@ React app over the same-origin `/api/v1/*` read-models — sorting, paging,
 focusing, and filtering mutate no store and contact no external origin:
 
 - **Navigation feedback.** A slow navigation or any in-flight data fetch (e.g.
-  Graph/Wiki search) arms an orange top progress bar plus a pending state on the
+  Graph search) arms an orange top progress bar plus a pending state on the
   clicked sidebar item after a short delay, clearing when the view or fetch
   settles. Instant/cached views (e.g. Overview) never flash it.
 - **Interactive graph canvas (`/graph`).** The Graph & Decisions view is a
@@ -1264,7 +1228,7 @@ focusing, and filtering mutate no store and contact no external origin:
     graph-element field — none fabricated ([FR-UI-08](../specs/requirements/FR-UI-08.md),
     [NFR-RA-05](../specs/requirements/NFR-RA-05.md)).
 - **Interactive tables.** Every data table (Rule findings, Health,
-  Files & Risk, Coverage, Wiki search/anchors, Graph Decisions & docs, and the
+  Files & Risk, Coverage, Graph Decisions & docs, and the
   Graph nodes/edges accessible tables) has sortable column headers — click to sort
   the **full dataset** first, then the page is sliced — and consistent pagination.
   A single shared **`DEFAULT_TABLE_PAGE_SIZE = 20`** governs every table so no view
@@ -1288,9 +1252,7 @@ focusing, and filtering mutate no store and contact no external origin:
   the graph (config) or re-evaluates governance (rules), with an in-flight
   affordance and an honest outcome panel. A `rules.toml` save requires an explicit
   confirmation checkbox before any write and stamps a provenance comment into the
-  saved file. The chat API key is written through the separate masked, write-only
-  `POST /config/secret` route (only presence + last-4 is ever rendered, never the
-  raw key). All three POSTs ride the same-origin + `x-logos-intent` guard described
+  saved file. Both POSTs ride the same-origin + `x-logos-intent` guard described
   above; the SPA submits them via `fetch` carrying the intent token.
   Beside Apply, a **Check graph consistency** control runs the deep `verify`
   (`POST /api/v1/verify`, the same-origin twin of `logos verify`): it shows an
@@ -1300,624 +1262,8 @@ focusing, and filtering mutate no store and contact no external origin:
   symbols. On a read fault it shows an honest error panel — never a fabricated
   `CONSISTENT` ([FR-UI-25](../specs/requirements/FR-UI-25.md),
   [NFR-RA-05](../specs/requirements/NFR-RA-05.md)).
-- **Per-page Wiki (`/wiki`).** The Wiki is a navigable per-page documentation
-  site, not one scroll. `/wiki` is a **Start-here landing** that leads with a
-  Summary callout and an "N pages · all fresh" freshness badge (derived from
-  `wiki status` counts, no write), and every page renders in a **three-column
-  layout**: a tiered doc-tree menu of discrete page links, the page content, and
-  an "On this page" TOC rail. The menu has **three consolidated tiers** (CR-035,
-  CR-039) — **Summary** (the overview/Getting-Started pages, minus the architecture
-  narrative), **Design** (the architecture narrative — listed once and labelled
-  *Architecture* — plus the consolidated ADRs / Components / Integrations pages,
-  and Frontend Design only when `docs/specs/frontend-design.md` exists), and
-  **Specs** (consolidated Functional Requirements / Non-Functional Requirements /
-  User Acceptance Tests) — plus a **top-level Search link** rendered as a sibling
-  of the tiers (CR-039 dropped the lone-item *Reference* tier and hoisted Search
-  out of it), with no redundant "Wiki" heading and no fragmented per-ADR /
-  per-requirement / per-Story / per-CR entries. The earlier browsable **native** tier (the `/wiki/native/*`
-  routes and the per-file Modules tier) is **retired** (CR-035): the native
-  read-model still backs generation internally, but the only browsable content is
-  now the **agent** tier of generated prose at `/wiki/page/*slug`, carrying
-  revision-keyed staleness flags. A consolidated category page that has not been
-  generated yet renders an honest placeholder (HTTP 200), never a 404. Each page
-  leads with **one enlarged in-card `h1` title** (CR-035): the title is rendered
-  once inside the content card and a duplicate leading heading in the body prose
-  is suppressed, so a page never shows its title twice. A **"Wiki"** provenance
-  callout carries the `generator · HEAD · @revision` line and any STALE/REGEN
-  badges (without an on-page "generated content" disclaimer — the fixed marker
-  stays in the `wiki read` / `wiki_read` payload); the empty Anchors card is
-  suppressed on unanchored/overview pages. Page prose is rendered through a
-  **comrak GFM pipeline** (CR-035): GitHub-flavoured **tables** render as real
-  HTML tables, **fenced code blocks** render styled (background/border/padding)
-  with long unbroken tokens contained inside the content card — scrolled within
-  the block, never overflowing the page (CR-039) — raw-HTML is still stripped for
-  safety, and the `toc-<slug>` heading anchors that back the "On this page" rail
-  are preserved. Mermaid diagrams (any
-  ` ```mermaid ` fences in agent prose) render as **visual diagrams** from a
-  vendored, embedded offline bundle under the unchanged self-only CSP, with every
-  node label sitting within its box. Diagram colors are **theme-aware** — driven
-  through `mermaid.initialize({ themeVariables })`, which lands most colors as
-  inline SVG attributes, plus the rest of each render's generated `<style>`
-  (CSP-blocked as an injected element) adopted onto the page as a constructable
-  stylesheet the CSP does not restrict — so a diagram is legible in either theme,
-  in every shape Mermaid draws, rather than black-on-black
-  ([FR-WK-15](../specs/requirements/FR-WK-15.md)). The Wiki tab owns its own client sub-routes —
-  `/wiki` (landing), `/wiki/search`, and the `/wiki/page/*` reader — all inside one
-  mounted React view; the page bodies and freshness come from `GET /api/v1/wiki`,
-  `/api/v1/wiki/nav`, `/api/v1/wiki/search`, and `/api/v1/wiki/page/*slug`. FTS
-  search lives on the self-sufficient `/wiki/search` client route (CR-035), reached
-  from the **top-level Search link** in the menu (CR-039): it carries its own search
-  input and renders live results from `GET /api/v1/wiki/search`. Each result row
-  carries the **same unified staleness verdict** as the page view (CR-039): REGEN
-  PENDING / STALE / MISSING ANCHOR / FRESH, derived from the one core
-  `revision_pending` predicate against the same persisted graph revision, so a page
-  can never read "regeneration pending" on its page view and "fresh" in search.
-  Every read endpoint is read-only (GET-only; non-GET → 405) and same-origin.
-  Regeneration of the agent tier now runs **in-process** (`--features agents`
-  builds only): opening the Wiki tab checks the work-list and, if pages have drifted,
-  launches a background generation pass on the in-process wiki-agent under a
-  single-run lock, streaming each page in over SSE as it completes while existing
-  pages stay browsable — gated by a first-use consent disclosure and a dedicated
-  `[wiki].model` ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md);
-  see [The Wiki tab](#the-wiki-tab) below). The headless `claude -p` SessionEnd
-  autogen hook is retired, as is the PostToolUse wiki-augmentation hook
-  ([CR-070](../requests/CR-070-retire-wiki-augment-hook.md)); `wiki generate`
-  is still available as the CLI queue read, and the embedded `logos-wiki`
-  skill is the manual generation path outside `agents` builds.
 
 Run it alongside the MCP server in one process with `logos serve --mcp --ui`.
-
-### The Chat tab
-
-The **Chat** tab (`/chat`, between Graph and Wiki) is an LLM-backed assistant
-for compound questions about your codebase — "what's the riskiest untested code
-and who calls it?", "what breaks if I change this symbol?". It is a React client
-built on **assistant-ui** ([`@assistant-ui/react`](../specs/architecture/decisions/ADR-45.md))
-that streams the turn as Server-Sent Events over the unchanged intent-guarded
-`POST /chat`. The SSE wire contract, the orchestrator, the budget tree, and the
-per-turn memory are all **untouched** — the surface is rebuilt on assistant-ui
-through a **custom external-store runtime adapter** over the existing SSE client,
-so Logos keeps owning its own message array and renders the planner side-channel
-(the **Activity** disclosure, budget-halt) as custom components. The tab uses the
-same two-pane layout as the Wiki tab. On the left is the **conversation history
-rail**: it runs the full height of the view, and a full-size **+ New chat**
-control stays pinned above the scrolling list. On the right, the conversation
-sits inside the application's shared **card**, which has the red accent edge and
-fills its column. The assistant turn is a flat block with no card of its own, and
-your own turns are right-aligned rounded bubbles. Below 1024px wide the two panes stack,
-and a toggle shows or hides the rail. A **planner**
-decomposes the question, dispatches
-specialized read-only **subagents** over the existing Logos tools, and streams
-back a synthesized answer:
-
-- **Graph-Navigator** — structural navigation (callers, callees, impact, search).
-- **Governance-Analyst** — the quality/governance read-models (gate, gaps, hotspots).
-- **Source-Reader** — sandboxed read/grep/glob over the project source.
-- **Synthesizer** — a tool-less subagent that writes the final answer from what the others found.
-
-This Chat answers for **one codebase** — the repository it is opened on. It is offered
-in a single-root serve and in a `--standalone` serve (which focuses one repository even
-under a workspace manifest), and has no cross-service tool. In a **workspace** serve the
-sidebar offers the [Workspace Chat](#the-workspace-chat) instead, in the Workspace
-section: the cross-service tools (`xservice_route_providers`, `xservice_callers`,
-`xservice_impact`, `xservice_search`) and the workspace read-models belong to its
-roster, whose Workspace-Analyst answers "which services call this endpoint?" across
-members, every cross-service result qualified by the member it belongs to, and an empty
-cross-service answer over a non-zero **unresolved** residue reported as unresolved,
-never as "none". To chat with one member on its own, start a `--standalone` serve in
-that member.
-
-A working Chat exists **only** in an `--features agents` build. The default
-`logos` binary ships the dashboard and no networking client — there is no
-outbound call anywhere short of the opt-in `agents` feature (CR-078/ADR-60).
-Note that the default build still **renders the Chat tab** in the SPA (the web
-bundle is feature-agnostic), but a chat turn fails with `405` because the
-`POST /chat` route carries no agent backend without `agents`; the affordance is
-a known, harmless cosmetic gap (the server never gains an egress client). The
-conversation and its per-turn memory persist in `.logos/chat.db` (created on the
-first turn, gitignored, never in the default binary).
-
-**Workflow:**
-
-1. **Configure a provider and key.** Open the **Config** tab and set the chat
-   `provider` / `model` (and `base_url` for an OpenAI-compatible endpoint) plus
-   the **chat API key** field (stored in the gitignored `.logos/secrets.toml`).
-   See [configuration.md](configuration.md#chat--the-agentic-chat-tab) for the
-   keys, defaults, and the budget tree.
-   In a workspace you can instead declare both **once at the workspace root** and
-   let every member inherit them — see
-   [configuration.md](configuration.md#workspace-level-chat-configuration).
-2. **Open the Chat tab.** Until an effective provider model **and** an effective API
-   key both resolve (declared on the member or inherited from the workspace), the
-   tab shows an honest **configure-first** state and **no composer**. The state says
-   exactly what it checked: the **root it inspected** (the member by name in a
-   workspace, "this repository" otherwise), **which half is missing** (model, key or
-   both), and **where any present half came from** (the member or the workspace). If the
-   member has its own key but inherits the workspace endpoint, the state says that key
-   is not used there, and that setting a `[chat] model` on the member makes it use it. It
-   links to the member Config tab, and in a workspace also names the
-   workspace-root file the missing half would go in (`<workspace-root>/.logos/config.toml`
-   or `secrets.toml`) and links to the workspace **Config** view that writes it. This is a state, not an error: until you configure it, no
-   outbound call is possible. A request sent anyway is refused with the same facts.
-3. **Acknowledge the consent banner.** Once configured, the first thing the tab
-   shows is a **consent banner** naming the exact configured **endpoint host**
-   (e.g. `openrouter.ai`, or `api.anthropic.com` for the Anthropic provider) and
-   stating that asking a question sends your message together with **source and
-   graph excerpts** from the project to that endpoint. **Nothing is sent until
-   you click _Start chatting_** to acknowledge — the acknowledgement persists, so
-   you grant it once **per chat**: the consent (and the remembered open
-   conversation) is kept separately for a single-root chat, for each member, and for
-   the Workspace Chat, so accepting one never accepts another, and a conversation
-   number from one chat is never reopened in another.
-
-   After you acknowledge, a one-line **CHAT chip** takes the banner's place at the
-   top of the view (for example `CHAT openai · openrouter.ai · z-ai/glm-5.2 ·
-   budget 24/8/3`). The configure state, the consent banner and the chip share that
-   one slot, so the view always opens with a single verdict line, as Health and Wiki
-   do. The chip names the **provider**, **endpoint host** and **model**, and the
-   turn's **budget tree** in short: tool calls, the per-subagent cap and replans.
-   Click it to expand the full **status band**, which spells the budget out and
-   lists any extra read roots. The chip says "extra read roots" when there are
-   some. It stays visible after your first message, so the budget is on screen
-   during a long turn. A value you have not configured is shown as not configured,
-   never as an invented default. The chat key never appears on the page.
-
-   **Symlinked docs.** The Source-Reader reads only inside the project root, so docs
-   kept in a sibling repo behind a symlink (`docs/planning → ../logos-docs/planning`)
-   are out of its reach by default. Asking about them ends the turn with a sandbox
-   refusal. To make them readable, declare the sibling repo as an extra read root:
-   `[chat] read_roots = ["../logos-docs"]`
-   ([configuration.md](configuration.md#reading-symlinked-docs--read_roots)). Its files
-   are then readable, greppable and globbable **through the project's symlinks**, under
-   their in-project paths. Files under a read root can be sent to the endpoint too,
-   so the consent banner and the status band both list every declared read root
-   ("Extra read roots: `../logos-docs`"). Declaring read roots after you consented,
-   or changing the set, brings the consent banner back before the next send. An
-   inherited workspace table's roots are
-   marked as relative to the workspace root. A declared root that does not exist
-   fails the turn with a message naming it.
-4. **Ask a question.** Type into the composer, the rounded field pinned to the
-   bottom of the conversation card, and press the round **Send** button inside it.
-   Send turns red once there is something to send and becomes **Stop** while a
-   turn runs. The field grows with your text up to eight lines, then scrolls. A muted
-   hint under it names the two keys that matter there: **Enter** sends and
-   **Shift+Enter** starts a new line. At
-   desktop widths the chat fills the window: only the conversation scrolls, so the
-   composer never leaves the screen. If you scroll up through a long conversation, a
-   round **↓ Scroll to bottom** button floats above the composer. Click it and the
-   conversation returns to its end and follows the answer as it streams again. At
-   the bottom the button is not on the page at all. The answer streams in over SSE. The planner's plan and every subagent step live in
-   one **Activity** disclosure above the answer — a native fold that is **open
-   while the turn streams** and **auto-collapses once the answer is finalized**,
-   leaving a one-line summary with a census (`3 steps`). Re-open it and it stays
-   open for the rest of that turn. Expanded, it shows the numbered plan and each
-   step's role, instruction, and **full observed result rendered as markdown** —
-   the grounding is readable in place rather than hidden behind a hover tooltip.
-   A step still running is marked `▸`, a finished one `✓`, each as a small colour
-   chip with a screen-reader text equivalent beside it, so the state never rides
-   on colour alone. A turn with neither a plan nor any activity — a restored
-   answer-only turn, for instance — shows **no** Activity fold at all. A turn you
-   **Stop** before any answer arrives keeps its fold open, as the honest record of
-   how far it got. On a **replanned** turn the fold groups its contents **by
-   round**: each round's plan sits with that round's own steps, and a step is
-   marked done only by an observation from its own round (the orchestrator
-   restarts step numbering on every replan). A single-round turn shows no grouping
-   chrome.
-
-   The synthesized **answer** then renders token-by-token as
-   **GitHub-flavoured Markdown** — headings, lists,
-   tables, and **fenced code blocks**, each block carrying a **copy** control (the
-   markdown is built as an escaped React tree, no raw HTML, CSP-clean). A table
-   renders in a bordered block, like a code block: an uppercase header over a
-   stronger underline, hairline row rules and a hover tint on each row. There is no
-   copy control on a table. A table wider than the column scrolls sideways inside
-   its own block, so the page never scrolls sideways and cells never break
-   mid-word. A table in an **Activity** step result looks and scrolls the same
-   way.
-
-   A fenced block tagged with a language is **syntax-highlighted**: the languages
-   Logos indexes plus common config, shell and patch formats (`toml`, `yaml`,
-   `json`, `sh`/`bash`, a `shell` console session, `diff`, `xml`/`html`, `css`). A
-   block with no tag, or a tag the bundle does not carry (Terraform among them),
-   renders as plain text. The colours follow the light or dark theme.
-
-   Once an answer is final, its backticked **file paths** (`web/src/lib.rs`, also
-   with a `:42` or `:42-57` line suffix) and **symbol names** (`build_router`,
-   `parse()`) are checked against the graph in one request
-   (`GET /api/v1/code-refs`, at most 24 spans per answer). A span becomes a link
-   only when the graph confirms it: a path that is an indexed source file opens the
-   Graph view at the file tier focused on that file, and a name exactly one node
-   carries opens the Graph view focused on that node. A name several nodes share,
-   a path the graph does not have, a qualified name such as `Engine::node`, and a
-   config or documentation file stay plain code. In the Workspace Chat the check
-   runs against the member selected in the shell.
-
-   A
-   ` ```mermaid ` fence renders as an **interactive diagram** rather than source —
-   see [Mermaid diagrams in chat](#mermaid-diagrams-in-chat) below. While a
-   turn streams you can **Stop** it (the in-flight request is aborted — and is also
-   aborted automatically if you leave the Chat tab mid-stream); a finished turn
-   offers two small icon buttons under the answer, **Copy** (the whole answer; the
-   icon turns into a check for a moment once it has copied) and **Regenerate**
-   (asks your question again in place of that answer). Each has a tooltip and a
-   name for a screen reader.
-
-   **Edit** — the pencil under each of your own messages — opens the message in
-   place. Change it and press **Resend** (or Enter) to ask the edited question
-   instead; **Cancel** (or Esc) leaves it as it was, and resending the text
-   unchanged just closes the box. The pencil is hidden while a turn runs. An edit
-   does not branch the conversation: everything after the edited message is
-   dropped, and the edited question is asked as the next turn. It runs under the
-   conversation's preset, as any send does.
-
-   **Regenerate and Edit change what is stored, not just what is shown.** Both
-   first cut the conversation back to before the question in `.logos/chat.db` —
-   that question, every later message and the agent memory written after it are
-   deleted together — and then ask it. A reloaded or restored conversation
-   therefore shows each turn once, with only its latest answer. (Before this, a
-   regenerated answer replaced the old one on screen only, and a reload showed
-   both.) If the cut fails — say the conversation was deleted in another tab — the
-   turn is not re-run, and the message under it says why. The cut is an
-   intent-guarded `POST …/chat/threads/{id}/truncate` with a `user_turn` form field
-   (the 0-based index among the conversation's stored questions), on the Chat and
-   the Workspace Chat alike. The turn runs under the
-   budget tree ([configuration.md](configuration.md#the-budget-tree)) — the
-   tool-call ceiling, the per-subagent cap, and the replan limit are shown in the
-   CHAT status band (step 3).
-
-   An empty conversation **greets** you with a few **suggestion chips** under it.
-   Each is a fixed question with one slot, filled from what Logos already knows
-   about the project, so a chip names a real file: *Why is `<top hotspot>` the top
-   hotspot, and what depends on it?*, *What would it take to cover `<riskiest
-   untested file>`…?*, *Give me a tour of this project's `<N>` indexed files.* They
-   come from the Files read-model (`GET /api/v1/files`, the ranked hotspot board
-   and its untested view), which only reads what is already stored — no model writes
-   a chip, and nothing is sent to the provider until you send. A chip whose fact is
-   not there (no index yet, no git history, a failed read) shows a generic question
-   instead and never names anything. In the **Workspace Chat** the chips come from
-   the roster the Workspace view already holds, with no extra request and no
-   member store opened: how many members the workspace has, and the member you
-   have selected in the shell. The chips are greyed out until you accept the notice above; after that, clicking one
-   sends its text as your first message, exactly as if you had typed it, and the
-   chips go away.
-5. **Delete a conversation.** Each row in the history rail carries a **trash**
-   button, shown when you hover or focus the row and always on the open
-   conversation. Clicking it *arms* an inline confirmation naming what will go
-   ("Delete this conversation and its memory?"); only **Delete** in that panel
-   removes anything, and **Cancel** leaves the conversation untouched. A confirmed
-   delete removes that conversation **and** its per-thread agent memory from
-   `.logos/chat.db` by cascade — no orphaned memory. Deletion is always **per
-   conversation**: there is no clear-all, and the old global "Clear history"
-   control (and its route) no longer exist. This is irreversible.
-
-   The button above the rail (**Hide conversations** / **Show conversations**)
-   collapses the rail at any width, so the conversation gets the room. On a wide
-   window each chat remembers the choice in this browser. On a narrow window the
-   rail always starts collapsed above the conversation, and picking a conversation
-   closes it again.
-
-**Presets.** The **+** button at the left of the composer opens a menu of four
-built-in presets, each with a one-line description. A preset steers how the turn is
-planned and how the answer is written. It changes only the planner's and the
-Synthesizer's instructions. The tools, the subagents, the budget bounds and the
-read-only sandbox are the same under every preset, and no extra request is sent.
-
-| Preset | Steers the turn toward |
-|---|---|
-| **Default** | The question as asked. This is the plain chat. |
-| **Impact analysis** | What a change to the code in question would reach, nearest first, and what would need re-testing. |
-| **Onboarding** | An orientation for someone new to the code: the big picture, the terms, and where to start reading. |
-| **Troubleshooting** | A diagnosis: likely causes ranked by the evidence, where each would occur, and the next check to run. |
-
-A preset belongs to the conversation. Pick one in a conversation and every later
-turn in it runs under that preset, Regenerate and Retry included. Each
-conversation remembers its own preset in this browser, across a reload, and the
-Chat and the Workspace Chat keep separate choices. A new chat starts at Default. A preset picked before the first message stays with the conversation
-that message creates. While a conversation runs under a preset other than Default,
-a small chip in the composer names it. Its **×** clears it back to Default. In the
-menu, **↑** / **↓**, **Home** and **End** move, **Enter** picks, and **Esc** closes
-the menu without stopping a running turn. The turn route takes the preset as the
-form field `preset` (`default`, `impact_analysis`, `onboarding` or
-`troubleshooting`; absent means `default`). Any other value is refused with a `400`
-and runs no turn.
-
-**Keyboard shortcuts.** They work the same in the Chat and the Workspace Chat.
-
-| Key | Does |
-|---|---|
-| **Enter** | Sends the message in the composer. |
-| **Shift+Enter** | Inserts a new line in the message instead of sending. |
-| **Esc** | Stops the turn that is running, exactly as the round **Stop** button does. With no turn running it does nothing. While the preset menu is open, it closes the menu instead; while a message is open for editing, it cancels the edit instead — in neither case does it stop a running turn. |
-| **⌘K** (macOS) · **Ctrl+K** (everywhere else) | Starts a new chat, as **+ New chat** does. |
-
-⌘K / Ctrl+K and Esc work from the page, the conversation and the rail's buttons.
-They are left alone when the key is pressed in a text field outside the
-conversation (another view's field, or one in the app shell), so a browser or
-field shortcut that uses the same keys still works there.
-
-**Honest states (never a fabricated answer):**
-
-- If a turn reaches a budget bound it **halts** and the log says so explicitly,
-  naming which bound was hit (the global tool-call ceiling, a subagent's cap, or
-  the replan limit) and its limit — it never invents an answer to fill the gap.
-- A provider error is surfaced **verbatim with its full detail** — the error
-  carries the complete provider source chain and distinguishes a **transport**
-  failure (endpoint unreachable) from an **HTTP-status** failure (with the `(HTTP
-  n)` code) from an **auth** failure, instead of an opaque flattened string. A
-  dropped connection or a turn that closes without producing an answer is likewise
-  shown as an explicit error line, never a silently empty turn.
-- **A silent stream is reported, not left on "Working…".** While a turn is open,
-  the server writes an SSE comment line, `: keepalive`, every **15 seconds**. This
-  applies to both the Chat and the Workspace Chat. A comment is not an event, so
-  the event stream any client reads is unchanged. The Chat tab counts **any**
-  received byte, event or keepalive, as proof the connection is alive. After **45
-  seconds** with nothing received, the turn's "Working…" line is replaced by *"No
-  response from the server for 45 s. The connection may be lost."* with two
-  controls:
-  - **Retry** re-runs the question in place, like Regenerate. On the first turn of
-    a new chat, the server had already filed the stalled attempt as a
-    conversation, so the history rail keeps it as its own unanswered entry. The
-    chat continues in the conversation the retry creates.
-  - **Stop** ends the turn.
-
-  A byte arriving later clears the notice by itself. A slow subagent step never
-  trips it, because the keepalive keeps arriving while the step works; only a
-  connection that has gone quiet does. Both intervals are fixed constants, not
-  settings: 45 s is three missed keepalives.
-
-  The notice is for a connection that stays open but carries nothing, such as a
-  frozen server or a stalled network path. A server that **exits** closes the
-  connection, and the browser reports that at once as the dropped-connection error
-  line above, with **Regenerate**. After restarting `logos serve --ui`, **reload
-  the page** before re-running a turn: each server process issues a fresh intent
-  token, and the page holds the old one, so a re-run is refused (`403`) until
-  then.
-- **Configuration preflight.** Before a turn opens any connection, a preflight
-  validates the chat config — base_url well-formed and present, key present, model
-  set — and on a problem returns an **actionable message** naming the specific
-  misconfiguration rather than letting the request fail opaquely downstream.
-
-**Restoring a conversation.** Selecting a past conversation rehydrates its full
-transcript from `.logos/chat.db` — both your **user** questions and the assistant's
-final **answers**, in send order. Each turn's answer is persisted to the conversation
-when (and only when) the turn actually produced one; a turn that halted honestly or
-faulted persists no assistant message, so the restored transcript never shows an
-answer the assistant did not give. A turn you regenerated or edited is restored
-once, with its latest answer: the earlier one was deleted from the store. The ephemeral plan / subagent-activity side-channel
-(streamed live over SSE) is not part of the durable transcript — a restored assistant
-turn shows the answer with **Copy**/**Regenerate**, not the intermediate step chatter.
-This is also why a restored turn grows no empty **Activity** fold: there is no
-side-channel left to show, so none is rendered.
-
-#### The Workspace Chat
-
-In a workspace serve (`logos serve --ui` at the workspace root, `agents` build) the
-chat is the **Workspace Chat**, listed as **Chat** in the sidebar's **Workspace**
-section at `/workspace-chat`. It answers for the whole workspace first and narrows to a
-member when a question names one. It reuses every part of the Chat tab — transcript,
-Activity disclosure, composer, history rail, status band — so everything above applies,
-with these differences:
-
-- **Its heading names what it answers for**: `Workspace chat · <workspace> · N members`.
-  It does not follow the member selector: switching member leaves the open
-  conversation, the rail and the composer exactly as they are.
-- **Its configuration comes from the workspace root alone**
-  (`<workspace-root>/.logos/config.toml` `[chat]` and `.logos/secrets.toml`). A member's
-  own `[chat]` does not configure it. With either half missing, the configure-first
-  state names the workspace root and the missing half and links the workspace
-  **Config** view (`/workspace-config`) — never a member's Config tab. A workspace-root
-  file that does not parse is shown as a fault to repair there, not as "not configured".
-- **Its consent banner names every member's read roots** — the extra read roots a
-  source call on that member reads through: roots declared by the workspace table once,
-  relative to the workspace root, with the members that inherit them, and a member's
-  own roots relative to that member. A member whose chat config cannot be read is named
-  as such. These are read from config alone, so opening the view starts no member
-  engine.
-- **Its history rail lists workspace conversations only.** An empty rail says so, and
-  that a member's conversations are available in a `--standalone` serve of that member.
-- **Its presets steer the workspace planner and Synthesizer.** The same four presets
-  apply to the workspace chat's own instructions, with its tools and budget unchanged.
-  Its preset choices are remembered apart from the member chat's.
-
-**Where each chat's history lives:**
-
-| Chat | Serve | History |
-|---|---|---|
-| Chat (`/chat`) | single-root, or `--standalone` in a member | `<repo>/.logos/chat.db` |
-| Workspace Chat (`/workspace-chat`) | at the workspace root | `<workspace-root>/.logos/chat.db` |
-
-A workspace serve never opens or lists a member's `chat.db`; a member's conversations
-from an earlier serve are still in that member's store, and a `--standalone` serve in
-the member shows them. See
-[The workspace chat](configuration.md#the-workspace-chat--its-own-configuration-and-history)
-for its configuration and routes.
-
-#### Mermaid diagrams in chat
-
-A ` ```mermaid ` fence in an answer renders as a **visual diagram**, not as source.
-It reuses the same vendored, embedded offline bundle and theme-aware render seam as
-the Wiki tab — **no new dependency, no external origin, and the self-only CSP is
-unchanged** — so it works fully offline. Because the answer body and the Activity
-step results go through one markdown renderer, diagrams render on **both** surfaces.
-
-Each diagram carries:
-
-- **Zoom in / out / reset.** Zoom is a CSS-class ladder rather than an inline
-  `style` attribute, because the served policy is `default-src 'self'` with no
-  `style-src` override — an inline transform would be blocked exactly as Mermaid's
-  own injected `<style>` is.
-- **A Diagram / Source toggle.** Flip to the raw fence source and back.
-- **Copy** — copies the **raw fence source** in *both* modes, matching the copy
-  control on ordinary fenced code blocks.
-
-Diagram colours follow the app's light/dark toggle through `themeVariables`. Every
-rendered diagram's own generated styling — not just the flowchart shapes a small
-token-driven CSS fallback covers — reaches the page too: each render's `<style>`
-(CSP-blocked as an injected element) is copied into a constructable stylesheet and
-adopted onto the page, which the CSP does not restrict. That covers classDiagram,
-sequence, and ER shapes the same way it covers a flowchart's cylinders — nothing
-falls back to the browser's solid-black default fill. If the bundle is unavailable
-or the diagram does not parse, the **escaped source stays visible** with an
-explanatory note — never a blank space and never a silent failure
-([FR-UI-32](../specs/requirements/FR-UI-32.md)). A bare `;` in a sequence
-diagram's message or note text — Mermaid's own statement separator, which would
-otherwise reject the whole diagram — is auto-repaired to Mermaid's `#59;` escape
-before render; the Source toggle still shows exactly what was written, `;` and
-all.
-
-Non-mermaid code blocks are unaffected and keep their existing copy control.
-
-Every route is **read-only except the explicit, intent-guarded mutating
-routes**: the config-write/apply routes (`/config/save`, `/config/apply`,
-`/config/secret`), the Chat routes (`/chat` and the per-conversation delete,
-rename and truncate under `/api/v1/chat/threads/{id}/`), and the Wiki
-generation trigger (`/wiki/generate`). Serving any read
-page — the Dashboard, Health, the analytics views, the Wiki, the Chat tab itself
-— reads the latest persisted snapshot through dedicated read-model accessors and
-never writes back, so browsing leaves `logos.db` and `history.db` byte-identical
-and never perturbs the evolution trend it plots. The writes the surface can make
-are: a validated config **Save** (to `config.toml` / `rules.toml`) and the chat
-**Save key** (to `secrets.toml`); an explicit **Apply** (which reconciles the
-graph / re-evaluates the gate exactly as the corresponding CLI path would); and a
-Chat turn or a **conversation delete** (which write only the Chat conversation store
-`chat.db`, never the graph); and a **Wiki generation** run (which writes only
-generated pages to `wiki.db` via the `wiki write` contract, never the graph) —
-all deliberate, acknowledged, and bounded to those enumerated routes. Otherwise
-only the explicit `scan` / `hotspots` / `index` / `sync` commands persist; a read
-GET writes nothing.
-
-### The Wiki tab
-
-The **Wiki** tab (`/wiki`) renders the source wiki — a durable, agent-authored
-documentation layer anchored to graph entities, live-rendered from the deterministic
-native tier plus generated prose pages. Its **read** surface is unchanged (page
-bodies, nav, and FTS search over `GET /api/v1/wiki*`, all read-only). What Sprint 38
-adds is **in-process page generation** ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md)):
-opening the tab regenerates drifted pages on the same `rig` agent substrate the Chat
-tab uses, replacing the retired headless `claude -p` SessionEnd autogen hook.
-
-Generated pages are **grounded**: for each queue item the binary resolves its
-grounding content locally — the referenced `docs/` source(s) for a doc-grounded
-page, or a code-graph digest of the anchored symbols for a code-grounded one —
-and injects it into the synthesis prompt, so the tool-less agent writes a real
-summary of that source rather than free-form prose. The resolution is local I/O
-(no extra network egress), and the write-path content-validity guard (above, in
-[commands.md](commands.md#wiki-write)) rejects any page that comes back as
-agent-noise, so the stored corpus stays trustworthy.
-
-Since CR-062 the tab opens on a **presented** tier first ([ADR-57]): when the
-project ships an SRS (`docs/specs/architecture.md` + a requirement — "Case 1"),
-the binary runs `wiki materialize` before the LLM queue, presenting the authored
-Design/Specs pages deterministically from source (labelled *"presented from
-`docs/specs/…`"*, never model prose) and asking the agent to generate only the
-Summary/Overview tier. When `docs/howto/` is present, the menu gains a **User
-Guide** tier listing the authored guides. Projects without an SRS ("Case 2") keep
-the previous behavior — the agent infers Design/Specs from the code graph. Either
-way the read surface (bodies, nav, FTS) is unchanged.
-
-**Navigating the presented tier (CR-064).** Sprint 45 shipped the presented tier as
-a foundation; Sprint 46 makes it genuinely navigable, so browsing the materialized
-wiki reads as a product rather than a page dump:
-
-- **Working cross-references, no dead links.** At `wiki materialize`, a presentation
-  transform rewrites each presented page's in-body Markdown links against a
-  materialize-time manifest: a link to another presented document resolves to that
-  document's wiki page (a same-page target becomes an in-page anchor), a `path.md#frag`
-  link resolves to the destination page and its stable section anchor, and a link whose
-  target is **not** a presented document renders as plain text (visible text kept, no
-  `href`) — so a presented page never 404s. The transform touches only reference
-  targets, never prose or code spans, and re-running it on an unchanged source set is
-  byte-identical with no LLM/network call.
-- **Titled list sections, not filenames.** Each entry on a consolidated page (Components,
-  NFRs, ADRs, …) is now headed by the source document's own title with a horizontal rule
-  between entries, instead of the bare source filename above a duplicate title. The
-  stable section anchor is unchanged, so rewritten cross-links still land correctly.
-- **An SRS hub under Specs.** `docs/specs/software-spec.md` is presented as a first-class
-  page at slug `specs/srs`, listed at the top of the **Specs** nav tier, so
-  `software-spec.md` / `§N` references from other presented pages resolve to it. Only the
-  SRS hub is presented — the stray top-level `docs/specs/*.md` analyst inputs are not
-  exposed — and the page is never purged by reconciliation while the source exists.
-- **Diagrams and doc images render.** Presented `<img>` sources pointing at doc-relative
-  images under `docs/specs/**` / `docs/howto/**` are rewritten to a same-origin, read-only
-  asset route (`GET /api/v1/wiki/asset/*path`). The route is path-sandboxed
-  (canonicalized-prefix containment — `..`, absolute, and symlink escapes are refused),
-  serves image content-types only, and adds `X-Content-Type-Options: nosniff`; the
-  self-only CSP is unchanged (no `data:` inlining).
-- **Search jumps to the match.** Clicking a wiki search result now opens the page and
-  scrolls to + highlights the first occurrence of the query term in the body (carried in
-  the client navigation state, so a bookmark or menu navigation shows no highlight). The
-  FTS backend and read-model are unchanged — this is a presentation-only refinement.
-- **Orientation prose written for a reader.** The Overview/Getting-Started generation
-  guidance now leads each orientation page with a concrete reader outcome and names the
-  actual user-facing commands/workflows, keeping internal symbol/type detail on the
-  code-level pages. Existing Overview pages pick up the improved prose the next time the
-  connected agent re-runs generation.
-
-Like Chat, generation exists **only** in an `--features agents` build — the
-default `logos` binary serves the wiki **view** and parses `[wiki]` as policy but
-makes no outbound call and links no HTTP client (the offline invariant holds).
-`wiki materialize`,
-however, is a **deterministic** presentation step that the default binary *does*
-perform (still no LLM/network). Generated and presented pages persist in
-`.logos/wiki.db` via the unchanged `wiki write` contract.
-
-**Workflow:**
-
-1. **Configure a provider, key, and (optionally) a wiki model.** Generation reuses
-   the `[chat]` provider/`base_url`/API key. Set a **dedicated** `[wiki].model` in
-   the Config tab to write the wiki with a model distinct from chat; omit it to fall
-   back to `[chat].model`. See
-   [configuration.md](configuration.md#wiki--the-source-wiki-generation-model).
-2. **Open the Wiki tab.** With no provider configured the tab shows an honest
-   **configure-first** state (a link to the Config tab), not an error. When configured,
-   opening the tab checks the regeneration work-list; an empty work-list starts **no**
-   run and makes no outbound call. The work-list is bounded to the **Overview** pages
-   plus **consolidated documentation** categories (dozens of pages, not thousands) —
-   per-file and per-module pages are **not** seeded into generation ([CR-056](../requests/CR-056-wiki-generation-usability.md));
-   any such pages already in `wiki.db` stay browsable and are still refreshed when their
-   anchor drifts, and the native Files view still enumerates every file.
-3. **Acknowledge the first-use consent banner.** The first generation in a session is
-   preceded by a **consent disclosure** naming the configured **endpoint host** and the
-   wiki model — never the key. Nothing is sent until you acknowledge; the acknowledgement
-   persists (a distinct `logos.wiki.consent` key, independent of chat consent).
-4. **Watch pages stream in — cumulative progress.** When the work-list is non-empty a
-   **background** generation run launches under a **single-run lock**: existing (stale)
-   pages stay browsable and each page **refreshes in place over SSE** as it completes,
-   behind a cumulative **"N of M pages"** indicator that spans the whole run. The run's
-   lifetime is **owned server-side, independent of the connection** ([CR-056](../requests/CR-056-wiki-generation-usability.md)) —
-   leaving the Wiki tab or losing the connection **no longer aborts it**; the pass keeps
-   running and, when it hits its per-chunk page budget with work remaining, **auto-continues**
-   into the next chunk until the work-list drains (bounded by a hard safety ceiling that
-   halts honestly rather than looping). **Reopening the Wiki tab while a run is in flight
-   re-attaches** to that same run and resumes the cumulative progress — it never starts a
-   second run or resets the counter. Reopening after the run has finished shows an
-   **"up to date"** state. Because each auto-continued chunk re-reads the work-list,
-   a run can surface work it did not start with (a sync adding a page-worthy entity,
-   a section re-armed past its threshold); the denominator then **grows to the real
-   scope** rather than letting the count overshoot it, never decreases within a run,
-   and the banner says so — *"scope grew from 5 as new work surfaced during the
-   run"*. A run whose scope never changed reads exactly as before.
-
-**Honest states (never a fabricated page):**
-
-- **Configure-first / empty work-list** start no run and make no outbound call.
-- A **provider failure** — or a stalled/dead-air provider call, bounded by a per-page
-  synthesis timeout — **halts the pass honestly**: pages already written persist, no page
-  is fabricated, and the halt reason surfaces to the tab. Once a halt is known the banner
-  reads **"Generation halted"** with its reason — never a stale "Generating…" or a false
-  "complete". While a page is in flight the tab shows a **visible liveness hint** naming
-  the per-page synthesis timeout (a long page reads as *working*, not *stuck*); the hint
-  clears the moment that page finishes. A per-page write rejection is **attempted once**,
-  recorded, and the run moves on without spinning.
-- The API key never appears in any SSE frame, page body, or page provenance field
-  (`generator` records the resolved model id, not the key).
-
-**One honest limitation:**
-
-- Automatic generation is **`ui`-only**. Non-`ui` / headless / CI builds have **no**
-  automatic wiki regeneration by design (the offline guarantee is preserved); manual
-  regeneration remains available via `logos wiki skill --emit` + your own Claude Code,
-  and `logos wiki generate` still prints the deterministic queue for a CLI-driven flow.
 
 ### The Statistics tab
 
@@ -1934,8 +1280,7 @@ and why it matters (CR-203):
    dogfood metric), clearly labeled as *estimates*, not measured truth.
 2. A **daily-activity line** — calls per UTC day over the window.
 3. A **top-tools / by-surface** ranking bar. Self-referential reads — the tab's
-   own `stats` request, the shell's `status` readout and the chat's automatic code-refs
-   lookup — are excluded per event,
+   own `stats` request and the shell's `status` readout — are excluded per event,
    so opening this tab never inflates its own numbers; a graph query issued
    through the dashboard is counted like any other.
 4. A **dev-vs-`main` split** — usage attributed by `origin` (a worktree's branch

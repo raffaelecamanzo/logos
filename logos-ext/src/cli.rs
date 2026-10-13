@@ -120,7 +120,7 @@ pub fn indexed_engine(root: &Path) -> anyhow::Result<Engine> {
 }
 
 /// `command` with each core subcommand an extension re-exposes as a hidden
-/// subcommand of its own (`logos wiki hook --emit`, S-638) naming that alias in
+/// subcommand of its own (`logos <extension> hook --emit`, S-638) naming that alias in
 /// its help: `(`logos <extension> <name> <required flags>` is the hidden alias of
 /// this command.)`. Read from the composed `extensions`, never from a feature or a
 /// crate name ([ADR-74] §3), so a build composing no alias names none (S-645).

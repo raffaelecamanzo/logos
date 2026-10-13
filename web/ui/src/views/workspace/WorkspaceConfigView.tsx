@@ -9,14 +9,8 @@
  *
  *   - the manifest, `logos.workspace.toml` ({@link ManifestGroup}, S-430):
  *     `[workspace]`, `[workspace.warm]` and the full `[governance]` family;
- *   - the workspace chat tier, `<workspace-root>/.logos/` ({@link TierGroup},
- *     S-451, FR-WS-30, ADR-67): `[chat]`, `[wiki].model` and the chat credential
- *     every member that declares none inherits — and nothing else. The workspace
- *     root holds no graph, so the group offers no indexing key, no rules document
- *     and no Apply action, and says so on the surface rather than leaving the
- *     absence to be discovered (NFR-CC-04). It is the `chat` extension's
- *     workspace config panel since S-643 ({@link WorkspaceChatTierPanel}), so it is
- *     offered only while that extension is active.
+ *   - the config panels the mounted extensions contribute (S-642), each owning its
+ *     own reads and saves. This build composes none.
  *
  * The editing grammar is the member Config editor's (S-099, FR-UI-12), carried in
  * rather than re-invented: typed fields for the scalar/list keys, a raw-TOML pane
@@ -25,13 +19,9 @@
  * typed field patches its one key into that text through the member editor's own
  * line-patcher (`../config/toml.ts`), so there is no second source of truth.
  * Validation is the server's: a candidate the parser rejects is refused before
- * the file is touched and the parser's message is shown inline. The tier group
- * follows the same grammar over its own raw pane; its credential is the one field
- * outside it — masked and write-only, never pre-filled (NFR-SE-07).
+ * the file is touched and the parser's message is shown inline.
  *
- * Two properties shape the manifest's save; the first, and the repair read beside
- * it, shape the tier's policy save too (S-451 T2 — FR-UI-38's Statement applies
- * them to both files):
+ * Two properties shape the manifest's save:
  *
  *   - **No silent clobber.** The read returns a fingerprint of the bytes it
  *     loaded; the save posts it back, and a file changed on disk since (by hand,
@@ -57,7 +47,7 @@
  * Config editor (`../config/ConfigView.tsx`) is a different editor over different
  * files and is untouched by this one; its stylesheet is reused here unmodified so
  * its served class names do not rotate. Unreachable and unrendered in single-root
- * mode, and neither group's routes answer there.
+ * mode, and the manifest group's routes do not answer there.
  *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
@@ -70,25 +60,17 @@ import { useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 
 import { ConfigMutateError } from "../../api/configClient.ts";
-import { AsyncResource, describeReadError, useApiResource } from "../../api/hooks.tsx";
+import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import {
-  fetchWorkspaceConfig,
   fetchWorkspaceGovernance,
   fetchWorkspaceManifest,
-  saveWorkspaceConfig,
   saveWorkspaceManifest,
-  saveWorkspaceSecret,
 } from "../../api/workspaceClient.ts";
 import type {
   ManifestSaveOutcome,
-  MaskedSecret,
-  ParsedConfig,
-  SecretWriteOutcome,
   WorkspaceGovernanceAnswer,
   WorkspaceManifest,
   WorkspaceManifestDocument,
-  WorkspaceTierDocument,
-  WorkspaceTierSaveOutcome,
 } from "../../api/types.ts";
 import {
   Badge,
@@ -104,10 +86,8 @@ import {
   Widget,
   WidgetStack,
 } from "../../components/index.ts";
-import { ExtensionConfigPanels, useMountedConfigTable } from "../../extensions/ConfigPanels.tsx";
-import type { ConfigPanelProps } from "../../extensions/registry.ts";
+import { ExtensionConfigPanels } from "../../extensions/ConfigPanels.tsx";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-import { WORKSPACE_CONFIG_FILE, WORKSPACE_SECRETS_FILE } from "../chat/chatModel.ts";
 import { dropEmptyTable, patch, type TomlFieldType } from "../config/toml.ts";
 import styles from "../config/ConfigView.module.css";
 
@@ -146,20 +126,12 @@ interface TypedField {
   help: string;
   /** Pre-filled from the parsed document only — never a default it did not declare. */
   initial: string;
-  /** The rendered label when `key` alone is ambiguous (`[wiki].model` beside
-   *  `[chat].model`). Defaults to `key`. */
-  label?: string;
-  placeholder?: string;
-  /** A closed set of string values, rendered as a select (the `[chat]` provider). */
-  choices?: readonly { value: string; label: string }[];
 }
 
-/** Typed fields under one `[table]` legend, with optional read-only prose beneath
- *  them — never a control, never posted. */
+/** Typed fields under one `[table]` legend. */
 interface FieldGroup {
   legend: string;
   fields: TypedField[];
-  note?: ReactNode;
 }
 
 // ── The manifest's typed fields ────────────────────────────────────────────────
@@ -221,7 +193,7 @@ function FieldControl({
 }) {
   const handle = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     onChange(e.target.value);
-  const label = field.label ?? field.key;
+  const label = field.key;
   if (field.type === "list") {
     return <TextareaField label={label} hint={field.help} rows={3} value={value} onChange={handle} className="mono" spellCheck={false} />;
   }
@@ -234,23 +206,11 @@ function FieldControl({
       </SelectField>
     );
   }
-  if (field.choices) {
-    return (
-      <SelectField label={label} hint={field.help} value={value} onChange={handle}>
-        {field.choices.map((c) => (
-          <option key={c.value} value={c.value}>
-            {c.label}
-          </option>
-        ))}
-      </SelectField>
-    );
-  }
   return (
     <TextField
       label={label}
       hint={field.help}
       type={field.type === "int" ? "number" : "text"}
-      placeholder={field.placeholder}
       value={value}
       onChange={handle}
       className="mono"
@@ -278,7 +238,6 @@ function Fieldsets({
               <FieldControl key={fieldId(f)} field={f} value={values[fieldId(f)] ?? ""} onChange={(v) => onChange(f, v)} />
             ))}
           </div>
-          {g.note}
         </fieldset>
       ))}
     </>
@@ -706,427 +665,6 @@ function ManifestGroup() {
   );
 }
 
-// ── The workspace chat tier group (S-451) ──────────────────────────────────────
-
-/** The `[chat]` provider family (mirrors `ChatProvider`). */
-const PROVIDERS = [
-  { value: "openai", label: "openai — OpenAI-compatible (OpenRouter by default)" },
-  { value: "anthropic", label: "anthropic — native Messages API" },
-] as const;
-
-/**
- * The tier's typed fields: `[chat]` provider/model/base_url and — while the `wiki`
- * extension edits the table (`withWiki`, S-644) — `[wiki].model`: the keys this root
- * is read for, and only those. Every other `[chat]` key (the
- * budget tree, retry policy, per-role overrides) is edited in the raw pane, as in
- * the member editor.
- *
- * `provider` and `base_url` pre-fill from the parse, which carries their code
- * defaults: on the parsed document "declared the default" and "declared nothing"
- * are indistinguishable for every `[chat]` key but `model` (ADR-67 §3). A default
- * is patched into the raw pane only if the field is edited.
- */
-function tierFields(c: ParsedConfig, withWiki: boolean): FieldGroup[] {
-  const groups: (FieldGroup | null)[] = [
-    {
-      legend: "[chat]",
-      fields: [
-        { table: "chat", key: "provider", type: "str", choices: PROVIDERS, initial: c.chat.provider, help: "The provider family. openai is OpenAI-compatible (base_url defaults to OpenRouter); anthropic uses the native Messages endpoint." },
-        { table: "chat", key: "model", type: "str", initial: c.chat.model ?? "", placeholder: "leave blank to declare no workspace [chat] table", help: "The model every inheriting member's chat uses. It is what makes this [chat] table inheritable: without it no member inherits the table." },
-        { table: "chat", key: "base_url", type: "str", initial: c.chat.base_url, placeholder: "leave blank for the default (OpenRouter)", help: "The OpenAI-compatible endpoint for the openai provider (anthropic ignores this)." },
-      ],
-    },
-    {
-      legend: "[wiki]",
-      fields: [
-        { table: "wiki", key: "model", type: "str", label: "wiki model", initial: c.wiki?.model ?? "", placeholder: "leave blank to declare none", help: "A dedicated wiki-synthesis model, distinct from the chat model, for every member that inherits this [chat] table and declares no wiki model of its own." },
-      ],
-      // Stated because the banner above is about inheritance per half, and this
-      // key rides the policy half under a condition of its own: a member inherits
-      // it only while it inherits this root's `[chat]` table, since a member that
-      // owns its `[chat]` model owns its endpoint, where a model named for this
-      // root's endpoint may not exist (`WikiConfig::resolve_inherited`, Sprint 77
-      // HF-1, NFR-CC-04).
-      note: (
-        <p className={styles.inherited}>
-          <strong>Inherited with the <code>[chat]</code> table.</strong> A member that declares no{" "}
-          <code>[wiki] model</code> of its own uses this one only while it inherits this root&apos;s{" "}
-          <code>[chat]</code> table; with none here, it uses its effective <code>[chat]</code> model. A
-          member that declares its own <code>[chat] model</code> owns its endpoint, where this model may
-          not exist, so it uses its own <code>[wiki] model</code>, else its own <code>[chat]</code> model.
-        </p>
-      ),
-    },
-  ];
-  return groups.filter((g): g is FieldGroup => g !== null && (withWiki || g.legend !== "[wiki]"));
-}
-
-/** Which members take what from this root — the reach of a save, stated where it
- *  is made (ADR-67 §2, FR-WS-30). */
-function InheritanceBanner() {
-  return (
-    <Callout label="INHERITED PER HALF" tone="muted">
-      <p>
-        What a member takes from this root depends on which half it declares itself — the policy and
-        the credential are inherited separately:
-      </p>
-      <ul>
-        <li>
-          <strong>Policy.</strong> When this root declares a <code>[chat] model</code>, a member whose own{" "}
-          <code>.logos/config.toml</code> declares none inherits this whole <code>[chat]</code> table, and
-          dials its endpoint with this root&apos;s key only — never with a key of its own. A member that
-          declares a <code>[chat] model</code> owns its whole table; with no model here, nothing is
-          inherited.
-        </li>
-        <li>
-          <strong>Credential.</strong> A member that does not inherit this root&apos;s <code>[chat]</code>{" "}
-          table — it declares its own, or neither root declares one — and holds no key in its own{" "}
-          <code>.logos/secrets.toml</code> uses the key saved here.
-        </li>
-      </ul>
-    </Callout>
-  );
-}
-
-/** What this group does NOT offer, said rather than left to be discovered
- *  (NFR-CC-04, FR-UI-38). */
-function NotHere() {
-  return (
-    <Callout label="NOT HERE" tone="muted">
-      This group edits the workspace root&apos;s chat policy and credential only. It has{" "}
-      <strong>no indexing key</strong> (languages, include, exclude, max_file_size, framework_hints) —
-      the workspace root is never indexed, so they would change nothing; <strong>no rules document</strong>{" "}
-      — workspace rules are the manifest&apos;s <code>[governance]</code> family; and{" "}
-      <strong>no Apply action</strong> — there is no graph here to reconcile or re-evaluate. A save
-      takes effect on each inheriting member&apos;s next chat turn.
-    </Callout>
-  );
-}
-
-/** The honest secret-write message — never the response body (NFR-SE-07). The
- *  file is named as the operator finds it; the server's `path` is relative to a
- *  root this page does not otherwise name. */
-function describeTierSecret(outcome: SecretWriteOutcome | null): string {
-  if (outcome === null) return "Key saved (unexpected response format).";
-  if (outcome.chat_key.present) {
-    const tail = outcome.chat_key.last4 ? ` (ends …${outcome.chat_key.last4})` : "";
-    return `Key saved${tail}. It is stored in ${WORKSPACE_SECRETS_FILE} and never echoed.`;
-  }
-  return `Key cleared. ${WORKSPACE_SECRETS_FILE} no longer holds a chat key.`;
-}
-
-/** The credential half when `secrets.toml` cannot be read: named, never shown
- *  (NFR-SE-07), and not writable here — the key write merges into the existing
- *  store and refuses an unparsable one rather than overwrite it. */
-function UnreadableTierSecret({ fault }: { fault: string }) {
-  return (
-    <fieldset className={styles.group}>
-      <legend className={styles.legend}>chat API key</legend>
-      <div className={styles.fileHead}>
-        <Badge tone="red">unreadable</Badge>
-        <span className={styles.path}>{WORKSPACE_SECRETS_FILE}</span>
-      </div>
-      <ErrorPanel>
-        The workspace credential store could not be read: {fault} Its contents are never shown on this
-        page. Repair or remove <code>{WORKSPACE_SECRETS_FILE}</code> by hand — the key cannot be
-        replaced here until it parses, because a key save merges into the existing store and refuses
-        to overwrite one it cannot read.
-      </ErrorPanel>
-    </fieldset>
-  );
-}
-
-/** The workspace credential: masked presence, a write-only input that is always
- *  blank on load, and its own save (FR-CF-06, NFR-SE-07). */
-function TierSecret({ initial }: { initial: MaskedSecret }) {
-  const [masked, setMasked] = useState<MaskedSecret>(initial);
-  const [value, setValue] = useState("");
-  const [result, setResult] = useState<ResultMessage | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  async function onSave() {
-    setSaving(true);
-    setResult(null);
-    try {
-      const reply = await saveWorkspaceSecret(value);
-      // Drop the typed secret the moment it is persisted.
-      setValue("");
-      // A 2xx without the masked state is "saved, format not understood", never
-      // a new badge state this page was not sent.
-      const outcome = typeof reply?.chat_key?.present === "boolean" ? reply : null;
-      if (outcome) setMasked(outcome.chat_key);
-      setResult({ kind: "ok", text: describeTierSecret(outcome) });
-    } catch (e) {
-      setResult(describeError(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <fieldset className={styles.group}>
-      <legend className={styles.legend}>chat API key</legend>
-      <div className={styles.fileHead}>
-        {masked.present ? (
-          <Badge tone="green">set · ends …{masked.last4 ?? ""}</Badge>
-        ) : (
-          <Badge tone="muted">not set</Badge>
-        )}
-        <span className={styles.path}>{WORKSPACE_SECRETS_FILE}</span>
-      </div>
-      <p className={styles.help}>
-        The LLM API key inheriting members dial with. It is a secret: stored owner-only in the
-        gitignored <code>{WORKSPACE_SECRETS_FILE}</code> and never echoed — this page shows only
-        whether a key is set and its last 4 characters.
-      </p>
-      <TextField
-        label="api_key"
-        type="password"
-        autoComplete="off"
-        spellCheck={false}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="enter a new key to replace, or leave blank to clear"
-        hint="Write-only. Always blank on load; type a new key to replace, or save it empty to remove the key."
-        className="mono"
-      />
-      <div className={styles.actions}>
-        <Button variant="primary" onClick={() => void onSave()} disabled={saving} aria-busy={saving}>
-          {saving ? "Saving…" : "Save the workspace API key"}
-        </Button>
-      </div>
-      <ResultPanel result={result} />
-    </fieldset>
-  );
-}
-
-/** What a tier save did, in the words the manifest group uses for the same arms.
- *  `exists` is whether the file was on disk before the save: an empty document
- *  saved over an absent file is `unchanged` too, and must not claim a file. */
-function describeTierOutcome(outcome: WorkspaceTierSaveOutcome, overwrote: boolean, exists: boolean): ResultMessage {
-  switch (outcome.outcome) {
-    case "written":
-      return {
-        kind: "ok",
-        text: `${overwrote ? "Overwrote the changes on disk with your edits — " : ""}Saved ${WORKSPACE_CONFIG_FILE} (${outcome.bytes_written} bytes). Members that inherit it use it from their next chat turn — no restart. No member's .logos/ was written and no member was reindexed.`,
-      };
-    case "unchanged":
-      return {
-        kind: "ok",
-        text: exists
-          ? `No change — ${WORKSPACE_CONFIG_FILE} on disk already matches; nothing was written.`
-          : `No change — the document is empty and ${WORKSPACE_CONFIG_FILE} does not exist; nothing was written.`,
-      };
-    case "conflict":
-      return {
-        kind: "warn",
-        text: `Not saved — ${WORKSPACE_CONFIG_FILE} changed on disk since this editor loaded it. Nothing was written. Choose below which copy wins.`,
-      };
-  }
-}
-
-/** The tier editor over one loaded document: typed fields + the authoritative
- *  raw pane over `config.toml`, then the credential. Keyed by the load in
- *  {@link TierGroup}, so "load the version on disk" — and a repair save, whose
- *  typed fields only a re-seed brings up — re-seeds it from scratch.
- *
- *  Over a `config.toml` that does not parse it is the **repair editor**
- *  (S-451 T2): the literal document in the raw pane, no typed fields, and the
- *  fault by file and position or key; the save validates the new document only. */
-function TierEditor({
-  doc,
-  notice,
-  onReload,
-}: {
-  doc: WorkspaceTierDocument;
-  /** What the reload that seeded this editor did, stated on arrival. */
-  notice: ResultMessage | null;
-  /** Re-read the tier and re-seed this editor from it, stating `notice` once the
-   *  new editor is up. */
-  onReload: (notice: ResultMessage) => void;
-}) {
-  const parsed = doc.config.parsed;
-  // `[wiki]` is the `wiki` extension's table (S-644): its field is offered while the
-  // extension mounts a panel editing it, as `[chat]`'s are by chat's (S-643).
-  const withWiki = useMountedConfigTable("workspace", "wiki");
-  const groups = parsed === null ? [] : tierFields(parsed, withWiki);
-  const [raw, setRaw] = useState(doc.config.content);
-  const [fingerprint, setFingerprint] = useState(doc.config.fingerprint);
-  const [values, setValues] = useState<Record<string, string>>(() => seedValues(groups));
-  const [exists, setExists] = useState(doc.config.exists);
-  // The load's fault, until a save replaces the document it describes.
-  const [fault, setFault] = useState(doc.config.error);
-  const [conflict, setConflict] = useState<Extract<WorkspaceTierSaveOutcome, { outcome: "conflict" }> | null>(null);
-  const [result, setResult] = useState<ResultMessage | null>(notice);
-  const [saving, setSaving] = useState(false);
-
-  function onFieldChange(f: TypedField, value: string) {
-    setValues((prev) => ({ ...prev, [fieldId(f)]: value }));
-    setRaw((prev) => patch(prev, f.table, f.key, f.type, value));
-  }
-
-  async function save(against: string, overwrote: boolean) {
-    setSaving(true);
-    setResult(null);
-    try {
-      const outcome = await saveWorkspaceConfig(raw, against);
-      const message = describeTierOutcome(outcome, overwrote, exists);
-      if (outcome.outcome === "conflict") {
-        setResult(message);
-        setConflict(outcome);
-        return;
-      }
-      setConflict(null);
-      setFingerprint(outcome.fingerprint);
-      if (outcome.outcome === "written") {
-        setExists(true);
-        setFault(null);
-      }
-      // A repair of an invalid load has no typed state worth keeping, and only a
-      // re-seed brings its typed fields up. As in the manifest group, the re-seed
-      // follows a re-read that succeeded; one that fails still states the save.
-      if (outcome.outcome === "written" && parsed === null) {
-        fetchWorkspaceConfig().then(
-          () => onReload(message),
-          () =>
-            setResult({
-              kind: "warn",
-              text: `${message.text} The tier could not be re-read after this save, so its typed fields are not shown; reload the page to edit them.`,
-            }),
-        );
-        return;
-      }
-      setResult(message);
-    } catch (e) {
-      setResult(describeError(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <>
-      <div className={styles.fileHead}>
-        <Badge tone={exists ? "green" : "muted"}>{exists ? "on disk" : "not yet created"}</Badge>
-        {/* "invalid", not "does not parse": the fault may be a value the
-            validator refuses in a document that parses. */}
-        {fault !== null && <Badge tone="red">invalid</Badge>}
-      </div>
-      {fault !== null && (
-        <ErrorPanel>
-          The workspace tier&apos;s <code>config.toml</code> is invalid — members that inherit from this
-          root cannot resolve their chat until it is repaired. Fix it in the raw pane below:{" "}
-          {fault}
-        </ErrorPanel>
-      )}
-      <InheritanceBanner />
-      <NotHere />
-      <Fieldsets groups={groups} values={values} onChange={onFieldChange} />
-      {parsed === null && fault !== null && (
-        <p className={styles.help}>Typed fields are unavailable while the document is invalid.</p>
-      )}
-      {/* Not labelled "Raw TOML — …" like the manifest's pane: each group's pane is
-          named for its own file first, so neither label can be taken for the other. */}
-      <TextareaField
-        label={`Workspace tier — raw TOML, ${WORKSPACE_CONFIG_FILE} (the full document — the rest of [chat] edited here)`}
-        value={raw}
-        onChange={(e) => setRaw(e.target.value)}
-        rows={12}
-        spellCheck={false}
-        className="mono"
-      />
-      <div className={styles.actions}>
-        <Button variant="primary" onClick={() => void save(fingerprint, false)} disabled={saving} aria-busy={saving}>
-          {saving ? "Saving…" : `Save ${WORKSPACE_CONFIG_FILE}`}
-        </Button>
-      </div>
-      <p className={styles.help}>
-        Save validates the whole document with the parser every <code>logos</code> command runs and
-        replaces the file atomically; an invalid edit is refused and the file is left untouched, and a
-        file changed on disk since this editor loaded it is never silently overwritten. It writes only
-        under the workspace root&apos;s <code>.logos/</code> — no member&apos;s — and reindexes nothing.
-      </p>
-      <ResultPanel result={result} />
-      {conflict && (
-        <ConflictPanel
-          disk={conflict.disk_content}
-          diskLabel={`${WORKSPACE_CONFIG_FILE} on disk now`}
-          busy={saving}
-          onLoadDisk={() => onReload(DISCARDED)}
-          onOverwrite={() => void save(conflict.disk_fingerprint, true)}
-        >
-          <code>{WORKSPACE_CONFIG_FILE}</code> was changed on disk — by hand, or by another tab — after
-          this editor loaded it. Your save was refused so that change is not silently overwritten.
-        </ConflictPanel>
-      )}
-      {doc.chat_key === null ? (
-        <UnreadableTierSecret fault={doc.chat_key_error ?? ""} />
-      ) : (
-        <TierSecret initial={doc.chat_key} />
-      )}
-    </>
-  );
-}
-
-/**
- * The workspace chat tier group: load `<workspace-root>/.logos/`, then edit it.
- *
- * A tier file that does not parse is NOT a failed read (S-451 T2): the read
- * delivers it for repair and {@link TierEditor} opens over it. What is left as a
- * failed read — an unreadable file, a transport fault, a reply that is not the
- * document — is stated INSIDE the group as a `NOT LOADED` status (a `Callout`,
- * `role=status`), in the shared describer's words, and the manifest group stays
- * fully usable beside it. That is a deliberate exception to the design grammar's
- * Error panel (`ErrorPanel`, `role=alert`), which this view's own manifest reads
- * still use, and it is made for one reason: S-430's tests, which must stay
- * unmodified, render this group beside theirs with a stub that answers its read
- * with `{}` and query the page's alert unscoped — a standing alert here would
- * make every such query ambiguous. Moving this state to the Error panel means
- * scoping those queries to the manifest card.
- */
-function TierGroup() {
-  const [generation, setGeneration] = useState(0);
-  const [notice, setNotice] = useState<ResultMessage | null>(null);
-  // Keyed on each completed read, as the manifest group's editor is — see there.
-  const loads = useRef(0);
-  const loaded = useApiResource<{ doc: WorkspaceTierDocument; load: number }>(
-    () => fetchWorkspaceConfig().then((doc) => ({ doc, load: ++loads.current })),
-    [generation],
-  );
-  return (
-    <ConfigGroup title="Workspace chat policy and credential" file={WORKSPACE_CONFIG_FILE}>
-      {loaded.status === "loading" && <LoadingState label="Loading the workspace chat tier…" />}
-      {loaded.status === "error" && (
-        <Callout label="NOT LOADED" tone="signal">
-          The workspace chat tier could not be loaded, so it cannot be edited here.{" "}
-          {describeReadError(loaded.error)}
-        </Callout>
-      )}
-      {loaded.status === "ready" && loaded.data && (
-        <TierEditor
-          key={loaded.data.load}
-          doc={loaded.data.doc}
-          notice={notice}
-          onReload={(next) => {
-            setNotice(next);
-            setGeneration((n) => n + 1);
-          }}
-        />
-      )}
-    </ConfigGroup>
-  );
-}
-
-/**
- * The workspace chat tier — the `chat` extension's workspace config panel (S-643),
- * mounted by {@link ExtensionConfigPanels} while the extension is active. The group
- * owns its reads and saves, so it needs nothing from this view; a build without the
- * extension offers no workspace chat tier at all.
- */
-export function WorkspaceChatTierPanel(_props: ConfigPanelProps) {
-  return <TierGroup />;
-}
-
 // ── The view ───────────────────────────────────────────────────────────────────
 
 export function WorkspaceConfigView() {
@@ -1165,8 +703,7 @@ export function WorkspaceConfigView() {
       </Callout>
       {/* Each group is a sibling ConfigGroup owning its own reads and saves. */}
       <ManifestGroup />
-      {/* The panels of the mounted extensions (S-642) — the `chat` extension's
-          workspace chat tier among them (S-643). */}
+      {/* The panels of the mounted extensions (S-642). */}
       <ExtensionConfigPanels scope="workspace" />
     </WidgetStack>
   );

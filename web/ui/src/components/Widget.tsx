@@ -16,12 +16,12 @@
  *
  * The words come from a catalogue entry (`copy`), so a view never writes copy
  * inline and a wording change edits one catalogue. One entry is typed to have
- * no explanation (`NoExplanationEntry`, CR-208 — Project Overview); its frame
+ * no explanation (`NoExplanationEntry`, CR-208 — an extension's Project Overview card); its frame
  * leaves the explanation part out and is marked `data-widget-no-explanation`. An absence renders as a
  * left-aligned statement in the figure row; the centred `EmptyState` is for a
  * view with no widget at all, never here.
  *
- * PANEL MODE (S-617): a tool panel — a query form, an editor, the chat, a wiki
+ * PANEL MODE (S-617): a tool panel — a query form, an editor, a document
  * page — presents no figure, so it is exempt from why. It is
  * rendered as `<Widget panel="key" title=…>`: the title row, the panel's one
  * line from the `TOOL_PANELS` register as its explanation (`what`), then the

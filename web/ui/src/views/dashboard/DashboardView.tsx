@@ -5,8 +5,8 @@
  * AppShell content slot, rendering exclusively through the S-193 design system.
  *
  * It keeps the server-rendered Dashboard's verdict-first order (frontend-design
- * §4.1): a freshness statement leads, then Project Overview, Quality index,
- * Languages, Graph, Activity, Rule findings and Code coverage — and its honest
+ * §4.1): a freshness statement leads, then the cards the mounted extensions add
+ * (S-644), Quality index, Languages, Graph, Activity, Rule findings and Code coverage — and its honest
  * empty states (an un-indexed root is one empty state naming `logos index`; every
  * figure traces to a read-model field, none fabricated; NFR-RA-05, NFR-CC-04).
  *
@@ -23,7 +23,7 @@
  */
 
 import { AsyncResource, fetchOverview, useApiResource } from "../../api/index.ts";
-import { mountedDashboardCards, useExtensions, type DashboardCardProps } from "../../extensions/registry.ts";
+import { mountedDashboardCards, useExtensions } from "../../extensions/registry.ts";
 import type {
   CoverageStatus,
   GateResult,
@@ -41,7 +41,6 @@ import {
   DASHBOARD_ABSENCE,
   graph as graphCopy,
   languages as languagesCopy,
-  projectOverview,
   qualityIndex,
 } from "../../copy/dashboard.copy.ts";
 import { RULE_FINDINGS_TEXT, ruleFindings, ruleFindingsState } from "../../copy/ruleFindings.copy.ts";
@@ -52,7 +51,6 @@ import {
   freshnessStatement,
   pctBp,
   resolutionStatement,
-  snippetOf,
 } from "./dashboardModel.ts";
 import styles from "./Dashboard.module.css";
 
@@ -360,41 +358,3 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
     </Widget>
   );
 }
-
-/** *Project Overview* — a prose snippet of the agent wiki page, or an honest
- *  "not yet generated" absence naming the producing command.
- *
- *  The page is agent-authored prose the binary never writes itself (ADR-57), and
- *  `wiki status` is a pure read that only *lists* the work — running it leaves the
- *  page just as absent. So the absence names the write that ends it (FR-EH-04,
- *  CR-130, CR-206), which is also the command `wiki status` hands out for this slug.
- *
- *  The `wiki` extension's card since S-644: registered by `views/wiki/extension.tsx`
- *  and rendered in the Dashboard's extension slot, over the `overview_page` field the
- *  extension adds to the bundle. It stays in this file (registered, not owned — the
- *  S-643 shape for chat's panels) beside the cards it is styled with. */
-function ProjectOverviewCard({ overview }: DashboardCardProps) {
-  const page = overview.overview_page ?? null;
-  if (page === null) {
-    return (
-      <Widget
-        title="Project Overview"
-        copy={projectOverview}
-        absence={DASHBOARD_ABSENCE.noOverview}
-      />
-    );
-  }
-  const snippet = snippetOf(page.body);
-  return (
-    <Widget title="Project Overview" copy={projectOverview}>
-      {snippet === "" ? (
-        <p className="muted">A project overview is available in the wiki.</p>
-      ) : (
-        <p className={styles.snippet}>{snippet}</p>
-      )}
-      <DetailLink href="/wiki" label="Open wiki" />
-    </Widget>
-  );
-}
-
-export { ProjectOverviewCard };

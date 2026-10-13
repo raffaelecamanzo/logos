@@ -24,17 +24,16 @@ import react from "@vitejs/plugin-react";
 //   - target: a modern baseline so the output uses native ES modules with no
 //     SystemJS/eval shim (no `unsafe-eval`).
 //
-// The dev server (`npm run dev`) proxies /api and /chat to a running
-// `logos serve --ui`; HMR/inline only ever exist in dev and never ship.
+// The dev server (`npm run dev`) proxies /api to a running `logos serve --ui`;
+// HMR/inline only ever exist in dev and never ship.
 // /assets is NOT proxied: the vendored Mermaid bundle lives in public/assets/vendor/
 // (S-196) and is served directly by Vite in dev mode.
 //
 // `virtual:logos-extensions` (S-642, FR-UI-51, CR-213) is the build-time module extension
 // UI code enters through: a default export of the `ExtensionUi` registrations the
 // build composes (`src/extensions/registry.ts`). Here it is aliased to the composed
-// entry, which registers the `chat` extension's code (S-643) — inert until a server
-// reports chat active, so the one bundle serves a build with or without `agents`; a
-// build that composes other extensions points the alias at its own entry.
+// entry, which registers no extension — the binary built from this repository
+// composes none; a build that composes extensions points the alias at its own entry.
 // `src/extensions/virtual.d.ts` types it for `tsc -b`, and `vitest.config.ts` carries
 // the same alias.
 // `URL.pathname` is percent-encoded (a checkout path with a space becomes `%20`, a file
@@ -76,11 +75,10 @@ export default defineConfig({
     sourcemap: false,
   },
   server: {
-    // Frontend dev loop: proxy the same-origin API/chat/asset seams to a running
+    // Frontend dev loop: proxy the same-origin API seam to a running
     // `logos serve --ui` so the SPA talks to a real engine during development.
     proxy: {
       "/api": "http://127.0.0.1:4983",
-      "/chat": "http://127.0.0.1:4983",
       // /assets is NOT proxied: the vendored Mermaid bundle is now in
       // public/assets/vendor/ (S-196, FR-WK-15) — Vite serves it directly in dev
       // mode and Vite's build copies it verbatim to dist/assets/vendor/ for

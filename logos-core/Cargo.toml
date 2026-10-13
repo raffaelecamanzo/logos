@@ -5,7 +5,7 @@ edition     = "2021"
 description = "Logos engine — thick-core ports-and-adapters (ADR-01)"
 license.workspace = true
 # Internal workspace crate — never published to crates.io. Only the `logos`
-# binary is distributed (via brew/curl, ADR-16).
+# binary is the product (ADR-16).
 publish = false
 
 [dependencies]
@@ -252,13 +252,14 @@ tracing-subscriber = { workspace = true }
 [features]
 # The agent carve-out marker (CR-078, ADR-60, FR-OB-10). It adds NO dependency:
 # its only effect is to declare `observability::Surface::Chat`, the override-only
-# surface the in-process chat agent attributes its engine calls to. `agent-core`
-# turns it on, and `agent-core` itself reaches the binary only through the
-# `chat` extension and the wiki generator, which the `logos` binary links only
-# under its `agents` feature (S-643, S-644; `web` has no `agents` feature and no
-# edge to `agent-core`) — so in a build without agents the variant is **absent**
-# rather than present-and-never-emitted, which is what FR-OB-10 asks for. The
-# no-network fitness function is unaffected: no crate enters the graph here.
+# surface an in-process chat agent attributes its engine calls to. The agent
+# substrate a composing build links turns it on; no crate in this workspace does
+# (the binary this repository builds composes no extension, FR-DS-05) — so in
+# such a build the variant is **absent** rather than present-and-never-emitted,
+# which is what FR-OB-10 asks for. The marker is kept, and the gated code is
+# tested with it on: `scripts/gate.sh full` and CI run the `observability::` unit
+# tests under `--features agents`. The no-network fitness function is
+# unaffected: no crate enters the graph here.
 agents = []
 # The default build links the five v1 grammars (FR-PL-01). Each language is a
 # feature line + a `plugins/<lang>/` asset dir + one gated row in
@@ -342,7 +343,7 @@ lang-graphql    = ["dep:tree-sitter-graphql"]
 # touching no other core source (NFR-MA-01). Out of logos-core's slim `default`
 # (the five code grammars + markdown) so a minimal `--no-default-features` build
 # stays small (ADR-16), but carried by `lang-all` — which is the shipped CLI's
-# default (cli/Cargo.toml `default = ["lang-all"]`), so the distributed binary
+# default (cli/Cargo.toml `default = ["lang-all"]`), so the shipped binary
 # parses Terraform and SQL out of the box.
 lang-terraform  = ["dep:tree-sitter-hcl"]
 lang-sql        = ["dep:tree-sitter-sequel"]
