@@ -17,6 +17,17 @@ Linux builds are **musl-only by design**: there is no glibc variant and no
 install-time libc detection — the same artifact runs on Alpine, Debian,
 NixOS, or a scratch container. Windows is not supported in v1.
 
+## Which release the installers deliver
+
+Homebrew, the shell installer and a manual download all fetch the newest release
+on the [Releases page](https://github.com/raffaelecamanzo/logos/releases): the
+default build for your target, with the web UI embedded. For now those releases
+are built by this repository's own release workflow, from its release tags (see
+[CI integration → the release train](ci-integration.md#the-release-train-what-a-tag-publishes)),
+until the first release built outside this repository takes over the same names.
+The formula, the installer URL and the archive names do not change when that
+happens, so `brew upgrade` or re-running the installer moves to it.
+
 ## Install with Homebrew (macOS)
 
 ```bash

@@ -387,6 +387,33 @@ extension claims: ignored, and kept in the file`).
 
 Every other unknown table or key still fails with the same error as before.
 
+**Typed fields for an extension's table.** An active extension can give the web
+Config views typed fields for the table it owns: groups of fields, each group with an
+optional heading and an optional read-only note, each field an integer, a number, a
+true/false choice, a list (one entry per line), a string, or a pick from a fixed set
+of values, shown with its label, help, placeholder and the default that applies
+when the key is unset. The groups render after the built-in fields:
+
+- in a member's **Config** view, in the `config.toml` form — saved by its **Save**,
+  together with everything else in that form;
+- in the workspace **Config** view, in a *Workspace config tier* group over the
+  workspace root's `.logos/config.toml` — saved against the fingerprint its read
+  returned (`GET /api/v1/workspace/config`, `POST /api/v1/workspace/config/save`),
+  so a file changed on disk since the load is refused with `409` and shown, as the
+  manifest's save does. The group appears only while an extension contributes such
+  fields.
+
+A field is a view of the one document: it reads its value from the text in the raw
+pane and writes its one key back into that text, so the raw pane is always what
+**Save** writes and no extension writes the file itself. Clearing a field removes its
+key. A value the field cannot show without changing it — a hexadecimal integer, a
+multi-line or padded string, an inline table, an empty or mixed list — is shown as
+written, read-only, and left untouched; edit it in the raw pane. A pick-from-a-set
+value outside its set is shown as written and stays as written until you choose
+another. Logos validates the saved document as it always does, so a value the
+extension rejects is refused with `422` and nothing is written. A build that composes
+no extension shows none of these fields, and no *Workspace config tier* group.
+
 ```toml
 # Optional code-language admission allowlist (grammar names from `logos languages`).
 # Omit it (or use []) to index every compiled-in code language out of the box —

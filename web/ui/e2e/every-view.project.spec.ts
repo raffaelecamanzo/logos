@@ -12,7 +12,7 @@ import { expect, test } from "@playwright/test";
 
 import { navItemsFor } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
-import { extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
+import { composesNoExtension, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
 const CASES: Record<string, ViewCase> = {
   "/": { ready: "Code coverage" },
@@ -51,3 +51,11 @@ for (const [path, view] of Object.entries(CASES)) {
     test.info().annotations.push({ type: "widgets", description: `${path}: ${titles.join(" | ")}` });
   });
 }
+
+// A build that composes no extension renders no extension field in the member
+// Config form (S-730, FR-UI-54); a composed build's fields are its own specs' case.
+test("/config renders no extension field when the served build composes no extension", async ({ page, request }) => {
+  test.skip(!(await composesNoExtension(request)), "the served build composes an extension");
+  await layoutCase(page, "/config", CASES["/config"]);
+  await expect(page.locator("[data-extension-fields]")).toHaveCount(0);
+});

@@ -9,9 +9,10 @@
 # Publishing is a separate, later step: `scripts/publish-public.sh --version X.Y.Z`
 # turns the release(X.Y.Z) tree into one commit over origin/main, gated by
 # scripts/check-public-terms.sh, and with --push tags it vX.Y.Z and pushes both.
-# The tag is a source release: no workflow here builds or publishes anything from
-# it, and the version this script writes to Cargo.toml is the one the tag names
-# (publish-public.sh refuses a tag that disagrees with it).
+# The tag push starts .github/workflows/release.yml, which checks out the tag and
+# builds with `dist --tag=vX.Y.Z`: the version this script writes to Cargo.toml
+# must match the tag, or the workflow refuses it (and publish-public.sh refuses a
+# tag that disagrees with it first). See docs/howto/ci-integration.md.
 #
 # Usage: swe-build.sh [--dry-run] [--bump patch|minor]
 set -euo pipefail

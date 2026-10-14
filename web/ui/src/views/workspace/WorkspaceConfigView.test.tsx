@@ -16,6 +16,7 @@ import type {
   WorkspaceGovernanceAnswer,
   WorkspaceManifestDocument,
   WorkspaceRoster,
+  WorkspaceTierDocument,
 } from "../../api/types.ts";
 import { WorkspaceProvider, useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -23,6 +24,7 @@ import { expectToolPanel } from "../../copy/expectWidgetCopy.ts";
 import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../../extensions/registry.ts";
 import { extensionsInfo, STUB_UI, stubInfo } from "../../test/extensions.tsx";
+import { STUB_FIELDS_UI, STUB_NOTE, STUB_WORKSPACE_GROUPS } from "../../extensions/fixtures/stubConfigFields.ts";
 import { WorkspaceConfigView } from "./WorkspaceConfigView.tsx";
 
 const ROSTER: WorkspaceRoster = { workspace: "shop", default: "api", members: ["api", "web"] };
@@ -100,9 +102,12 @@ function stubApi({
   check = CLEAN_CHECK,
   saves = [],
   probeStatus = 200,
+  tiers = [],
 }: {
   /** `null` answers that read with a `500`. */
   manifests?: (WorkspaceManifestDocument | null)[];
+  /** The workspace-root config reads, served in turn like `manifests`. */
+  tiers?: WorkspaceTierDocument[];
   check?: WorkspaceGovernanceAnswer;
   saves?: { status: number; body: unknown }[];
   probeStatus?: number;
@@ -111,6 +116,7 @@ function stubApi({
   const posts: Posted[] = [];
   let m = 0;
   let s = 0;
+  let t = 0;
   const respond = (body: unknown, status = 200) =>
     Promise.resolve({
       ok: status >= 200 && status < 300,
@@ -137,6 +143,7 @@ function stubApi({
         return next === null ? respond({ error: "boom" }, 500) : respond(next);
       }
       if (url.startsWith("/api/v1/workspace/check")) return respond(check);
+      if (url.startsWith("/api/v1/workspace/config")) return respond(tiers[Math.min(t++, tiers.length - 1)]);
       return respond({});
     }),
   );
@@ -543,5 +550,205 @@ describe("this build composes no extension (FR-DS-05)", () => {
   it("reads no workspace-root tier: the manifest and its check are the view's only reads", async () => {
     const { gets } = await mount();
     expect(gets.some((u) => u.startsWith("/api/v1/workspace/config"))).toBe(false);
+  });
+});
+
+describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () => {
+  /** The workspace root's config.toml, declaring the stub's table. */
+  const TIER_CONTENT = '# the workspace tier\n\n[stub]\ncount = 3\nmode = "slow"\n';
+
+  /** The workspace-root config read. Its key-state and parse halves are the read's
+   *  own core fields, which the client checks before seeding an editor. */
+  function tier(over: Partial<WorkspaceTierDocument["config"]> = {}): WorkspaceTierDocument {
+    return {
+      config: {
+        path: ".logos/config.toml",
+        exists: true,
+        content: TIER_CONTENT,
+        fingerprint: "tier-loaded",
+        parsed: { chat: { provider: "openai", base_url: "" } } as WorkspaceTierDocument["config"]["parsed"],
+        error: null,
+        ...over,
+      },
+      chat_key: { present: false, last4: null },
+      chat_key_error: null,
+      effective_chat: null,
+    };
+  }
+
+  const WRITTEN = { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 40, fingerprint: "tier-mine" } };
+
+  /** Mount with the stub active, waiting for the tier group's fields. */
+  async function mountTier(opts: Parameters<typeof stubApi>[0] = {}) {
+    registerExtensionUi(STUB_FIELDS_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    const api = stubApi({ tiers: [tier()], ...opts });
+    render(
+      <WorkspaceProvider>
+        <WorkspaceConfigView />
+      </WorkspaceProvider>,
+    );
+    await screen.findByText("Workspace config tier");
+    return api;
+  }
+
+  function tierRaw(): HTMLTextAreaElement {
+    return screen.getByLabelText(/^Raw TOML — \.logos\/config\.toml/) as HTMLTextAreaElement;
+  }
+
+  const saveTier = () => screen.getByRole("button", { name: "Save the workspace config.toml" });
+
+  it("renders the stub's workspace group after the manifest group, over the workspace root's config.toml", async () => {
+    const { gets } = await mountTier();
+    expect(await screen.findByLabelText("Stub count")).toHaveValue(3);
+    expect(screen.getByLabelText("Stub mode")).toHaveValue("slow");
+    // The workspace groups, not the member ones: their legend, their fields, no member note.
+    const ext = document.body.querySelectorAll("[data-extension-fields]");
+    expect([...ext].map((g) => g.querySelector("legend")?.textContent)).toEqual(["[stub] (workspace tier)"]);
+    expect(screen.queryByLabelText("Stub title")).toBeNull();
+    expect(screen.queryByText(STUB_NOTE)).toBeNull();
+    // Core group first, then the tier the extension's fields edit, then its panel.
+    expect(expectOneWidgetStack(document.body).map(widgetTitle)).toEqual(["Workspace manifest", "Workspace config tier"]);
+    const stack = document.body.querySelector("[data-widget-stack]") as HTMLElement;
+    expect(stack.lastElementChild).toBe(screen.getByTestId("stub-workspace-panel"));
+    // The manifest form carries no extension field.
+    const manifestRaw = screen.getByLabelText(/^Raw TOML — logos\.workspace\.toml/);
+    const manifestPanel = manifestRaw.closest("section") as HTMLElement;
+    expect(manifestPanel.querySelector("[data-extension-fields]")).toBeNull();
+    expect(gets.filter((u) => u.startsWith("/api/v1/workspace/config"))).toHaveLength(1);
+  });
+
+  it("renders no tier group, and reads no tier, for a registered stub the server does not report active", async () => {
+    registerExtensionUi(STUB_FIELDS_UI);
+    setActiveExtensions(extensionsInfo());
+    const { gets } = await mount({ tiers: [tier()] });
+    expect(screen.queryByText("Workspace config tier")).toBeNull();
+    expect(document.body.querySelector("[data-extension-fields]")).toBeNull();
+    expect(gets.some((u) => u.startsWith("/api/v1/workspace/config"))).toBe(false);
+  });
+
+  it("patches an edit into the tier candidate and saves it through the fingerprint save", async () => {
+    const { posts } = await mountTier({ saves: [WRITTEN] });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.clear(screen.getByLabelText("Stub count"));
+    expect(tierRaw().value).toBe('# the workspace tier\n\n[stub]\nmode = "fast"\n');
+    await user.click(saveTier());
+    expect(await screen.findByText(/Saved \.logos\/config\.toml \(40 bytes\)/)).toHaveTextContent(/no member was reindexed/);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/v1/workspace/config/save");
+    expect(posts[0].form.get("fingerprint")).toBe("tier-loaded");
+    expect(posts[0].form.get("content")).toBe(tierRaw().value);
+    expect(posts[0].intent).toBeTruthy();
+  });
+
+  it("answers a stale fingerprint (409) with the conflict, writing nothing until the explicit overwrite", async () => {
+    const conflict: ManifestSaveOutcome = {
+      outcome: "conflict",
+      path: ".logos/config.toml",
+      loaded_fingerprint: "tier-loaded",
+      disk_fingerprint: "tier-disk",
+      disk_content: "[stub]\ncount = 9\n",
+    };
+    const { posts } = await mountTier({ saves: [{ status: 409, body: conflict }, WRITTEN] });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.click(saveTier());
+    expect(await screen.findByText(/Not saved — \.logos\/config\.toml changed on disk/)).toHaveTextContent(/Nothing was written/);
+    const panel = screen.getByText("CONFLICT").closest("section") as HTMLElement;
+    expect(within(panel).getByLabelText("The workspace config.toml on disk now")).toHaveValue(conflict.disk_content);
+    await user.click(within(panel).getByRole("button", { name: /Overwrite it with my edits/ }));
+    expect(await screen.findByText(/Overwrote the changes on disk with your edits/)).toBeInTheDocument();
+    expect(posts.map((p) => p.form.get("fingerprint"))).toEqual(["tier-loaded", "tier-disk"]);
+    expect(posts.every((p) => p.url === "/api/v1/workspace/config/save")).toBe(true);
+  });
+
+  it("states the file is on disk once the first save has created it", async () => {
+    await mountTier({ tiers: [tier({ exists: false, content: "" })], saves: [WRITTEN] });
+    const user = userEvent.setup();
+    expect(screen.getByText("not yet created")).toBeInTheDocument();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.click(saveTier());
+    await screen.findByText(/Saved \.logos\/config\.toml/);
+    expect(screen.queryByText("not yet created")).toBeNull();
+    expect(screen.getByText("on disk")).toBeInTheDocument();
+  });
+
+  it("offers no typed field over a tier that does not parse, leaving the raw pane as the repair path", async () => {
+    await mountTier({ tiers: [tier({ parsed: null, error: "config.toml: line 3: expected `=`" })] });
+    expect(await screen.findByText(/does not parse — every member inheriting from it/)).toHaveTextContent(/line 3/);
+    expect(screen.queryByLabelText("Stub count")).toBeNull();
+    expect(tierRaw()).toHaveValue(TIER_CONTENT);
+  });
+
+  it("loads the disk copy after a 409 on the explicit choice, re-reading the tier and discarding the edits", async () => {
+    const { gets, posts } = await mountTier({
+      tiers: [tier(), tier({ content: "[stub]\ncount = 9\n", fingerprint: "tier-disk" })],
+      saves: [{ status: 409, body: { outcome: "conflict", path: ".logos/config.toml", loaded_fingerprint: "tier-loaded", disk_fingerprint: "tier-disk", disk_content: "[stub]\ncount = 9\n" } as ManifestSaveOutcome }],
+    });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.click(saveTier());
+    await screen.findByText(/Not saved/);
+    await user.click(screen.getByRole("button", { name: /Load the version on disk/ }));
+    await waitFor(() => expect(tierRaw().value).toBe("[stub]\ncount = 9\n"));
+    expect(screen.getByLabelText("Stub count")).toHaveValue(9);
+    expect(await screen.findByText(/Loaded the version on disk — your unsaved edits were discarded/)).toBeInTheDocument();
+    expect(gets.filter((u) => u.startsWith("/api/v1/workspace/config"))).toHaveLength(2);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("states a refused tier save (422) inline, as nothing written", async () => {
+    await mountTier({ saves: [{ status: 422, body: { error: "unknown field `cnt` in [stub]" } }] });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.click(saveTier());
+    expect(await screen.findByText(/Validation error — nothing was written/)).toHaveTextContent(/unknown field `cnt`/);
+  });
+
+  it("makes a second save against the fingerprint the first one returned", async () => {
+    const second = { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 41, fingerprint: "tier-2" } };
+    const { posts } = await mountTier({ saves: [WRITTEN, second] });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.click(saveTier());
+    await screen.findByText(/\(40 bytes\)/);
+    await user.selectOptions(screen.getByLabelText("Stub mode"), "slow");
+    await user.click(saveTier());
+    await screen.findByText(/\(41 bytes\)/);
+    expect(posts.map((p) => p.form.get("fingerprint"))).toEqual(["tier-loaded", "tier-mine"]);
+  });
+
+  it("re-reads a repaired tier after the save, bringing the typed fields up and keeping the saved message", async () => {
+    await mountTier({ tiers: [tier({ parsed: null, error: "config.toml: line 3: expected `=`" }), tier()], saves: [WRITTEN] });
+    const user = userEvent.setup();
+    expect(screen.queryByLabelText("Stub count")).toBeNull();
+    await user.click(saveTier());
+    expect(await screen.findByLabelText("Stub count")).toHaveValue(3);
+    expect(screen.getByText(/Saved \.logos\/config\.toml \(40 bytes\)/)).toBeInTheDocument();
+  });
+
+  it("clears the conflict panel once the overwrite is written", async () => {
+    await mountTier({ saves: [{ status: 409, body: { outcome: "conflict", path: ".logos/config.toml", loaded_fingerprint: "tier-loaded", disk_fingerprint: "tier-disk", disk_content: "[stub]\ncount = 9\n" } as ManifestSaveOutcome }, WRITTEN] });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
+    await user.click(saveTier());
+    const panel = (await screen.findByText("CONFLICT")).closest("section") as HTMLElement;
+    await user.click(within(panel).getByRole("button", { name: /Overwrite it with my edits/ }));
+    await screen.findByText(/Overwrote the changes on disk/);
+    expect(screen.queryByText("CONFLICT")).toBeNull();
+  });
+
+  it("offers the tier group to an extension that contributes workspace groups only", async () => {
+    registerExtensionUi({ ...STUB_UI, configFields: { "stub-config": { workspace: STUB_WORKSPACE_GROUPS } } });
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    stubApi({ tiers: [tier()] });
+    render(
+      <WorkspaceProvider>
+        <WorkspaceConfigView />
+      </WorkspaceProvider>,
+    );
+    expect(await screen.findByText("Workspace config tier")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Stub count")).toHaveValue(3);
   });
 });

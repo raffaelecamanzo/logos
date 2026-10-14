@@ -952,7 +952,7 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "logos"
-version = "1.16.2"
+version = "1.16.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "logos-core"
-version = "1.16.2"
+version = "1.16.4"
 dependencies = [
  "anyhow",
  "arborium-dockerfile",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "logos-ext"
-version = "1.16.2"
+version = "1.16.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1053,7 +1053,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp"
-version = "1.16.2"
+version = "1.16.4"
 dependencies = [
  "anyhow",
  "logos-core",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "web"
-version = "1.16.2"
+version = "1.16.4"
 dependencies = [
  "anyhow",
  "axum",

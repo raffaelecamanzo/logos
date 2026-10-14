@@ -99,6 +99,7 @@ advisory** — they never move the quality signal and the quality gate never rea
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)
+8. [Contributing](contributing.md) — the per-sprint pull request (`scripts/publish-sprint.sh`), the issue status labels, and the owner's GitHub settings checklist; contributors start at [CONTRIBUTING.md](../../CONTRIBUTING.md)
 
 ## Quick start
 

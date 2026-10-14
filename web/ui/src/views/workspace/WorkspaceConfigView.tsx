@@ -9,8 +9,14 @@
  *
  *   - the manifest, `logos.workspace.toml` ({@link ManifestGroup}, S-430):
  *     `[workspace]`, `[workspace.warm]` and the full `[governance]` family;
+ *   - the workspace root's own `config.toml` ({@link TierGroup}, S-730), offered
+ *     only while a mounted extension contributes workspace field groups (FR-UI-54):
+ *     its tables are the ones those extensions read, so with none mounted there is
+ *     nothing to type and the group is neither rendered nor read;
  *   - the config panels the mounted extensions contribute (S-642), each owning its
- *     own reads and saves. This build composes none.
+ *     own reads and saves.
+ *
+ * A build that composes no extension renders the manifest group alone.
  *
  * The editing grammar is the member Config editor's (S-099, FR-UI-12), carried in
  * rather than re-invented: typed fields for the scalar/list keys, a raw-TOML pane
@@ -21,7 +27,8 @@
  * Validation is the server's: a candidate the parser rejects is refused before
  * the file is touched and the parser's message is shown inline.
  *
- * Two properties shape the manifest's save:
+ * Two properties shape the manifest's save; the first shapes the workspace config
+ * tier's save too:
  *
  *   - **No silent clobber.** The read returns a fingerprint of the bytes it
  *     loaded; the save posts it back, and a file changed on disk since (by hand,
@@ -62,8 +69,10 @@ import type { ChangeEvent, ReactNode } from "react";
 import { ConfigMutateError } from "../../api/configClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import {
+  fetchWorkspaceConfig,
   fetchWorkspaceGovernance,
   fetchWorkspaceManifest,
+  saveWorkspaceConfig,
   saveWorkspaceManifest,
 } from "../../api/workspaceClient.ts";
 import type {
@@ -71,6 +80,7 @@ import type {
   WorkspaceGovernanceAnswer,
   WorkspaceManifest,
   WorkspaceManifestDocument,
+  WorkspaceTierDocument,
 } from "../../api/types.ts";
 import {
   Badge,
@@ -86,6 +96,7 @@ import {
   Widget,
   WidgetStack,
 } from "../../components/index.ts";
+import { ExtensionConfigFields, useMountedConfigFields } from "../../extensions/ConfigFields.tsx";
 import { ExtensionConfigPanels } from "../../extensions/ConfigPanels.tsx";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { dropEmptyTable, patch, type TomlFieldType } from "../config/toml.ts";
@@ -407,12 +418,16 @@ interface ResultMessage {
 const RESTART_NOTE =
   "The running serve keeps the manifest it started with: members, warm concurrency and the governance findings take effect after `logos serve` is restarted. No member was reindexed.";
 
-function describeOutcome(outcome: ManifestSaveOutcome, overwrote: boolean): ResultMessage {
+/** What a workspace-root `config.toml` save leaves untouched, stated with every
+ *  successful write. */
+const TIER_NOTE = "Only the workspace root's .logos/ was written; no member was reindexed.";
+
+function describeOutcome(outcome: ManifestSaveOutcome, overwrote: boolean, writtenNote = RESTART_NOTE): ResultMessage {
   switch (outcome.outcome) {
     case "written":
       return {
         kind: "ok",
-        text: `${overwrote ? "Overwrote the changes on disk with your edits — " : ""}Saved ${outcome.path} (${outcome.bytes_written} bytes). ${RESTART_NOTE}`,
+        text: `${overwrote ? "Overwrote the changes on disk with your edits — " : ""}Saved ${outcome.path} (${outcome.bytes_written} bytes). ${writtenNote}`,
       };
     case "unchanged":
       return { kind: "ok", text: `No change — ${outcome.path} on disk already matches; nothing was written.` };
@@ -665,10 +680,140 @@ function ManifestGroup() {
   );
 }
 
+// ── The workspace root's config tier (S-730) ───────────────────────────────────
+
+/** The editor over one loaded workspace-root `config.toml`: the mounted extensions'
+ *  workspace field groups, the raw pane they patch, and the fingerprint save. Keyed
+ *  by the load in {@link TierGroup}, like {@link ManifestEditor}. */
+function TierEditor({
+  doc,
+  notice,
+  onReload,
+}: {
+  doc: WorkspaceTierDocument;
+  notice: ResultMessage | null;
+  onReload: (notice: ResultMessage) => void;
+}) {
+  const file = doc.config;
+  const [raw, setRaw] = useState(file.content);
+  const [fingerprint, setFingerprint] = useState(file.fingerprint);
+  // A load of an absent file states "not yet created" until a save writes it.
+  const [exists, setExists] = useState(file.exists);
+  const [conflict, setConflict] = useState<Extract<ManifestSaveOutcome, { outcome: "conflict" }> | null>(null);
+  const [result, setResult] = useState<ResultMessage | null>(notice);
+  const [saving, setSaving] = useState(false);
+
+  async function save(against: string, overwrote: boolean) {
+    setSaving(true);
+    setResult(null);
+    try {
+      const outcome = await saveWorkspaceConfig(raw, against);
+      const message = describeOutcome(outcome, overwrote, TIER_NOTE);
+      setResult(message);
+      if (outcome.outcome === "conflict") {
+        setConflict(outcome);
+        return;
+      }
+      setConflict(null);
+      setFingerprint(outcome.fingerprint);
+      if (outcome.outcome === "written") setExists(true);
+      // A repair of an unparsable load has no typed fields up: re-seed to bring them.
+      if (outcome.outcome === "written" && file.parsed === null) onReload(message);
+    } catch (e) {
+      setResult(describeError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <div className={styles.fileHead}>
+        <Badge tone={exists ? "green" : "muted"}>{exists ? "on disk" : "not yet created"}</Badge>
+        {file.error === null ? <Badge tone="green">parses</Badge> : <Badge tone="red">does not parse</Badge>}
+      </div>
+      {file.error !== null ? (
+        <>
+          <ErrorPanel>
+            The workspace root&apos;s config.toml does not parse — every member inheriting from it fails
+            its config read until it is repaired. Fix it in the raw pane below: {file.error}
+          </ErrorPanel>
+          <p className={styles.help}>Typed fields are unavailable while the document does not parse.</p>
+        </>
+      ) : (
+        <ExtensionConfigFields scope="workspace" raw={raw} onPatch={setRaw} />
+      )}
+
+      <TextareaField
+        label={`Raw TOML — ${file.path} (the full document)`}
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        rows={12}
+        spellCheck={false}
+        className="mono"
+      />
+
+      <div className={styles.actions}>
+        <Button variant="primary" onClick={() => void save(fingerprint, false)} disabled={saving} aria-busy={saving}>
+          {saving ? "Saving…" : "Save the workspace config.toml"}
+        </Button>
+      </div>
+      <p className={styles.help}>
+        Save validates the whole document and replaces the file atomically; an invalid edit is
+        refused and the file is left untouched. It writes only under the workspace root&apos;s{" "}
+        <code>.logos/</code> and reindexes nothing.
+      </p>
+      <ResultPanel result={result} />
+      {conflict && (
+        <ConflictPanel
+          disk={conflict.disk_content}
+          diskLabel="The workspace config.toml on disk now"
+          busy={saving}
+          onLoadDisk={() => onReload(DISCARDED)}
+          onOverwrite={() => void save(conflict.disk_fingerprint, true)}
+        >
+          The workspace root&apos;s <code>config.toml</code> was changed on disk after this editor
+          loaded it. Your save was refused so that change is not silently overwritten.
+        </ConflictPanel>
+      )}
+    </>
+  );
+}
+
+/** The workspace root's `config.toml`: load it, then edit it — rendered, and read,
+ *  only while a mounted extension contributes workspace field groups. */
+function TierGroup() {
+  const [generation, setGeneration] = useState(0);
+  const [notice, setNotice] = useState<ResultMessage | null>(null);
+  const loads = useRef(0);
+  const loaded = useApiResource<{ doc: WorkspaceTierDocument; load: number }>(
+    () => fetchWorkspaceConfig().then((doc) => ({ doc, load: ++loads.current })),
+    [generation],
+  );
+  return (
+    <ConfigGroup title="Workspace config tier" file="<workspace-root>/.logos/config.toml">
+      <AsyncResource resource={loaded} loadingLabel="Loading the workspace config…">
+        {(l) => (
+          <TierEditor
+            key={l.load}
+            doc={l.doc}
+            notice={notice}
+            onReload={(next) => {
+              setNotice(next);
+              setGeneration((n) => n + 1);
+            }}
+          />
+        )}
+      </AsyncResource>
+    </ConfigGroup>
+  );
+}
+
 // ── The view ───────────────────────────────────────────────────────────────────
 
 export function WorkspaceConfigView() {
   const { mode, error } = useWorkspace();
+  const tierFields = useMountedConfigFields("workspace");
 
   if (mode === "loading") {
     return (
@@ -703,6 +848,8 @@ export function WorkspaceConfigView() {
       </Callout>
       {/* Each group is a sibling ConfigGroup owning its own reads and saves. */}
       <ManifestGroup />
+      {/* The workspace root's config.toml, for the mounted extensions' fields (S-730). */}
+      {tierFields.length > 0 && <TierGroup />}
       {/* The panels of the mounted extensions (S-642). */}
       <ExtensionConfigPanels scope="workspace" />
     </WidgetStack>

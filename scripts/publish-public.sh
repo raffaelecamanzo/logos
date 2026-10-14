@@ -63,10 +63,24 @@
 #   the tag this run created.
 #
 # WHAT A PUBLIC TAG IS
-#   A source release. No workflow in this repository runs on a pushed tag, builds
-#   a binary, creates a GitHub Release or updates a package tap: the tag marks the
-#   squash commit, and the commit is what a build pins. Binaries are built and
-#   published elsewhere, from a pin of this tag.
+#   For now, a binary release as well as a source release (S-732). Until the
+#   first release built outside this repository takes over the release names, a
+#   pushed vX.Y.Z tag starts .github/workflows/release.yml, which builds this
+#   repository's binaries for the four targets from the tag, creates the GitHub
+#   Release on it, and publishes the shell installer and the Homebrew formula. A
+#   tag pushed before the pipeline returned, with no Release yet, is released by
+#   dispatching the workflow with that tag. The commit that removes the pipeline
+#   again lands in the tag that first outside release is built from; from then on
+#   a tag here is a source release only, and the commit is what a build pins.
+#
+# HOW THE RELEASE WORKFLOW CONSUMES IT
+#   Every job that builds checks out the tag (the squash commit's tree; the
+#   formula job checks out the tap repository instead), `dist` builds with
+#   --tag=vX.Y.Z and refuses a tag the workspace version does not match, and the
+#   GitHub Release is created on the existing tag (--verify-tag) with --target set
+#   to the squash commit. A tag that already has a Release is refused before
+#   anything is built, and the release text passes this script's term gate before
+#   the Release is created or the formula pushed. See docs/howto/ci-integration.md.
 #
 # Usage:
 #   bash scripts/publish-public.sh --version X.Y.Z [--from REV] [--push]

@@ -1,0 +1,13 @@
+# release-text.allow — reviewed lines scripts/check-release-text.sh admits in the
+# text a release generates (the notes, the Homebrew formula, the shell installer).
+#
+# Same format as scripts/public-terms.allow: one `name:sha256` entry per admitted
+# line, the digest of the whole line without its ending. The name is the file's
+# base name, which is how check-release-text.sh stages it. An entry lapses when
+# its line changes, so a new dist version's template is reviewed again. Say why a
+# line is admitted without quoting the term the gate found in it.
+
+# The shell installer dist 0.32.0 generates: a comment in its LoongArch ABI
+# detection, upstream boilerplate describing early Linux distributions for that
+# architecture. It names nothing about this project.
+logos-installer.sh:d6f9230839ed7e933873748533f1d1019a497489d83c760adeb6338c6e25737e

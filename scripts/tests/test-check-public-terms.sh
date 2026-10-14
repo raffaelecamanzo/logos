@@ -322,6 +322,94 @@ printf 'dos.txt:%s\n' "$(sha "a $WORD here")" >"$WORK/dos.allow"
 run "$WORK/dos.allow"
 expect "a CRLF line's entry is the digest of the line without its ending" 0 "public-terms: tracked=1 untracked=0 scanned=1 binary=0 skipped=0 hits=0 allowlisted=1"
 
+# --- the text a release generates (scripts/check-release-text.sh) --------------
+#
+# .github/workflows/release.yml runs the gate over the release notes, the Homebrew
+# formula and the shell installer before the GitHub Release is created. Those
+# files are never committed, so check-release-text.sh stages them in a throwaway
+# repository; these cases run it on files shaped like the ones dist writes.
+
+RELTEXT="$HERE/scripts/check-release-text.sh"
+REL="$WORK/release"
+mkdir -p "$REL/a" "$REL/b"
+
+# formula <file> <desc>: a formula shaped like the one dist generates.
+formula() {
+    cat >"$1" <<EOF
+class Logos < Formula
+  desc "$2"
+  homepage "https://github.com/example/logos"
+  version "1.16.2"
+  if OS.mac? && Hardware::CPU.arm?
+      url "https://github.com/example/logos/releases/download/v1.16.2/logos-aarch64-apple-darwin.tar.xz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  end
+  license "Apache-2.0"
+
+  def install
+    bin.install "logos"
+  end
+end
+EOF
+}
+formula "$REL/logos.rb" "Logos — structural code intelligence"
+printf '## Install logos 1.16.2\n\n### Added\n\n- a release, built from the tag\n' >"$REL/notes.txt"
+printf '#!/bin/sh\n# installer for logos 1.16.2\nAPP_NAME="logos"\n' >"$REL/logos-installer.sh"
+
+# reltext [<allow-file>] <file>... -> sets OUT and RC
+reltext() {
+    local allow="$EMPTY_ALLOW"
+    case "${1:-}" in *.allow) allow="$1"; shift ;; esac
+    OUT="$(bash "$RELTEXT" --terms "$TERMS" --allow "$allow" "$@" 2>&1)"
+    RC=$?
+}
+
+reltext "$REL/notes.txt" "$REL/logos.rb" "$REL/logos-installer.sh"
+expect "release text: clean notes, formula and installer pass, with their denominator" 0 \
+    "release text: public-terms: tracked=3 untracked=0 scanned=3 binary=0 skipped=0 hits=0 allowlisted=0"
+
+formula "$REL/a/logos.rb" "Logos — structural code intelligence, the $WORD build"
+reltext "$REL/notes.txt" "$REL/a/logos.rb"
+expect "release text: a term planted in a fixture formula fails with name:line:term" 1 "    logos.rb:2:$WORD"
+
+printf '## Install logos 1.16.2\n\nthe quindle frap returns\n' >"$REL/a/notes.txt"
+reltext "$REL/a/notes.txt" "$REL/logos.rb"
+expect "release text: a pair planted in the release notes fails" 1 "    notes.txt:3:$PAIR"
+
+printf '#!/bin/sh\nAPP_NAME="logos-%s"\n' "$WORD" >"$REL/a/logos-installer.sh"
+reltext "$REL/notes.txt" "$REL/logos.rb" "$REL/a/logos-installer.sh"
+expect "release text: a term in the installer fails" 1 "    logos-installer.sh:2:$WORD"
+
+# A file the gate does not read as text is not a pass: the summary would be clean.
+printf 'a %s\0 binary\n' "$WORD" >"$REL/b/blob.bin"
+reltext "$REL/notes.txt" "$REL/b/blob.bin"
+expect "release text: a file not read as text fails the run" 3 "" "release text:"
+
+reltext "$REL/notes.txt" "$REL/a/notes.txt"
+expect "release text: two files with one base name are refused" 2 \
+    "check-release-text.sh: two files share the base name notes.txt"
+
+reltext "$REL/notes.txt" "$REL/no-such.rb"
+expect "release text: a missing file is refused" 2 \
+    "check-release-text.sh: not a readable regular file: $REL/no-such.rb"
+
+reltext
+expect "release text: no file at all is refused" 2
+
+OUT="$(bash "$RELTEXT" --terms "$WORK/no-terms.sha256" --allow "$EMPTY_ALLOW" "$REL/notes.txt" 2>&1)"
+RC=$?
+expect "release text: a gate that cannot run fails the run" 3 "" "release text:"
+
+printf 'logos.rb:%s\n' "$(sha "  desc \"Logos — structural code intelligence, the $WORD build\"")" >"$WORK/rel.allow"
+reltext "$WORK/rel.allow" "$REL/notes.txt" "$REL/a/logos.rb"
+expect "release text: an allowlist entry is keyed by the file's base name" 0 \
+    "release text: public-terms: tracked=2 untracked=0 scanned=2 binary=0 skipped=0 hits=0 allowlisted=1"
+
+OUT="$(bash "$RELTEXT" --terms "$TERMS" "$REL/notes.txt" 2>&1)"
+RC=$?
+expect "release text: without --allow, the reviewed release-text allowlist is the one read" 0 \
+    "release text: allowlist $HERE/scripts/release-text.allow"
+
 # --- the controls --------------------------------------------------------------
 
 fixture a.txt "clean text

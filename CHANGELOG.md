@@ -13,6 +13,73 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.16.4] — 2026-10-14
+
+The first binary release since 1.15.8: Homebrew, the shell installer and the
+release archives deliver it again, and it carries every change listed under
+1.16.0 to 1.16.3 below.
+
+### Added
+
+- **The contributor documents are checked in the gate and in CI.**
+  `scripts/tests/test-contributing-docs.sh` checks `CONTRIBUTING.md`,
+  `docs/howto/contributing.md` and the issue forms: every quoted command, path,
+  flag, link and status label must exist, and the forms must be valid.
+
+## [1.16.3] — 2026-10-14
+
+### Added
+
+- **Release tags publish this repository's binaries again (S-732).** Until the
+  first release built outside this repository takes over the release names, a
+  pushed release tag runs `.github/workflows/release.yml` once more: four archives
+  (`aarch64`/`x86_64` × Apple Darwin / Linux musl, the default build with the real
+  web UI), their checksums, the shell installer and the Homebrew formula in the
+  `raffaelecamanzo/homebrew-tap` tap, under the names they had before 1.16.0. The
+  workflow, `dist-workspace.toml`, the `logos` package's `[package.metadata.dist]`
+  and the `[profile.dist]` profile are restored as they were before 1.16.0; the
+  commit that removes them again lands in the tag that first outside release is
+  built from. New in the workflow:
+  - a manual dispatch releases an **existing** tag, named by its `tag` input, so a
+    tag cut while the pipeline was gone (`v1.16.2`) is released without a new
+    tag. Every job builds the tag's commit, never the dispatching branch, and
+    `scripts/release-dist-config.sh` supplies the dist configuration a tag cut
+    without it lacks, changing nothing on a tag that has it;
+  - `scripts/release-tag-guard.sh` refuses, before anything is built and again
+    before the GitHub Release is created, a tag that is not a version tag, is not
+    the checkout, or already has a GitHub Release (drafts included); an unreadable
+    release listing is a refusal too, and so is a tag moved during the run;
+  - `scripts/check-release-text.sh` runs the term gate over the release title, the
+    notes, the formula, the installer and the published `dist-manifest.json`
+    before the Release is created or the formula pushed, and fails the release on
+    a hit. Reviewed lines of generated text are admitted through
+    `scripts/release-text.allow`; its one entry is a comment in the installer
+    template `dist` ships.
+
+  The suites are `scripts/tests/test-release-tag-guard.sh`,
+  `scripts/tests/test-release-dist-config.sh`, `scripts/tests/test-release-workflow.sh`
+  (the workflow's structure: step order, checkouts, refusal steps that cannot be
+  bypassed) and the release-text cases of `scripts/tests/test-check-public-terms.sh`. `docs/howto/ci-integration.md`
+  describes the release train; `docs/howto/installation.md` says which release
+  the installers deliver.
+- **An extension contributes typed fields to the Config forms (S-730).** The SPA
+  extension registry (`web/ui/src/extensions/registry.ts`) takes config field
+  groups per Config view (member, workspace), keyed to one of the extension's
+  manifest config panels and limited to that panel's table (or a sub-table of it):
+  kinds `int`, `float`, `bool`, `list`, `str` and `choice`, each with a label,
+  help, placeholder and default hint, and an optional read-only group note. The member Config view
+  renders the mounted extensions' groups after its core groups in the
+  `config.toml` form, saved by its Save; the workspace Config view renders them in
+  a group over the workspace root's `.logos/config.toml`, saved with the
+  fingerprint its read returned (`409` on a stale one), and offered only while an
+  extension contributes workspace fields. A field reads its value from the raw
+  candidate and patches its one key back into it (`readValue` beside `patch` in
+  `web/ui/src/views/config/toml.ts`), so no new write path or route exists. An
+  empty field removes its key; a value the reader cannot type is shown read-only
+  and left untouched; a `choice` value outside its options is shown as written
+  and never rewritten. A build that composes no extension renders no extension
+  field. `docs/howto/configuration.md` describes the fields.
+
 ## [1.16.2] — 2026-10-14
 
 ## [1.16.1] — 2026-10-13

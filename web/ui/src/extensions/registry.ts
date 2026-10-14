@@ -5,7 +5,8 @@
  * Two things meet here, and NEITHER alone mounts anything:
  *
  *   - the CODE an extension contributes — its icons, view components, config-panel
- *     components and Dashboard cards — registered at build time through the
+ *     components, config field groups and Dashboard cards — registered at build
+ *     time through the
  *     `virtual:logos-extensions` module (`boot.ts`); and
  *   - the SERVER's statement of which extensions are ACTIVE and what each puts in the
  *     UI (`GET /api/v1/extensions`, read once at boot).
@@ -70,6 +71,45 @@ export interface ConfigPanelProps {
   host?: ConfigPanelHost;
 }
 
+/** The TOML shape a config field edits. A `choice` is a string drawn from its
+ *  options; the rest are the shapes the core's typed fields take. */
+export type ConfigFieldKind = "int" | "float" | "bool" | "list" | "str" | "choice";
+
+/** What every config field declares, whatever its kind. */
+interface ConfigFieldBase {
+  /** The `config.toml` table holding the key: the table of the config panel the
+   *  field's group is keyed to, or a sub-table of it. */
+  table: string;
+  key: string;
+  label: string;
+  help: string;
+  placeholder?: string;
+  /** The default the server applies when the key is unset, as the field states it
+   *  beside the value ("Default: …"). */
+  defaultHint?: string;
+}
+
+/**
+ * One typed field an extension contributes to a Config form (S-730, FR-UI-54). Its
+ * value is read from, and patched into, the candidate document the form already
+ * edits, so the field is never a second writer of the file.
+ */
+export type ConfigFieldDescriptor =
+  | (ConfigFieldBase & { kind: Exclude<ConfigFieldKind, "choice"> })
+  | (ConfigFieldBase & { kind: "choice"; options: readonly string[] });
+
+/**
+ * A group of config fields, rendered after the Config form's core groups. Its
+ * `note` is read-only text above the fields: a fixed string, or one computed from
+ * the view's host context ({@link ConfigPanelHost}; the member view hands one, the
+ * workspace view none) — `null` renders no note.
+ */
+export interface ConfigFieldGroup {
+  legend?: string;
+  note?: string | ((host: ConfigPanelHost | undefined) => string | null);
+  fields: readonly ConfigFieldDescriptor[];
+}
+
 /** The props a Dashboard card receives (S-644): the manifest line that mounted it,
  *  and the Dashboard's overview read-model — which carries the field the card's
  *  extension adds to it (`OverviewField` on the server), so the card reads from the
@@ -94,6 +134,13 @@ export interface ExtensionUi {
   configPanels?: Readonly<
     Record<string, Partial<Record<ConfigPanelScope, ComponentType<ConfigPanelProps>>>>
   >;
+  /** Config field groups per panel id, per Config view they appear in (S-730). A
+   *  group is offered only when the manifest lists its panel, like the panel's
+   *  component, and a field outside the panel's table is not offered at all: the
+   *  manifest names the tables an extension edits. */
+  configFields?: Readonly<
+    Record<string, Partial<Record<ConfigPanelScope, readonly ConfigFieldGroup[]>>>
+  >;
   /** Dashboard-card component per card id (S-644). Where the cards render is the
    *  Dashboard's: one slot, directly after its freshness callout. */
   dashboardCards?: Readonly<Record<string, ComponentType<DashboardCardProps>>>;
@@ -115,6 +162,13 @@ export interface MountedConfigPanel {
   Component: ComponentType<ConfigPanelProps>;
 }
 
+/** One config field group that is mounted, with the panel that keyed it. */
+export interface MountedConfigFieldGroup {
+  scope: ConfigPanelScope;
+  panel: ExtensionConfigPanel;
+  group: ConfigFieldGroup;
+}
+
 /** One Dashboard card that is mounted, with the component that renders it. */
 export interface MountedDashboardCard {
   card: ExtensionDashboardCard;
@@ -130,6 +184,7 @@ export interface MountedExtension {
   icons: Readonly<Record<string, IconComponent>>;
   views: Readonly<Record<string, ViewComponent>>;
   configPanels: readonly MountedConfigPanel[];
+  configFields: readonly MountedConfigFieldGroup[];
   dashboardCards: readonly MountedDashboardCard[];
 }
 
@@ -167,6 +222,16 @@ function mount(ext: ExtensionInfo, reg: ExtensionUi): MountedExtension | null {
       return Component === undefined ? [] : [{ scope, panel, Component }];
     }),
   );
+  // Field groups keyed to a panel the manifest lists, keeping only the fields in
+  // that panel's table (or a sub-table of it); a group left with none is dropped.
+  const configFields = ui.config_panels.flatMap((panel) =>
+    (["member", "workspace"] as const).flatMap((scope) =>
+      (reg.configFields?.[panel.id]?.[scope] ?? []).flatMap((group) => {
+        const fields = group.fields.filter((f) => inTable(f.table, panel.table));
+        return fields.length === 0 ? [] : [{ scope, panel, group: { ...group, fields } }];
+      }),
+    ),
+  );
   // A card the manifest lists AND the bundle can render, like a config panel.
   const dashboardCards = (ui.dashboard_cards ?? []).flatMap((card) => {
     const Component = reg.dashboardCards?.[card.id];
@@ -175,7 +240,12 @@ function mount(ext: ExtensionInfo, reg: ExtensionUi): MountedExtension | null {
   const navAfter = Object.fromEntries(
     nav.flatMap((n) => (reg.navAfter?.[n.id] !== undefined ? [[n.id, reg.navAfter[n.id]]] : [])),
   );
-  return { id: ext.id, nav, navAfter, icons, views, configPanels, dashboardCards };
+  return { id: ext.id, nav, navAfter, icons, views, configPanels, configFields, dashboardCards };
+}
+
+/** Is `table` the panel's table `owner`, or a sub-table of it? */
+function inTable(table: string, owner: string): boolean {
+  return owner !== "" && (table === owner || table.startsWith(`${owner}.`));
 }
 
 function compose(): ExtensionsSnapshot {
@@ -268,6 +338,12 @@ export function mountedIcon(id: string): IconComponent | undefined {
 /** The mounted config panels offered in the Config view of `scope`. */
 export function mountedConfigPanels(scope: ConfigPanelScope): readonly MountedConfigPanel[] {
   return snapshot.mounted.flatMap((m) => m.configPanels.filter((p) => p.scope === scope));
+}
+
+/** The mounted config field groups offered in the Config form of `scope` (S-730),
+ *  in registration-then-manifest order. */
+export function mountedConfigFields(scope: ConfigPanelScope): readonly MountedConfigFieldGroup[] {
+  return snapshot.mounted.flatMap((m) => m.configFields.filter((g) => g.scope === scope));
 }
 
 /** The mounted Dashboard cards, in registration-then-manifest order (S-644). */

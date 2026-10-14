@@ -1,5 +1,7 @@
 [package]
-# Package name == the app name: the binary is `logos`. The directory stays
+# Package name == the distributed app name: cargo-dist derives artifact names
+# (logos-<target>.tar.xz), the Homebrew formula (logos.rb → `brew install
+# <tap>/logos`, FR-IN-05), and the installer URL from it. The directory stays
 # `cli/` (the adapter role, ADR-01); only the package identity is `logos`.
 name    = "logos"
 version.workspace = true
@@ -7,14 +9,19 @@ edition = "2021"
 description = "Logos — structural code intelligence for AI-assisted development"
 license.workspace = true
 repository.workspace = true
+# The Homebrew formula's homepage field (cargo-dist publish-jobs).
 homepage = "https://github.com/raffaelecamanzo/logos"
 # Internal workspace crate — never published to crates.io. It builds the single
-# `logos` binary (ADR-16).
+# distributed `logos` binary (ADR-16).
 publish = false
 
-# The default feature set (`lang-all` + `ui`, below) is the build this repository
-# ships, the dashboard included (S-287, CR-078/ADR-60), and it composes no
-# extension (FR-DS-05).
+# cargo-dist (S-023, FR-DS-01, ADR-16): this is the one distributed package —
+# `publish = false` keeps it off crates.io, so dist needs the explicit opt-in.
+[package.metadata.dist]
+dist = true
+# No `features` list: the default feature set (`lang-all` + `ui`, below) is the
+# build this repository ships, the dashboard included (S-287, CR-078/ADR-60), and
+# it composes no extension (FR-DS-05).
 
 # The CLI as a library (CR-213, ADR-74): `logos_cli::run(ExtensionHost)` is the
 # entry a binary's `main` — the composition root — calls with its extensions.

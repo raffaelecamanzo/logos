@@ -264,8 +264,9 @@ A release is a **tag**, and the tag marks one commit on `origin/main`. When the
 sprints a release holds were already published as pull requests, that commit is
 already on `origin/main` and `--tag-only` (below) tags it. When a release is
 published without them, `scripts/publish-public.sh` builds **one commit** over
-`origin/main`, whatever local history led to it, and tags it. The tag is a source
-release: no workflow in this repository runs on it.
+`origin/main`, whatever local history led to it, and tags it. Pushing the tag
+starts the release workflow, which builds and publishes the binaries from it (see
+[The release train](#the-release-train-what-a-tag-publishes) below).
 
 ```bash
 bash scripts/publish-public.sh --version 1.15.7          # dry run: prints, moves nothing
@@ -325,13 +326,80 @@ Exit codes: `0` done, `1` the term gate found a listed term, `2` usage error or 
 failed precondition, `3` the term gate could not run or read the wrong number of
 files, `4` the push failed (the tag the run created is deleted again).
 
-**What the tag starts.** Nothing in this repository: no workflow runs on a
-pushed tag, builds a binary, creates a GitHub Release or updates a package
-tap (`.github/workflows/ci.yml` runs on `main` and on pull requests only). The
-tag marks the squash commit, and that commit is what a build pins.
-
 The tests are `bash scripts/tests/test-publish-public.sh`: every case runs in a
 throwaway clone whose `origin` is a local bare repository.
+
+### The release train: what a tag publishes
+
+**For now, a tag publishes this repository's binaries.** Until the first release
+built outside this repository takes over the release names, a release tag runs
+`.github/workflows/release.yml` (cargo-dist): four archives
+(`aarch64`/`x86_64` × Apple Darwin / Linux musl) with their checksums, the shell
+installer `logos-installer.sh`, and the Homebrew formula `logos.rb`, pushed to the
+`raffaelecamanzo/homebrew-tap` tap. Each archive is the default build, with the
+real web UI. The commit that removes this pipeline again lands in the tag that
+first outside release is built from; from then on a tag here is a source release
+only, and the commit it marks is what a build pins. Only one release train runs
+at any moment.
+
+**Releasing a tag that already exists.** A tag pushed while this repository had no
+release pipeline (`v1.16.2`; `v1.16.1` is superseded by it and is not released) is
+released by dispatching the workflow from the default branch with the tag as its `tag` input (**Actions → Release →
+Run workflow**, or `gh workflow run release.yml -f tag=v1.16.2`). Dispatch only a
+tag newer than the newest GitHub Release: the guard refuses a tag that already has
+one, not an older tag, and an older tag released now would become the latest
+Release, so the installer URL and the tap would move back to it. The run builds
+the tag, not the branch it was dispatched from, and uses the default branch's copy
+of the workflow and of `scripts/`. A tag cut without the dist configuration gets
+it from there: `scripts/release-dist-config.sh` adds `dist-workspace.toml`, the
+`[profile.dist]` profile and the `logos` package's `[package.metadata.dist]`
+table, and changes nothing on a tag that already carries them.
+
+**What it refuses.** `scripts/release-tag-guard.sh` runs before `dist` is
+installed or anything is built, and again just before the GitHub Release is
+created. It refuses a tag that is not `vMAJOR.MINOR.PATCH` (optionally
+`-SUFFIX`), a checkout that is not the tag's commit, and a tag that already has a
+GitHub Release, drafts included; a release listing it cannot read is a refusal
+too. A released tag is never released again, whichever train released it. The
+build jobs check out the commit the first run of the guard validated, not the tag
+by name, and the second run refuses a tag that no longer points at that commit,
+so a tag moved during the run is never released over artifacts of another commit.
+
+**What it checks before anything is published.** In the `host` job,
+`scripts/check-release-text.sh` runs the term gate (`scripts/check-public-terms.sh`)
+over the release title, the release notes, the formula, the installer and the
+`dist-manifest.json` the Release attaches: every text file the Release carries.
+The archives' own text files (`README.md`, `LICENSE`, `CHANGELOG.md`,
+`THIRD-PARTY-NOTICES.md`) are tracked, so the tree gate covered them when the tag
+was published. The
+gate walks a git repository, so the script stages those files, under their base
+names, in a throwaway one; it fails the release on a listed term (exit 1) and on a
+walk that did not read every file as text (exit 3). After a failure no Release is
+created and no formula is pushed; the build jobs' workflow artifacts already
+exist by then, but they are not the Release, the installer URL or the tap. Reviewed lines of generated text are admitted
+through `scripts/release-text.allow`, keyed by base name: the one entry today is
+a comment in the installer template `dist` ships, unrelated to this project.
+
+**How `release.yml` consumes the tag.** Traced through the workflow file:
+
+| Step | What it reads | So it builds |
+|---|---|---|
+| Trigger | `on.push.tags: '**[0-9]+.[0-9]+.[0-9]+*'`, or `workflow_dispatch` with the `tag` input | the pushed `vX.Y.Z`, or the named one, starts the run |
+| `plan` | the guard's `tag` output → `dist host --steps=create --tag=vX.Y.Z` | the release named by the tag; `dist` refuses a tag the workspace version does not match, which is why `publish-public.sh` checks `Cargo.toml` first |
+| Every job that builds | `actions/checkout@v6` with `ref:` the commit `plan` validated (`plan` and `host` check out `refs/tags/vX.Y.Z`; `publish-homebrew-formula` checks out the tap repository and only commits the formula built from the tag's artifacts) | the tag's tree, never the dispatching branch |
+| `build-*` | `dist build --tag=vX.Y.Z` | the artifacts from that tree, with the SPA `build-spa` built from it |
+| `host` | `gh release create vX.Y.Z --verify-tag --target "$RELEASE_COMMIT"`, where `RELEASE_COMMIT` is the guard's `commit` output | a GitHub Release on the existing tag, pointing at its commit |
+
+Nothing in the workflow reads history behind the tagged commit, so a release
+built from the one squash commit is the same release the local tree would build.
+Never regenerate the workflow with `dist init`: it is hand-customised (the
+`build-spa` job, the dispatch, the guard, the term gate), and `dist-workspace.toml`
+sets `allow-dirty = ["ci"]` so `dist` accepts it as edited. The tests are
+`bash scripts/tests/test-release-tag-guard.sh` (against a stubbed release
+listing), `bash scripts/tests/test-release-dist-config.sh`,
+`bash scripts/tests/test-release-workflow.sh` (the workflow's structure, parsed:
+step order, checkouts, refusal steps that cannot be bypassed), and the
+release-text cases of `bash scripts/tests/test-check-public-terms.sh`.
 
 ## See also
 

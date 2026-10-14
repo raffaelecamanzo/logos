@@ -1,0 +1,84 @@
+name: Bug report
+description: Something does not work as documented
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. A report that a maintainer
+        can reproduce is the fastest route to a fix. See
+        [CONTRIBUTING.md](https://github.com/raffaelecamanzo/logos/blob/main/CONTRIBUTING.md)
+        for how an accepted report becomes planned work.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: One or two sentences on what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order, starting from a clean checkout where possible.
+      placeholder: |
+        1. logos init -i
+        2. logos index
+        3. logos ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened, with the full output and the exit code if there is one.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Logos version
+      description: The output of `logos --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - Release binary or installer
+        - Package manager
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 15 on arm64, Ubuntu 24.04 on x86_64, ...
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: The languages in the indexed project, the size of the repository, relevant configuration. Optional.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I removed secrets, tokens and private source code from everything I pasted.
+          required: true

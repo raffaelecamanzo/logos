@@ -35,6 +35,14 @@ export async function extensionNavPaths(
   return info.extensions.flatMap((e) => e.ui?.nav ?? []).filter((n) => n.scope === scope).map((n) => n.path);
 }
 
+/** Does the served build compose no extension at all (`GET /api/v1/extensions`
+ *  lists none) — the public build? */
+export async function composesNoExtension(request: APIRequestContext): Promise<boolean> {
+  const response = await request.get("/api/v1/extensions");
+  expect(response.ok(), "GET /api/v1/extensions").toBe(true);
+  return ((await response.json()) as ExtensionsInfo).extensions.length === 0;
+}
+
 /** Every widget's title in the stack, in order (a gloss's tooltip left out). */
 export async function widgetTitles(stack: Locator): Promise<string[]> {
   return stack.locator("[data-widget] > [data-widget-part='title'] h3").evaluateAll((nodes) =>

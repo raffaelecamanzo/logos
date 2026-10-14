@@ -1,0 +1,51 @@
+# cargo-dist release-pipeline configuration (S-023, FR-DS-01, ADR-16).
+#
+# `dist init` consumes this file to (re)generate .github/workflows/release.yml;
+# a version tag (v*.*.*) then builds the single static binary for the four
+# locked targets, uploads artifacts, and publishes the brew/curl install paths
+# (FR-IN-05). Linux is musl-only — no glibc variant, no install-time libc
+# detection (NFR-PC-01).
+#
+# macOS universal2 note (ADR-16): the two darwin targets ship as per-arch
+# artifacts; cargo-dist's Homebrew formula selects the right one at install
+# time, which delivers the "one `brew install`" UX the lipo universal2 bottle
+# was specified for. The actual `lipo` merge (one downloadable universal
+# binary) is deferred to the CI hotfix that first exercises this pipeline,
+# per the sprint-5 risk note.
+
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# `release.yml` is intentionally hand-customized: a `build-spa` job builds the
+# web UI bundle once and every per-target build job fetches + embeds it into the
+# `--features ui` binary (CR-049, FR-UI-22, ADR-43) — a step cargo-dist does not
+# generate natively. `allow-dirty = ["ci"]` tells `dist plan`/`dist host` to skip
+# the "CI file matches `dist init` output" check so the pipeline runs against the
+# customized workflow instead of aborting at `plan`. Re-running `dist init` still
+# regenerates the base file; the SPA jobs must then be re-applied (see the note
+# in release.yml).
+allow-dirty = ["ci"]
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew"]
+# A GitHub repo to push Homebrew formulas to
+tap = "raffaelecamanzo/homebrew-tap"
+# Publish jobs to run in CI
+publish-jobs = ["homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
+# Extra static files to include in each App (path relative to this Cargo.toml's dir)
+include = ["THIRD-PARTY-NOTICES.md"]
+# Static musl linking for the Linux targets (NFR-PC-01): cargo-zigbuild is
+# the ADR-16 primary (fallback: `cross`) — zig provides the cross C toolchain
+# the tree-sitter grammars and bundled SQLite need.
+cargo-zigbuild = true
+# Path that installers should place binaries in
+install-path = ["$CARGO_HOME/bin", "~/.local/bin"]
+# Whether to install an updater program
+install-updater = false

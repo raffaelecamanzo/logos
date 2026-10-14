@@ -18,8 +18,10 @@
  * explicit confirmation (BR-35).
  *
  * The config panels the mounted extensions contribute (S-642) render beneath the
- * config document; this build composes none, so a table only an extension reads is
- * edited in the raw pane like any other text.
+ * config document, and their typed field groups (S-730, FR-UI-54) render in it,
+ * after the core groups: they read from and patch the same raw candidate, and the
+ * same Save writes them. A build that composes no extension renders neither, so a
+ * table only an extension reads is then edited in the raw pane like any other text.
  *
  * Renders exclusively through the S-193 design system; every read is GET-only.
  *
@@ -42,6 +44,7 @@ import {
   type PolicyFile,
 } from "../../api/configClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
+import { ExtensionConfigFields } from "../../extensions/ConfigFields.tsx";
 import { ExtensionConfigPanels } from "../../extensions/ConfigPanels.tsx";
 import type { ConfigPanelHost } from "../../extensions/registry.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
@@ -357,6 +360,7 @@ function FileEditor({
   groups,
   isRules,
   onSaved,
+  host,
 }: {
   file: PolicyFile;
   view: FileView<unknown>;
@@ -364,6 +368,9 @@ function FileEditor({
   isRules: boolean;
   /** Called after a successful save — the document on disk has changed. */
   onSaved?: () => void;
+  /** The `config.toml` editor's host context: present, it also renders the mounted
+   *  extensions' member field groups after the core ones (S-730). */
+  host?: ConfigPanelHost;
 }) {
   const [raw, setRaw] = useState<string>(view.content);
   const [values, setValues] = useState<Record<string, string>>(() => {
@@ -457,6 +464,7 @@ function FileEditor({
           </div>
         </fieldset>
       ))}
+      {host && <ExtensionConfigFields scope="member" raw={raw} onPatch={setRaw} host={host} />}
 
       <TextareaField
         label={`Raw TOML — ${title} (the full document — repeated tables edited here)`}
@@ -643,6 +651,7 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
         groups={configGroups(model.config.parsed, model.defaults.config)}
         isRules={false}
         onSaved={refresh}
+        host={host}
       />
       {/* The mounted extensions' panels (S-642), directly beneath the config document
           whose tables they edit (S-452). */}

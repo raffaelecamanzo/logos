@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { dropEmptyTable, patch, tomlValue } from "./toml.ts";
+import { dropEmptyTable, patch, readValue, tomlValue, type TomlFieldType } from "./toml.ts";
 
 describe("tomlValue — typed-field serialisation (S-191, FR-UI-12)", () => {
   it("encodes a non-empty list, and removes the key when cleared", () => {
@@ -200,5 +200,139 @@ describe("patch — a multi-line array survives a typed edit of its table's othe
     const tricky = '[tool]\nread_roots = [\n  "model = inside",\n]\nmodel = "old/model"\n';
     const out = patch(tricky, "tool", "model", "str", "new/model");
     expect(out).toBe('[tool]\nread_roots = [\n  "model = inside",\n]\nmodel = "new/model"\n');
+  });
+});
+
+describe("readValue — a typed field's value read from the candidate text (S-730, FR-UI-54)", () => {
+  const DOC = [
+    'top = "level"',
+    "",
+    "[probe]",
+    "count = 1_000 # a comment",
+    "ratio = 0.25",
+    "on = false",
+    "label = 'literal'",
+    'escaped = "a \\"quoted\\" word"',
+    "names = [",
+    '    "alpha",',
+    "    'beta', # a comment inside the array",
+    "]",
+    "",
+    "[other]",
+    "count = 7",
+    "",
+  ].join("\n");
+
+  it("reads each kind from its own table, in the form its field shows", () => {
+    expect(readValue(DOC, "probe", "count", "int")).toEqual({ kind: "typed", value: "1000" });
+    expect(readValue(DOC, "other", "count", "int")).toEqual({ kind: "typed", value: "7" });
+    expect(readValue(DOC, "probe", "ratio", "float")).toEqual({ kind: "typed", value: "0.25" });
+    expect(readValue(DOC, "probe", "on", "bool")).toEqual({ kind: "typed", value: "false" });
+    expect(readValue(DOC, "probe", "label", "str")).toEqual({ kind: "typed", value: "literal" });
+    expect(readValue(DOC, "probe", "escaped", "str")).toEqual({ kind: "typed", value: 'a "quoted" word' });
+    expect(readValue(DOC, "probe", "names", "list")).toEqual({ kind: "typed", value: "alpha\nbeta" });
+    expect(readValue(DOC, "", "top", "str")).toEqual({ kind: "typed", value: "level" });
+  });
+
+  it("reports a key the table does not declare, or a table the document lacks, as absent", () => {
+    expect(readValue(DOC, "probe", "missing", "str")).toEqual({ kind: "absent" });
+    expect(readValue(DOC, "nowhere", "count", "int")).toEqual({ kind: "absent" });
+    // The near miss: `count` is declared in [probe], never at the top level.
+    expect(readValue(DOC, "", "count", "int")).toEqual({ kind: "absent" });
+  });
+
+  it("leaves a value the field cannot show as untyped, stating it as written", () => {
+    const doc = [
+      "[probe]",
+      'count = "12"',
+      "hex = 0xff",
+      "ratio = inf",
+      "on = 1",
+      "name = 42",
+      'multi = """',
+      'two lines"""',
+      "inline = { a = 1 }",
+      "mixed = [1, \"a\"]",
+      "empty = []",
+      'blank = ""',
+      'padded = " x "',
+      'unicode = "\\U0001F600"',
+      'items = ["ok", " padded "]',
+      "",
+    ].join("\n");
+    expect(readValue(doc, "probe", "count", "int")).toEqual({ kind: "untyped", text: '"12"' });
+    expect(readValue(doc, "probe", "hex", "int")).toEqual({ kind: "untyped", text: "0xff" });
+    expect(readValue(doc, "probe", "ratio", "float")).toEqual({ kind: "untyped", text: "inf" });
+    expect(readValue(doc, "probe", "on", "bool")).toEqual({ kind: "untyped", text: "1" });
+    expect(readValue(doc, "probe", "name", "str")).toEqual({ kind: "untyped", text: "42" });
+    expect(readValue(doc, "probe", "multi", "str")).toEqual({ kind: "untyped", text: '"""\ntwo lines"""' });
+    expect(readValue(doc, "probe", "inline", "str")).toEqual({ kind: "untyped", text: "{ a = 1 }" });
+    expect(readValue(doc, "probe", "mixed", "list")).toEqual({ kind: "untyped", text: '[1, "a"]' });
+    // `[]` is "nothing", which a cleared list field cannot say: clearing removes the key.
+    expect(readValue(doc, "probe", "empty", "list")).toEqual({ kind: "untyped", text: "[]" });
+    // An empty or padded string would be trimmed (or removed) by the field's encoder.
+    expect(readValue(doc, "probe", "blank", "str")).toEqual({ kind: "untyped", text: '""' });
+    expect(readValue(doc, "probe", "padded", "str")).toEqual({ kind: "untyped", text: '" x "' });
+    expect(readValue(doc, "probe", "unicode", "str")).toEqual({ kind: "untyped", text: '"\\U0001F600"' });
+    expect(readValue(doc, "probe", "items", "list")).toEqual({ kind: "untyped", text: '["ok", " padded "]' });
+  });
+
+  it("round-trips typed → raw → typed for every kind, and raw → typed → raw leaves the text as patched", () => {
+    const cases: [TomlFieldType, string][] = [
+      ["int", "42"],
+      ["int", "-3"],
+      ["float", "0.5"],
+      ["float", "1e-3"],
+      ["bool", "true"],
+      ["bool", "false"],
+      ["str", 'with "quotes" and \\ backslash'],
+      ["list", "one\ntwo # not a comment"],
+    ];
+    for (const [type, value] of cases) {
+      const raw = patch("[probe]\nkeep = 1\n", "probe", "k", type, value);
+      expect(readValue(raw, "probe", "k", type)).toEqual({ kind: "typed", value });
+      expect(patch(raw, "probe", "k", type, value)).toBe(raw);
+    }
+  });
+
+  it("reads a cleared field's key as absent: an empty value removes it", () => {
+    for (const type of ["int", "float", "bool", "str", "list"] as const) {
+      const raw = patch('[probe]\nk = "x"\n', "probe", "k", type, "");
+      expect(readValue(raw, "probe", "k", type)).toEqual({ kind: "absent" });
+    }
+  });
+});
+
+describe("a line inside an earlier key's value is never a key or a table header (S-730 review)", () => {
+  it("reads and patches the real key, not a `key =` line inside a multi-line string", () => {
+    const raw = '[stub]\nabout = """\nmode = "fake"\n"""\nmode = "real"\n';
+    expect(readValue(raw, "stub", "mode", "str")).toEqual({ kind: "typed", value: "real" });
+    expect(patch(raw, "stub", "mode", "str", "b")).toBe(raw.replace('mode = "real"', 'mode = "b"'));
+  });
+
+  it("never takes a `[table]` line inside another table's multi-line string for that table's header", () => {
+    const raw = "[other]\ntext = '''\n[stub]\nmode = \"x\"\n'''\n\n[stub]\nmode = \"real\"\n";
+    expect(readValue(raw, "stub", "mode", "str")).toEqual({ kind: "typed", value: "real" });
+    expect(patch(raw, "stub", "mode", "str", "b")).toBe(raw.replace('mode = "real"', 'mode = "b"'));
+  });
+
+  it("does not end a table, or the top-level region, at a line inside a multi-line value", () => {
+    const nested = '[stub]\nmatrix = [\n  ["a", "b"],\n]\nmode = "real"\n';
+    expect(readValue(nested, "stub", "mode", "str")).toEqual({ kind: "typed", value: "real" });
+    expect(patch(nested, "stub", "mode", "str", "b")).toBe(nested.replace('mode = "real"', 'mode = "b"'));
+    const top = 'about = """\n[stub]\n"""\ntitle = "real"\n';
+    expect(readValue(top, "", "title", "str")).toEqual({ kind: "typed", value: "real" });
+    expect(readValue(top, "stub", "title", "str")).toEqual({ kind: "absent" });
+  });
+});
+
+describe("readValue — the number and list shapes near the edges (S-730 review)", () => {
+  it("types a leading `+` and drops it, as a number input states it", () => {
+    expect(readValue("[p]\nk = +5\n", "p", "k", "int")).toEqual({ kind: "typed", value: "5" });
+  });
+
+  it("leaves a leading-zero integer and a list missing its separator untyped", () => {
+    expect(readValue("[p]\nk = 007\n", "p", "k", "int")).toEqual({ kind: "untyped", text: "007" });
+    expect(readValue('[p]\nk = ["a" "b"]\n', "p", "k", "list")).toEqual({ kind: "untyped", text: '["a" "b"]' });
   });
 });

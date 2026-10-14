@@ -18,6 +18,7 @@ import type { ConfigReadModel, VerifyReport } from "../../api/types.ts";
 import type { WorkspaceRoster } from "../../api/types.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../../extensions/registry.ts";
 import { extensionsInfo, STUB_UI, stubInfo } from "../../test/extensions.tsx";
+import { STUB_FIELDS, STUB_FIELDS_UI, STUB_NOTE } from "../../extensions/fixtures/stubConfigFields.ts";
 import { ConfigView } from "./ConfigView.tsx";
 import styles from "./ConfigView.module.css";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
@@ -836,5 +837,296 @@ describe("this build composes no extension: no extension table in the document f
     const content = new URLSearchParams(calls.find((c) => c.url === "/config/save")?.body).get("content") ?? "";
     expect(content).toContain('[chat]\nprovider = "openai"');
     expect(content).toContain('[wiki]\nmodel = "claude-wiki"');
+  });
+});
+
+describe("the mounted extensions' config field groups (S-730, FR-UI-54)", () => {
+  /** A config.toml declaring the stub's table, one key per field kind. */
+  const STUB_DOC = [
+    'languages = ["rust"]',
+    "max_file_size = 1048576",
+    "",
+    "[stub]",
+    "count = 3",
+    "ratio = 0.5",
+    "enabled = true",
+    'names = ["alpha", "beta"]',
+    'title = "Hello"',
+    'mode = "slow"',
+    "",
+  ].join("\n");
+
+  /** The read-model over `content`, as the core serves it. */
+  function withContent(content: string): ConfigReadModel {
+    const m = model();
+    return { ...m, config: { ...m.config, content } };
+  }
+
+  function serve(content: string, routes: Record<string, Route> = {}) {
+    return mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(withContent(content)) }),
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 120, provenance_stamped: false }),
+      }),
+      ...routes,
+    });
+  }
+
+  function activateStub(ui = STUB_FIELDS_UI) {
+    registerExtensionUi(ui);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+  }
+
+  async function savedContent(calls: ReturnType<typeof mockFetch>): Promise<string> {
+    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
+    await screen.findByText(/Saved \.logos\/config\.toml/);
+    const saves = calls.filter((c) => c.method === "POST");
+    // The existing Save, and nothing else: no second writer, no other route.
+    expect(saves.map((c) => c.url)).toEqual(["/config/save"]);
+    return new URLSearchParams(saves[0].body).get("content") ?? "";
+  }
+
+  it("renders an active stub's member group after the core groups, in the config.toml form", async () => {
+    serve(STUB_DOC);
+    activateStub();
+    const { container } = renderView();
+    await screen.findByLabelText("Stub count");
+
+    const groups = container.querySelectorAll("[data-extension-fields]");
+    expect(groups).toHaveLength(1); // the config.toml form only — never rules.toml
+    const [ext] = groups;
+    expect(ext.querySelector("legend")).toHaveTextContent("[stub]");
+    // After the core group, before the raw pane, inside the config.toml panel.
+    const core = screen.getByLabelText("max_file_size").closest("fieldset") as HTMLElement;
+    expect(core.compareDocumentPosition(ext)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(ext.compareDocumentPosition(configRaw())).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual(["config.toml", "Graph consistency check", "rules.toml"]);
+
+    // Every value is read from the candidate text.
+    expect(screen.getByLabelText("Stub count")).toHaveValue(3);
+    expect(screen.getByLabelText("Stub ratio")).toHaveValue(0.5);
+    expect(screen.getByLabelText("Stub enabled")).toHaveValue("true");
+    expect(screen.getByLabelText("Stub names")).toHaveValue("alpha\nbeta");
+    expect(screen.getByLabelText("Stub title")).toHaveValue("Hello");
+    expect(screen.getByLabelText("Stub mode")).toHaveValue("slow");
+  });
+
+  it("renders no extension field while the stub is registered but not active, and renders it once the boot read settles", async () => {
+    serve(STUB_DOC);
+    registerExtensionUi(STUB_FIELDS_UI);
+    const { container } = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(container.querySelector("[data-extension-fields]")).toBeNull();
+    act(() => setActiveExtensions(extensionsInfo()));
+    expect(container.querySelector("[data-extension-fields]")).toBeNull();
+    act(() => setActiveExtensions(extensionsInfo(stubInfo())));
+    expect(await screen.findByLabelText("Stub count")).toBeInTheDocument();
+  });
+
+  it("renders each kind's control with its label, placeholder, help and default hint, and the note read-only", async () => {
+    serve(STUB_DOC);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub count");
+
+    for (const f of STUB_FIELDS) {
+      const hint = fieldHintText(f.label);
+      expect(hint).toContain(f.help);
+      expect(hint).toContain(f.defaultHint);
+      if (f.placeholder) expect(screen.getByLabelText(f.label)).toHaveAttribute("placeholder", f.placeholder);
+    }
+    expect(screen.getByLabelText("Stub count")).toHaveAttribute("type", "number");
+    expect(screen.getByLabelText("Stub ratio")).toHaveAttribute("step", "any");
+    expect(screen.getByLabelText("Stub names").tagName).toBe("TEXTAREA");
+    expect(screen.getByLabelText("Stub title")).toHaveAttribute("type", "text");
+    const options = (label: string) =>
+      within(screen.getByLabelText(label)).getAllByRole("option").map((o) => o.textContent);
+    expect(options("Stub enabled")).toEqual(["(unset)", "true", "false"]);
+    expect(options("Stub mode")).toEqual(["(unset)", "fast", "slow"]);
+
+    const note = screen.getByText(STUB_NOTE);
+    expect(note.tagName).toBe("P");
+    expect(note.closest("label, input, textarea, select")).toBeNull();
+  });
+
+  it("round-trips typed → raw → typed for every kind, through the existing Save", async () => {
+    const calls = serve(STUB_DOC);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub count");
+
+    const edits: [string, string, string][] = [
+      ["Stub count", "7", "count = 7"],
+      ["Stub ratio", "0.75", "ratio = 0.75"],
+      ["Stub enabled", "false", "enabled = false"],
+      ["Stub names", "gamma\ndelta", 'names = ["gamma", "delta"]'],
+      ["Stub title", 'Say "hi"', 'title = "Say \\"hi\\""'],
+      ["Stub mode", "fast", 'mode = "fast"'],
+    ];
+    for (const [label, value, line] of edits) {
+      fireEvent.change(screen.getByLabelText(label), { target: { value } });
+      expect(configRaw().value).toContain(`[stub]`);
+      expect(configRaw().value.split("\n")).toContain(line);
+    }
+    const content = await savedContent(calls);
+    expect(content).toBe(configRaw().value);
+
+    // Reload over what was saved: every field reads back the value it wrote.
+    cleanup();
+    serve(content);
+    renderView();
+    await screen.findByLabelText("Stub count");
+    expect(screen.getByLabelText("Stub count")).toHaveValue(7);
+    expect(screen.getByLabelText("Stub ratio")).toHaveValue(0.75);
+    expect(screen.getByLabelText("Stub enabled")).toHaveValue("false");
+    expect(screen.getByLabelText("Stub names")).toHaveValue("gamma\ndelta");
+    expect(screen.getByLabelText("Stub title")).toHaveValue('Say "hi"');
+    expect(screen.getByLabelText("Stub mode")).toHaveValue("fast");
+  });
+
+  it("removes a key whose field is emptied, keeping the rest of the table", async () => {
+    serve(STUB_DOC);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub count");
+    for (const f of STUB_FIELDS) fireEvent.change(screen.getByLabelText(f.label), { target: { value: "" } });
+    const lines = configRaw().value.split("\n");
+    expect(lines).toContain("[stub]");
+    for (const f of STUB_FIELDS) expect(lines.some((l) => l.startsWith(`${f.key} =`))).toBe(false);
+    expect(lines).toContain("max_file_size = 1048576");
+  });
+
+  it("shows a choice value outside its options as written, and never rewrites it", async () => {
+    const calls = serve(STUB_DOC.replace('mode = "slow"', 'mode = "turbo"'));
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub mode");
+    expect(screen.getByLabelText("Stub mode")).toHaveValue("turbo");
+    expect(within(screen.getByLabelText("Stub mode")).getByRole("option", { name: "turbo (not one of the options)" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Stub count"), { target: { value: "4" } });
+    const content = await savedContent(calls);
+    expect(content.split("\n")).toContain('mode = "turbo"');
+    expect(content.split("\n")).toContain("count = 4");
+  });
+
+  it("leaves a value the reader cannot type untouched, shown read-only as written", async () => {
+    const odd = STUB_DOC.replace("count = 3", "count = 0x10").replace('names = ["alpha", "beta"]', "names = []");
+    const calls = serve(odd);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub count");
+    for (const [label, text] of [["Stub count", "0x10"], ["Stub names", "[]"]]) {
+      const control = screen.getByLabelText(label);
+      expect(control).toHaveValue(text);
+      expect(control).toHaveAttribute("readonly");
+      expect(fieldHintText(label)).toMatch(/left as written/);
+    }
+    fireEvent.change(screen.getByLabelText("Stub title"), { target: { value: "Edited" } });
+    const content = await savedContent(calls);
+    expect(content).toBe(odd.replace('title = "Hello"', 'title = "Edited"'));
+  });
+
+  it("shows a multi-line untyped value with its line breaks, read-only", async () => {
+    serve(STUB_DOC.replace('title = "Hello"', 'title = """\nfirst\nsecond\n"""'));
+    activateStub();
+    renderView();
+    const title = await screen.findByLabelText("Stub title");
+    expect(title.tagName).toBe("TEXTAREA");
+    expect(title).toHaveValue('"""\nfirst\nsecond\n"""');
+    expect(title).toHaveAttribute("readonly");
+  });
+
+  it("shows a raw-pane edit of an untouched field's key in that field", async () => {
+    serve(STUB_DOC);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub title");
+    fireEvent.change(configRaw(), { target: { value: STUB_DOC.replace('title = "Hello"', 'title = "From the raw pane"') } });
+    expect(screen.getByLabelText("Stub title")).toHaveValue("From the raw pane");
+  });
+
+  it("agrees with a raw-pane edit of a key its field already edited, and keeps a partial number while typing", async () => {
+    serve(STUB_DOC);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub count");
+    fireEvent.change(screen.getByLabelText("Stub count"), { target: { value: "7" } });
+    expect(configRaw().value.split("\n")).toContain("count = 7");
+    fireEvent.change(configRaw(), { target: { value: configRaw().value.replace("count = 7", "count = 9") } });
+    expect(screen.getByLabelText("Stub count")).toHaveValue(9);
+    // A list mid-edit keeps its blank line: the candidate still holds what it wrote.
+    fireEvent.change(screen.getByLabelText("Stub names"), { target: { value: "alpha\n" } });
+    expect(screen.getByLabelText("Stub names")).toHaveValue("alpha\n");
+  });
+
+  it("states a select kind's placeholder as its empty choice", async () => {
+    serve(STUB_DOC);
+    activateStub({
+      ...STUB_UI,
+      configFields: {
+        "stub-config": {
+          member: [{ fields: [{ ...STUB_FIELDS[5], placeholder: "(use the stub's own mode)" }, STUB_FIELDS[2]] }],
+        },
+      },
+    });
+    renderView();
+    const mode = await screen.findByLabelText("Stub mode");
+    expect(within(mode).getAllByRole("option")[0]).toHaveTextContent("(use the stub's own mode)");
+    expect(within(screen.getByLabelText("Stub enabled")).getAllByRole("option")[0]).toHaveTextContent("(unset)");
+  });
+
+  it("computes a group's note from the view's host context, and renders none for null", async () => {
+    serve(STUB_DOC);
+    activateStub({
+      ...STUB_UI,
+      configFields: {
+        "stub-config": {
+          member: [
+            { legend: "[stub]", note: (host) => (host?.model.config.exists ? `Read from ${host.model.config.path}` : null), fields: STUB_FIELDS.slice(0, 1) },
+            { legend: "[stub.more]", note: () => null, fields: [{ ...STUB_FIELDS[4], table: "stub.more" }] },
+          ],
+        },
+      },
+    });
+    const { container } = renderView();
+    await screen.findByLabelText("Stub count");
+    expect(screen.getByText("Read from .logos/config.toml").tagName).toBe("P");
+    const groups = container.querySelectorAll("[data-extension-fields]");
+    expect(groups).toHaveLength(2);
+    // The note is the fieldset's own paragraph; a field's hint paragraph is nested in it.
+    expect(groups[0].querySelector(":scope > p")).toHaveTextContent("Read from .logos/config.toml");
+    expect(groups[1].querySelector(":scope > p")).toBeNull();
+  });
+
+  it("keeps what was typed in an edited field where the encoder would normalise it", async () => {
+    serve(STUB_DOC);
+    activateStub();
+    renderView();
+    await screen.findByLabelText("Stub title");
+    fireEvent.change(screen.getByLabelText("Stub title"), { target: { value: "Hello " } });
+    expect(screen.getByLabelText("Stub title")).toHaveValue("Hello ");
+    expect(configRaw().value.split("\n")).toContain('title = "Hello"');
+  });
+
+  it("keeps the edit state of a key apart from the same key in a sub-table", async () => {
+    serve(STUB_DOC + "\n[stub.sub]\ncount = 5\n");
+    activateStub({
+      ...STUB_UI,
+      configFields: {
+        "stub-config": {
+          member: [
+            { legend: "[stub]", fields: [STUB_FIELDS[0]] },
+            { legend: "[stub.sub]", fields: [{ ...STUB_FIELDS[0], table: "stub.sub", label: "Sub count" }] },
+          ],
+        },
+      },
+    });
+    renderView();
+    await screen.findByLabelText("Sub count");
+    fireEvent.change(screen.getByLabelText("Stub count"), { target: { value: "8" } });
+    expect(screen.getByLabelText("Stub count")).toHaveValue(8);
+    expect(screen.getByLabelText("Sub count")).toHaveValue(5);
   });
 });

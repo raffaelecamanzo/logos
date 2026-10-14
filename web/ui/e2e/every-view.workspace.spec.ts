@@ -10,7 +10,7 @@ import { expect, test } from "@playwright/test";
 
 import { WORKSPACE_NAV_ITEMS } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
-import { extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
+import { composesNoExtension, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
 const CASES: Record<string, ViewCase> = {
   "/workspace-dashboard": { ready: "Members" },
@@ -37,3 +37,13 @@ for (const [path, view] of Object.entries(CASES)) {
     test.info().annotations.push({ type: "widgets", description: `${path}: ${titles.join(" | ")}` });
   });
 }
+
+// A build that composes no extension renders no extension field in the workspace
+// Config form, and no group over the workspace root's config.toml for one (S-730,
+// FR-UI-54); a composed build's fields are its own specs' case.
+test("/workspace-config renders no extension field when the served build composes no extension", async ({ page, request }) => {
+  test.skip(!(await composesNoExtension(request)), "the served build composes an extension");
+  const { titles } = await layoutCase(page, "/workspace-config", CASES["/workspace-config"]);
+  expect(titles).toEqual(["Workspace manifest"]);
+  await expect(page.locator("[data-extension-fields]")).toHaveCount(0);
+});

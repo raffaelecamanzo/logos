@@ -10,6 +10,7 @@ import { extensionsInfo, STUB_ID, STUB_NAV, STUB_UI, StubAppView, StubView, stub
 import {
   clearExtensions,
   getExtensions,
+  mountedConfigFields,
   mountedConfigPanels,
   mountedIcon,
   mountedNavEntries,
@@ -18,6 +19,7 @@ import {
   registerExtensionUi,
   setActiveExtensions,
 } from "./registry.ts";
+import { STUB_FIELDS, STUB_FIELDS_UI, STUB_MEMBER_GROUPS, STUB_WORKSPACE_GROUPS } from "./fixtures/stubConfigFields.ts";
 
 afterEach(clearExtensions);
 
@@ -173,5 +175,70 @@ describe("registration", () => {
     expect(ownsRegisteredPath("/stubby")).toBe(false);
     expect(ownsRegisteredPath("/stu")).toBe(false);
     expect(ownsRegisteredPath("/")).toBe(false);
+  });
+});
+
+describe("config field groups (S-730, FR-UI-54)", () => {
+  it("mounts nothing before the boot read, and nothing for a build with no extension", () => {
+    registerExtensionUi(STUB_FIELDS_UI);
+    expect(mountedConfigFields("member")).toEqual([]);
+    clearExtensions();
+    setActiveExtensions(extensionsInfo());
+    expect(mountedConfigFields("member")).toEqual([]);
+    expect(mountedConfigFields("workspace")).toEqual([]);
+  });
+
+  it("mounts an active extension's groups per scope, keyed to the panel the manifest lists", () => {
+    registerExtensionUi(STUB_FIELDS_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    const member = mountedConfigFields("member");
+    expect(member.map((g) => g.group)).toEqual(STUB_MEMBER_GROUPS);
+    expect(member.every((g) => g.scope === "member" && g.panel.id === "stub-config")).toBe(true);
+    expect(mountedConfigFields("workspace").map((g) => g.group)).toEqual(STUB_WORKSPACE_GROUPS);
+  });
+
+  it("mounts no group for an inactive extension, nor for a panel the manifest does not list", () => {
+    registerExtensionUi(STUB_FIELDS_UI);
+    setActiveExtensions(extensionsInfo());
+    expect(mountedConfigFields("member")).toEqual([]);
+    const info = stubInfo();
+    setActiveExtensions(extensionsInfo({ ...info, ui: { ...info.ui!, config_panels: [] } }));
+    expect(mountedConfigFields("member")).toEqual([]);
+  });
+
+  it("mounts a group only in the scopes it is registered for", () => {
+    registerExtensionUi({ ...STUB_UI, configFields: { "stub-config": { member: STUB_MEMBER_GROUPS } } });
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    expect(mountedConfigFields("member")).toHaveLength(1);
+    expect(mountedConfigFields("workspace")).toEqual([]);
+  });
+
+  it("offers only the fields in the panel's table or a sub-table of it, dropping a group left empty", () => {
+    const at = (table: string) => ({ ...STUB_FIELDS[0], table, key: `k_${table}` });
+    registerExtensionUi({
+      ...STUB_UI,
+      configFields: {
+        "stub-config": {
+          member: [
+            { legend: "kept", fields: [at("stub"), at("stub.sub"), at("stubby"), at(""), at("other")] },
+            { legend: "dropped", fields: [at("other")] },
+          ],
+        },
+      },
+    });
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    const groups = mountedConfigFields("member");
+    expect(groups.map((g) => g.group.legend)).toEqual(["kept"]);
+    // `stubby` is one character past the panel's table: a prefix test would keep it.
+    expect(groups[0].group.fields.map((f) => f.table)).toEqual(["stub", "stub.sub"]);
+  });
+});
+
+describe("config field groups never reach the core's top-level keys (S-730 review)", () => {
+  it("offers no field for a panel whose table is empty", () => {
+    registerExtensionUi({ ...STUB_UI, configFields: { "stub-config": { member: [{ fields: [{ ...STUB_FIELDS[0], table: "" }] }] } } });
+    const info = stubInfo();
+    setActiveExtensions(extensionsInfo({ ...info, ui: { ...info.ui!, config_panels: info.ui!.config_panels.map((p) => ({ ...p, table: "" })) } }));
+    expect(mountedConfigFields("member")).toEqual([]);
   });
 });
