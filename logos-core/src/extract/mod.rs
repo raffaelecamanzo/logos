@@ -106,19 +106,13 @@ mod shape;
 // unified `is_test` annotation (S-028, FR-AN-05) needs to catch what path
 // conventions miss.
 pub(crate) mod testmarker;
-// `pub(crate)`: the framework pass (resolve::framework, S-012) builds the
-// canonical symbols of its promoted route/component nodes with the same
-// builder extraction uses, so promoted identities follow ADR-07 like every
-// other node's.
+// `pub(crate)`: the framework pass (resolve::framework, S-012), the topic
+// pass (resolve::topics) and the annotation engine's policy nodes (S-014)
+// build their symbols with the same builder extraction uses, so every node's
+// identity follows ADR-07 and carries the repository coordinate (ADR-85).
 pub(crate) mod symbol;
 
-/// SCIP descriptor-name escaping, shared with the annotation engine's
-/// synthetic policy-node symbols (S-014, [FR-AN-03]) so layer names from
-/// `rules.toml` always assemble into a valid symbol.
-///
-/// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
 pub use assoc::ImplBlockFact;
-pub(crate) use symbol::escape_name;
 pub use symbol::SymbolContext;
 
 use std::cell::OnceCell;
@@ -1002,37 +996,8 @@ fn extract_one(
         &mut facts,
     );
 
-    #[cfg(debug_assertions)]
-    debug_assert_unique_symbols(&facts);
-
     sort_facts(&mut facts);
     facts
-}
-
-/// Debug-only per-file symbol-uniqueness assertion (S-512, [ADR-07]): every node
-/// one file emits must carry its own symbol. Two that share one are folded into
-/// a single node by the store's `symbol_id` upsert, and the second `Contains`
-/// edge to it then fails `UNIQUE(source, target, kind)` and aborts the whole
-/// index, so a debug build (tests, dev) panics here — naming the file and the
-/// symbol — rather than at persistence.
-/// A release build never pays for it, mirroring the pipeline's
-/// `debug_assert_structural_integrity`.
-///
-/// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
-#[cfg(debug_assertions)]
-fn debug_assert_unique_symbols(facts: &Facts) {
-    let mut seen: HashSet<&str> = HashSet::with_capacity(facts.nodes.len());
-    let duplicates: Vec<&str> = facts
-        .nodes
-        .iter()
-        .map(|n| n.symbol.as_str())
-        .filter(|s| !seen.insert(s))
-        .collect();
-    debug_assert!(
-        duplicates.is_empty(),
-        "{} emitted one symbol for two declarations (S-512, ADR-07): {duplicates:?}",
-        facts.path
-    );
 }
 
 /// HTTP client-call arm (S-252, CR-061, FR-WS-08): capture outbound calls via

@@ -403,6 +403,20 @@ fn a_document_path_is_the_symbols_file_descriptor() {
     assert_eq!(p("local op0"), None);
 }
 
+#[test]
+fn a_document_path_is_the_same_with_or_without_a_coordinate() {
+    // S-703 / ADR-85: the coordinate in the package slot — `/`, `.`, `@`, `:`
+    // and `-` included — never reaches the path read from the descriptors.
+    let p = |s: &str| document_path(&LogosSymbol::parse(s).unwrap());
+    for tail in ["api/src/main/resources/openapi/`v1.yaml`/op0#get#", "`PSS_v1.0.3.yaml`/op0#get#", "`my spec.yaml`/op0#get#"] {
+        let old = p(&format!("logos . . . {tail}"));
+        assert!(old.is_some(), "{tail}");
+        for coordinate in ["github.com/acme/api", "git@h:o/r", "a/b.c@d:e-f"] {
+            assert_eq!(p(&format!("logos . {coordinate} . {tail}")), old, "{coordinate} {tail}");
+        }
+    }
+}
+
 /// The headline is stated over its denominator, which accounts for every
 /// document, and says what it is not. Every figure the line prints differs from
 /// every other (5 · 1 · 4 · 6 · 10 · 3 · 2), so a swapped argument cannot pass.

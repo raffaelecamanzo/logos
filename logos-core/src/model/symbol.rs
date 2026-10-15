@@ -61,6 +61,92 @@ impl LogosSymbol {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The repository coordinate in the SCIP package slot ([ADR-85]), or
+    /// `None` when the slot is empty (`.`, a coordinate-less symbol) or the
+    /// symbol is local.
+    ///
+    /// [ADR-85]: ../../../../docs/specs/architecture/decisions/ADR-85.md
+    pub fn coordinate(&self) -> Option<&str> {
+        self.fields().map(|f| f.package).filter(|p| *p != EMPTY_FIELD)
+    }
+
+    /// Whether this is a global symbol whose package slot is empty — the form
+    /// every symbol had before [ADR-85] put the repository coordinate there.
+    /// A local symbol has no package slot and is never coordinate-less.
+    ///
+    /// [ADR-85]: ../../../../docs/specs/architecture/decisions/ADR-85.md
+    pub fn is_coordinate_less(&self) -> bool {
+        self.fields().is_some_and(|f| f.package == EMPTY_FIELD)
+    }
+
+    /// The descriptor tail: everything after the four coordinate fields
+    /// (scheme, manager, package, version) — the path and scope that identify
+    /// the declaration within its repository. Two repositories' symbols for
+    /// one repo-relative declaration share it. `None` for a local symbol.
+    pub fn descriptor_tail(&self) -> Option<&str> {
+        self.fields().map(|f| f.tail)
+    }
+
+    /// The fields of a global symbol, or `None` for a local one (`local <id>`,
+    /// two fields, where a global symbol has at least four).
+    ///
+    /// Splitting the canonical string on its first four spaces is exact: the
+    /// codec's formatter writes each coordinate field verbatim and a coordinate
+    /// never contains a space ([`crate::config::is_valid_coordinate`]), while
+    /// a space inside the descriptors (a backtick-quoted name) stays in the
+    /// tail.
+    fn fields(&self) -> Option<Fields<'_>> {
+        let mut parts = self.0.splitn(5, ' ');
+        Some(Fields {
+            scheme: parts.next()?,
+            manager: parts.next()?,
+            package: parts.next()?,
+            version: parts.next()?,
+            tail: parts.next().unwrap_or(""),
+        })
+    }
+
+    /// This symbol under another coordinate: the package slot replaced, every
+    /// other field and the descriptor tail kept byte for byte. `None` (or an
+    /// empty coordinate) renders the empty slot `.`, the coordinate-less form.
+    /// A local symbol has no package slot and comes back unchanged.
+    ///
+    /// # Errors
+    /// Returns an error when `coordinate` contains whitespace, which would
+    /// shift every later field, or when the rebuilt string is not a valid SCIP
+    /// symbol.
+    pub fn with_coordinate(&self, coordinate: Option<&str>) -> anyhow::Result<Self> {
+        let Some(f) = self.fields() else {
+            return Ok(self.clone());
+        };
+        let package = match coordinate {
+            Some(c) if c.chars().any(char::is_whitespace) => {
+                anyhow::bail!("a symbol coordinate cannot contain whitespace: {c:?}")
+            }
+            Some(c) if !c.is_empty() => c,
+            _ => EMPTY_FIELD,
+        };
+        let mut raw = [f.scheme, f.manager, package, f.version].join(" ");
+        if !f.tail.is_empty() {
+            raw.push(' ');
+            raw.push_str(f.tail);
+        }
+        Self::parse(&raw)
+    }
+}
+
+/// The SCIP marker for an empty scheme/package field.
+const EMPTY_FIELD: &str = ".";
+
+/// A global symbol's four coordinate fields and its descriptor tail, borrowed
+/// from the canonical string ([`LogosSymbol::fields`]).
+struct Fields<'a> {
+    scheme: &'a str,
+    manager: &'a str,
+    package: &'a str,
+    version: &'a str,
+    tail: &'a str,
 }
 
 impl TryFrom<String> for LogosSymbol {
@@ -179,6 +265,96 @@ mod tests {
     fn display_matches_canonical_string() {
         let sym = LogosSymbol::parse(GOLDEN).unwrap();
         assert_eq!(sym.to_string(), GOLDEN);
+    }
+
+    /// Coordinates spelling every character `[project] id` admits beyond
+    /// letters and digits — `/`, `.`, `@`, `:`, `-`, `_` — in the shapes the
+    /// derivation and a hand-written id produce.
+    const COORDINATES: &[&str] = &[
+        "github.com/acme/svc-a",
+        "h/o/r",
+        "logos",
+        "my_repo",
+        "git@h:o/r",
+        "a/b.c@d:e-f",
+        "host:2222/o/r",
+        "...",
+        "a..b",
+        "-",
+        "@scope/pkg",
+    ];
+
+    #[test]
+    fn the_codec_round_trips_every_coordinate_character_byte_identically() {
+        // UAT-EX-01 / CR-222 CRA-01: a coordinate in the package slot survives
+        // parse → format unchanged, so the codec needs no escaping for it.
+        for coordinate in COORDINATES {
+            for tail in ["src/`lib.rs`/run().", "topic/orders#", "`my file.rs`/f().", "layer/domain/"] {
+                let raw = format!("logos . {coordinate} . {tail}");
+                let sym = LogosSymbol::parse(&raw).unwrap_or_else(|e| panic!("{raw:?}: {e}"));
+                assert_eq!(sym.as_str(), raw, "{raw:?} round-trips byte for byte");
+                assert_eq!(sym.coordinate(), Some(*coordinate), "{raw:?}");
+                assert_eq!(sym.descriptor_tail(), Some(tail), "{raw:?}");
+                assert!(!sym.is_coordinate_less(), "{raw:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_coordinate_less_symbol_is_told_from_a_canonical_one() {
+        let old = LogosSymbol::parse("logos . . . src/`lib.rs`/run().").unwrap();
+        assert!(old.is_coordinate_less());
+        assert_eq!(old.coordinate(), None);
+        assert_eq!(old.descriptor_tail(), Some("src/`lib.rs`/run()."));
+
+        let canonical = LogosSymbol::parse("logos . h/o/r . src/`lib.rs`/run().").unwrap();
+        assert!(!canonical.is_coordinate_less());
+        assert_eq!(canonical.coordinate(), Some("h/o/r"));
+
+        // A manager or version alone does not make a coordinate: the package
+        // slot is the one ADR-85 assigns.
+        let versioned = LogosSymbol::parse("logos cargo . 1.0 src/`lib.rs`/run().").unwrap();
+        assert!(versioned.is_coordinate_less());
+        assert_eq!(versioned.coordinate(), None);
+        let policy = LogosSymbol::parse("logos policy h/o/r . layer/domain/").unwrap();
+        assert_eq!(policy.coordinate(), Some("h/o/r"));
+        assert_eq!(policy.descriptor_tail(), Some("layer/domain/"));
+
+        // A local symbol has no package slot at all.
+        let local = LogosSymbol::parse("local 0").unwrap();
+        assert!(!local.is_coordinate_less());
+        assert_eq!(local.coordinate(), None);
+        assert_eq!(local.descriptor_tail(), None);
+    }
+
+    #[test]
+    fn replacing_the_coordinate_keeps_every_other_field() {
+        let old = LogosSymbol::parse("logos . . . src/`lib.rs`/S#m(1).").unwrap();
+        for coordinate in COORDINATES {
+            let new = old.with_coordinate(Some(coordinate)).unwrap();
+            assert_eq!(new.as_str(), format!("logos . {coordinate} . src/`lib.rs`/S#m(1)."));
+            assert_eq!(new.descriptor_tail(), old.descriptor_tail());
+            // Reversible (ADR-85): back to the empty slot, byte for byte.
+            assert_eq!(new.with_coordinate(None).unwrap(), old);
+            assert_eq!(new.with_coordinate(Some("")).unwrap(), old);
+        }
+        // From one coordinate to another; manager and version are kept.
+        let policy = LogosSymbol::parse("logos policy a/b . boundary/x/y/").unwrap();
+        assert_eq!(
+            policy.with_coordinate(Some("c/d")).unwrap().as_str(),
+            "logos policy c/d . boundary/x/y/"
+        );
+        // A local symbol has no slot to replace.
+        let local = LogosSymbol::parse("local 7").unwrap();
+        assert_eq!(local.with_coordinate(Some("h/o/r")).unwrap(), local);
+    }
+
+    #[test]
+    fn a_coordinate_with_whitespace_is_refused_not_spliced() {
+        let old = LogosSymbol::parse("logos . . . src/`lib.rs`/run().").unwrap();
+        for bad in ["a b", "a\tb", " a", "a\n"] {
+            assert!(old.with_coordinate(Some(bad)).is_err(), "{bad:?} is refused");
+        }
     }
 
     #[test]

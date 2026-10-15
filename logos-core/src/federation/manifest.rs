@@ -312,11 +312,15 @@ pub struct ServiceBoundary {
 /// A `[[governance.no_cross_service_callers]]` entry: a provider that must have
 /// **no** cross-service callers ([FR-WS-13]) — the "deprecated endpoint" contract.
 ///
-/// [`symbol`](Self::symbol) is a **glob** matched against the provider endpoint's
-/// canonical [`LogosSymbol`](crate::model::LogosSymbol) string (compiled once via
-/// the same `globset` matcher every `rules.toml` family uses), so a whole
-/// deprecated namespace fences in one rule. [`member`](Self::member), when given,
-/// additionally scopes the rule to providers owned by that member.
+/// [`symbol`](Self::symbol) is a **glob** matched against the provider endpoint
+/// symbol's descriptor tail — its path and scope, without the repository
+/// coordinate — and against its coordinate-less form, so a manifest written
+/// before symbols carried a coordinate keeps matching (compiled once via the
+/// same `globset` matcher every `rules.toml` family uses); a whole deprecated
+/// namespace fences in one rule. [`member`](Self::member), when given,
+/// additionally scopes the rule to providers owned by that member — it is what
+/// names the repository. A glob that matches no provider in its scope is
+/// reported, never read as a pass (`WorkspaceGovernance::unmatched_rules`).
 ///
 /// Any [`BridgeEdge`](super::BridgeEdge) whose **provider** endpoint matches is a
 /// violation — the edge *is* the cross-service caller. The rule reads the bridge;
@@ -327,7 +331,8 @@ pub struct ServiceBoundary {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoCrossServiceCallers {
-    /// Glob matched against the provider endpoint's canonical symbol string.
+    /// Glob matched against the provider endpoint symbol's descriptor tail (and
+    /// its coordinate-less form).
     pub symbol: String,
     /// Scope the rule to providers owned by this member (optional; omit to match
     /// the symbol glob in **any** member).

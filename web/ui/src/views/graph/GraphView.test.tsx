@@ -320,6 +320,19 @@ describe("GraphView — the /graph?seed= deep link (S-622, FR-UI-47)", () => {
     await waitFor(() => expect(urls.some((u) => u.startsWith("/api/v1/impact?seed=scip%3A%3Aa"))).toBe(true));
   });
 
+  it("focuses the canonical seed the snapshot echoes for a coordinate-less symbol seed (FR-EX-36)", async () => {
+    // A link bookmarked before symbols carried their repository coordinate: the
+    // server anchors it under the store's coordinate and echoes the canonical seed.
+    window.history.replaceState({}, "", "/graph?seed=logos%20.%20.%20.%20a");
+    const urls = stubApi({ ...GRAPH, seed: "scip::a" });
+    render(<GraphView />);
+    await screen.findByRole("application");
+    expect(urls[0]).toBe("/api/v1/graph?cap=250&seed=logos+.+.+.+a");
+    expect(screen.getByText(/Focused on alpha — Reset to return/i)).toBeInTheDocument();
+    // Locked on the canonical node, so the trace is fetched for it.
+    await waitFor(() => expect(urls.some((u) => u.startsWith("/api/v1/impact?seed=scip%3A%3Aa"))).toBe(true));
+  });
+
   it("consumes the deep link: the seed leaves the URL, the member stays", async () => {
     window.history.replaceState({}, "", "/graph?seed=scip%3A%3Aa&repo=api");
     stubApi();

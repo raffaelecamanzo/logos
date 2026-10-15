@@ -183,8 +183,9 @@ pub struct ColdStartPhases {
     /// Everything on the cold path that is not one of the six phases above:
     /// worktree-root resolution, `.logos/` directory creation, worktree-seed
     /// detection/copy, governance-contract seeding, linked-worktree git-hook
-    /// seeding (CR-106), constructing the `Engine` value itself, and the
-    /// post-construction seed-diff reconcile. Exists
+    /// seeding (CR-106), constructing the `Engine` value itself, the
+    /// coordinate migration (S-704) and the post-construction seed-diff
+    /// reconcile. Exists
     /// so [`sum`](Self::sum) reconciles with the
     /// externally measured wall time rather than merely approximating it
     /// (CR-116 AC1).
@@ -550,6 +551,13 @@ impl Engine {
             call_residue_walks: AtomicU64::new(0),
         };
 
+        // Move a store whose symbols carry another coordinate than the
+        // project's — one built before ADR-85, or a changed `[project] id` or
+        // remote — before anything syncs into it (FR-EX-35, S-704). A
+        // just-seeded worktree store migrates here too, so the diff reconcile
+        // below re-extracts under the coordinate the seed now carries.
+        engine.migrate_symbol_coordinate();
+
         // Finish the worktree bootstrap: reconcile only the main↔branch diff
         // over the just-seeded store — O(diff-from-main), not O(repo)
         // ([FR-WT-03]). Fail-soft by design.
@@ -574,17 +582,20 @@ impl Engine {
     /// This is a *mirror*, not a refactor: the production path is never routed
     /// through this function. The price is that an edit to
     /// [`start_with_configs`](Self::start_with_configs)'s call sequence must be
-    /// applied here too — S-338 (hook seeding) and S-369 (the shared
-    /// `--git-common-dir` resolution) both were, each with a side-effect guard
-    /// (`worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
+    /// applied here too — S-338 (hook seeding), S-369 (the shared
+    /// `--git-common-dir` resolution) and S-704 (the coordinate migration) all
+    /// were, each with a side-effect guard
+    /// (`worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`,
+    /// `worktree.rs::a_phase_reported_engine_start_seeds_the_store_and_the_contract_too`
     /// and
-    /// `worktree.rs::a_phase_reported_engine_start_seeds_the_store_and_the_contract_too`).
+    /// `coordinate_migration.rs::a_phase_reported_engine_start_migrates_the_store_too`).
     ///
     /// [`ColdStartPhases::other`] absorbs everything that is not one of the
     /// six phases [NFR-PE-05] enumerates — root resolution, directory
     /// creation, worktree-seed detection/copy, governance-contract seeding
     /// (FR-WT-06), linked-worktree git-hook seeding (CR-106), engine
-    /// construction, and the post-construction seed-diff reconcile — so
+    /// construction, the coordinate migration (S-704) and the
+    /// post-construction seed-diff reconcile — so
     /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
     /// time to within the noise of the handful of `Instant::now()` calls
     /// themselves, not merely "within a stated margin" by approximation.
@@ -732,6 +743,7 @@ impl Engine {
             call_residue_walks: AtomicU64::new(0),
         };
 
+        engine.migrate_symbol_coordinate();
         if let Some(seed) = seed {
             engine.reconcile_seed_diff(&seed);
         }
@@ -923,8 +935,19 @@ impl Engine {
             let logos_dir = root.join(".logos");
             let db_path = logos_dir.join("logos.db");
             let existed = db_path.exists();
-            drop(Self::start(root)?);
+            let engine = Self::start(root)?;
             let mut steps = crate::init::run(root, options)?;
+            // FR-CF-10: the store records the coordinate the config `init` just
+            // completed resolves to, so `status` reads it before any index. A
+            // config that does not load is `init`'s to report, never to fail on
+            // (DL-06) — its `[project] id` row says why, and `index` fails loud.
+            match crate::config::load_config_from_root(root) {
+                Ok(config) => engine.record_project_id(&config)?,
+                Err(err) => tracing::warn!(
+                    "project id not recorded: the configuration does not load ({err})"
+                ),
+            }
+            drop(engine);
             for contribution in contributions {
                 steps.extend(contribution.run(root, options)?);
             }
@@ -2901,6 +2924,20 @@ impl Engine {
             .is_some_and(|revision| revision > 0)
     }
 
+    /// Record this project's resolved identity coordinate in the store
+    /// ([FR-CF-10], S-702) — the step `init` runs after completing `config.toml`.
+    ///
+    /// # Errors
+    /// A transient engine, or a failed write.
+    ///
+    /// [FR-CF-10]: ../../../docs/specs/requirements/FR-CF-10.md
+    fn record_project_id(&self, config: &crate::config::Config) -> Result<()> {
+        let runtime = self.runtime.as_ref().context(
+            "recording the project id requires a started engine (Engine::start)",
+        )?;
+        crate::pipeline::record_project_id(runtime, &self.root, config)
+    }
+
     /// Fallible body of [`index`](Self::index).
     fn run_index(&self) -> Result<IndexResult> {
         let (runtime, registry, config) = self.pipeline_ctx()?;
@@ -2978,6 +3015,44 @@ impl Engine {
             Err(err) => tracing::warn!(
                 "diff-reconcile after seeding failed; the next evaluation's \
                  reconcile backstop (ADR-11) will catch up: {err:#}"
+            ),
+        }
+    }
+
+    /// Migrate the store to the project's coordinate when its symbols carry
+    /// another ([FR-EX-35], S-704) — the open-time step
+    /// [`start_with_configs`](Self::start_with_configs) runs after the runtime
+    /// is up and before any sync. A static schema migration could not: the
+    /// coordinate comes from the configuration and the repository, not the
+    /// store.
+    ///
+    /// Fail-soft, like [`reconcile_seed_diff`](Self::reconcile_seed_diff): a
+    /// configuration that does not load or a migration that fails is logged
+    /// and the store stays as it was, consistent under its old coordinate —
+    /// every sync renders the coordinate the store records — and the next open
+    /// tries again. The configuration error is `index`'s to report.
+    ///
+    /// [FR-EX-35]: ../../../docs/specs/requirements/FR-EX-35.md
+    fn migrate_symbol_coordinate(&self) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let migrated = crate::config::load_config_from_root(&self.root)
+            .map_err(anyhow::Error::from)
+            .and_then(|config| crate::pipeline::migrate_symbol_coordinate(runtime, &self.root, &config));
+        match migrated {
+            Ok(None) => {}
+            Ok(Some(migrated)) => tracing::info!(
+                from = migrated.from.as_deref().unwrap_or("."),
+                to = %migrated.to,
+                symbols = migrated.changes.symbols_rewritten,
+                orphans_removed = migrated.changes.orphan_symbols_removed,
+                files_to_re_extract = migrated.changes.files_invalidated,
+                "migrated the store's symbols to the project coordinate (FR-EX-35)"
+            ),
+            Err(err) => tracing::warn!(
+                "the store's symbols were not migrated to the project coordinate; it keeps \
+                 its recorded one until the next open: {err:#}"
             ),
         }
     }

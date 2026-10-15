@@ -80,6 +80,7 @@ export function statusInfo(over: Partial<StatusInfo> = {}): StatusInfo {
 export function memberStatus(member: string, over: Partial<MemberStatus> = {}): MemberStatus {
   return {
     member,
+    coordinate: `example.com/${member}`,
     result: statusInfo(),
     warm_state: "warm",
     open_state: "opened",
@@ -93,6 +94,7 @@ export function memberStatus(member: string, over: Partial<MemberStatus> = {}): 
 export function degradedMember(member: string): MemberStatus {
   return {
     member,
+    coordinate: `example.com/${member}`,
     error: "could not open member store",
     warm_state: "degraded",
     open_state: "degraded",
@@ -114,8 +116,8 @@ export const POPULATED_COVERAGE: CrossServiceCoverage = {
   references: [
     {
       relation: "route",
-      from: { member: "web", symbol: "logos . . . web/`cart.ts`/checkout()." },
-      to: { member: "api", symbol: "logos . . . api/`billing.rs`/charge()." },
+      from: { member: "web", symbol: "logos . example.com/web . web/`cart.ts`/checkout()." },
+      to: { member: "api", symbol: "logos . example.com/api . api/`billing.rs`/charge()." },
       bucket: "bound",
       state: "bound",
       intake: "invocation",
@@ -123,7 +125,7 @@ export const POPULATED_COVERAGE: CrossServiceCoverage = {
     },
     {
       relation: "route",
-      from: { member: "orders", symbol: "logos . . . orders/`client.rs`/fetch()." },
+      from: { member: "orders", symbol: "logos . example.com/orders . orders/`client.rs`/fetch()." },
       bucket: "unbound",
       state: "unbound",
       reason: "path-not-composed",
@@ -220,7 +222,7 @@ export function reachabilityAnswer(
       live_via_cross_service: [
         {
           member: "orders",
-          symbol: "logos . . . orders/`handler.rs`/place_order().",
+          symbol: "logos . example.com/orders . orders/`handler.rs`/place_order().",
           name: "place_order",
           kind: "function",
           verdict: "live-via-cross-service",
@@ -261,8 +263,8 @@ export function governanceReport(over: Partial<WorkspaceGovernance> = {}): Works
         rule_type: "workspace-boundary",
         severity: "error",
         relation: "route",
-        from: { member: "web", symbol: "logos . . . web/`cart.ts`/checkout()." },
-        to: { member: "api", symbol: "logos . . . api/`billing.rs`/charge()." },
+        from: { member: "web", symbol: "logos . example.com/web . web/`cart.ts`/checkout()." },
+        to: { member: "api", symbol: "logos . example.com/api . api/`billing.rs`/charge()." },
         message: "web must not call api directly — route through orders",
       },
     ],

@@ -1467,6 +1467,8 @@ fn impact_intersection_reports_the_collision_through_the_binary() {
 /// through the same two helpers, plus a symbol attached to nothing.
 fn precedent_fixture() -> TempDir {
     let tmp = TempDir::new().unwrap();
+    // A pinned coordinate (S-703): the queried symbol names it.
+    write(tmp.path(), ".logos/config.toml", "[project]\nid = \"example.com/fixture\"\n");
     write(
         tmp.path(),
         "src/plugin.rs",
@@ -1527,7 +1529,7 @@ fn precedent_reports_the_sibling_arms_through_the_binary() {
 
     let out = logos(
         tmp.path(),
-        &["precedent", "logos . . . src/`rustarm.rs`/extract().", "--json"],
+        &["precedent", "logos . example.com/fixture . src/`rustarm.rs`/extract().", "--json"],
     );
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let payload: serde_json::Value =

@@ -136,14 +136,16 @@ fn existing_member_config_is_never_overwritten() {
     let tmp = two_member_fixture();
     let api_config_dir = tmp.path().join("api").join(".logos");
     fs::create_dir_all(&api_config_dir).unwrap();
-    fs::write(api_config_dir.join("config.toml"), "# hand-edited by the user\n").unwrap();
+    // It pins its own `[project] id` (S-702): every byte is the user's.
+    let hand_edited = "# hand-edited by the user\n[project]\nid = \"pinned/api\"\n";
+    fs::write(api_config_dir.join("config.toml"), hand_edited).unwrap();
 
     let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
 
     assert_eq!(
         fs::read_to_string(api_config_dir.join("config.toml")).unwrap(),
-        "# hand-edited by the user\n",
+        hand_edited,
         "a pre-existing member config must never be overwritten"
     );
 }
@@ -936,8 +938,25 @@ fn the_nudge_leaves_stdout_byte_for_byte_as_before() {
     let as_value = |bytes: &[u8]| -> serde_json::Value {
         serde_json::from_slice(bytes).expect("stdout is exactly one JSON document")
     };
-    let nudged_doc = as_value(&nudged.stdout);
-    let plain_doc = as_value(&plain.stdout);
+    // The `[project] id` row (S-702) states the coordinate `init` derived from
+    // the root's directory name, so its detail carries the root like
+    // `logos_dir` does: checked for its shape, then masked.
+    let mask_project_id = |mut doc: serde_json::Value| -> serde_json::Value {
+        for step in doc["steps"].as_array_mut().expect("a steps array") {
+            if step["target"] == ".logos/config.toml [project] id" {
+                let detail = step["detail"].as_str().expect("a detail string");
+                assert!(detail.starts_with("id = \""), "{detail}");
+                step["detail"] = serde_json::Value::String("<root-derived>".to_string());
+            }
+        }
+        doc
+    };
+    let nudged_doc = mask_project_id(as_value(&nudged.stdout));
+    let plain_doc = mask_project_id(as_value(&plain.stdout));
+    assert!(
+        plain_doc["steps"].to_string().contains("<root-derived>"),
+        "the row is present, so the mask is not vacuous"
+    );
 
     let keys = |v: &serde_json::Value| -> Vec<String> {
         let mut k: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();

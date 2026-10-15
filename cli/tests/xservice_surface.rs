@@ -1690,6 +1690,89 @@ reason = \"deprecated in v3\"
     );
 }
 
+/// A glob written before symbols carried their repository coordinate matches
+/// the same binding after (S-705, [FR-WS-13]): one spelled against the whole
+/// old symbol (`logos . . . …`) names exactly the binding a descriptor-tail glob
+/// does, and neither is reported unmatched.
+#[test]
+fn an_existing_symbol_glob_matches_the_same_binding_after_symbols_carry_a_coordinate() {
+    let tmp = workspace();
+    declare_rules(
+        tmp.path(),
+        "
+[[governance.no_cross_service_callers]]
+symbol = \"logos . . . *users*\"
+
+[[governance.no_cross_service_callers]]
+member = \"web\"
+symbol = \"*users*\"
+",
+    );
+
+    let report = logos_json(tmp.path(), &["workspace", "check"]);
+    let violations = report["violations"].as_array().expect("violations array");
+    assert_eq!(violations.len(), 2, "each rule names the one binding: {violations:?}");
+    assert_eq!(violations[0]["rule"], "no-cross-service-callers:logos . . . *users*");
+    assert_eq!(violations[1]["rule"], "no-cross-service-callers:*users*");
+    for side in ["from", "to"] {
+        assert_eq!(violations[0][side], violations[1][side], "the same binding's {side}");
+    }
+    let provider = violations[0]["to"]["symbol"].as_str().expect("a symbol");
+    assert!(
+        provider.starts_with("logos . web . "),
+        "the provider carries its repository coordinate, so the old glob matched it \
+         through its coordinate-less form: {provider}"
+    );
+    assert!(report.get("unmatched_rules").is_none(), "{report}");
+}
+
+/// A glob that matches no provider in its scope is reported — in the payload and
+/// on stderr — and never reads as a pass ([BR-48]); a glob that matches a
+/// provider nobody calls is the rule holding, and is not reported.
+#[test]
+fn a_glob_matching_no_provider_is_reported_and_an_uncalled_provider_holds() {
+    let tmp = workspace();
+    let web = tmp.path().join("web");
+    write(
+        &web,
+        "src/legacy.rs",
+        "use axum::routing::get;\nuse axum::Router;\n\nasync fn legacy_report() {}\n\n\
+         fn legacy() -> Router {\n    Router::new().route(\"/legacy-report\", get(legacy_report))\n}\n",
+    );
+    assert!(logos(&web, &["index"]).status.success(), "re-index web");
+    declare_rules(
+        tmp.path(),
+        "
+[[governance.no_cross_service_callers]]
+member = \"web\"
+symbol = \"*legacy-report*\"
+
+[[governance.no_cross_service_callers]]
+member = \"web\"
+symbol = \"*retired*\"
+",
+    );
+
+    let out = logos(tmp.path(), &["workspace", "check", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "advisory: no exit-code move");
+    let report: Value = serde_json::from_slice(&out.stdout).expect("machine-clean JSON");
+    assert_eq!(
+        report["violations"].as_array().map(Vec::len),
+        Some(0),
+        "nobody calls either provider: {report}"
+    );
+    assert_eq!(
+        report["unmatched_rules"],
+        serde_json::json!(["no-cross-service-callers:*retired*"]),
+        "only the glob naming nothing is reported: {report}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not counted as passing: no-cross-service-callers:*retired*"),
+        "stderr names the unmatched rule: {stderr}"
+    );
+}
+
 /// An out-of-range `[workspace.warm] concurrency` fails LOUD on a command that
 /// has nothing to do with warming (S-322, FR-WS-01, [ADR-14]).
 ///
@@ -2226,6 +2309,8 @@ fn xservice_callers_and_impact_mark_an_asserted_link_in_json_and_human_output() 
         let dir = root.join(member);
         init_repo(&dir);
         write(&dir, "src/lib.rs", source);
+        // A pinned coordinate (S-703): the symbols below name it.
+        write(&dir, ".logos/config.toml", &format!("[project]\nid = \"example.com/{member}\"\n"));
         assert!(logos(&dir, &["index"]).status.success(), "index {member}");
     }
     std::fs::write(
@@ -2234,8 +2319,8 @@ fn xservice_callers_and_impact_mark_an_asserted_link_in_json_and_human_output() 
          from = \"web::fetch_cart\"\nto = \"api::get_cart\"\n",
     )
     .unwrap();
-    let get_cart = "logos . . . src/`lib.rs`/get_cart().";
-    let fetch_cart = "logos . . . src/`lib.rs`/fetch_cart().";
+    let get_cart = "logos . example.com/api . src/`lib.rs`/get_cart().";
+    let fetch_cart = "logos . example.com/web . src/`lib.rs`/fetch_cart().";
 
     let callers = logos_json(root, &["xservice", "callers", get_cart]);
     let row = &callers["via_asserted_link"][0];

@@ -25,7 +25,7 @@
 //! |---|---|---|
 //! | `opened` | the store was opened — **including** a member later LRU-evicted to stay inside the [budget](super::budget) ([NFR-PE-11]) | no |
 //! | `not-attempted` | the answer never needed this member, so nothing was opened ([NFR-PE-10] laziness) | no |
-//! | `degraded` | opening was **attempted and failed**, with the cause | yes |
+//! | `degraded` | opening was **attempted and failed** — or was **refused** because the member shares an earlier member's coordinate ([FR-WS-39]) — with the cause | yes |
 //!
 //! Eviction is the sharp one. An evicted member's engine is torn down and
 //! rebuilt on next touch, and the rebuild is indistinguishable from a
@@ -54,11 +54,14 @@
 //! [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 //! [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+//! [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
 //! [FR-DB-01]: ../../../docs/specs/requirements/FR-DB-01.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
 //! [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
+
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -109,11 +112,28 @@ pub enum DegradedCause {
     /// exactly the failure this vocabulary exists to stop misreporting. That case
     /// claims no cause at all (see [`classify`]).
     StoreObstructed,
+    /// The member **resolves to the repository coordinate an earlier member
+    /// already holds** — two clones of one remote, or a copy of a checkout
+    /// ([FR-WS-39], [ADR-85]). Its symbols would be the earlier member's, byte for
+    /// byte, so the workspace refuses to open it rather than fold the two into
+    /// one identity; the earlier member (manifest order) answers normally.
+    ///
+    /// Nothing is wrong with the member's store, and a re-index is not the
+    /// remedy: the fix is a distinct `[project] id` in the later member's
+    /// `.logos/config.toml`. The row's `degraded_reason` names both paths and the
+    /// coordinate they share ([`duplicate_coordinate_reason`]).
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    /// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+    DuplicateCoordinate,
 }
 
 impl DegradedCause {
     /// The plain-language statement of this cause, for the human diagnostic and
-    /// for the row's `degraded_reason`.
+    /// for the row's `degraded_reason`. [`DuplicateCoordinate`](Self::DuplicateCoordinate)
+    /// is the exception on the row: the registry supplies the sentence naming the
+    /// two checkouts ([`duplicate_coordinate_reason`]), and this statement is the
+    /// cause stated without them.
     ///
     /// Stated as what is *known* **first**, then the remedy, because the whole
     /// reason the cause exists is that the raw SQLite wording sends a reader to
@@ -147,6 +167,12 @@ impl DegradedCause {
             Self::StoreObstructed => {
                 "the member's `.logos/logos.db` path is occupied by something that is not a \
                  regular file — clear that path, then run `logos index` in that member"
+            }
+            Self::DuplicateCoordinate => {
+                "the member resolves to the repository coordinate an earlier member already \
+                 holds, so it is excluded rather than folded into it: its store is intact and \
+                 a re-index is not the remedy — set a distinct `[project] id` in the later \
+                 member's `.logos/config.toml`, then re-open the workspace"
             }
         }
     }
@@ -276,6 +302,36 @@ pub fn classify(diagnostic: &str, store: StoreFile) -> Option<DegradedCause> {
     None
 }
 
+/// The sentence a member excluded for sharing a coordinate carries as its
+/// `degraded_reason` and `degraded_diagnostic` ([FR-WS-39], [NFR-CC-04]).
+///
+/// Names **both** checkouts by path — the one that holds the coordinate and the
+/// one excluded — and the override that clears it, because a reader holding only
+/// "duplicate coordinate" cannot tell which of two clones was kept, and the fix
+/// (`[project] id` in the later member's config) lives in neither word.
+///
+/// Each member is its name (the workspace-relative label) and its resolved root.
+///
+/// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[must_use]
+pub fn duplicate_coordinate_reason(
+    coordinate: &str,
+    first: (&str, &Path),
+    later: (&str, &Path),
+) -> String {
+    format!(
+        "workspace member {later_name:?} ({later_root}) resolves to repository coordinate \
+         {coordinate:?}, which member {first_name:?} ({first_root}) already holds, so it is \
+         excluded rather than folded into it. Set a distinct `[project] id` in \
+         {later_root}/.logos/config.toml, then re-open the workspace",
+        later_name = later.0,
+        later_root = later.1.display(),
+        first_name = first.0,
+        first_root = first.1.display(),
+    )
+}
+
 /// One member's open state as a workspace read-model reports it ([FR-WS-16]).
 ///
 /// Serialized **internally tagged** on `open_state`, matching
@@ -299,7 +355,11 @@ pub enum MemberOpenState {
     ///
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     NotAttempted,
-    /// Opening was attempted and **failed**.
+    /// Opening was attempted and **failed**, or was **refused** before any
+    /// attempt because the member resolves to the coordinate an earlier member
+    /// holds ([`DegradedCause::DuplicateCoordinate`], [FR-WS-39]).
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
     Degraded {
         /// The classified cause, **absent** when the diagnostic identifies none
         /// rather than defaulted to the likeliest ([NFR-CC-04]).
@@ -313,7 +373,9 @@ pub enum MemberOpenState {
         /// Additive to — never a replacement for — the row's existing `error`
         /// field, which keeps the raw engine diagnostic exactly as it was.
         degraded_reason: String,
-        /// The verbatim engine diagnostic, **always**.
+        /// The verbatim engine diagnostic, **always** — for a member refused as
+        /// a duplicate coordinate there is no engine beneath it, so this is the
+        /// refusal's own sentence, the same text as `degraded_reason`.
         ///
         /// Carried here rather than left to the row's `error` field because
         /// `error` does not always hold it. Two reachable cases:
@@ -349,6 +411,23 @@ impl MemberOpenState {
             degraded_reason: cause
                 .map_or_else(|| diagnostic.to_string(), |cause| cause.message().to_string()),
             degraded_diagnostic: diagnostic.to_string(),
+        }
+    }
+
+    /// The degraded state of a member excluded for sharing a coordinate: the
+    /// cause is known, so it is stated, and `reason` (see
+    /// [`duplicate_coordinate_reason`]) is the whole of what there is to tell —
+    /// there is no engine diagnostic beneath it, so it fills both fields
+    /// ([FR-WS-39], [NFR-CC-04]).
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[must_use]
+    pub fn duplicate_coordinate(reason: &str) -> Self {
+        Self::Degraded {
+            degraded_cause: Some(DegradedCause::DuplicateCoordinate),
+            degraded_reason: reason.to_string(),
+            degraded_diagnostic: reason.to_string(),
         }
     }
 
@@ -502,7 +581,9 @@ impl DegradedRollup {
     /// The grouping key is the member's **reason text**, not its
     /// [`DegradedCause`]. For a classified member the two are the same key —
     /// `degraded_reason` *is* `cause.message()`, and distinct causes give
-    /// distinct messages — while an *unclassified* member carries its own
+    /// distinct messages (a duplicate coordinate is the exception: its reason
+    /// names its own two checkouts, so each such member is its own group) —
+    /// while an *unclassified* member carries its own
     /// verbatim engine diagnostic there. Keying on `Option<DegradedCause>` would
     /// collapse every unclassified member into one `None` group under a single
     /// member's diagnostic, destroying the evidence the absent cause is precisely
@@ -1173,6 +1254,7 @@ mod tests {
         for (cause, wire) in [
             (DegradedCause::HostResourceLimit, "host-resource-limit"),
             (DegradedCause::StoreObstructed, "store-obstructed"),
+            (DegradedCause::DuplicateCoordinate, "duplicate-coordinate"),
         ] {
             assert_eq!(serde_json::to_value(cause).unwrap(), wire);
         }
@@ -1220,6 +1302,39 @@ mod tests {
         assert!(
             !absent.reason().unwrap().contains("logos index"),
             "and it must NOT send an fd-exhausted operator to a re-index"
+        );
+    }
+
+    /// [FR-WS-39]: an excluded duplicate says which two checkouts collide, on
+    /// which coordinate, and the override that clears it — and carries the cause
+    /// on the wire, with the same sentence as reason and diagnostic.
+    #[test]
+    fn a_duplicate_coordinate_names_both_paths_and_the_override() {
+        let reason = duplicate_coordinate_reason(
+            "github.com/acme/orders",
+            ("orders", Path::new("/ws/orders")),
+            ("orders-copy", Path::new("/ws/orders-copy")),
+        );
+        for needle in [
+            "github.com/acme/orders",
+            "\"orders\" (/ws/orders)",
+            "\"orders-copy\" (/ws/orders-copy)",
+            "[project] id",
+            "/ws/orders-copy/.logos/config.toml",
+        ] {
+            assert!(reason.contains(needle), "{needle:?} missing from: {reason}");
+        }
+
+        let state = MemberOpenState::duplicate_coordinate(&reason);
+        assert!(state.is_degraded());
+        assert_eq!(state.reason(), Some(reason.as_str()));
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(value["open_state"], "degraded", "{value}");
+        assert_eq!(value["degraded_cause"], "duplicate-coordinate", "{value}");
+        assert_eq!(value["degraded_diagnostic"], reason.as_str(), "{value}");
+        assert!(
+            DegradedCause::DuplicateCoordinate.message().contains("[project] id"),
+            "the static statement names the override too"
         );
     }
 }

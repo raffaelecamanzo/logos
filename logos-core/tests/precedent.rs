@@ -26,6 +26,9 @@ use logos_core::models::navigation::{
 use logos_core::Engine;
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 /// Write `contents` at `root/rel`, creating parents.
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -106,6 +109,7 @@ fn arm_init(file: &str) -> String {
 
 /// An indexed engine over `tmp`.
 fn indexed_engine(tmp: &TempDir) -> Engine {
+    coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let result = engine.index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
@@ -118,7 +122,7 @@ fn indexed_engine(tmp: &TempDir) -> Engine {
 /// named `extract`, and a test that let the resolver pick would be asserting
 /// against whichever one it picked.
 fn extract_in(file: &str) -> String {
-    format!("logos . . . src/`{file}`/extract().")
+    coordinate::symbol(&format!("src/`{file}`/extract()."))
 }
 
 /// The precedent named `name`, or a panic naming what did come back.
@@ -459,7 +463,7 @@ fn a_single_shared_callee_is_not_a_call_shape_and_the_drop_is_counted() {
 
     // The canonical symbol, not the bare name: `subject` also names the module
     // the file becomes, and the module is the lower-id resolution.
-    let result = engine.precedent("logos . . . src/`subject.rs`/subject().", None);
+    let result = engine.precedent(&coordinate::symbol("src/`subject.rs`/subject()."), None);
 
     let names: Vec<&str> = result
         .precedents
@@ -775,7 +779,7 @@ fn a_long_shared_list_is_truncated_counted_and_says_so() {
     }
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("logos . . . src/`subject.rs`/subject().", None);
+    let result = engine.precedent(&coordinate::symbol("src/`subject.rs`/subject()."), None);
 
     let twin = by_name(&result, "twin");
     let reason = &twin.reasons[0];
@@ -819,7 +823,7 @@ fn an_over_large_limit_is_clamped_and_the_remainder_counted() {
     write(tmp.path(), "src/siblings.rs", &body);
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("logos . . . src/`siblings.rs`/sibling_0().", Some(10_000));
+    let result = engine.precedent(&coordinate::symbol("src/`siblings.rs`/sibling_0()."), Some(10_000));
 
     assert_eq!(
         result.precedents.len(),

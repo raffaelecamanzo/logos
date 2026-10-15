@@ -55,6 +55,12 @@ fn init_repo(dir: &Path, rel: &str, contents: &str) {
     sh_git(dir, &["commit", "-q", "-m", "init"]);
 }
 
+/// Pin `id` as the repository coordinate (S-703), so a member's symbols name
+/// a fixed coordinate rather than one derived from the temp tree.
+fn pin_coordinate(dir: &Path, id: &str) {
+    write(dir, ".logos/config.toml", &format!("[project]\nid = \"{id}\"\n"));
+}
+
 /// An OpenAPI spec whose `/users/{user_id}` `get` matches the axum `/users/{id}`
 /// route (the `route_key` param-drift erasure) — one bound cross-service edge.
 const OPENAPI_YAML: &str = "\
@@ -347,6 +353,12 @@ async fn workspace_status_reports_name_members_and_coverage() {
     // hand-maintained TS union `MemberWarmStateLabel` in `web/ui/src/api/types.ts`.
     for m in v["members"].as_array().unwrap() {
         assert_eq!(m["warm_state"], "warm", "both fixture members are indexed: {m}");
+        // S-706 ([FR-WS-39]): every row names the repository coordinate it
+        // resolves to, from the one read-model the CLI prints — and it is the
+        // identity the member's own store recorded when it was indexed.
+        let coordinate = m["coordinate"].as_str().unwrap_or_else(|| panic!("a coordinate: {m}"));
+        assert!(!coordinate.is_empty(), "{m}");
+        assert_eq!(m["result"]["project_id"], coordinate, "the row and the store agree: {m}");
     }
     assert_eq!(v["warm_rollup"]["members"], 2, "the roll-up is served too: {body}");
     assert_eq!(v["warm_rollup"]["warm"], 2, "{body}");
@@ -665,18 +677,25 @@ async fn workspace_impact_exposes_seed_and_cross_service_tiers() {
 const FORK_CLIENT_WIRED: &str = "use reqwest::Client;\n\npub async fn fetch_user(client: Client) {\n    \
                                  let _ = client.get(\"/users/{id}\").await;\n}\n";
 
-/// `svc-a`'s fork of it: the same file and function — the same symbol — calling
-/// nothing.
+/// `svc-a`'s fork of it: the same file and function — the same descriptors —
+/// calling nothing.
 const FORK_CLIENT_IDLE: &str = "use reqwest::Client;\n\npub async fn fetch_user(client: Client) {}\n";
 
-/// The symbol both forks hold.
+/// The forks' `fetch_user` written without a coordinate (S-705): each fork is its
+/// own repository with its own coordinate (S-706), so no canonical symbol is held
+/// by both, but this one string names the function in both — the case per-member
+/// grouping exists for.
 const FORK_SYMBOL: &str = "logos . . . src/`client.rs`/fetch_user().";
+
+/// `svc-b`'s canonical `fetch_user`: `svc-b`'s alone.
+const SVC_B_SYMBOL: &str = "logos . example.com/svc-b . src/`client.rs`/fetch_user().";
 
 /// **A symbol two members hold is grouped per member on the web read-model too**
 /// (S-701, [BR-73]): `/api/v1/workspace/{impact,callers}` serialize the one
 /// read-model, so the unscoped answer carries `resolved_by_member` — `svc-a`'s
 /// idle fork at zero — and the `ambiguity_warning`; `repo=svc-a` stitches
-/// nothing through `svc-b`'s edge and carries neither.
+/// nothing through `svc-b`'s edge and carries neither, and nor does `svc-b`'s
+/// canonical symbol, which one member holds.
 ///
 /// [BR-73]: ../../docs/specs/software-spec.md#327-workspace-federation
 #[tokio::test]
@@ -687,6 +706,7 @@ async fn workspace_reachability_groups_a_symbol_two_members_hold_per_member() {
     init_repo(&root.join("svc-a"), "src/client.rs", FORK_CLIENT_IDLE);
     init_repo(&root.join("svc-b"), "src/client.rs", FORK_CLIENT_WIRED);
     for member in ["api", "svc-a", "svc-b"] {
+        pin_coordinate(&root.join(member), &format!("example.com/{member}"));
         Engine::start(root.join(member)).expect("member engine").index();
     }
     std::fs::write(root.join("logos.workspace.toml"), "[workspace]\nname = \"forks\"\nmembers = [\"api\", \"svc-a\", \"svc-b\"]\n")
@@ -724,6 +744,72 @@ async fn workspace_reachability_groups_a_symbol_two_members_hold_per_member() {
     let scoped = answer(format!("/api/v1/workspace/impact?{symbol}&repo=svc-a")).await;
     assert_eq!(scoped["cross_service"], serde_json::json!([]), "svc-b's edge is not svc-a's: {scoped:#}");
     assert!(scoped.get("resolved_by_member").is_none() && scoped.get("ambiguity_warning").is_none(), "{scoped:#}");
+
+    let canonical = answer(format!("/api/v1/workspace/impact?{}", form_field("symbol", SVC_B_SYMBOL))).await;
+    assert_eq!(canonical["cross_service"], impact["cross_service"], "the same row: {canonical:#}");
+    assert!(canonical.get("resolved_by_member").is_none() && canonical.get("ambiguity_warning").is_none(), "{canonical:#}");
+}
+
+/// **Two members resolving to one coordinate never fold, on the web surface too**
+/// (S-706, [FR-WS-39], [FR-WS-16]): `/api/v1/workspace/status` lists each
+/// member's `coordinate` and reports the later of two members sharing one as
+/// `degraded` with `degraded_cause: "duplicate-coordinate"`, naming both
+/// checkouts and the `[project] id` override — the first answers normally, and
+/// the duplicate is a member the coverage figures did not read.
+///
+/// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
+/// [FR-WS-39]: ../../docs/specs/requirements/FR-WS-39.md
+#[tokio::test]
+async fn workspace_status_degrades_the_later_of_two_members_sharing_a_coordinate() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("svc-a"), "src/client.rs", FORK_CLIENT_IDLE);
+    init_repo(&root.join("svc-b"), "src/client.rs", FORK_CLIENT_IDLE);
+    init_repo(&root.join("api"), "src/main.rs", AXUM_MAIN);
+    for fork in ["svc-a", "svc-b"] {
+        pin_coordinate(&root.join(fork), "example.com/svc");
+    }
+    pin_coordinate(&root.join("api"), "example.com/api");
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"forks\"\nmembers = [\"svc-a\", \"svc-b\", \"api\"]\n",
+    )
+    .unwrap();
+
+    let resp = ws_router(&tmp).oneshot(get("/api/v1/workspace/status")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a degraded member is not an HTTP error: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let row = |member: &str| {
+        v["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["member"] == member)
+            .unwrap_or_else(|| panic!("no row for {member}: {body}"))
+            .clone()
+    };
+
+    assert_eq!(row("svc-a")["coordinate"], "example.com/svc", "{body}");
+    assert_eq!(row("svc-b")["coordinate"], "example.com/svc", "{body}");
+    assert_eq!(row("api")["coordinate"], "example.com/api", "{body}");
+    assert_eq!(row("svc-a")["open_state"], "opened", "the first holder answers: {body}");
+    assert_eq!(row("api")["open_state"], "opened", "{body}");
+
+    let second = row("svc-b");
+    assert_eq!(second["open_state"], "degraded", "{second}");
+    assert_eq!(second["degraded_cause"], "duplicate-coordinate", "{second}");
+    let reason = second["degraded_reason"].as_str().expect("a reason");
+    for needle in ["svc-a", "svc-b", "example.com/svc", "[project] id"] {
+        assert!(reason.contains(needle), "{needle:?} missing from: {reason}");
+    }
+    assert_eq!(
+        v["degraded_rollup"]["degraded_members"],
+        serde_json::json!(["svc-b"]),
+        "the roll-up names it: {body}"
+    );
+    assert_eq!(v["coverage"]["members_read"], 2, "the duplicate is not read: {body}");
+    assert_eq!(v["coverage"]["members_total"], 3, "{body}");
 }
 
 /// `web`'s client for the linked fixture: a call whose URL is composed at
@@ -751,6 +837,9 @@ async fn the_workspace_api_carries_an_asserted_link_labelled() {
     init_repo(&root.join("api"), "src/lib.rs", LINKED_API);
     init_repo(&root.join("web"), "src/lib.rs", LINKED_WEB);
     for member in ["api", "web"] {
+        pin_coordinate(&root.join(member), &format!("example.com/{member}"));
+    }
+    for member in ["api", "web"] {
         Engine::start(root.join(member)).expect("member engine").index();
     }
     std::fs::write(
@@ -769,14 +858,14 @@ async fn the_workspace_api_carries_an_asserted_link_labelled() {
         }
     };
 
-    let callers = answer(format!("/api/v1/workspace/callers?{}", form_field("symbol", "logos . . . src/`lib.rs`/get_cart()."))).await;
+    let callers = answer(format!("/api/v1/workspace/callers?{}", form_field("symbol", "logos . example.com/api . src/`lib.rs`/get_cart()."))).await;
     let rows = callers["via_asserted_link"].as_array().expect("the asserted tier");
     assert_eq!(rows.len(), 1, "{callers:#}");
     assert_eq!((rows[0]["intake"].as_str(), rows[0]["reached"].as_str()), (Some("asserted"), Some("(asserted)")));
     assert_eq!(rows[0]["from"]["member"], "web");
     assert_eq!(callers["cross_service"], serde_json::json!([]), "never in the measured tier");
 
-    let impact = answer(format!("/api/v1/workspace/impact?{}", form_field("symbol", "logos . . . src/`lib.rs`/fetch_cart()."))).await;
+    let impact = answer(format!("/api/v1/workspace/impact?{}", form_field("symbol", "logos . example.com/web . src/`lib.rs`/fetch_cart()."))).await;
     let far = impact["via_asserted_link"].as_array().expect("stitched across the link");
     assert_eq!((far[0]["member"].as_str(), far[0]["via"]["intake"].as_str()), (Some("api"), Some("asserted")), "{impact:#}");
 

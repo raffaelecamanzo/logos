@@ -59,6 +59,9 @@ export const HEALTH_TEXT = {
   /** Rule references naming a member the workspace does not have. */
   unknownMembers: (n: number) =>
     `${n} rule ${plural(n, "reference names", "references name")} a member this workspace does not have, so ${plural(n, "that rule was", "those rules were")} silently narrowed and can never match:`,
+  /** Rules whose glob matches nothing a member exposes (BR-48): never a pass. */
+  unmatchedRules: (n: number) =>
+    `${n} ${plural(n, "rule matches", "rules match")} nothing any member exposes to another service, so ${plural(n, "it was", "they were")} checked against nothing — this is not a pass:`,
   /** Members answering (S-617): "2 of 3 members answered". */
   answered: (opened: number, members: number) => `${opened} of ${members} ${plural(members, "member", "members")} answered`,
   /** Warm state (S-617): "2 of 3 members are warm". */

@@ -34,12 +34,17 @@ use crate::model::{LogosSymbol, NodeKind};
 /// rendered as the SCIP empty-field marker `.` — `scheme` is never empty (SCIP
 /// requires it), defaulting to `logos`.
 ///
-/// Resolving the *precise* per-file cargo crate + version is a
-/// [resolution-engine](../../../docs/specs/architecture/components/resolution-engine.md)
-/// concern (S-011); Pass 1 takes a single coordinate for the run. Symbol
-/// *stability* and *uniqueness* do not depend on it — the file path and scope
-/// chain in the descriptor carry the identity — so a coarse coordinate here is
-/// sound.
+/// The package slot holds the **repository coordinate** ([ADR-85]): every
+/// production run builds its context with [`SymbolContext::for_coordinate`]
+/// from the store's coordinate, so a symbol names its repository and two
+/// repositories holding the same repo-relative declaration never share one.
+/// Within a repository the file path and scope chain carry the identity, as
+/// before; the coordinate is what makes it unique beyond the store ([BR-74]).
+/// Manager and version stay `.`: a version would change every symbol on every
+/// release.
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+/// [BR-74]: ../../../docs/specs/software-spec.md#35-extraction--symbol-ids
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolContext {
     /// The SCIP scheme; never empty. Logos uses `logos`.
@@ -64,6 +69,21 @@ impl Default for SymbolContext {
 }
 
 impl SymbolContext {
+    /// The context every symbol of a repository is built under: `logos . <coordinate> .`
+    /// ([ADR-85]). `None` is the coordinate-less context (`logos . . .`), the
+    /// form of a store that records no symbol coordinate yet.
+    ///
+    /// `coordinate` is a resolved project coordinate
+    /// ([`crate::config::resolve_project_id`]), which never contains a space.
+    ///
+    /// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+    pub fn for_coordinate(coordinate: Option<&str>) -> Self {
+        Self {
+            package: coordinate.unwrap_or_default().to_string(),
+            ..Self::default()
+        }
+    }
+
     /// A `logos cargo <package> <version>` coordinate — the common Rust case.
     pub fn cargo(package: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
@@ -512,6 +532,29 @@ mod tests {
         let chain = vec![descriptor_for(NodeKind::Function, "main", 0)];
         let sym = build_symbol(&ctx, &["src", "main.rs"], &chain).unwrap();
         assert_eq!(sym.as_str(), "logos . . . src/`main.rs`/main().");
+        assert_eq!(SymbolContext::for_coordinate(None), ctx, "no coordinate is the empty slot");
+    }
+
+    #[test]
+    fn the_repository_coordinate_fills_the_package_slot() {
+        // ADR-85: the coordinate occupies the package slot; manager and version
+        // stay `.`. Every character a coordinate admits renders unescaped.
+        let chain = vec![descriptor_for(NodeKind::Function, "run", 0)];
+        for coordinate in ["github.com/acme/svc-a", "git@h:o/r", "a/b.c@d:e-f", "my_repo"] {
+            let ctx = SymbolContext::for_coordinate(Some(coordinate));
+            let sym = build_symbol(&ctx, &["src", "lib.rs"], &chain).unwrap();
+            assert_eq!(sym.as_str(), format!("logos . {coordinate} . src/`lib.rs`/run()."));
+            assert_eq!(sym.coordinate(), Some(coordinate));
+        }
+    }
+
+    #[test]
+    fn one_declaration_in_two_repositories_has_two_symbols_and_one_tail() {
+        let chain = vec![descriptor_for(NodeKind::Function, "run", 0)];
+        let a = build_symbol(&SymbolContext::for_coordinate(Some("h/acme/a")), &["src", "lib.rs"], &chain).unwrap();
+        let b = build_symbol(&SymbolContext::for_coordinate(Some("h/acme/b")), &["src", "lib.rs"], &chain).unwrap();
+        assert_ne!(a, b, "the coordinate keeps two repositories apart");
+        assert_eq!(a.descriptor_tail(), b.descriptor_tail());
     }
 
     #[test]

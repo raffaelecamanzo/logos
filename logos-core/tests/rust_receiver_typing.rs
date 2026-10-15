@@ -20,6 +20,9 @@ use logos_core::model::{EdgeKind, NodeId, ReceiverShape, RefForm};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -27,6 +30,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 fn index(tmp: &TempDir) -> Engine {
+    coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.index();
     engine

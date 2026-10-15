@@ -9,14 +9,15 @@
 //! cart handler through a runtime-composed URL (`fetch_cart`, `base-url-runtime`
 //! residue) that a link declares. `get_cart` and the `load_cart` it calls are
 //! private and uncalled, so their own graph verdicts them dead. `fork` holds a
-//! copy of `api`'s source under another route path — the same handler symbols,
-//! another member.
+//! copy of `api`'s source under another route path — the same handlers at the
+//! same descriptors, under its own coordinate ([CR-222]), so a symbol written
+//! without a coordinate names the handler in both.
 //!
 //! It proves, per acceptance criterion:
 //!
 //! - `xservice callers` / `impact` carry the asserted edge in `via_asserted_link`,
 //!   `intake: "asserted"` and `reached: "(asserted)"`, matched on the
-//!   `(member, symbol)` pair: the fork's identical symbol is never answered for;
+//!   `(member, symbol)` pair: `api`'s symbol never answers for the fork's link;
 //! - app-wide reachability makes the link's target and its callee
 //!   `live-via-asserted-link`, never `live-via-cross-service`, and a `publishes`
 //!   link seeds no root;
@@ -31,6 +32,7 @@
 //! - renaming the link's target and syncing makes the link `no-match`, and its
 //!   roots disappear on the next answer of the **same** bridge.
 //!
+//! [CR-222]: ../../docs/requests/CR-222-workspace-safe-symbol-identity.md
 //! [CR-224]: ../../docs/requests/CR-224-asserted-cross-service-links.md
 //! [FR-WS-41]: ../../docs/specs/requirements/FR-WS-41.md
 //! [BR-75]: ../../docs/specs/software-spec.md#327-workspace-federation
@@ -47,6 +49,9 @@ use logos_core::federation::{
 };
 use logos_core::Engine;
 use serde_json::Value;
+
+#[path = "support/coordinate.rs"]
+mod coordinate;
 
 /// `web`: one static call the bridge binds, one runtime-composed call it cannot.
 const WEB_LIB: &str = r#"
@@ -101,6 +106,7 @@ fn fixture(tmp: &Path) -> Vec<Member> {
         .map(|(name, source)| {
             let root = tmp.join(name);
             write(&root, "src/lib.rs", &source);
+            coordinate::pin_as(&root, &member_coordinate(name));
             index_member(&root);
             Member {
                 name: name.to_string(),
@@ -140,24 +146,42 @@ fn registry(root: &Path, members: &[Member], links: Vec<Link>) -> EngineRegistry
     )
 }
 
-/// The canonical symbol of `name` in `src/lib.rs` — identical in `api` and
-/// `fork`, which is the point of the fork.
+/// The coordinate a member is indexed under (S-703): its own, `fork` included —
+/// two members sharing one would leave the later degraded (S-706).
+fn member_coordinate(name: &str) -> String {
+    format!("example.com/{name}")
+}
+
+/// The canonical symbol of `name` in `src/lib.rs`, under the coordinate of the
+/// member declaring it: `web` declares the `fetch_*` clients, `api` every
+/// handler (and `fork` its copy of each, see [`symbol_in`]).
 fn symbol(name: &str) -> String {
-    format!("logos . . . src/`lib.rs`/{name}().")
+    let member = if name.starts_with("fetch_") { "web" } else { "api" };
+    symbol_in(member, name)
+}
+
+/// The canonical symbol of `name` in `member`'s `src/lib.rs`.
+fn symbol_in(member: &str, name: &str) -> String {
+    format!("logos . {} . src/`lib.rs`/{name}().", member_coordinate(member))
 }
 
 /// Every answer one surface would give over `registry`: status, callers and
 /// impact on each cart symbol, and the reachability view.
 struct Answers {
     status: Value,
+    /// Unscoped over `get_cart` written without a coordinate, which `api` and
+    /// `fork` both answer to: the grouped callers answer ([BR-73]).
     callers_get_cart: Value,
+    /// Unscoped over `api`'s canonical `get_cart`: `api`'s alone.
+    callers_get_cart_canonical: Value,
     callers_get_cart_in_api: Value,
     callers_get_cart_in_fork: Value,
     callers_get_user: Value,
     impact_fetch_cart: Value,
     impact_get_cart: Value,
-    /// Unscoped over `get_cart`, which `api` and `fork` both hold: the grouped
-    /// impact answer ([BR-73]) a link must not move.
+    /// Unscoped over `get_cart` written without a coordinate, which `api` and
+    /// `fork` both answer to: the grouped impact answer ([BR-73]) a link must
+    /// not move.
     impact_get_cart_unscoped: Value,
     reach: Value,
 }
@@ -167,7 +191,8 @@ fn answers(registry: &EngineRegistry<Engine>, bridge: &ContractBridge) -> Answer
     let json = |value: &dyn erased::Json| value.json();
     Answers {
         status: json(&workspace_status(registry)),
-        callers_get_cart: json(&query::xservice_callers(registry, &inputs, &symbol("get_cart"), None, None)),
+        callers_get_cart: json(&query::xservice_callers(registry, &inputs, &old_form("get_cart"), None, None)),
+        callers_get_cart_canonical: json(&query::xservice_callers(registry, &inputs, &symbol("get_cart"), None, None)),
         callers_get_cart_in_api: json(&query::xservice_callers(
             registry,
             &inputs,
@@ -178,14 +203,14 @@ fn answers(registry: &EngineRegistry<Engine>, bridge: &ContractBridge) -> Answer
         callers_get_cart_in_fork: json(&query::xservice_callers(
             registry,
             &inputs,
-            &symbol("get_cart"),
+            &symbol_in("fork", "get_cart"),
             None,
             Some("fork"),
         )),
         callers_get_user: json(&query::xservice_callers(registry, &inputs, &symbol("get_user"), None, None)),
         impact_fetch_cart: json(&query::xservice_impact(registry, &inputs, &symbol("fetch_cart"), None, None)),
         impact_get_cart: json(&query::xservice_impact(registry, &inputs, &symbol("get_cart"), None, Some("api"))),
-        impact_get_cart_unscoped: json(&query::xservice_impact(registry, &inputs, &symbol("get_cart"), None, None)),
+        impact_get_cart_unscoped: json(&query::xservice_impact(registry, &inputs, &old_form("get_cart"), None, None)),
         reach: json(&app_wide_reachability(registry, &query::reach_edges(bridge, registry))),
     }
 }
@@ -251,8 +276,10 @@ fn an_asserted_link_joins_callers_impact_and_reachability_labelled_and_moves_no_
     let linked = answers(&registry(&root, &members, links), &ContractBridge::new());
 
     // ── callers: the asserted rows, labelled, keyed on (member, symbol) ──────
-    // `api` and `fork` hold one symbol string: unscoped, each link's row names
-    // its own member; scoped, each member answers for its own link alone.
+    // `api` and `fork` both answer to `get_cart` written without a coordinate:
+    // unscoped, each link's row names its own member and that member's symbol;
+    // scoped, or by `api`'s canonical symbol, each member answers for its own
+    // link alone.
     let ends = |answer: &Value| -> Vec<(String, String)> {
         answer["via_asserted_link"]
             .as_array()
@@ -262,8 +289,9 @@ fn an_asserted_link_joins_callers_impact_and_reachability_labelled_and_moves_no_
                         assert_eq!(row["reached"], "(asserted)", "{row}");
                         assert_eq!(row["intake"], "asserted", "{row}");
                         assert_eq!(row["from"]["member"], "web", "{row}");
-                        assert_eq!(row["to"]["symbol"], symbol("get_cart"), "{row}");
-                        (row["to"]["member"].as_str().unwrap().to_string(), row["relation"].as_str().unwrap().to_string())
+                        let member = row["to"]["member"].as_str().unwrap();
+                        assert_eq!(row["to"]["symbol"], symbol_in(member, "get_cart"), "{row}");
+                        (member.to_string(), row["relation"].as_str().unwrap().to_string())
                     })
                     .collect()
             })
@@ -271,6 +299,8 @@ fn an_asserted_link_joins_callers_impact_and_reachability_labelled_and_moves_no_
     };
     let pair = |member: &str, relation: &str| (member.to_string(), relation.to_string());
     assert_eq!(ends(&linked.callers_get_cart), [pair("api", "route"), pair("fork", "broker-topic")]);
+    assert_eq!(ends(&linked.callers_get_cart_canonical), [pair("api", "route")]);
+    assert!(linked.callers_get_cart_canonical.get("ambiguity_warning").is_none(), "one holder");
     assert_eq!(ends(&linked.callers_get_cart_in_api), [pair("api", "route")]);
     assert_eq!(ends(&linked.callers_get_cart_in_fork), [pair("fork", "broker-topic")]);
     // Never in the measured tier, and never in its resolved count.
@@ -342,6 +372,7 @@ fn an_asserted_link_joins_callers_impact_and_reachability_labelled_and_moves_no_
     assert_eq!(plain.status["coverage"]["resolved_cross_service_edges"], 1, "the figure is not vacuous");
     for (with, without_links) in [
         (&linked.callers_get_cart, &plain.callers_get_cart),
+        (&linked.callers_get_cart_canonical, &plain.callers_get_cart_canonical),
         (&linked.callers_get_cart_in_api, &plain.callers_get_cart_in_api),
         (&linked.callers_get_cart_in_fork, &plain.callers_get_cart_in_fork),
         (&linked.callers_get_user, &plain.callers_get_user),
@@ -402,7 +433,7 @@ fn a_renamed_link_target_turns_no_match_and_its_root_disappears_on_the_next_answ
 }
 
 /// The `api` route `fetch_user` binds — the measured edge's provider end.
-const USERS_ROUTE: &str = "logos . . . src/`lib.rs`/route/`GET /users/{user_id}`#";
+const USERS_ROUTE: &str = "logos . example.com/api . src/`lib.rs`/route/`GET /users/{user_id}`#";
 
 /// **A redundant link is never listed beside the edge it repeats** ([BR-75],
 /// S-709): querying either end of the measured `fetch_user → route` edge, which
@@ -450,4 +481,122 @@ fn an_indexed_route_and_its_handler_are_each_others_counterparts() {
     assert_eq!(api.route_counterparts(&sym(USERS_ROUTE)).unwrap(), [sym(&symbol("get_user"))]);
     assert_eq!(api.route_counterparts(&sym(&symbol("get_user"))).unwrap(), [sym(USERS_ROUTE)]);
     assert!(api.route_counterparts(&sym(&symbol("get_cart"))).unwrap().is_empty(), "no route serves it");
+}
+
+/// `name` in `src/lib.rs` as a symbol written before symbols carried their
+/// repository coordinate (S-705, [FR-EX-36]).
+///
+/// [FR-EX-36]: ../../docs/specs/requirements/FR-EX-36.md
+fn old_form(name: &str) -> String {
+    format!("logos . . . src/`lib.rs`/{name}().")
+}
+
+/// The parts of a cross-service answer that must not depend on how the symbol
+/// was spelled: the bound and asserted rows, each member's share, the residue
+/// figure, and whether the [BR-73] notice is raised. The per-member rows echo
+/// their query and carry the note, so they are left out.
+///
+/// [BR-73]: ../../docs/specs/software-spec.md#327-workspace-federation
+fn cross_service_part(answer: &Value) -> String {
+    format!(
+        "{} {} {} {} warned={}",
+        answer["cross_service"],
+        answer["via_asserted_link"],
+        answer["resolved_by_member"],
+        answer["unresolved_egress"],
+        answer["ambiguity_warning"].is_string(),
+    )
+}
+
+/// **A symbol written without a coordinate answers `xservice callers` and
+/// `impact` as its canonical form does** (S-705, [FR-EX-36]): each member's row
+/// upgrades it to that member's coordinate, and the bound rows, the asserted
+/// rows and the [BR-73] grouping follow the same upgrade. Scoped to `api`, it is
+/// `api`'s canonical symbol. Unscoped it names `get_cart` in `api` and in `fork`,
+/// each under its own coordinate, so it is grouped over both holders — rows
+/// unchanged, `fork` at zero — where `api`'s canonical symbol names `api` alone.
+///
+/// [FR-EX-36]: ../../docs/specs/requirements/FR-EX-36.md
+/// [BR-73]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn an_old_form_symbol_answers_cross_service_callers_and_impact_as_its_canonical_form() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let members = fixture(&root);
+    let registry = registry(&root, &members, vec![http("web::fetch_cart", "api::get_cart")]);
+    let bridge = ContractBridge::new();
+    let inputs = query::reachability_inputs(&bridge, &registry);
+    let json = |value: &dyn erased::Json| value.json();
+    let old_route = USERS_ROUTE.replace("logos . example.com/api . ", "logos . . . ");
+
+    for (canonical, old, repo) in [
+        (USERS_ROUTE.to_string(), old_route, Some("api")),
+        (symbol("get_cart"), old_form("get_cart"), Some("api")),
+    ] {
+        let callers = |s: &str| json(&query::xservice_callers(&registry, &inputs, s, None, repo));
+        let impact = |s: &str| json(&query::xservice_impact(&registry, &inputs, s, None, repo));
+        let (canonical_callers, canonical_impact) = (callers(&canonical), impact(&canonical));
+        assert!(
+            canonical_callers["cross_service"].as_array().is_some_and(|r| !r.is_empty())
+                || canonical_callers["via_asserted_link"].as_array().is_some_and(|r| !r.is_empty()),
+            "{canonical} {repo:?}: the canonical answer has cross-service rows: {canonical_callers}"
+        );
+        assert_eq!(
+            cross_service_part(&callers(&old)),
+            cross_service_part(&canonical_callers),
+            "callers {repo:?}: {old}"
+        );
+        assert_eq!(
+            cross_service_part(&impact(&old)),
+            cross_service_part(&canonical_impact),
+            "impact {repo:?}: {old}"
+        );
+    }
+    let rows = |answer: &Value| format!("{} {}", answer["cross_service"], answer["via_asserted_link"]);
+    let holders = serde_json::json!([{"member": "api", "resolved": 0}, {"member": "fork", "resolved": 0}]);
+    for verb in ["callers", "impact"] {
+        let answer = |s: &str| match verb {
+            "callers" => json(&query::xservice_callers(&registry, &inputs, s, None, None)),
+            _ => json(&query::xservice_impact(&registry, &inputs, s, None, None)),
+        };
+        let (grouped, canonical) = (answer(&old_form("get_cart")), answer(&symbol("get_cart")));
+        assert!(canonical["via_asserted_link"].as_array().is_some_and(|r| !r.is_empty()), "{verb}: {canonical}");
+        assert_eq!(rows(&grouped), rows(&canonical), "{verb}: the same rows");
+        assert_eq!(grouped["resolved_by_member"], holders, "{verb}: {grouped}");
+        let warning = grouped["ambiguity_warning"].as_str().unwrap_or_else(|| panic!("{verb}: {grouped}"));
+        assert!(warning.contains("api, fork"), "{verb}: {warning}");
+        assert!(canonical.get("ambiguity_warning").is_none() && canonical.get("resolved_by_member").is_none(), "{verb}: {canonical}");
+    }
+}
+
+/// **A `[[links]]` endpoint written as a symbol without a coordinate stays
+/// valid** (S-705, [FR-EX-36]): a 1.17.0 manifest naming its ends by full
+/// symbol resolves each under its member's coordinate and asserts the very edge
+/// the canonical spelling does. A coordinate the member does not carry is never
+/// rewritten: that end is `no-match`.
+///
+/// [FR-EX-36]: ../../docs/specs/requirements/FR-EX-36.md
+#[test]
+fn a_link_written_with_old_form_symbols_asserts_the_canonical_edge() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let members = fixture(&root);
+    // A fresh bridge per manifest: its link slot is keyed on the members'
+    // stamps, which three manifests over one set of stores share.
+    let link_row = |from: &str, to: &str| {
+        let registry = registry(&root, &members, vec![http(from, to)]);
+        serde_json::to_value(&query::reachability_inputs(&ContractBridge::new(), &registry).links[0]).unwrap()
+    };
+
+    let canonical = link_row(&format!("web::{}", symbol("fetch_cart")), &format!("api::{}", symbol("get_cart")));
+    let old = link_row(&format!("web::{}", old_form("fetch_cart")), &format!("api::{}", old_form("get_cart")));
+    assert_eq!(canonical["status"], "valid", "{canonical}");
+    assert_eq!(old["status"], "valid", "{old}");
+    assert_eq!(old["edge"], canonical["edge"], "the same asserted edge");
+
+    let foreign = link_row(
+        &format!("web::{}", symbol("fetch_cart")),
+        "api::logos . example.com/other . src/`lib.rs`/get_cart().",
+    );
+    assert_eq!((foreign["status"].as_str(), foreign["reason"].as_str()), (Some("invalid"), Some("no-match")), "{foreign}");
 }

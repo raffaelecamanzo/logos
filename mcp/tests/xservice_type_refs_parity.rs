@@ -34,7 +34,7 @@ mod federated;
 
 use federated::{boot, call, index_member, member, registry, write};
 
-const DTO_NODE: &str = "logos . . . src/main/java/com/acme/lib/`Dto.java`/Dto#";
+const DTO_NODE: &str = "logos . example.com/lib . src/main/java/com/acme/lib/`Dto.java`/Dto#";
 
 fn pom(artifact: &str, dependencies: &[&str]) -> String {
     let deps: String = dependencies

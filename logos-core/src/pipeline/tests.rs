@@ -677,7 +677,8 @@ fn chunk_boundaries_persist_every_file_exactly_once() {
 
 /// Persist `facts` at `chunk` files per transaction with `faulted` files failed
 /// through the test seam; returns `(files persisted, failed paths, warnings)`.
-#[cfg(feature = "lang-rust")]
+/// The seam exists in debug builds only, so these tests are too.
+#[cfg(all(feature = "lang-rust", debug_assertions))]
 fn persist_with_faults(
     rt: &Runtime,
     facts: &[Facts],
@@ -703,7 +704,7 @@ fn persist_with_faults(
     )
 }
 
-#[cfg(feature = "lang-rust")]
+#[cfg(all(feature = "lang-rust", debug_assertions))]
 #[test]
 fn one_failing_file_rolls_back_alone_and_its_chunk_mates_persist() {
     // FR-EH-05: in ONE chunk (3 files at chunk 8) the middle file fails after
@@ -739,7 +740,7 @@ fn one_failing_file_rolls_back_alone_and_its_chunk_mates_persist() {
     );
 }
 
-#[cfg(feature = "lang-rust")]
+#[cfg(all(feature = "lang-rust", debug_assertions))]
 #[test]
 fn a_file_failing_on_a_re_index_is_absent_not_left_at_its_old_version() {
     // FR-EH-05, full index: the failed file is ABSENT from the graph. Rolling
@@ -767,7 +768,7 @@ fn a_file_failing_on_a_re_index_is_absent_not_left_at_its_old_version() {
     assert!(f2_nodes.is_empty(), "nor any node: {f2_nodes:?}");
 }
 
-#[cfg(feature = "lang-rust")]
+#[cfg(all(feature = "lang-rust", debug_assertions))]
 #[test]
 fn every_file_failing_persists_nothing_and_fails_no_batch() {
     // The total case is reported, not raised: the run decides it is a
@@ -781,6 +782,115 @@ fn every_file_failing_persists_nothing_and_fails_no_batch() {
     assert_eq!(failed, ["f0.rs", "f1.rs", "f2.rs", "f3.rs"], "in persistence order, across chunks");
     let rows = rt.submit_read(|s| Ok(s.indexed_files()?.len())).unwrap();
     assert_eq!(rows, 0, "nothing persisted");
+}
+
+// ── S-703 / BR-74: a duplicate symbol is refused, never folded ──────────────
+
+/// Persist `facts` as one full-index chunk and record the run's failures the
+/// way [`super::index`] does; returns `(files persisted, failed paths)`.
+#[cfg(feature = "lang-rust")]
+fn persist_and_record(rt: &Runtime, facts: Vec<Facts>, hashes: &[(String, String)]) -> (usize, Vec<String>) {
+    let hash_by_rel: HashMap<&str, &str> =
+        hashes.iter().map(|(p, h)| (p.as_str(), h.as_str())).collect();
+    let mut owned = facts;
+    let mut warn = Vec::new();
+    let out = persist_facts_chunked(rt, &mut owned, &hash_by_rel, false, 8, &mut warn)
+        .expect("a file's failure never fails the batch");
+    super::record_index_persist_failures(rt, &out.failed, &[]).expect("the failures are recorded");
+    (out.files, out.failed.iter().map(|f| f.path.clone()).collect())
+}
+
+/// The store a run persisting every file of `facts` but `drop` leaves — the
+/// oracle a refused file must leave the store equal to.
+#[cfg(feature = "lang-rust")]
+fn oracle_without(facts: &[Facts], hashes: &[(String, String)], drop: &str) -> String {
+    let (_dir, oracle) = open_runtime();
+    let kept: Vec<Facts> = facts.iter().filter(|f| f.path != drop).cloned().collect();
+    let kept_hashes: Vec<(String, String)> = hashes.iter().filter(|(p, _)| p != drop).cloned().collect();
+    let (files, failed) = persist_and_record(&oracle, kept, &kept_hashes);
+    assert_eq!((files, failed.len()), (facts.len() - 1, 0), "the oracle persists every other file");
+    persisted_fingerprint(&oracle)
+}
+
+/// The persisted failure record — what `status` and `scan` read.
+#[cfg(feature = "lang-rust")]
+fn recorded_failures(rt: &Runtime) -> Vec<(String, String)> {
+    rt.submit_read(|s| Ok(s.persist_failures()?.into_iter().map(|r| (r.path, r.reason)).collect()))
+        .expect("read runs")
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_symbol_declared_twice_in_one_file_fails_that_file_with_a_recorded_reason() {
+    // BR-74 / FR-EH-05, in every build profile: the second node carrying a
+    // symbol the file already declared is refused. The file is rolled back
+    // alone and its reason recorded; nothing is folded into the first node,
+    // and its chunk-mates persist exactly as if it had never been there.
+    let inputs = sample_inputs(3);
+    let mut facts = extract_sample(&inputs);
+    let hashes = hash_pairs(&inputs);
+    let f1 = facts.iter_mut().find(|f| f.path == "f1.rs").expect("f1.rs");
+    let mut twin = f1.nodes.iter().find(|n| n.name == "f1").expect("fn f1").clone();
+    let symbol = twin.symbol.to_string();
+    twin.name = "f1_twin".into();
+    f1.nodes.push(twin);
+
+    let (_dir, rt) = open_runtime();
+    let (files, failed) = persist_and_record(&rt, facts.clone(), &hashes);
+    assert_eq!(files, 2, "every other file persists");
+    assert_eq!(failed, ["f1.rs"], "the file declaring the symbol twice fails");
+
+    let recorded = recorded_failures(&rt);
+    assert_eq!(recorded.len(), 1, "one recorded failure: {recorded:?}");
+    let (path, reason) = &recorded[0];
+    assert_eq!(path, "f1.rs");
+    assert!(
+        reason.contains("duplicate symbol") && reason.contains(&symbol) && reason.contains("in this file"),
+        "the recorded reason names the duplicate symbol: {reason}"
+    );
+    assert_eq!(
+        persisted_fingerprint(&rt),
+        oracle_without(&facts, &hashes, "f1.rs"),
+        "no row of f1.rs survives and nothing was folded"
+    );
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_symbol_another_file_holds_fails_the_later_file_and_leaves_the_holder_untouched() {
+    // BR-74: a node elsewhere in the store already holds the symbol. The later
+    // file fails with its reason recorded; the holder keeps its node — its
+    // name, its file — rather than being folded over by the newcomer.
+    let inputs = sample_inputs(3);
+    let mut facts = extract_sample(&inputs);
+    let hashes = hash_pairs(&inputs);
+    let held = facts
+        .iter()
+        .find(|f| f.path == "f0.rs")
+        .and_then(|f| f.nodes.iter().find(|n| n.name == "f0"))
+        .expect("fn f0")
+        .clone();
+    let symbol = held.symbol.to_string();
+    let f2 = facts.iter_mut().find(|f| f.path == "f2.rs").expect("f2.rs");
+    f2.nodes.push(crate::extract::NodeFact { name: "stolen".into(), ..held });
+
+    let (_dir, rt) = open_runtime();
+    let (files, failed) = persist_and_record(&rt, facts.clone(), &hashes);
+    assert_eq!((files, failed.as_slice()), (2, ["f2.rs".to_string()].as_slice()));
+
+    let recorded = recorded_failures(&rt);
+    assert!(
+        matches!(recorded.as_slice(), [(path, reason)] if path == "f2.rs"
+            && reason.contains("duplicate symbol")
+            && reason.contains(&symbol)
+            && reason.contains("already in the store")),
+        "the reason names the symbol another node holds: {recorded:?}"
+    );
+    assert_eq!(
+        persisted_fingerprint(&rt),
+        oracle_without(&facts, &hashes, "f2.rs"),
+        "f0's node is untouched and no row of f2.rs survives"
+    );
 }
 
 // ── Parallel file load (S-228, FR-IX-09) ────────────────────────────────────
@@ -1029,4 +1139,66 @@ fn a_graph_stands_when_either_files_or_nodes_survive() {
         counts_show_a_graph(&counts(1, 1)),
         "both present is a surviving graph"
     );
+}
+
+// ── S-704 / FR-EX-35: the coordinate migration is one transaction ────────────
+
+/// The store logos 1.17.0 built over `tests/coordinate_migration/tree` — every
+/// symbol coordinate-less, no coordinate recorded.
+#[cfg(debug_assertions)]
+const PRE_COORDINATE_STORE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/coordinate_migration/logos-1.17.0.db"
+);
+
+/// The bytes of `db` once its write-ahead log is folded in: the runtime leaves
+/// a commit in `logos.db-wal` when it closes, so the main file alone cannot
+/// show one.
+#[cfg(debug_assertions)]
+fn settled_bytes(db: &Path) -> Vec<u8> {
+    let conn = rusqlite::Connection::open(db).expect("open the store");
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).expect("checkpoint");
+    drop(conn);
+    std::fs::read(db).expect("read the store")
+}
+
+/// A migration that fails after its rewrite and before it commits leaves
+/// `logos.db` byte for byte as it was ([FR-EX-35], NFR-RA-07); the same
+/// migration let through does change the file, so the comparison can see one.
+/// Fails through the debug-only persistence fault seam (S-513).
+///
+/// [FR-EX-35]: ../../../docs/specs/requirements/FR-EX-35.md
+#[cfg(debug_assertions)]
+#[test]
+fn an_interrupted_coordinate_migration_leaves_the_store_byte_identical() {
+    use super::{migrate_symbol_coordinate, COORDINATE_MIGRATION_FAULT_PATH};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("logos.db");
+    std::fs::copy(PRE_COORDINATE_STORE, &db).expect("copy the fixture store");
+    // This build's schema migrations apply on the first open; the coordinate
+    // migration is an engine step, so a bare runtime does not run it.
+    drop(Runtime::open(&db).expect("runtime opens"));
+    let before = settled_bytes(&db);
+
+    let mut config = Config::default();
+    config.project.id = Some("example.com/fixture".to_string());
+    let rt = Runtime::open(&db).expect("runtime opens");
+    rt.inject_persist_fault(COORDINATE_MIGRATION_FAULT_PATH);
+    let err = migrate_symbol_coordinate(&rt, tmp.path(), &config).expect_err("the fault fails it");
+    assert!(
+        format!("{err:#}").contains(crate::runtime::INJECTED_FAULT_REASON),
+        "the injected fault, not another failure: {err:#}"
+    );
+    drop(rt);
+    assert!(settled_bytes(&db) == before, "the store is byte-identical");
+
+    let rt = Runtime::open(&db).expect("runtime opens");
+    let migrated = migrate_symbol_coordinate(&rt, tmp.path(), &config)
+        .expect("the migration runs")
+        .expect("a coordinate-less store migrates");
+    assert_eq!((migrated.from.as_deref(), migrated.to.as_str()), (None, "example.com/fixture"));
+    assert!(migrated.changes.symbols_rewritten > 0, "{migrated:?}");
+    drop(rt);
+    assert!(settled_bytes(&db) != before, "a migration that commits is visible");
 }

@@ -84,8 +84,15 @@ fn plain_init_creates_policy_files_gitignore_and_store() {
 
     // The generated templates are pure-default starters: they must parse and
     // deserialize to the exact built-in defaults (FR-CF-01 alignment).
-    let config = logos_core::config::load_config(&tmp.path().join(".logos/config.toml"))
+    // S-702: the only non-default key is the `[project] id` init appends — the
+    // derived coordinate, here the root's own directory name (no git).
+    let mut config = logos_core::config::load_config(&tmp.path().join(".logos/config.toml"))
         .expect("generated config.toml parses");
+    assert_eq!(
+        config.project.id.take(),
+        Some(logos_core::config::derive_project_id(tmp.path())),
+        "init writes the derived `[project] id`"
+    );
     assert_eq!(config, Config::default(), "template == built-in defaults");
     let rules = logos_core::config::load_rules(&tmp.path().join(".logos/rules.toml"))
         .expect("generated rules.toml parses");
@@ -131,7 +138,13 @@ fn re_init_never_clobbers_edited_policy_files() {
 
     let result = Engine::init(tmp.path()).expect("re-init succeeds");
 
-    assert_eq!(read(tmp.path(), ".logos/config.toml"), custom_config);
+    // S-702: an edited config lacking `[project] id` gains it, appended after
+    // every byte the user wrote; nothing else is touched.
+    let config = read(tmp.path(), ".logos/config.toml");
+    let appended = config
+        .strip_prefix(custom_config)
+        .expect("the user's bytes are kept verbatim, in front");
+    assert!(appended.contains("\n[project]\nid = \""), "{appended}");
     assert_eq!(read(tmp.path(), ".logos/rules.toml"), custom_rules);
     assert_eq!(
         step(&result, ".logos/config.toml").action,
@@ -1036,4 +1049,193 @@ fn a_failing_contributed_init_step_fails_init() {
     let err = Engine::init_with_contributions(dir.path(), &InitOptions::default(), &contributions)
         .expect_err("the contribution's failure is init's");
     assert!(format!("{err:#}").contains(".logos/contributed"), "{err:#}");
+}
+
+// ── S-702 / FR-CF-10: `[project] id` is written once, never overwritten ──
+
+fn project_step(result: &InitResult) -> &InitStep {
+    step(result, ".logos/config.toml [project] id")
+}
+
+/// `cmp` exits 0 exactly when the two files are byte-identical.
+fn cmp(a: &Path, b: &Path) -> bool {
+    Command::new("cmp")
+        .arg("-s")
+        .arg(a)
+        .arg(b)
+        .status()
+        .expect("cmp is on PATH")
+        .success()
+}
+
+#[test]
+fn init_writes_the_project_id_once_and_a_re_run_leaves_the_file_byte_identical() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("payments");
+    fs::create_dir_all(&root).unwrap();
+    let first = Engine::init(&root).unwrap();
+    assert_eq!(project_step(&first).action, InitAction::Updated);
+    assert_eq!(project_step(&first).detail, "id = \"payments\"");
+    let config = root.join(".logos/config.toml");
+    assert_eq!(
+        logos_core::config::load_config(&config).unwrap().project.id.as_deref(),
+        Some("payments")
+    );
+
+    let snapshot = tmp.path().join("config.before");
+    fs::copy(&config, &snapshot).unwrap();
+    let again = Engine::init(&root).unwrap();
+    assert_eq!(project_step(&again).action, InitAction::Unchanged);
+    assert!(cmp(&snapshot, &config), "a re-run leaves config.toml byte-identical");
+}
+
+/// A present id is the user's in every byte — its spelling, spacing, quoting and
+/// comment — even when it differs from what would be derived.
+#[test]
+fn an_existing_project_id_is_never_rewritten() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".logos")).unwrap();
+    let pinned = "# mine\n[project]\nid   =   'example.org/pinned/app'   # pinned by hand\n";
+    let config = tmp.path().join(".logos/config.toml");
+    fs::write(&config, pinned).unwrap();
+    let snapshot = tmp.path().join("config.before");
+    fs::copy(&config, &snapshot).unwrap();
+
+    let result = Engine::init(tmp.path()).unwrap();
+    assert_eq!(project_step(&result).action, InitAction::Unchanged);
+    assert!(cmp(&snapshot, &config), "an existing id stays byte-identical");
+    assert_eq!(
+        Engine::start(tmp.path()).unwrap().status().project_id.as_deref(),
+        Some("example.org/pinned/app"),
+        "the store records the configured id, not the derived one"
+    );
+}
+
+/// A key-less `[project]` header gets the key on the line after it — appending a
+/// second `[project]` table would make the file invalid TOML.
+#[test]
+fn a_key_less_project_table_gains_the_id_under_its_own_header() {
+    for (before, after) in [
+        // The plain spelling.
+        (
+            "languages = [\"rust\"]\n\n[project]\n\n[watcher]\ndebounce_ms = 300\n",
+            "languages = [\"rust\"]\n\n[project]\nid = \"svc\"\n\n[watcher]\ndebounce_ms = 300\n",
+        ),
+        // A comment after the header.
+        (
+            "languages = [\"rust\"]\n\n[project] # identity\n\n[watcher]\ndebounce_ms = 300\n",
+            "languages = [\"rust\"]\n\n[project] # identity\nid = \"svc\"\n\n[watcher]\ndebounce_ms = 300\n",
+        ),
+        // The header is the file's last line, with no newline after it.
+        (
+            "languages = [\"rust\"]\n[project]",
+            "languages = [\"rust\"]\n[project]\nid = \"svc\"\n",
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("svc");
+        fs::create_dir_all(root.join(".logos")).unwrap();
+        fs::write(root.join(".logos/config.toml"), before).unwrap();
+
+        let result = Engine::init(&root).unwrap();
+        assert_eq!(project_step(&result).action, InitAction::Updated, "{before:?}");
+        assert_eq!(read(&root, ".logos/config.toml"), after, "{before:?}");
+    }
+}
+
+/// A config `init` cannot safely extend is reported, never edited, and `init`
+/// still succeeds — its failure posture is unchanged (DL-06).
+#[test]
+fn a_config_init_cannot_extend_is_skipped_and_left_untouched() {
+    for (text, why) in [
+        ("languages = [\n", "not valid TOML"),
+        ("project = { }\n", "not a `[project]` table this step can extend"),
+        ("[project]\nid = \"my repo\"\n", "not a valid coordinate"),
+        // A `[project]` line inside a multi-line string, before the real
+        // header: the line edit would land in the string, so the re-parse
+        // check refuses the write and the user's value is never corrupted.
+        (
+            "note = \"\"\"\n[project]\n\"\"\"\n[project]\n",
+            "add `id = ",
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".logos")).unwrap();
+        fs::write(tmp.path().join(".logos/config.toml"), text).unwrap();
+        let result = Engine::init(tmp.path()).expect("init still succeeds");
+        let row = project_step(&result);
+        assert_eq!(row.action, InitAction::Skipped, "{text:?}");
+        assert!(row.detail.contains(why), "{text:?}: {}", row.detail);
+        assert_eq!(read(tmp.path(), ".logos/config.toml"), text, "untouched");
+    }
+}
+
+/// A config `init` cannot read as text (TOML is UTF-8) is reported like one it
+/// cannot parse: a `Skipped` row, the file untouched, and every later step
+/// still runs — as before the `[project] id` step existed.
+#[test]
+fn a_config_that_is_not_utf_8_is_skipped_and_init_completes() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".logos")).unwrap();
+    let bytes = b"# caf\xe9 settings\n[watcher]\n";
+    fs::write(tmp.path().join(".logos/config.toml"), bytes).unwrap();
+
+    let result = Engine::init(tmp.path()).expect("init still succeeds");
+    let row = project_step(&result);
+    assert_eq!(row.action, InitAction::Skipped);
+    assert!(row.detail.contains("could not be read"), "{}", row.detail);
+    assert_eq!(fs::read(tmp.path().join(".logos/config.toml")).unwrap(), bytes, "untouched");
+    assert_eq!(step(&result, ".logos/rules.toml").action, InitAction::Created);
+    assert_eq!(step(&result, ".logos/.gitignore").action, InitAction::Created);
+}
+
+/// [CR-222] CRA-03: where `.logos/` is git-ignored the written id stays on this
+/// machine, and `init` says so — and names the default the others derive.
+#[test]
+fn init_says_a_git_ignored_project_id_will_not_travel() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("shop");
+    fs::create_dir_all(&root).unwrap();
+    git_init(&root);
+    fs::write(root.join(".gitignore"), ".logos/\n").unwrap();
+
+    let result = Engine::init(&root).unwrap();
+    let detail = &project_step(&result).detail;
+    assert!(detail.starts_with("id = \"shop\""), "{detail}");
+    assert!(
+        detail.contains("git-ignored, so this id will not travel")
+            && detail.contains("use the derived default (\"shop\")"),
+        "{detail}"
+    );
+    // Re-running repeats the statement: the key is still kept off every other
+    // checkout.
+    let again = Engine::init(&root).unwrap();
+    assert!(project_step(&again).detail.contains("will not travel"));
+}
+
+/// The near miss: a repository that tracks `.logos/config.toml` carries the id
+/// to every checkout, so there is nothing to warn about.
+#[test]
+fn a_committable_project_id_carries_no_travel_warning() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("shop");
+    fs::create_dir_all(&root).unwrap();
+    git_init(&root);
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let result = Engine::init(&root).unwrap();
+    assert_eq!(project_step(&result).detail, "id = \"shop\"");
+}
+
+/// The coordinate is recorded in the store by `init` and read back by `status`,
+/// in the read-model and in its JSON.
+#[test]
+fn init_records_the_coordinate_and_status_reports_it() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("ledger");
+    fs::create_dir_all(&root).unwrap();
+    Engine::init(&root).unwrap();
+    let status = Engine::start(&root).unwrap().status();
+    assert_eq!(status.project_id.as_deref(), Some("ledger"));
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["project_id"], "ledger");
 }

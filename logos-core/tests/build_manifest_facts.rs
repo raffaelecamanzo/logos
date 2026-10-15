@@ -22,6 +22,9 @@ use logos_core::graph_store::{
 };
 use logos_core::{Engine, Runtime};
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
@@ -334,6 +337,7 @@ fn a_member_with_no_build_manifest_is_byte_for_byte_unaffected_apart_from_the_em
     let with_pom = tempfile::tempdir().unwrap();
     for root in [bare.path(), with_pom.path()] {
         write(root, "src/lib.rs", "pub fn hello() {}\npub fn world() { hello(); }\n");
+        coordinate::pin(root);
     }
     write(with_pom.path(), "pom.xml", ROOT_POM);
 

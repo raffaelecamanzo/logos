@@ -35,6 +35,9 @@ use tempfile::TempDir;
 mod graph_fingerprint;
 use graph_fingerprint::graph_fingerprint;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -46,6 +49,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
     for (rel, text) in files {
         write(tmp.path(), rel, text);
     }
+    coordinate::pin(tmp.path());
     tmp
 }
 

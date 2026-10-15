@@ -34,6 +34,9 @@ use logos_core::model::{EdgeKind, NodeId, RefForm};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -54,6 +57,7 @@ fn indexed_under(fixture: fixtures::Fixture, policy: Option<&str>) -> (TempDir, 
             &format!("[resolution]\npolicy = \"{policy}\"\n"),
         );
     }
+    coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.index();
     (tmp, engine)
@@ -154,6 +158,7 @@ fn cold(fixture: fixtures::Fixture, tmp: &TempDir) -> (Vec<(String, String, Stri
     for (rel, _) in fixture {
         write(fresh.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
     }
+    coordinate::pin(fresh.path());
     let engine = Engine::start(fresh.path()).expect("engine starts");
     engine.index();
     binding_facts(engine.runtime().unwrap())

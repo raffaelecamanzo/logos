@@ -179,20 +179,7 @@ fn git_is_missing(err: &anyhow::Error) -> bool {
 /// [ADR-50]: ../../docs/specs/architecture/decisions/ADR-50.md
 /// [FR-OB-07]: ../../docs/specs/requirements/FR-OB-07.md
 pub fn primary_root(root: &Path) -> Option<PathBuf> {
-    let common = git(root, &["rev-parse", "--git-common-dir"]).ok()?;
-    if common.is_empty() {
-        return None;
-    }
-    // The common dir may come back relative (".git" in the primary checkout);
-    // anchor it where the git call ran.
-    let common = {
-        let p = PathBuf::from(common);
-        if p.is_absolute() {
-            p
-        } else {
-            root.join(p)
-        }
-    };
+    let common = git_common_dir(root)?;
     // The primary working tree sits around its `.git` directory. A common dir
     // not named `.git` (a bare repo's worktree) has no primary checkout.
     if common.file_name().is_none_or(|n| n != ".git") {
@@ -207,6 +194,51 @@ pub fn primary_root(root: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(primary_root)
+}
+
+/// The repository's common `.git` directory as seen from `root` (`git rev-parse
+/// --git-common-dir`), anchored at `root` when git answers with a relative path
+/// (`.git` in the primary checkout). `None` outside git or with no `git` on PATH.
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let common = git(root, &["rev-parse", "--git-common-dir"]).ok()?;
+    if common.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(common);
+    Some(if p.is_absolute() { p } else { root.join(p) })
+}
+
+/// The directory that names the repository `root` belongs to, identical from
+/// the main checkout and from every linked worktree ([FR-CF-10], CR-222
+/// CRA-04): the main worktree's top-level directory, read through the git
+/// common directory — or, for a bare repository's worktree, which has no main
+/// worktree, the bare repository itself.
+///
+/// Symlink-resolved, so a checkout reached through a symlink names the same
+/// directory a worktree sees (`--git-common-dir` answers worktrees with the
+/// resolved path). `None` when `root` is not in a git repository or `git` is
+/// absent from PATH.
+///
+/// [FR-CF-10]: ../../docs/specs/requirements/FR-CF-10.md
+pub fn main_worktree_dir(root: &Path) -> Option<PathBuf> {
+    let common = git_common_dir(root)?;
+    let common = common.canonicalize().unwrap_or(common);
+    if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common)
+    }
+}
+
+/// The URL of `root`'s `origin` remote (`git remote get-url origin`), or `None`
+/// when the repository has no `origin`, `root` is not in a repository, or `git`
+/// is absent from PATH ([FR-CF-10]).
+///
+/// [FR-CF-10]: ../../docs/specs/requirements/FR-CF-10.md
+pub fn origin_url(root: &Path) -> Option<String> {
+    git(root, &["remote", "get-url", "origin"])
+        .ok()
+        .filter(|url| !url.is_empty())
 }
 
 /// The current branch name at `root` via `git rev-parse --abbrev-ref HEAD`

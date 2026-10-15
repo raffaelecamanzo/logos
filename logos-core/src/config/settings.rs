@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::chat::ChatConfig;
+use super::project::Project;
 use super::secrets::Secrets;
 use super::wiki::{EffectiveWikiModel, WikiConfig};
 
@@ -348,6 +349,19 @@ pub struct Config {
     /// [ADR-38]: ../../../../docs/specs/architecture/decisions/ADR-38.md
     #[serde(default)]
     pub coverage_ingest: CoverageIngest,
+
+    /// The repository's identity coordinate (`[project]`, [FR-CF-10],
+    /// [ADR-85], S-702). Core-owned ([FR-CF-09]); an absent table or key leaves
+    /// the coordinate to the derived default
+    /// ([`resolve_project_id`](super::resolve_project_id)). Elided from the
+    /// serialised read-model while no key is set, so a config without it reads
+    /// exactly as before.
+    ///
+    /// [FR-CF-09]: ../../../../docs/specs/requirements/FR-CF-09.md
+    /// [FR-CF-10]: ../../../../docs/specs/requirements/FR-CF-10.md
+    /// [ADR-85]: ../../../../docs/specs/architecture/decisions/ADR-85.md
+    #[serde(default, skip_serializing_if = "Project::is_empty")]
+    pub project: Project,
 
     /// Agentic-chat policy + the orchestrator budget tree (`[chat]`, S-169,
     /// [FR-CF-06], [ADR-40], [ADR-41]). Optional; an absent table behaves as
@@ -856,6 +870,7 @@ impl Default for Config {
             documentation: Documentation::default(),
             config_artifacts: ConfigArtifacts::default(),
             coverage_ingest: CoverageIngest::default(),
+            project: Project::default(),
             chat: ChatConfig::default(),
             wiki: WikiConfig::default(),
         }
@@ -1017,6 +1032,8 @@ impl Config {
         // bad glob fails at load (exit 2), not on first watch.
         super::globs::validate(&self.coverage_ingest.artifact_glob)?;
         self.resolution.validate()?;
+        // [FR-CF-10]: a present `[project] id` must be a coordinate.
+        self.project.validate()?;
         // The format token, if set, must be a recognized parser name — a typo
         // fails loud at load rather than silently disabling auto-ingest.
         if let Some(format) = &self.coverage_ingest.format {
@@ -1358,7 +1375,13 @@ mod tests {
         let mut cov_cmd = base.clone();
         cov_cmd.coverage_ingest.refresh_cmd = Some("make coverage".to_string());
 
+        // S-702: the identity coordinate names the repository, never which of
+        // its files are admitted — a change to it must not purge the graph.
+        let mut project = base.clone();
+        project.project.id = Some("example.org/o/r".to_string());
+
         for (label, cfg) in [
+            ("project.id", project),
             ("resolution.policy", policy),
             ("watcher.debounce_ms", watcher),
             ("framework_hints", hints),

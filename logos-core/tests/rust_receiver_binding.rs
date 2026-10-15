@@ -35,6 +35,9 @@ use tempfile::TempDir;
 mod graph_fingerprint;
 use graph_fingerprint::graph_fingerprint;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -50,6 +53,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 }
 
 fn index(root: &Path) -> Engine {
+    coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
     let result = engine.index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
@@ -726,6 +730,7 @@ fn a_rust_rows_external_type_stays_external_in_a_workspace() {
     assert_eq!(alone.reasons[&R::ExternalType], 2, "{alone:#?}");
     assert!(!alone.reasons.contains_key(&R::TypeInAnotherMember));
 
+    coordinate::detach(&app, "example.com/app");
     write(ws.path(), "logos.workspace.toml", "[workspace]\nname = \"w\"\nmembers = [\"lib\", \"app\"]\n");
     let federation = discover(ws.path()).expect("discovers").expect("a workspace");
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);

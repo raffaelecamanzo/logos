@@ -111,7 +111,31 @@ fn extract_lang(ext: &str, path: &str, source: &str) -> Facts {
         .for_extension(ext)
         .unwrap_or_else(|| panic!("{ext} grammar"));
     let ctx = SymbolContext::cargo("logos-core", "0.1.0");
-    extract(&FileInput::new(path, source), plugin, &ctx)
+    let facts = extract(&FileInput::new(path, source), plugin, &ctx);
+    assert_unique_symbols(&facts);
+    facts
+}
+
+/// Every node one file emits carries its own symbol (S-512, [ADR-07]). Two
+/// sharing one would fail the file at persistence ([BR-74], S-703), so every
+/// file this suite extracts is checked here — the tripwire for an ordinal
+/// regression, raised at the fixture that causes it rather than at the store.
+///
+/// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+/// [BR-74]: ../../../docs/specs/software-spec.md#35-extraction--symbol-ids
+fn assert_unique_symbols(facts: &Facts) {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(facts.nodes.len());
+    let duplicates: Vec<&str> = facts
+        .nodes
+        .iter()
+        .map(|n| n.symbol.as_str())
+        .filter(|s| !seen.insert(s))
+        .collect();
+    assert!(
+        duplicates.is_empty(),
+        "{} emitted one symbol for two declarations (S-512, ADR-07): {duplicates:?}",
+        facts.path
+    );
 }
 
 /// The symbol string of the (first) node named `name`, if present.
@@ -293,11 +317,11 @@ fn same_name_siblings_of_one_family_are_numbered_together_across_kinds() {
     );
 }
 
-#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "emitted one symbol for two declarations")]
-fn one_symbol_emitted_twice_in_a_file_trips_the_debug_assertion() {
-    // The test-build guard behind every extraction in the suite (S-512).
+fn one_symbol_emitted_twice_in_a_file_trips_the_suite_guard() {
+    // The guard behind every extraction in this suite (S-512); the store's
+    // own refusal is pinned in `pipeline::tests` (S-703).
     let mut facts = extract_src("src/lib.rs", "fn a() {}\n");
     let twin = facts
         .nodes
@@ -306,7 +330,7 @@ fn one_symbol_emitted_twice_in_a_file_trips_the_debug_assertion() {
         .expect("fn a")
         .clone();
     facts.nodes.push(twin);
-    debug_assert_unique_symbols(&facts);
+    assert_unique_symbols(&facts);
 }
 
 #[test]

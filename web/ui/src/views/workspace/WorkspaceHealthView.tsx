@@ -377,6 +377,7 @@ const VIOLATION_COLUMNS: Column<WorkspaceViolation>[] = [
 function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
   const report = answer.governance;
   const unknown = report?.unknown_member_refs ?? [];
+  const unmatched = report?.unmatched_rules ?? [];
   const degraded = answer.degraded_rollup.degraded_members;
   const incomplete = !answer.complete && (
     <p className="muted">
@@ -405,6 +406,11 @@ function GovernanceCard({ answer }: { answer: WorkspaceGovernanceAnswer }) {
           {unknown.length > 0 && (
             <FigureNote block>
               {HEALTH_TEXT.unknownMembers(unknown.length)} <span className="mono">{unknown.join(", ")}</span>.
+            </FigureNote>
+          )}
+          {unmatched.length > 0 && (
+            <FigureNote block>
+              {HEALTH_TEXT.unmatchedRules(unmatched.length)} <span className="mono">{unmatched.join(", ")}</span>.
             </FigureNote>
           )}
         </div>

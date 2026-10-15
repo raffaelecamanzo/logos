@@ -310,6 +310,27 @@ fn a_workspace_without_declarations_or_candidates_renders_status_byte_for_byte_a
         }
     }
     assert!(rust_residues > 0, "the fixture has a Rust row, or this pins nothing");
+    // S-702's `project_id` is recorded by each member's index: taken out and
+    // checked the same way — each remote-less member names its own directory,
+    // the coordinate its symbols carry in the golden below (S-703).
+    for member in value["members"].as_array_mut().expect("a member array") {
+        let name = member["member"].as_str().expect("a member name").to_string();
+        let id = member["result"]
+            .as_object_mut()
+            .expect("a status object")
+            .shift_remove("project_id")
+            .expect("an indexed member records its coordinate (S-702)");
+        assert_eq!(id, name.as_str(), "{name}");
+        // S-706 adds one field to the row, the member's resolved coordinate: the
+        // same value, from the registry. Taken out so the golden below keeps
+        // proving that nothing ELSE in a member row moved.
+        let coordinate = member
+            .as_object_mut()
+            .expect("a member row")
+            .shift_remove("coordinate")
+            .expect("every row names its coordinate (S-706)");
+        assert_eq!(coordinate, name.as_str(), "{name}");
+    }
     let status = masked(value);
     assert_eq!(
         status,

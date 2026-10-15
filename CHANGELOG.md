@@ -13,6 +13,89 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-10-15
+
+### Added
+
+- **A repository carries a stable project identity.** `.logos/config.toml` takes
+  a `[project] id`, the coordinate that names the repository. Without the key it
+  is derived from the normalised `origin` remote (`git@h:o/r.git`,
+  `https://h/o/r`, `https://user@h/o/r.git` and `ssh://git@h/o/r` all give
+  `h/o/r`). With no remote it is the main worktree's directory name, so a linked
+  worktree, a clone at another path and CI resolve the same value. `logos init`
+  writes the key when it is absent and never rewrites it. When
+  `.logos/config.toml` is git-ignored, `init` says the id will not travel and
+  names the default other checkouts derive. A malformed id (empty, a space, a
+  disallowed character, or a bare `.`, which in a symbol marks an empty field)
+  exits 2 naming `project.id`. The coordinate in force is recorded by `init` and
+  every full `index`, and `logos status --json` reports it as `project_id`.
+
+- **Workspace members have distinct identities.** `workspace status` (human,
+  `--json` and `GET /api/v1/workspace/status`) lists each member's `coordinate`,
+  the repository coordinate its symbols carry. Two members that resolve to one
+  coordinate (two clones of one remote, or a copied checkout) are never folded:
+  the later one in manifest order is reported `degraded` with the new
+  `degraded_cause` `duplicate-coordinate`, whose reason names both paths and the
+  `[project] id` override, and it is excluded from every fan-out, the bridge and
+  coverage like a member that cannot be opened, so the command exits 1. The first
+  member keeps answering. A distinct `[project] id` in the later member, then
+  re-running the command, clears it. A workspace whose members all resolve
+  distinct coordinates differs only by the added `coordinate` field. A fitness
+  test unions the symbol sets of every member store of a workspace whose members
+  share every repo-relative path, and fails when the coordinate is forced empty.
+
+### Changed
+
+- **Every node symbol names its repository.** The coordinate fills the SCIP
+  package slot of every node symbol, so the same declaration in two repositories
+  has two symbols: `logos . . . src/`lib.rs`/run().` becomes
+  `logos . github.com/acme/svc-a . src/`lib.rs`/run().`. Broker topics carry it
+  too, so two repositories' `orders` topics are two nodes. Policy nodes take the
+  shape `logos policy <coordinate> . layer/domain/`, which replaces
+  `logos policy rules . layer/domain/`. A full `index` builds every symbol under
+  the coordinate in force. An incremental sync keeps the coordinate the store's
+  symbols already carry, so one store never holds two; a sync that writes the
+  first file into a store takes the project's coordinate, as an index would.
+- **A duplicate symbol is refused in every build profile.** Before this change,
+  a second node with a symbol that another node already held was folded into the
+  existing node. Now the file that declares it fails to persist, and the reason
+  is recorded in `persist_failures`, naming the symbol. The node that already
+  holds the symbol is not touched, and every other file persists.
+- **An existing store moves to the repository coordinate when it is opened.** A
+  store built by an earlier release, or one whose `[project] id` or `origin`
+  remote has changed since it was built, is migrated in place before anything
+  syncs into it: every symbol in `symbols`, the reference ledger and the
+  declared types takes the new coordinate, symbol rows that no node references
+  any more are removed, and the store records the coordinate under both
+  `symbol_coordinate` and `project_id`. Every file is marked for re-reading, so
+  the next reconcile re-extracts it. Node and edge counts, snapshot history and
+  the gate baseline are unchanged. The migration runs in one transaction: if it
+  is interrupted, the store stays as it was and the next open runs it again. A
+  store already at the coordinate is opened without a write. A linked worktree
+  seeded from an unmigrated main store migrates its copy before its first sync.
+  If the configuration does not load, or no `[project] id` is set and the derived
+  value is only a fallback (git cannot answer for the repository, or the local
+  checkout `origin` names is away), a store keeps the coordinate it records.
+- **Symbols saved before the coordinate keep resolving.** A symbol argument whose
+  package slot is empty (`logos . . . src/`lib.rs`/run().`) resolves under the
+  coordinate the store's symbols carry, on `node`, `callers`, `callees`,
+  `impact`, `explore`, `precedent`, `impact-intersection`, `implements`,
+  `referencing-docs`, the web graph's `?seed=` and `xservice callers`/`impact`
+  (each member under its own coordinate). The answer is the canonical
+  symbol's, with a one-line note in `warnings`; the graph echoes the canonical
+  seed. A `[[links]]` endpoint written as a full symbol without a coordinate
+  stays valid. A canonical symbol answers as before. A symbol naming another
+  repository's coordinate is not rewritten and resolves as unknown.
+- **A `no_cross_service_callers` glob matches the descriptor tail.** The glob
+  matches the provider symbol's path and scope, without the repository
+  coordinate, and `member` names the repository. A glob written against the
+  whole symbol before the coordinate (`logos . . . …`) matches the same bindings
+  as before. A glob written as a path (`src/routes.ts/legacy*`), which matched
+  nothing before because the symbol began with `logos`, now matches by its tail
+  and can report violations. A glob that matches no provider in its scope is listed under
+  `unmatched_rules` in the `workspace check` report and on stderr, and the
+  report no longer reads as passing.
+
 ## [1.17.0] — 2026-10-15
 
 ### Added

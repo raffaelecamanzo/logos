@@ -43,6 +43,7 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
   HEALTH_TEXT: {
     rulesChecked: [[1, 1, 1], [2, 9, 0]],
     unknownMembers: [[1], [2]],
+    unmatchedRules: [[1], [2]],
     incomplete: [[1], [2]],
     answered: [[1, 1], [2, 3]],
     warm: [[1, 1], [2, 3]],

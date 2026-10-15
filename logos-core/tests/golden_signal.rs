@@ -69,6 +69,9 @@ use logos_core::{Engine, Granularity, Runtime};
 use serde::Serialize;
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 // ── The canonical fixture ────────────────────────────────────────────────────
 //
 // A small, deterministic, Rust-only workspace that exercises every invariant
@@ -80,9 +83,10 @@ use tempfile::TempDir;
 // - a `helper`/`unused` pair so the metric signal is a real, non-trivial value
 //   and FTS has distinct names to find.
 //
-// No `Cargo.toml`: the index pipeline derives symbols under
-// `SymbolContext::default()` (empty package/version), so the symbol strings are
-// a pure function of the project-relative path + declaration — identical on
+// No `Cargo.toml`, and a pinned `[project] id` ([`coordinate::FIXTURE_COORDINATE`],
+// S-703): every symbol carries that fixed repository coordinate in its package
+// slot, never one derived from the temp directory's name, so the symbol strings
+// are a pure function of the project-relative path + declaration — identical on
 // every run and every target.
 
 /// `(relative path, contents)` pairs for the canonical golden fixture.
@@ -116,12 +120,14 @@ const FIXTURE: &[(&str, &str)] = &[
     ("src/twin.rs", "pub fn target() -> i64 {\n\x20   2\n}\n"),
 ];
 
-/// Materialise the fixture under a fresh temp dir and return the guard.
+/// Materialise the fixture under a fresh temp dir, its coordinate pinned, and
+/// return the guard.
 fn build_fixture() -> TempDir {
     let dir = TempDir::new().expect("temp dir");
     for (rel, contents) in FIXTURE {
         write(dir.path(), rel, contents);
     }
+    coordinate::pin(dir.path());
     dir
 }
 

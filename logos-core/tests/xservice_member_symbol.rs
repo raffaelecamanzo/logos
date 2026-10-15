@@ -1,17 +1,21 @@
 //! S-701 ([FR-WS-05], [FR-WS-35], [BR-73]) end to end: **a cross-service
 //! answer matches the member and the symbol, never the symbol alone** — over
-//! members really indexed, where two of them hold byte-identical symbols.
+//! members really indexed, where two of them hold the same declarations.
 //!
 //! The fixture is a fork pair: `svc-a` and `svc-b` both declare
-//! `OrderListener#onOrder()`, `Shipper#ship()` and a Kotlin `Dto` at one path,
-//! so each pair's `LogosSymbol`s are byte-identical. Only `svc-b`'s are wired:
+//! `OrderListener#onOrder()`, `Shipper#ship()` and a Kotlin `Dto` at one path.
+//! Each fork is its own repository with its own coordinate ([CR-222], S-706), so
+//! no canonical symbol is held by both — two live members never can be — but a
+//! symbol written without a coordinate ([FR-EX-36]) names each pair in both, each
+//! fork resolving it under its own coordinate: that is how one query still
+//! matches several members, and it is what these tests query. Only `svc-b`'s are wired:
 //! its `onOrder` subscribes to `orders`, which `orders` publishes; its `ship`
 //! publishes `shipments`, which `ship` subscribes to. Both also declare
 //! `Relay#relay()`, which `svc-a`'s publishes from and `svc-b`'s listens on —
-//! one edge whose two ends hold the same symbol. The two Kotlin `Dto`s
+//! one edge whose two ends both answer to the queried symbol. The two Kotlin `Dto`s
 //! sit in different packages (`com.acme.a`, `com.acme.b`), which Kotlin allows
 //! at one path, and `app` — building against both — imports each from its own
-//! file, so both bind with the same owner node. Each fork also makes a client
+//! file, so both bind, each to its own fork's node. Each fork also makes a client
 //! call to a runtime-composed URL, the unresolved egress a scoped residue reports.
 //!
 //! - `--repo svc-a` finds no cross-service caller or impact through
@@ -24,6 +28,8 @@
 //! [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 //! [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
 //! [BR-73]: ../../docs/specs/software-spec.md#327-workspace-federation
+//! [CR-222]: ../../docs/requests/CR-222-workspace-safe-symbol-identity.md
+//! [FR-EX-36]: ../../docs/specs/requirements/FR-EX-36.md
 #![cfg(all(feature = "lang-java", feature = "lang-kotlin"))]
 
 use std::fs;
@@ -36,6 +42,9 @@ use logos_core::federation::{
 };
 use logos_core::Engine;
 use serde_json::{json, Value};
+
+#[path = "support/coordinate.rs"]
+mod coordinate;
 
 const J: &str = "src/main/java/com/acme";
 
@@ -58,7 +67,7 @@ class OrderListener {
 }
 ";
 
-/// `svc-a`'s fork of it: the same file, class and method — the same symbol —
+/// `svc-a`'s fork of it: the same file, class and method — the same descriptors —
 /// subscribed to nothing, and called inside `svc-a`.
 const LISTENER_A: &str = "package com.acme;
 class OrderListener {
@@ -79,7 +88,7 @@ class Shipper {
 }
 ";
 
-/// `svc-a`'s fork of it: the same symbol, publishing nothing.
+/// `svc-a`'s fork of it: the same descriptors, publishing nothing.
 const SHIPPER_A: &str = "package com.acme;
 class Shipper {
     public void ship(String payload) {}
@@ -121,8 +130,8 @@ class Relay {
 }
 ";
 
-/// …and `svc-b`'s, the same symbol, listens to it: one edge whose two ends both
-/// hold the queried symbol, in different members — a fork calling its original.
+/// …and `svc-b`'s, the same descriptors, listens to it: one edge whose two ends
+/// both answer to the queried symbol, in different members — a fork calling its original.
 const RELAY_B: &str = "package com.acme;
 class Relay {
     @KafkaListener(topics = \"loop\")
@@ -195,6 +204,7 @@ fn workspace(root: &Path) {
                 write(&dir, "pom.xml", &pom(fork, &[]));
             }
         }
+        coordinate::pin_as(&dir, &member_coordinate(name));
         index_member(&dir);
     }
     let list: Vec<String> = MEMBERS.iter().map(|m| format!("\"{m}\"")).collect();
@@ -222,10 +232,25 @@ fn fixture() -> Fixture {
     Fixture { tmp, registry, inputs, index }
 }
 
-/// The symbol of `path`'s `scope` in either fork — byte-identical in both.
+/// The coordinate a member is indexed under (S-703): its own, forks included —
+/// two members sharing one would leave the later degraded (S-706).
+fn member_coordinate(name: &str) -> String {
+    format!("example.com/{name}")
+}
+
+/// `path`'s `scope` written without a coordinate ([FR-EX-36]): the one string
+/// both forks answer to, each under its own coordinate.
+///
+/// [FR-EX-36]: ../../docs/specs/requirements/FR-EX-36.md
 fn shared(path: &str, scope: &str) -> String {
     let (dir, file) = path.rsplit_once('/').expect("a path with a file");
     format!("logos . . . {dir}/`{file}`/{scope}")
+}
+
+/// The canonical symbol `member` holds for the coordinate-less `shared`.
+fn held_by(member: &str, shared: &str) -> String {
+    let descriptors = shared.strip_prefix("logos . . . ").expect("a symbol without a coordinate");
+    format!("logos . {} . {descriptors}", member_coordinate(member))
 }
 
 fn on_order() -> String {
@@ -285,9 +310,10 @@ fn summary(answer: &Value) -> &str {
     answer["unresolved_egress"]["summary"].as_str().unwrap_or_else(|| panic!("a residue line: {answer:#}"))
 }
 
-/// **The fixture is what it claims** — every assertion below rests on it: the
-/// two forks hold the queried symbols, and only `svc-b`'s are bridge endpoints,
-/// but for `relay`, whose edge runs from one fork to the other.
+/// **The fixture is what it claims** — every assertion below rests on it: each
+/// fork resolves the queried symbols under its own coordinate and never holds the
+/// other's canonical one, and only `svc-b`'s are bridge endpoints, but for
+/// `relay`, whose edge runs from one fork to the other.
 #[test]
 fn the_fixture_binds_only_svc_b_while_both_forks_hold_the_symbols() {
     let f = fixture();
@@ -302,19 +328,26 @@ fn the_fixture_binds_only_svc_b_while_both_forks_hold_the_symbols() {
         [("orders", "svc-b", "broker-topic"), ("svc-a", "svc-b", "broker-topic"), ("svc-b", "ship", "broker-topic")],
         "{edges:?}"
     );
-    assert_eq!(f.inputs.edges[0].to.symbol.as_str(), on_order());
+    assert_eq!(f.inputs.edges[0].to.symbol.as_str(), held_by("svc-b", &on_order()));
     let relayed = &f.inputs.edges[1];
-    assert_eq!((relayed.from.symbol.as_str(), relayed.to.symbol.as_str()), (relay().as_str(), relay().as_str()));
-    assert_eq!(f.inputs.edges[2].from.symbol.as_str(), ship());
+    assert_eq!(
+        (relayed.from.symbol.as_str(), relayed.to.symbol.as_str()),
+        (held_by("svc-a", &relay()).as_str(), held_by("svc-b", &relay()).as_str())
+    );
+    assert_eq!(f.inputs.edges[2].from.symbol.as_str(), held_by("svc-b", &ship()));
     for symbol in [on_order(), ship(), relay(), DTO.to_string()] {
-        for fork in FORKS {
-            let seed = f.registry.engine_for(fork).unwrap().callers(&symbol, None);
-            assert_eq!(seed.resolved.map(|r| r.symbol), Some(symbol.clone()), "{fork} holds {symbol}");
+        for (fork, other) in [(FORKS[0], FORKS[1]), (FORKS[1], FORKS[0])] {
+            let engine = f.registry.engine_for(fork).unwrap();
+            let held = held_by(fork, &symbol);
+            assert_eq!(engine.callers(&symbol, None).resolved.map(|r| r.symbol), Some(held.clone()), "{fork} holds {symbol}");
+            let foreign = held_by(other, &symbol);
+            assert_eq!(engine.callers(&foreign, None).resolved.map(|r| r.symbol), None, "{fork} never holds {foreign}");
         }
     }
     let owners: Vec<(&str, Option<&str>)> =
         f.index.references.iter().map(|r| (r.owner.member.as_str(), r.owner.symbol.as_deref())).collect();
-    assert_eq!(owners, [("svc-a", Some(DTO)), ("svc-b", Some(DTO))], "both Dtos bind, one owner node");
+    let (dto_a, dto_b) = (held_by("svc-a", DTO), held_by("svc-b", DTO));
+    assert_eq!(owners, [("svc-a", Some(dto_a.as_str())), ("svc-b", Some(dto_b.as_str()))], "both Dtos bind, each its own node");
 }
 
 /// **Scoped callers** ([BR-73], AC 1): `--repo svc-a` reports no cross-service
@@ -378,11 +411,18 @@ fn unscoped_answers_over_a_shared_symbol_are_grouped_per_member_and_flagged() {
         let provider = if verb == "caller" { &cross[0]["to"]["member"] } else { &cross[0]["via"]["to"]["member"] };
         assert_eq!(provider, "svc-b", "the row names its provider member");
     }
+    // A canonical symbol names one member's: the same answer, never grouped.
+    let canonical = held_by("svc-b", &on_order());
+    for answer in [f.callers(&canonical, None), f.impact(&canonical, None)] {
+        assert_eq!(rows(&answer, "cross_service").len(), 1, "{answer:#}");
+        assert!(answer.get("ambiguity_warning").is_none() && answer.get("resolved_by_member").is_none(), "{answer:#}");
+    }
 }
 
 /// **Type references take the scope on the node path** ([BR-73], AC 5): the
-/// one `Dto` node both forks hold reaches `UsesA` for `svc-a` and `UsesB` for
-/// `svc-b`; unscoped, both, grouped by owner member under the notice.
+/// `Dto` symbol both forks answer to (each its own node) reaches `UsesA` for
+/// `svc-a` and `UsesB` for `svc-b`; unscoped, both, grouped by owner member
+/// under the notice.
 #[test]
 fn type_references_on_the_shared_node_are_scoped_to_their_owner_member() {
     let f = fixture();
@@ -419,9 +459,9 @@ fn type_references_on_the_dotted_name_path_are_scoped_to_their_owner_member() {
     assert!(all.get("ambiguity_warning").is_none(), "{all:#}");
 }
 
-/// **An edge whose two ends both hold the queried symbol is stitched from each
-/// near side** ([BR-73]): `svc-a`'s `relay` publishes to `svc-b`'s identical
-/// `relay`. Each `--repo` answer reaches the other fork, so the unscoped answer
+/// **An edge whose two ends both answer to the queried symbol is stitched from
+/// each near side** ([BR-73]): `svc-a`'s `relay` publishes to `svc-b`'s, at the
+/// same descriptors. Each `--repo` answer reaches the other fork, so the unscoped answer
 /// carries both stitches and credits each member with one — each holder's share
 /// equals its own scoped answer, never only the edge's first end.
 #[test]
@@ -487,7 +527,7 @@ fn a_bare_name_resolving_in_both_forks_is_not_a_shared_symbol() {
     let f = fixture();
     for fork in FORKS {
         let seed = f.registry.engine_for(fork).unwrap().callers("onOrder", None);
-        assert_eq!(seed.resolved.map(|r| r.symbol), Some(on_order()), "guard: {fork} resolves the bare name");
+        assert_eq!(seed.resolved.map(|r| r.symbol), Some(held_by(fork, &on_order())), "guard: {fork} resolves the bare name");
     }
     for answer in [f.callers("onOrder", None), f.impact("onOrder", None)] {
         assert!(

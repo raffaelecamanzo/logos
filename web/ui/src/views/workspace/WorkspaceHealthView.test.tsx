@@ -215,6 +215,19 @@ describe("governance is advisory and its empty is honest (ADR-56, AC3)", () => {
     });
     expect(within(card(/^Workspace rules$/)).getByText(/billing/)).toBeInTheDocument();
   });
+
+  it("names a rule whose glob matches nothing, and says it is not a pass (BR-48)", async () => {
+    // A rule evaluated over nothing cannot fire, so "0 findings" beside it would
+    // read as a pass it never earned.
+    await mount({
+      governance: governanceAnswer(
+        governanceReport({ violations: [], unmatched_rules: ["no-cross-service-callers:*retired*"] }),
+      ),
+    });
+    const rules = card(/^Workspace rules$/);
+    expect(within(rules).getByText(/checked against nothing — this is not a pass/i)).toBeInTheDocument();
+    expect(within(rules).getByText("no-cross-service-callers:*retired*")).toBeInTheDocument();
+  });
 });
 
 describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {

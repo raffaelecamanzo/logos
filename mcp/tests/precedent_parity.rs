@@ -47,6 +47,8 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// — the [FR-NV-12] AC 3 shape, minimal.
 fn fixture() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
+    // A pinned coordinate (S-703): the queried symbol names it.
+    write(tmp.path(), ".logos/config.toml", "[project]\nid = \"example.com/fixture\"\n");
     write(
         tmp.path(),
         "src/plugin.rs",
@@ -141,7 +143,7 @@ async fn cli_and_mcp_precedent_payloads_are_identical() {
     // (1) A symbol target with a real sibling, at the default limit. The
     // payloads must be byte-identical AND non-trivial — two empty results
     // comparing equal would pass while proving nothing.
-    let target = "logos . . . src/`rustarm.rs`/extract().";
+    let target = "logos . example.com/fixture . src/`rustarm.rs`/extract().";
     let cli = cli_payload(root, target, None);
     let mcp = mcp_payload(&client, target, None).await;
     assert_eq!(

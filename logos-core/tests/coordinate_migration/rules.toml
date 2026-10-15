@@ -1,0 +1,14 @@
+[[layers]]
+name = "model"
+paths = ["src/model.rs"]
+order = 1
+
+[[layers]]
+name = "service"
+paths = ["src/service.rs", "src/lib.rs"]
+order = 2
+
+[[boundaries]]
+from = "model"
+to = "service"
+reason = "the model knows nothing of the service"

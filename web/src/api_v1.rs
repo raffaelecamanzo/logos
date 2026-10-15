@@ -62,7 +62,7 @@ use serde::Serialize;
 
 use logos_core::config::{self as core_config, ConfigReadModel, TierSaveOutcome};
 use logos_core::federation::{
-    open_state, query as fed_query, workspace_governance,
+    open_state, query as fed_query,
     workspace_statistics, xservice_build_deps, Backing, BoundedReachability, BuildDependencies,
     ContractBridge, DegradedRollup, EngineRegistry, Federation, ReachabilityScope,
     WorkspaceGovernance, WorkspaceStatistics,
@@ -1108,8 +1108,8 @@ pub(crate) async fn workspace_roster(
 /// `GET /api/v1/workspace/status` — per-member index freshness, warm state and
 /// open state, the warm and degraded roll-ups, and the 3-state cross-service
 /// coverage summary ([`workspace_status`](fed_query::workspace_status),
-/// [FR-WS-05]/[FR-WS-06], [FR-WS-15], [FR-WS-16]): the coverage dashboard's
-/// data.
+/// [FR-WS-05]/[FR-WS-06], [FR-WS-15], [FR-WS-16], [FR-WS-39]): the coverage
+/// dashboard's data.
 ///
 /// Each member row carries `warm_state` (`warm` / `deferred` / `degraded`;
 /// `deferred` is honest and non-alarming — the member indexes lazily on first
@@ -1124,6 +1124,14 @@ pub(crate) async fn workspace_roster(
 /// later evicted still reads `opened`, because eviction reclaims a success),
 /// `not-attempted`, or `degraded` with a `degraded_reason` and, where the
 /// diagnostic identifies one, a `degraded_cause`. The two are never merged.
+///
+/// # Each row names its identity ([FR-WS-39])
+/// `coordinate` is the repository coordinate the member resolves to — the
+/// package slot of every symbol it holds — read off the same read-model the CLI
+/// prints. A member resolving to the coordinate an earlier one already holds is
+/// `degraded` with `degraded_cause: "duplicate-coordinate"` and is excluded from
+/// every fan-out, the bridge and the coverage figures, never folded into the
+/// first.
 ///
 /// A consumer that renders any figure from this payload must read
 /// `degraded_rollup.covers_all_members` and `coverage.covers_all_members`: when
@@ -1221,6 +1229,7 @@ pub(crate) async fn workspace_roster(
 ///
 /// [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
 /// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
+/// [FR-WS-39]: ../../docs/specs/requirements/FR-WS-39.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 pub(crate) async fn workspace_status(
     State(backing): State<Arc<Backing<Engine>>>,
@@ -1544,8 +1553,7 @@ pub(crate) async fn workspace_check(
         "api_v1_workspace_check",
         Surface::Web,
         move |registry, bridge| {
-            let edges = fed_query::edges(bridge, registry);
-            let governance = workspace_governance(registry.federation(), &edges)?;
+            let governance = fed_query::workspace_check(bridge, registry)?;
             Ok(WorkspaceGovernanceAnswer {
                 governance,
                 completeness: AnswerCompleteness::after_reading(registry),

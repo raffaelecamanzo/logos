@@ -177,6 +177,57 @@ pub const BUILD_FACTS_EXTRACTED_KEY: &str = "build_facts_extracted";
 /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
 pub const DECLARED_TYPES_EXTRACTED_KEY: &str = "declared_types_extracted";
 
+/// The `project_metadata` key recording the project's resolved identity
+/// coordinate ([FR-CF-10], [ADR-85], S-702) — `[project] id`, else its derived
+/// default — read back by [`status`](crate::Engine::status).
+///
+/// Written by `logos init`, by every full [`index`](crate::pipeline::index)
+/// and by the coordinate migration an engine runs when it opens a store whose
+/// symbols carry another coordinate (S-704), from the configuration in force;
+/// a read itself never writes it ([ADR-28]).
+///
+/// It records which coordinate the **project** resolves to, and nothing about
+/// the store's symbols: whether those carry a coordinate yet is a separate key,
+/// written only when the symbols do, so a store whose symbols still render the
+/// `.` package slot never reads as already carrying one.
+///
+/// [FR-CF-10]: ../../../docs/specs/requirements/FR-CF-10.md
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+pub const PROJECT_ID_KEY: &str = "project_id";
+
+/// The `project_metadata` key recording the coordinate this store's **symbols**
+/// carry in their SCIP package slot ([ADR-85], S-703), read back by
+/// [`GraphStore::symbol_coordinate`].
+///
+/// Written by a full [`index`](crate::pipeline::index) after every pass, when
+/// every symbol in the store is one it built: it re-stored files, or no file of
+/// an older graph stood. An index that stores no file while an older graph
+/// stands, or that stops part-way, leaves the previous value (or none). Also
+/// written by the first [`sync`](crate::pipeline::sync) that persists a file
+/// into a store holding none, which adopts the project's coordinate as an
+/// index would, so a store whose first write is a sync still carries it. And
+/// written by the coordinate migration an engine runs when it opens a store
+/// whose recorded value differs from the project's (S-704,
+/// [`BatchWriter::migrate_symbol_coordinate`]), in the batch that rewrites the
+/// symbols.
+///
+/// Absent on a store that holds files means a **coordinate-less store**, built
+/// before [ADR-85], whose symbols render the empty slot `.` until the next
+/// open migrates them. A sync renders the
+/// symbols it re-extracts under the recorded value (or `.`), so it never
+/// introduces a second coordinate. One case is not covered: a file a full
+/// index could not *load* keeps its rows, and so its previous coordinate,
+/// until it loads again or a later migration rewrites it — the posture an
+/// unloaded file has for every record.
+///
+/// Distinct from [`PROJECT_ID_KEY`], which records what the project resolves
+/// to now: the two differ exactly when the symbols have not yet followed the
+/// project's coordinate.
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+pub const SYMBOL_COORDINATE_KEY: &str = "symbol_coordinate";
+
 /// A row read back from the `nodes` table, mapped to model types.
 ///
 /// `kind` is recovered via [`NodeKind::try_from`] and `symbol` via
@@ -524,6 +575,27 @@ pub struct StoreCounts {
     pub refs_total: u64,
     /// Those ledger rows currently bound to an edge (`resolved = 1`).
     pub refs_resolved: u64,
+}
+
+/// What a coordinate migration changed ([`BatchWriter::migrate_symbol_coordinate`],
+/// S-704, [FR-EX-35]): one count per kind of row it rewrote or removed.
+///
+/// [FR-EX-35]: ../../../docs/specs/requirements/FR-EX-35.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct CoordinateMigration {
+    /// `symbols` rows with no node, removed before the rewrite.
+    pub orphan_symbols_removed: u64,
+    /// `symbols.symbol` values rewritten to the new coordinate.
+    pub symbols_rewritten: u64,
+    /// `unresolved_refs` values rewritten: a row's `source_symbol`, and the
+    /// `target` of a capture-before-delete row (`RefForm::Symbol`), which is a
+    /// symbol too. A row whose two values both moved counts once per value.
+    pub ref_symbols_rewritten: u64,
+    /// `declared_types.symbol` values rewritten.
+    pub declared_type_symbols_rewritten: u64,
+    /// `files` rows whose `content_hash` was cleared, so the next reconcile
+    /// re-extracts them.
+    pub files_invalidated: u64,
 }
 
 /// One relation class's raw resolution counts over one language — the four
@@ -2406,6 +2478,17 @@ pub trait GraphStore {
     fn declared_types_extracted(&self) -> Result<bool> {
         Ok(self.project_metadata(DECLARED_TYPES_EXTRACTED_KEY)?.is_some())
     }
+
+    /// The coordinate this store's symbols carry — [`SYMBOL_COORDINATE_KEY`]
+    /// (S-703) — or `None` when none is recorded: a coordinate-less store, whose
+    /// symbols render the empty package slot, or one that holds no file yet.
+    fn symbol_coordinate(&self) -> Result<Option<String>> {
+        self.project_metadata(SYMBOL_COORDINATE_KEY)
+    }
+
+    /// Whether the store holds at least one `symbols` row — anything a
+    /// coordinate migration (S-704) could rewrite.
+    fn holds_symbols(&self) -> Result<bool>;
 }
 
 /// The canonical SQLite-backed graph store — sole writer of `logos.db`.
@@ -3608,6 +3691,12 @@ impl GraphStore for SqliteGraphStore {
             .context("reading project_metadata value")
     }
 
+    fn holds_symbols(&self) -> Result<bool> {
+        self.conn
+            .query_row("SELECT EXISTS (SELECT 1 FROM symbols)", [], |row| row.get(0))
+            .context("probing for symbol rows")
+    }
+
     fn unresolved_refs(&self) -> Result<Vec<UnresolvedRefRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, \
@@ -4497,6 +4586,22 @@ impl BatchWriter<'_> {
         insert_node(self.conn, node)
     }
 
+    /// Insert a node whose symbol no node in the store holds yet, or `None`
+    /// when one already does — the extracted-fact insert ([BR-74], S-703).
+    ///
+    /// Unlike [`insert_node`](Self::insert_node), it never folds into an
+    /// existing row: an equal symbol is a duplicate the caller refuses, not
+    /// the same node.
+    ///
+    /// # Errors
+    /// Returns an error if a constraint other than the symbol's uniqueness
+    /// fires, or I/O fails.
+    ///
+    /// [BR-74]: ../../../docs/specs/software-spec.md#35-extraction--symbol-ids
+    pub fn insert_new_node(&self, node: &NewNode<'_>) -> Result<Option<NodeId>> {
+        insert_new_node(self.conn, node)
+    }
+
     /// Insert an edge within the batch; see [`SqliteGraphStore::insert_edge`].
     ///
     /// # Errors
@@ -4651,6 +4756,67 @@ impl BatchWriter<'_> {
         Ok(())
     }
 
+    /// Move every symbol this store holds to `coordinate` ([FR-EX-35], S-704):
+    /// remove the `symbols` rows no node references, then rewrite the package
+    /// slot of every symbol-bearing value — `symbols.symbol`,
+    /// `unresolved_refs.source_symbol`, a capture-before-delete row's `target`
+    /// and `declared_types.symbol` — and clear every `files.content_hash`, so
+    /// the next reconcile re-extracts each file under the coordinate.
+    ///
+    /// Every value whose coordinate differs is rewritten, not only the
+    /// coordinate-less ones: a file a full index could not load keeps an older
+    /// coordinate while the store moves on (S-703). Each value goes through
+    /// [`LogosSymbol::with_coordinate`], so a local symbol and the descriptor
+    /// tail come through byte for byte. Node and edge rows, snapshot history
+    /// and the gate baseline are not touched: a node references its symbol by
+    /// id.
+    ///
+    /// It writes no metadata; the caller records the coordinate in the same
+    /// batch, so the record and the symbols never disagree.
+    ///
+    /// # Errors
+    /// A value that is not a symbol (a corrupt store), two nodes whose symbols
+    /// would become one, or an I/O failure. The batch then rolls back whole.
+    ///
+    /// [FR-EX-35]: ../../../docs/specs/requirements/FR-EX-35.md
+    pub fn migrate_symbol_coordinate(&self, coordinate: &str) -> Result<CoordinateMigration> {
+        let orphan_symbols_removed = self
+            .conn
+            .execute(
+                "DELETE FROM symbols \
+                 WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE n.symbol_id = symbols.id)",
+                [],
+            )
+            .context("removing orphan symbol rows")? as u64;
+        let symbols_rewritten =
+            rewrite_symbol_column(self.conn, "symbols", "symbol", "", coordinate)?;
+        let ref_symbols_rewritten =
+            rewrite_symbol_column(self.conn, "unresolved_refs", "source_symbol", "", coordinate)?
+                + rewrite_symbol_column(
+                    self.conn,
+                    "unresolved_refs",
+                    "target",
+                    &format!("AND form = {}", RefForm::Symbol.as_i32()),
+                    coordinate,
+                )?;
+        let declared_type_symbols_rewritten =
+            rewrite_symbol_column(self.conn, "declared_types", "symbol", "", coordinate)?;
+        let files_invalidated = self
+            .conn
+            .execute(
+                "UPDATE files SET content_hash = NULL WHERE content_hash IS NOT NULL",
+                [],
+            )
+            .context("clearing file content hashes")? as u64;
+        Ok(CoordinateMigration {
+            orphan_symbols_removed,
+            symbols_rewritten,
+            ref_symbols_rewritten,
+            declared_type_symbols_rewritten,
+            files_invalidated,
+        })
+    }
+
     /// Run `f` under a **savepoint** nested in the open batch, so its writes
     /// commit or roll back as one unit **without** ending the batch (S-513,
     /// [FR-EH-05]).
@@ -4749,7 +4915,9 @@ impl BatchWriter<'_> {
     /// Persisting the revision is the single-row write [NFR-PE-03] budgets for on
     /// the existing post-`sync` write path. The caller advances it once per
     /// completed `index` and once per `sync` that mutated the graph (the
-    /// pipeline gates the call) — never on a no-op `sync` or a read-only read.
+    /// pipeline gates the call), and once inside the batch of a coordinate
+    /// migration, which moves every symbol (S-704) — never on a no-op `sync`
+    /// or a read-only read.
     ///
     /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
     /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
@@ -5739,63 +5907,29 @@ fn upsert_symbol(conn: &Connection, symbol: &LogosSymbol) -> Result<i64> {
     .context("reading symbol id")
 }
 
-/// Idempotent over `symbol_id` ([FR-SY-10], [NFR-RA-13], [ADR-46]): the
-/// `UNIQUE(symbol_id)` constraint (S-201) makes a second node for an
-/// already-present symbol a conflict rather than a duplicate row, and the
-/// `DO UPDATE` folds the fresh extraction fields into the existing row in
-/// place. The per-file delete-then-insert ([FR-SY-01]) is the primary
-/// replace-in-place mechanism for a re-extracted file; this upsert is the
-/// backstop that keeps `insert_node` itself safe to call again for a symbol
-/// that was never deleted (e.g. two nodes folding to the same symbol within
-/// one persist, or a caller that reuses an existing symbol without a prior
-/// delete) — re-extraction never accumulates a second node.
-///
-/// `last_insert_rowid()` only reflects the most recent INSERT, not an UPDATE,
-/// so it cannot be trusted on the `DO UPDATE` path (SQLite docs). The id is
-/// instead read back explicitly via `symbol_id`, mirroring the
-/// [`upsert_symbol`] idiom.
-///
-/// The `SET` list covers exactly [`NewNode`]'s extraction-owned columns.
-/// Annotation-owned columns (`is_dead`, `is_duplicate`, `layer_membership`,
-/// `is_test`, `clone_group`) are deliberately absent, so a re-extraction never
-/// wipes a prior annotation pass's verdict out from under it.
-///
-/// [FR-SY-01]: ../../../docs/specs/requirements/FR-SY-01.md
-/// [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
-/// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
-/// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
-fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
+/// The `INSERT INTO nodes` statement over every extraction-owned column,
+/// completed by an `ON CONFLICT` clause — one column list for
+/// [`insert_node`]'s upsert and [`insert_new_node`]'s refusal, so the two can
+/// never write different columns.
+macro_rules! node_insert_sql {
+    ($on_conflict:literal) => {
+        concat!(
+            "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
+                                derived, exported, cyclomatic_complexity, line_count, fingerprint, \
+                                test_evidence, body, max_nesting_depth, has_body, body_tokens, \
+                                self_type, param_min, param_max, takes_self, receiver_mode, variants, signature, \
+                                uninherited) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) ",
+            $on_conflict
+        )
+    };
+}
+
+/// Run a [`node_insert_sql!`] statement for `node`, returning the rows it
+/// inserted or updated.
+fn execute_node_insert(conn: &Connection, node: &NewNode<'_>, sql: &str) -> rusqlite::Result<usize> {
     conn.execute(
-        "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
-                            derived, exported, cyclomatic_complexity, line_count, fingerprint, \
-                            test_evidence, body, max_nesting_depth, has_body, body_tokens, \
-                            self_type, param_min, param_max, takes_self, receiver_mode, variants, signature, \
-                            uninherited) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) \
-         ON CONFLICT(symbol_id) DO UPDATE SET \
-             kind = excluded.kind, \
-             name = excluded.name, \
-             file_id = excluded.file_id, \
-             start_line = excluded.start_line, \
-             end_line = excluded.end_line, \
-             derived = excluded.derived, \
-             exported = excluded.exported, \
-             cyclomatic_complexity = excluded.cyclomatic_complexity, \
-             line_count = excluded.line_count, \
-             fingerprint = excluded.fingerprint, \
-             test_evidence = excluded.test_evidence, \
-             body = excluded.body, \
-             max_nesting_depth = excluded.max_nesting_depth, \
-             has_body = excluded.has_body, \
-             body_tokens = excluded.body_tokens, \
-             self_type = excluded.self_type, \
-             param_min = excluded.param_min, \
-             param_max = excluded.param_max, \
-             takes_self = excluded.takes_self, \
-             receiver_mode = excluded.receiver_mode, \
-             variants = excluded.variants, \
-             signature = excluded.signature, \
-             uninherited = excluded.uninherited",
+        sql,
         rusqlite::params![
             node.symbol_id,
             node.kind.as_i32(),
@@ -5823,6 +5957,77 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
             node.uninherited.then_some(1i64),
         ],
     )
+}
+
+/// Insert a node only if no node holds its symbol ([BR-74], S-703): `None`
+/// when one does, leaving that node untouched. `last_insert_rowid()` is exact
+/// here because the statement either inserted this row or changed nothing.
+///
+/// [BR-74]: ../../../docs/specs/software-spec.md#35-extraction--symbol-ids
+fn insert_new_node(conn: &Connection, node: &NewNode<'_>) -> Result<Option<NodeId>> {
+    let inserted = execute_node_insert(conn, node, node_insert_sql!("ON CONFLICT(symbol_id) DO NOTHING"))
+        .context("inserting node")?;
+    Ok((inserted > 0).then(|| NodeId(conn.last_insert_rowid())))
+}
+
+/// Idempotent over `symbol_id` ([FR-SY-10], [NFR-RA-13], [ADR-46]): the
+/// `UNIQUE(symbol_id)` constraint (S-201) makes a second node for an
+/// already-present symbol a conflict rather than a duplicate row, and the
+/// `DO UPDATE` folds the fresh extraction fields into the existing row in
+/// place. The per-file delete-then-insert ([FR-SY-01]) is the primary
+/// replace-in-place mechanism for a re-extracted file; this upsert is the
+/// backstop that keeps `insert_node` itself safe to call again for a symbol
+/// that was never deleted (a caller that re-materialises a node it owns
+/// without a prior delete). A file's extracted facts never take this path:
+/// they go through [`insert_new_node`], which refuses a symbol another node
+/// holds instead of folding into it ([BR-74], S-703).
+///
+/// `last_insert_rowid()` only reflects the most recent INSERT, not an UPDATE,
+/// so it cannot be trusted on the `DO UPDATE` path (SQLite docs). The id is
+/// instead read back explicitly via `symbol_id`, mirroring the
+/// [`upsert_symbol`] idiom.
+///
+/// The `SET` list covers exactly [`NewNode`]'s extraction-owned columns.
+/// Annotation-owned columns (`is_dead`, `is_duplicate`, `layer_membership`,
+/// `is_test`, `clone_group`) are deliberately absent, so a re-extraction never
+/// wipes a prior annotation pass's verdict out from under it.
+///
+/// [FR-SY-01]: ../../../docs/specs/requirements/FR-SY-01.md
+/// [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
+/// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
+/// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
+/// [BR-74]: ../../../docs/specs/software-spec.md#35-extraction--symbol-ids
+fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
+    execute_node_insert(
+        conn,
+        node,
+        node_insert_sql!(
+            "ON CONFLICT(symbol_id) DO UPDATE SET \
+             kind = excluded.kind, \
+             name = excluded.name, \
+             file_id = excluded.file_id, \
+             start_line = excluded.start_line, \
+             end_line = excluded.end_line, \
+             derived = excluded.derived, \
+             exported = excluded.exported, \
+             cyclomatic_complexity = excluded.cyclomatic_complexity, \
+             line_count = excluded.line_count, \
+             fingerprint = excluded.fingerprint, \
+             test_evidence = excluded.test_evidence, \
+             body = excluded.body, \
+             max_nesting_depth = excluded.max_nesting_depth, \
+             has_body = excluded.has_body, \
+             body_tokens = excluded.body_tokens, \
+             self_type = excluded.self_type, \
+             param_min = excluded.param_min, \
+             param_max = excluded.param_max, \
+             takes_self = excluded.takes_self, \
+             receiver_mode = excluded.receiver_mode, \
+             variants = excluded.variants, \
+             signature = excluded.signature, \
+             uninherited = excluded.uninherited"
+        ),
+    )
     .context("upserting node")?;
     conn.query_row(
         "SELECT id FROM nodes WHERE symbol_id = ?1",
@@ -5845,6 +6050,39 @@ fn insert_edge(conn: &Connection, source: NodeId, target: NodeId, kind: EdgeKind
 fn delete_node(conn: &Connection, id: NodeId) -> Result<usize> {
     conn.execute("DELETE FROM nodes WHERE id = ?1", [id.get()])
         .context("deleting node")
+}
+
+/// Rewrite every non-NULL symbol in `table.column` (rows narrowed by the
+/// `filter` SQL fragment, `""` for all) to `coordinate`, returning how many
+/// values changed — the per-column step of
+/// [`BatchWriter::migrate_symbol_coordinate`]. `table`, `column` and `filter`
+/// are this module's own literals, never input.
+fn rewrite_symbol_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    filter: &str,
+    coordinate: &str,
+) -> Result<u64> {
+    let rows: Vec<(i64, String)> = conn
+        .prepare(&format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL {filter}"))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()
+        .with_context(|| format!("reading {table}.{column}"))?;
+    let mut update = conn.prepare(&format!("UPDATE {table} SET {column} = ?2 WHERE id = ?1"))?;
+    let mut rewritten = 0;
+    for (id, raw) in rows {
+        let moved = LogosSymbol::parse(&raw)
+            .and_then(|symbol| symbol.with_coordinate(Some(coordinate)))
+            .with_context(|| format!("{table}.{column} row {id} holds {raw:?}, which is not a symbol"))?;
+        if moved.as_str() != raw {
+            update.execute(rusqlite::params![id, moved.as_str()]).with_context(|| {
+                format!("rewriting {table}.{column} row {id} to {moved}: another row already holds it")
+            })?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
 }
 
 /// The raw column tuple read from a node-shaped row, before model conversion.

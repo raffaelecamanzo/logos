@@ -33,6 +33,9 @@ use tempfile::TempDir;
 mod graph_fingerprint;
 use graph_fingerprint::graph_fingerprint;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -48,6 +51,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 }
 
 fn index(root: &Path) -> Engine {
+    coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
     let result = engine.index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);

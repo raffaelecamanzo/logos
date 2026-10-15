@@ -1009,11 +1009,13 @@ mod tests {
 
         let config = tmp.path().join(".logos").join("config.toml");
         assert!(config.is_file(), "the fallback ran the ordinary init and wrote a config.toml");
-        std::fs::write(&config, "# hand-edited\n").unwrap();
+        // It pins its own `[project] id` (S-702): every byte is the user's.
+        let hand_edited = "# hand-edited\n[project]\nid = \"pinned/shop\"\n";
+        std::fs::write(&config, hand_edited).unwrap();
         assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm, &logos_ext::ExtensionHost::new()).unwrap(), 0);
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
-            "# hand-edited\n",
+            hand_edited,
             "an existing config.toml is reported unchanged, never rewritten (FR-IN-01)"
         );
     }

@@ -32,6 +32,12 @@
 //! nothing" and "there was nothing to check" are different claims, and only the
 //! second is true.
 //!
+//! The same holds per rule ([BR-48]): a `no_cross_service_callers` glob that
+//! matches no provider in its scope is listed in
+//! [`unmatched_rules`](WorkspaceGovernance::unmatched_rules) and the report does
+//! not pass. See `CompiledNoCallers` for what the glob matches and what its
+//! scope is.
+//!
 //! # Never fabricated ([NFR-RA-05])
 //! Rules read the bridge's **actually-matched** edges. A consumer whose key never
 //! bound (ambiguous, unresolvable, no provider in the workspace) contributes no
@@ -47,6 +53,7 @@
 //! [FR-GV-01]: ../../../docs/specs/requirements/FR-GV-01.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+//! [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 //! [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
 //! [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 //! [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
@@ -60,6 +67,7 @@ use serde::Serialize;
 use super::bridge::{BridgeEdge, BridgeEndpoint};
 use super::manifest::Governance;
 use super::Federation;
+use crate::model::LogosSymbol;
 
 /// Every workspace-rule violation carries `severity = "error"`: checked-in
 /// workspace policy is a real breach, not a hint ([FR-WS-13]).
@@ -152,6 +160,20 @@ pub struct WorkspaceGovernance {
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unknown_member_refs: Vec<String>,
+    /// The `no-cross-service-callers:<symbol-glob>` rules whose glob matches no
+    /// provider in the rule's scope — in declaration order, de-duplicated.
+    ///
+    /// The third honesty rider ([BR-48]). Such a rule evaluated over nothing:
+    /// it can never fire, so its silence is not a pass, and the report does not
+    /// [pass](Self::passed) while any is listed. The usual cause is a glob that
+    /// names no symbol any member exposes — a typo, a renamed endpoint, or a
+    /// glob that spells the repository coordinate, which the
+    /// [`member`](super::manifest::NoCrossServiceCallers::member) scope names
+    /// instead. Empty in the healthy case.
+    ///
+    /// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unmatched_rules: Vec<String>,
     /// The violations found, in deterministic order ([NFR-RA-06]).
     ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
@@ -161,19 +183,57 @@ pub struct WorkspaceGovernance {
 impl WorkspaceGovernance {
     /// Whether the workspace rules all hold. Reported, **never gated** — the
     /// caller decides what to do with it, and no member's signal moves either way
-    /// ([ADR-56]).
+    /// ([ADR-56]). A rule listed in
+    /// [`unmatched_rules`](Self::unmatched_rules) evaluated over nothing, so the
+    /// report does not pass while one is ([BR-48]).
     ///
     /// [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
+    /// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
     pub fn passed(&self) -> bool {
-        self.violations.is_empty()
+        self.violations.is_empty() && self.unmatched_rules.is_empty()
+    }
+
+    /// The one-line notice naming the [`unmatched_rules`](Self::unmatched_rules),
+    /// or `None` when every rule matched — for a surface whose structured output
+    /// a reader may not inspect field by field.
+    pub fn unmatched_notice(&self) -> Option<String> {
+        (!self.unmatched_rules.is_empty()).then(|| {
+            format!(
+                "{} workspace rule(s) matched no provider in scope and were not counted \
+                 as passing: {}",
+                self.unmatched_rules.len(),
+                self.unmatched_rules.join(", ")
+            )
+        })
     }
 }
 
 /// One `[[governance.no_cross_service_callers]]` rule with its symbol glob
 /// compiled once — the compiled-matcher-per-declaration pattern the per-repo
 /// engine uses for every glob family ([FR-WS-13], [FR-GV-01]).
+///
+/// # What the glob matches ([FR-WS-13], [ADR-85])
+/// A provider symbol's **descriptor tail** — its path and scope, without the
+/// repository coordinate ([`LogosSymbol::descriptor_tail`]); the rule's
+/// `member` scope names the repository. A glob is also matched against the
+/// symbol's **coordinate-less form** (`logos . . . <tail>`), the form every
+/// symbol had before [ADR-85]: that is the string a manifest written before
+/// then was matched against, so it keeps matching the same bindings.
+///
+/// # Its scope ([BR-48])
+/// The symbols a rule can see are the **provider endpoints** the bridge reads
+/// from the members in its `member` scope (every member when unscoped), bound
+/// or not ([`ContractBridge::governance_read`](super::bridge::ContractBridge::governance_read)):
+/// a binding's provider side can only ever be one of them. A glob matching none
+/// can never fire and is reported as unmatched, never as a pass. A glob that
+/// matches a provider with no cross-service caller is the rule holding.
+///
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+/// [FR-GV-01]: ../../../docs/specs/requirements/FR-GV-01.md
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+/// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 struct CompiledNoCallers {
-    /// The compiled matcher over the provider endpoint's canonical symbol.
+    /// The compiled matcher over a provider symbol's [`GlobForms`].
     ///
     /// A [`GlobMatcher`] (not a `GlobSet`): there is exactly **one** pattern per
     /// rule, and it hands the original pattern back via `glob().glob()` — so it
@@ -187,9 +247,49 @@ struct CompiledNoCallers {
 }
 
 impl CompiledNoCallers {
-    /// The rule's original glob pattern — the violation's `rule` key.
+    /// The rule's original glob pattern.
     fn symbol_glob(&self) -> &str {
         self.symbol.glob().glob()
+    }
+
+    /// The rule key — a violation's `rule`, and an
+    /// [`unmatched_rules`](WorkspaceGovernance::unmatched_rules) entry.
+    fn rule_key(&self) -> String {
+        format!("no-cross-service-callers:{}", self.symbol_glob())
+    }
+
+    /// Whether `endpoint` is in this rule's scope and its symbol matches the glob.
+    fn matches(&self, endpoint: &BridgeEndpoint, forms: &GlobForms<'_>) -> bool {
+        let member_scoped = self
+            .member
+            .as_deref()
+            .is_none_or(|member| member == endpoint.member);
+        member_scoped && forms.iter().any(|form| self.symbol.is_match(form))
+    }
+}
+
+/// The spellings of one provider symbol a symbol glob is matched against
+/// ([`CompiledNoCallers`]): its descriptor tail, and its coordinate-less form.
+///
+/// A local symbol has neither a coordinate nor a tail, so its one spelling is
+/// the symbol itself — which is also what its coordinate-less form renders.
+struct GlobForms<'a> {
+    tail: Option<&'a str>,
+    coordinate_less: String,
+}
+
+impl<'a> GlobForms<'a> {
+    fn of(symbol: &'a LogosSymbol) -> Self {
+        Self {
+            tail: symbol.descriptor_tail(),
+            coordinate_less: symbol
+                .with_coordinate(None)
+                .map_or_else(|_| symbol.to_scip_string(), |s| s.to_scip_string()),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &str> {
+        self.tail.into_iter().chain([self.coordinate_less.as_str()])
     }
 }
 
@@ -289,8 +389,8 @@ impl<'a> CompiledWorkspaceRules<'a> {
 /// that does not exist here.
 ///
 /// `globset`'s default semantics apply, so `*` matches across `/` — which is what
-/// a symbol glob wants, since a canonical symbol embeds `/`-separated path
-/// segments (`… src/routes.ts/legacyOrders().`).
+/// a symbol glob wants, since a descriptor tail is `/`-separated path segments
+/// (`src/routes.ts/legacyOrders().`).
 ///
 /// # Errors
 /// A malformed glob — surfaced by the caller as a loud compile failure.
@@ -342,7 +442,13 @@ fn unknown_member_refs(federation: &Federation, governance: &Governance) -> Vec<
 /// [`is_evidence`](super::bridge::BridgeIntake::is_evidence) are checked or
 /// counted in `bindings_checked`, so a caller may pass a set holding both.
 ///
+/// `providers` is every provider endpoint the members expose, bound or not —
+/// the scope a `no_cross_service_callers` glob must match something in
+/// (`CompiledNoCallers`, [BR-48]). [`super::query::workspace_check`] reads
+/// both at one stamp snapshot.
+///
 /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 ///
 /// # Errors
 /// A rule that could never fire fails loud rather than silently matching nothing
@@ -360,6 +466,7 @@ fn unknown_member_refs(federation: &Federation, governance: &Governance) -> Vec<
 pub fn workspace_governance(
     federation: &Federation,
     edges: &[BridgeEdge],
+    providers: &[BridgeEndpoint],
 ) -> Result<Option<WorkspaceGovernance>> {
     // Honest empty: no declared policy ⇒ no report ([NFR-CC-04]).
     if federation.governance.is_empty() {
@@ -380,6 +487,7 @@ pub fn workspace_governance(
         rules_checked: compiled.rules_checked(),
         bindings_checked: edges.len(),
         unknown_member_refs: unknown_member_refs(federation, &federation.governance),
+        unmatched_rules: unmatched_rules(&compiled, &edges, providers),
         violations,
     }))
 }
@@ -467,21 +575,47 @@ fn check_no_cross_service_callers(
     let mut seen: BTreeSet<(usize, &BridgeEndpoint, &BridgeEndpoint)> = BTreeSet::new();
 
     for edge in edges {
+        let forms = GlobForms::of(&edge.to.symbol);
         for (i, rule) in compiled.no_callers.iter().enumerate() {
-            let member_scoped = rule
-                .member
-                .as_deref()
-                .is_none_or(|member| member == edge.to.member);
-            if member_scoped
-                && rule.symbol.is_match(edge.to.symbol.as_str())
-                && seen.insert((i, &edge.from, &edge.to))
-            {
+            if rule.matches(&edge.to, &forms) && seen.insert((i, &edge.from, &edge.to)) {
                 violations.push(no_callers_violation(edge, rule));
             }
         }
     }
 
     violations
+}
+
+/// The [`unmatched_rules`](WorkspaceGovernance::unmatched_rules) rider: the
+/// `no_cross_service_callers` rules whose glob matches no provider in scope
+/// ([BR-48]).
+///
+/// The scope is `providers` plus the evidence bindings' provider side — the
+/// latter so a rule that fired is matched by construction, whatever the
+/// provider list holds. In declaration order, a rule key listed once.
+///
+/// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+fn unmatched_rules(
+    compiled: &CompiledWorkspaceRules<'_>,
+    edges: &[&BridgeEdge],
+    providers: &[BridgeEndpoint],
+) -> Vec<String> {
+    if compiled.no_callers.is_empty() {
+        return Vec::new();
+    }
+    let scope: Vec<(&BridgeEndpoint, GlobForms<'_>)> = providers
+        .iter()
+        .chain(edges.iter().map(|edge| &edge.to))
+        .map(|endpoint| (endpoint, GlobForms::of(&endpoint.symbol)))
+        .collect();
+    let mut unmatched: Vec<String> = Vec::new();
+    for rule in &compiled.no_callers {
+        let key = rule.rule_key();
+        if !scope.iter().any(|(endpoint, forms)| rule.matches(endpoint, forms)) && !unmatched.contains(&key) {
+            unmatched.push(key);
+        }
+    }
+    unmatched
 }
 
 /// Render one no-cross-service-callers breach.
@@ -492,7 +626,7 @@ fn no_callers_violation(edge: &BridgeEdge, rule: &CompiledNoCallers) -> Workspac
         .map(|r| format!(" — {r}"))
         .unwrap_or_default();
     WorkspaceViolation {
-        rule: format!("no-cross-service-callers:{}", rule.symbol_glob()),
+        rule: rule.rule_key(),
         rule_type: RULE_TYPE_NO_CALLERS.to_string(),
         severity: SEVERITY_ERROR.to_string(),
         relation: edge.relation.clone(),
@@ -596,8 +730,21 @@ mod tests {
         }
     }
 
+    /// Evaluate `governance` over `edges`, with the bound providers as the
+    /// members' provider endpoints — the smallest scope a real bridge read gives.
     fn run(governance: Governance, edges: &[BridgeEdge]) -> Option<WorkspaceGovernance> {
-        workspace_governance(&federation(governance), edges).expect("rules compile")
+        let providers: Vec<BridgeEndpoint> = edges.iter().map(|edge| edge.to.clone()).collect();
+        run_over(governance, edges, &providers)
+    }
+
+    /// Evaluate `governance` over `edges` with `providers` as the members'
+    /// provider endpoints.
+    fn run_over(
+        governance: Governance,
+        edges: &[BridgeEdge],
+        providers: &[BridgeEndpoint],
+    ) -> Option<WorkspaceGovernance> {
+        workspace_governance(&federation(governance), edges, providers).expect("rules compile")
     }
 
     // ── AC 1: a layer rule evaluates over bridge matches and reports ──────
@@ -824,7 +971,7 @@ mod tests {
     #[test]
     fn no_declared_rules_produce_no_report_at_all() {
         let edges = [edge("web", "fetchOrder", "api", "getOrder")];
-        let report = workspace_governance(&federation(Governance::default()), &edges)
+        let report = workspace_governance(&federation(Governance::default()), &edges, &[])
             .expect("an empty family is not an error");
         assert!(
             report.is_none(),
@@ -843,7 +990,7 @@ mod tests {
         };
         let edges = [edge("web", "fetchOrder", "api", "getOrder")];
         assert!(
-            workspace_governance(&federation(governance), &edges)
+            workspace_governance(&federation(governance), &edges, &[])
                 .expect("not an error")
                 .is_none(),
             "layers declare vocabulary, not a contract to check",
@@ -869,7 +1016,7 @@ mod tests {
         };
         let edges = [edge("web", "fetchOrder", "api", "getOrder")];
 
-        let err = workspace_governance(&federation(governance), &edges)
+        let err = workspace_governance(&federation(governance), &edges, &[])
             .expect_err("a boundary that can never fire is a hard error");
         let msg = format!("{err:#}");
         assert!(
@@ -888,7 +1035,7 @@ mod tests {
             no_cross_service_callers: Vec::new(),
         };
         assert!(
-            workspace_governance(&federation(governance), &[]).is_err(),
+            workspace_governance(&federation(governance), &[], &[]).is_err(),
             "a boundary over an empty layer vocabulary can never fire",
         );
     }
@@ -1021,7 +1168,7 @@ mod tests {
                 reason: None,
             }],
         };
-        let err = workspace_governance(&federation(governance), &[])
+        let err = workspace_governance(&federation(governance), &[], &[])
             .expect_err("an uncompilable glob is a hard error");
         assert!(
             format!("{err:#}").contains("[unclosed"),
@@ -1046,5 +1193,203 @@ mod tests {
             "the same consumer→provider pair breaches the boundary once",
         );
         assert_eq!(report.bindings_checked, 2, "both bindings were still checked");
+    }
+
+    // ── S-705: globs match the descriptor tail; an unmatched glob is not a pass ──
+
+    /// A global provider symbol of `member` under `coordinate` (`.` for the
+    /// coordinate-less form every symbol had before ADR-85).
+    fn global(member: &str, coordinate: &str, tail: &str) -> BridgeEndpoint {
+        BridgeEndpoint {
+            member: member.to_string(),
+            symbol: LogosSymbol::parse(&format!("logos . {coordinate} . {tail}")).unwrap(),
+        }
+    }
+
+    /// A binding from `web`'s `fetchOrders` to `provider`.
+    fn bound(provider: &BridgeEndpoint) -> BridgeEdge {
+        BridgeEdge {
+            to: provider.clone(),
+            ..edge("web", "fetchOrders", "api", "unused")
+        }
+    }
+
+    /// One unscoped `no_cross_service_callers` rule per glob.
+    fn no_callers(globs: &[&str]) -> Governance {
+        Governance {
+            no_cross_service_callers: globs
+                .iter()
+                .map(|glob| NoCrossServiceCallers {
+                    symbol: (*glob).to_string(),
+                    member: None,
+                    reason: None,
+                })
+                .collect(),
+            ..Governance::default()
+        }
+    }
+
+    /// Each violation as `(rule, from member, to member, to tail)` — the binding
+    /// a rule matched, with the coordinate normalised away.
+    fn bindings(report: &WorkspaceGovernance) -> Vec<(String, String, String, String)> {
+        report
+            .violations
+            .iter()
+            .map(|v| {
+                (
+                    v.rule.clone(),
+                    v.from.member.clone(),
+                    v.to.member.clone(),
+                    v.to.symbol.descriptor_tail().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The manifest a user wrote before symbols carried a coordinate matches the
+    /// same bindings after (FR-WS-13, S-705): globs spelled against the whole
+    /// old symbol, against its tail, and with a leading wildcard. "Before" is the
+    /// matcher as it stood — the glob over the whole coordinate-less symbol
+    /// string — computed here independently of the code under test.
+    #[test]
+    fn an_existing_manifest_matches_the_same_bindings_before_and_after_the_coordinate() {
+        const TAILS: [&str; 3] = [
+            "src/`routes.ts`/legacyOrders().",
+            "src/`routes.ts`/orders().",
+            "src/legacy/`users.ts`/find().",
+        ];
+        const GLOBS: [&str; 4] = [
+            "logos . . . src/`routes.ts`/legacy*",
+            "*legacy*",
+            "logos . . . src/legacy/*",
+            "*`routes.ts`/orders().",
+        ];
+        let before_edges: Vec<BridgeEdge> = TAILS.iter().map(|t| bound(&global("api", ".", t))).collect();
+        let after_edges: Vec<BridgeEdge> = TAILS
+            .iter()
+            .map(|t| bound(&global("api", "example.com/api", t)))
+            .collect();
+
+        // The matcher as it stood before the coordinate, over the old symbols.
+        let mut expected: Vec<(String, String, String, String)> = Vec::new();
+        for edge in &before_edges {
+            for glob in GLOBS {
+                if Glob::new(glob).unwrap().compile_matcher().is_match(edge.to.symbol.as_str()) {
+                    let tail = edge.to.symbol.descriptor_tail().unwrap().to_string();
+                    expected.push((format!("no-cross-service-callers:{glob}"), "web".into(), "api".into(), tail));
+                }
+            }
+        }
+        expected.sort();
+        let globs_matched: BTreeSet<&str> = expected.iter().map(|(rule, ..)| rule.as_str()).collect();
+        assert_eq!(globs_matched.len(), GLOBS.len(), "every glob matched a binding before: {expected:?}");
+
+        for (label, edges) in [("before", &before_edges), ("after", &after_edges)] {
+            let report = run(no_callers(&GLOBS), edges).expect("a report");
+            let mut matched = bindings(&report);
+            matched.sort();
+            assert_eq!(matched, expected, "{label}: the same bindings");
+            assert!(report.unmatched_rules.is_empty(), "{label}: {:?}", report.unmatched_rules);
+        }
+    }
+
+    /// The descriptor tail is what a glob is written against now: a glob over
+    /// path and scope matches a provider whatever its repository coordinate, and
+    /// one character off matches nothing.
+    #[test]
+    fn a_glob_matches_the_descriptor_tail_without_the_coordinate() {
+        let provider = global("api", "github.com/acme/api", "src/`routes.ts`/legacyOrders().");
+        let edges = [bound(&provider)];
+
+        let report = run(no_callers(&["src/`routes.ts`/legacyOrders()."]), &edges).expect("a report");
+        assert_eq!(report.violations.len(), 1, "the tail glob matches");
+
+        let near_miss = run(no_callers(&["src/`routes.ts`/legacyOrder()."]), &edges).expect("a report");
+        assert!(near_miss.violations.is_empty(), "one character off matches nothing");
+        assert_eq!(
+            near_miss.unmatched_rules,
+            ["no-cross-service-callers:src/`routes.ts`/legacyOrder()."],
+        );
+    }
+
+    /// A glob that spells a repository coordinate matches no tail and no
+    /// coordinate-less form, so it is reported unmatched — the `member` scope is
+    /// what names the repository (FR-WS-13).
+    #[test]
+    fn a_glob_spelling_the_coordinate_is_reported_unmatched() {
+        let provider = global("api", "example.com/api", "src/`routes.ts`/legacyOrders().");
+        let report = run(no_callers(&["logos . example.com/api . *"]), &[bound(&provider)]).expect("a report");
+        assert!(report.violations.is_empty());
+        assert_eq!(report.unmatched_rules, ["no-cross-service-callers:logos . example.com/api . *"]);
+        assert!(!report.passed());
+    }
+
+    /// A glob matching no provider in its scope is reported and the report does
+    /// not pass ([BR-48]) — with no binding at all, and with bindings to other
+    /// providers. The notice names the rule.
+    #[test]
+    fn a_glob_matching_no_provider_in_scope_is_reported_and_never_passes() {
+        let other = global("api", "example.com/api", "src/`routes.ts`/orders().");
+        for (label, edges, providers) in [
+            ("no binding, no provider", Vec::new(), Vec::new()),
+            ("bindings to other providers", vec![bound(&other)], vec![other.clone()]),
+        ] {
+            let report = run_over(no_callers(&["*retired*"]), &edges, &providers).expect("a report");
+            assert!(report.violations.is_empty(), "{label}");
+            assert_eq!(report.unmatched_rules, ["no-cross-service-callers:*retired*"], "{label}");
+            assert!(!report.passed(), "{label}: an unmatched rule is never a pass");
+            let notice = report.unmatched_notice().expect("a notice");
+            assert!(notice.contains("no-cross-service-callers:*retired*"), "{notice}");
+        }
+    }
+
+    /// The scope is the providers the members expose, bound or not: a glob that
+    /// matches a provider nobody calls is the rule HOLDING — matched, no
+    /// violation, a pass. Scoped to the bindings alone, it would be unmatched,
+    /// and a no-callers rule could never pass.
+    #[test]
+    fn a_glob_matching_an_uncalled_provider_holds() {
+        let uncalled = global("api", "example.com/api", "src/`routes.ts`/legacyOrders().");
+        let called = global("api", "example.com/api", "src/`routes.ts`/orders().");
+        let report = run_over(
+            no_callers(&["*legacyOrders*"]),
+            &[bound(&called)],
+            &[uncalled, called.clone()],
+        )
+        .expect("a report");
+        assert!(report.violations.is_empty());
+        assert!(report.unmatched_rules.is_empty(), "{:?}", report.unmatched_rules);
+        assert!(report.passed());
+        assert_eq!(report.unmatched_notice(), None);
+    }
+
+    /// The member scope bounds the scope too: a glob that matches only another
+    /// member's provider is unmatched in its own.
+    #[test]
+    fn a_glob_matching_only_outside_its_member_scope_is_unmatched() {
+        let provider = global("orders", "example.com/orders", "src/`routes.ts`/legacyOrders().");
+        let governance = Governance {
+            no_cross_service_callers: vec![NoCrossServiceCallers {
+                symbol: "*legacyOrders*".to_string(),
+                member: Some("api".to_string()),
+                reason: None,
+            }],
+            ..Governance::default()
+        };
+        let report = run_over(governance, &[], &[provider]).expect("a report");
+        assert_eq!(report.unmatched_rules, ["no-cross-service-callers:*legacyOrders*"]);
+    }
+
+    /// Two rules with one glob are one rule key, listed once; a workspace whose
+    /// rules all match carries no rider, so its report serialises as before.
+    #[test]
+    fn the_unmatched_rider_lists_a_key_once_and_is_absent_when_empty() {
+        let report = run(no_callers(&["*gone*", "*gone*"]), &[]).expect("a report");
+        assert_eq!(report.unmatched_rules, ["no-cross-service-callers:*gone*"]);
+
+        let provider = global("api", "example.com/api", "src/`routes.ts`/orders().");
+        let clean = run_over(no_callers(&["*orders*"]), &[], &[provider]).expect("a report");
+        let json = serde_json::to_value(&clean).unwrap();
+        assert!(json.get("unmatched_rules").is_none(), "{json}");
     }
 }

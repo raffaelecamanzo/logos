@@ -25,6 +25,9 @@ use logos_core::Engine;
 mod graph_fingerprint;
 use graph_fingerprint::graph_fingerprint;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 /// Insert one `function` node named `name` inside a write batch.
 fn insert_function(w: &BatchWriter<'_>, symbol: &str, name: &str) -> Result<()> {
     let sym = LogosSymbol::parse(symbol)?;
@@ -312,6 +315,7 @@ fn index_the_fixture(eager: bool) -> String {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     }
+    coordinate::pin(root.path());
     logos_core::plugin::queries::clear_compiled_cache();
     let engine = Engine::start(root.path()).expect("engine starts");
     if eager {

@@ -79,9 +79,9 @@ use crate::extract::build_manifest::{self, ManifestFacts};
 use crate::extract::declared_types::{self, SchemaFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, GraphStore, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType, NewImplBlock,
+    BatchWriter, CoordinateMigration, GraphStore, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType, NewImplBlock,
     NewNode, NewUnresolvedRef, StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY,
-    DECLARED_TYPES_EXTRACTED_KEY, LAST_FULL_INDEX_AT_KEY,
+    DECLARED_TYPES_EXTRACTED_KEY, LAST_FULL_INDEX_AT_KEY, PROJECT_ID_KEY, SYMBOL_COORDINATE_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -201,8 +201,14 @@ pub fn index(
                 loaded.iter().map(|l| l.rel.as_str()),
             ));
 
+    // The repository coordinate every symbol this index builds carries in its
+    // package slot (ADR-85, S-703) — resolved once, here, and threaded through
+    // every pass that builds a symbol. Recorded only after they all completed.
+    let coordinate = crate::config::resolve_project_id(root, config);
+    let ctx = SymbolContext::for_coordinate(Some(&coordinate));
+
     let (mut outcome, extract_ms, persist_ms) =
-        extract_and_persist(runtime, registry, &loaded, false, enrich, &mut warnings)?;
+        extract_and_persist(runtime, registry, &loaded, &ctx, false, enrich, &mut warnings)?;
 
     // S-513 / FR-EH-05: a file whose facts could not be persisted was rolled
     // back alone and is absent from the graph; every other file persisted. It
@@ -247,13 +253,22 @@ pub fn index(
     // writes only that marker (see `rebuild_avro_schemas`).
     rebuild_avro_schemas(runtime, &avro_schemas)?;
 
+    // The passes below build symbols too — routes, components, topics, policy
+    // nodes. When this index re-stored files, or no file of an older graph
+    // stands, the store's symbols are this index's, so the passes take its
+    // coordinate; when it stored none and an older graph stands, they keep that
+    // graph's coordinate so the store never holds two (S-703). The store is read
+    // only on that rare zero-persist path.
+    let carries = outcome.files > 0 || runtime.submit_read(|store| Ok(store.indexed_files()?.is_empty()))?;
+    let ctx = if carries { ctx } else { store_symbol_context(runtime)? };
+
     // Pass 2 binds the freshly persisted reference ledger (S-011); the
     // framework pass promotes route/component matches against the resolved
     // graph (S-012); Pass 3 annotates the resolved graph (S-014).
     let (mut resolution, resolve_ms) =
         resolve_pass(runtime, registry, root, &config.resolution, None)?;
     let (framework, promoted_nodes) =
-        framework_pass(runtime, registry, root, &config.resolution, None)?;
+        framework_pass(runtime, registry, root, &config.resolution, &ctx, None)?;
     // CR-017 / S-080: bind any deferred reference (an OpenAPI operation's route
     // reference) to a route/component this pass just promoted — see
     // [`rebind_for_promotions`]. The focused re-resolve it runs is timed through
@@ -269,13 +284,13 @@ pub fn index(
     // Broker-topic promotion (S-256, CR-061, FR-WS-11): promote the ledger-only
     // broker refs to `topic`/`producer`/`consumer` nodes — a cold index always
     // reconciles the whole graph.
-    topics_pass(runtime)?;
+    topics_pass(runtime, &ctx)?;
     // Framework-dispatch live-rooting (CR-043, ADR-39): live-root the methods
     // dispatched only through an external framework so Pass 3 below stops
     // mis-reporting them dead — a cold index reconciles every `.rs` file.
     let dispatch = dispatch_pass(runtime, registry, root, None)?;
     // Cold index re-annotates the whole graph (whole-graph compute + commit).
-    let (annotation, annotate_ms) = annotate_pass(runtime, registry, root, config, false)?;
+    let (annotation, annotate_ms) = annotate_pass(runtime, registry, root, config, &ctx, false)?;
 
     // Record the fingerprint last, after a complete index, so the purge above
     // runs at most once per config change ([ADR-20]).
@@ -307,6 +322,7 @@ pub fn index(
     // indexing and therefore could never set an in-process clock — still reports
     // when the project was last fully indexed.
     record_full_index_at(runtime, persistence)?;
+    record_index_coordinate(runtime, carries, coordinate)?;
 
     // FR-SY-09 / ADR-32: a completed index always rebuilds the graph, so it
     // always advances the persisted revision — done last (after every pass
@@ -740,7 +756,8 @@ pub fn sync(
         .iter()
         .map(|l| (l.rel.as_str(), l.hash.as_str()))
         .collect();
-    let ctx = SymbolContext::default();
+    // The coordinate the store's symbols carry, never a second one (S-703).
+    let (ctx, adopted) = sync_symbol_context(runtime, &canon_root, config, !stored.is_empty())?;
     // Pass 1 over the dirty set — instrumented like the full-index path
     // (FR-OB-01: the three pipeline passes emit through the single seam).
     let mut facts = crate::observability::traced_infallible(Tool::Extract, || {
@@ -773,6 +790,7 @@ pub fn sync(
     let persist_failures =
         persist_dirty_set(runtime, &facts, &hash_by_rel, &added, &stored, &mut result, &mut warnings);
     files_failed.extend(persist_failures.iter().map(|(f, _)| f.path.clone()));
+    record_adopted_coordinate(runtime, adopted, result.files_added + result.files_modified > 0)?;
 
     // Removals: a file gone from disk, or a stored/on-disk file the current config
     // no longer admits (FR-SY-07). Both route through the shared removal path.
@@ -814,7 +832,7 @@ pub fn sync(
         resolve_pass(runtime, registry, &canon_root, &config.resolution, Some(&delta))?;
     result.resolution = resolution;
     let (framework, promoted_nodes) =
-        framework_pass(runtime, registry, &canon_root, &config.resolution, Some(&delta))?;
+        framework_pass(runtime, registry, &canon_root, &config.resolution, &ctx, Some(&delta))?;
     result.framework = framework;
     // CR-017 / S-080: the framework pass may have promoted a route/component after
     // the resolve above; rebind deferred cross-artifact references that target it.
@@ -829,14 +847,14 @@ pub fn sync(
     // Broker-topic promotion (S-256, CR-061, FR-WS-11), incrementally gated: a
     // graph with no broker footprint skips the whole-graph snapshot entirely, so a
     // repo that indexes no topics does no work and its store stays byte-identical.
-    topics_pass(runtime)?;
+    topics_pass(runtime, &ctx)?;
     // Framework-dispatch live-rooting (CR-043, ADR-39), incrementally gated:
     // only the changed `.rs` files are rescanned and only their markers
     // reconciled, so a sync that touched no Rust file does no work — keeping the
     // change-proportional sync within the NFR-PE-03 budget. Its markers feed the
     // re-annotate below transparently (no Pass-3 edit beyond reading the marker).
     result.dispatch = dispatch_pass(runtime, registry, &canon_root, Some(&delta))?;
-    let (annotation, _annotate_ms) = annotate_pass(runtime, registry, root, config, true)?;
+    let (annotation, _annotate_ms) = annotate_pass(runtime, registry, root, config, &ctx, true)?;
     result.annotation = annotation;
 
     // FR-SY-09 / ADR-32: advance the persisted revision only when this sync
@@ -1400,6 +1418,185 @@ fn record_full_index_at(runtime: &Runtime, persistence: IndexPersistence) -> Res
     runtime.submit_write(move |w| w.set_project_metadata(LAST_FULL_INDEX_AT_KEY, &now))
 }
 
+/// Record the project's resolved identity coordinate under [`PROJECT_ID_KEY`]
+/// ([FR-CF-10], S-702): `[project] id`, else the derived default. Called by
+/// `logos init`, which builds no symbol; a full index writes the same key
+/// through [`record_index_coordinate`], in one batch with the symbol
+/// coordinate.
+///
+/// [FR-CF-10]: ../../../docs/specs/requirements/FR-CF-10.md
+pub(crate) fn record_project_id(runtime: &Runtime, root: &Path, config: &Config) -> Result<()> {
+    let id = crate::config::resolve_project_id(root, config);
+    runtime.submit_write(move |w| w.set_project_metadata(PROJECT_ID_KEY, &id))
+}
+
+/// Record, after a full index, the coordinate it resolved: always under
+/// [`PROJECT_ID_KEY`] (what the project resolves to, S-702), and under
+/// [`SYMBOL_COORDINATE_KEY`] (what the store's symbols carry, S-703) when
+/// `carries` — this index re-stored files, or no file of an older graph stands,
+/// so every symbol in the store is one it built. An index that stored no file
+/// while an older graph stands left that graph, and the coordinate its symbols
+/// carry, in place, so the record is left as it was. One batch, so the two keys
+/// never describe different runs.
+fn record_index_coordinate(runtime: &Runtime, carries: bool, coordinate: String) -> Result<()> {
+    runtime.submit_write(move |w| {
+        w.set_project_metadata(PROJECT_ID_KEY, &coordinate)?;
+        if carries {
+            w.set_project_metadata(SYMBOL_COORDINATE_KEY, &coordinate)?;
+        }
+        Ok(())
+    })
+}
+
+/// The [`SymbolContext`] a run over an existing graph builds symbols under:
+/// the coordinate its symbols carry ([`SYMBOL_COORDINATE_KEY`]), or the
+/// coordinate-less context when it records none ([ADR-85], S-703).
+///
+/// A run that adds to a standing graph — `check_rules`' re-materialisation,
+/// an index that stored no file over an older graph, and (through
+/// [`sync_symbol_context`]) every sync — reads it here rather than resolving
+/// the project's coordinate, so a symbol it adds always matches the symbols the
+/// store already holds: changing what a store's symbols carry is a full
+/// index's job, or the open-time migration's ([`migrate_symbol_coordinate`]),
+/// never a side effect of re-extracting one file.
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+pub(crate) fn store_symbol_context(runtime: &Runtime) -> Result<SymbolContext> {
+    let coordinate = runtime.submit_read(|store| store.symbol_coordinate())?;
+    Ok(SymbolContext::for_coordinate(coordinate.as_deref()))
+}
+
+/// The [`SymbolContext`] a sync builds symbols under, and the coordinate it
+/// adopts (S-703).
+///
+/// The store's recorded coordinate when it has one ([`store_symbol_context`]).
+/// A store that records none and `holds_files` was built before [ADR-85]: the
+/// open-time migration ([`migrate_symbol_coordinate`]) moves it, and until it
+/// has (it failed, or the configuration did not load) a sync keeps it in its
+/// coordinate-less form. A store that
+/// records none and holds no file has no symbols to stay consistent with —
+/// `logos init` created it, or an index admitted nothing — so the first sync
+/// that writes into it takes the project's own coordinate, as a full index
+/// would, and hands it back for the caller to record once a file persists.
+/// Without that, a store whose first write is a sync (a commit hook, the
+/// watcher) would stay coordinate-less until someone ran `logos index`.
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+fn sync_symbol_context(
+    runtime: &Runtime,
+    root: &Path,
+    config: &Config,
+    holds_files: bool,
+) -> Result<(SymbolContext, Option<String>)> {
+    if let Some(recorded) = runtime.submit_read(|store| store.symbol_coordinate())? {
+        return Ok((SymbolContext::for_coordinate(Some(&recorded)), None));
+    }
+    if holds_files {
+        return Ok((SymbolContext::default(), None));
+    }
+    let coordinate = crate::config::resolve_project_id(root, config);
+    Ok((SymbolContext::for_coordinate(Some(&coordinate)), Some(coordinate)))
+}
+
+/// Record the coordinate a sync `adopted` ([`sync_symbol_context`]) once it
+/// `persisted` a file: the first file a fresh store holds carries it, so from
+/// here on the store records it (S-703). A no-op for every other sync.
+fn record_adopted_coordinate(runtime: &Runtime, adopted: Option<String>, persisted: bool) -> Result<()> {
+    match adopted.filter(|_| persisted) {
+        Some(coordinate) => runtime.submit_write(move |w| w.set_project_metadata(SYMBOL_COORDINATE_KEY, &coordinate)),
+        None => Ok(()),
+    }
+}
+
+/// The name the test-only persistence fault seam (S-513) knows the coordinate
+/// migration by, to fail it after its rewrite and before it commits. `.logos/`
+/// is never admitted, so no project file can carry this path.
+pub(crate) const COORDINATE_MIGRATION_FAULT_PATH: &str = ".logos/logos.db";
+
+/// A coordinate migration that ran ([`migrate_symbol_coordinate`]): the
+/// coordinate the store recorded (`None`: a coordinate-less store), the one it
+/// moved to, and what the rewrite changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MigratedCoordinate {
+    /// The symbol coordinate the store recorded before the migration.
+    pub(crate) from: Option<String>,
+    /// The project's resolved coordinate, which the store now records.
+    pub(crate) to: String,
+    /// The rows the rewrite changed.
+    pub(crate) changes: CoordinateMigration,
+}
+
+/// Move a store whose symbols carry another coordinate than the project's to
+/// the project's ([FR-EX-35], S-704): the step [`Engine`](crate::Engine) runs
+/// when it opens a store, before any sync or auto-index.
+///
+/// Gated like [`admission_change`]: one read of the recorded coordinate
+/// ([`SYMBOL_COORDINATE_KEY`]) against the resolved one, and nothing written
+/// when they agree — so a second open is a no-op. A store that records none
+/// and holds no symbol has nothing to migrate and resolves nothing; its first
+/// index or sync records the coordinate (S-703). A store that records a
+/// coordinate is not moved to a *derived* one git could not confirm (git
+/// absent or refusing the repository): that value is the directory-name
+/// fallback, and following it would flip the store between environments.
+/// Otherwise — a store built before [ADR-85] (no record), or one whose
+/// `[project] id` or remote has changed since — it rewrites every symbol
+/// ([`BatchWriter::migrate_symbol_coordinate`]), records the coordinate under
+/// both keys and advances the graph revision, in **one** batch: an
+/// interrupted migration leaves the store as it was, and the next open runs
+/// it again.
+///
+/// # Errors
+/// A failed read, or a migration that could not complete (the store is then
+/// unchanged).
+///
+/// [FR-EX-35]: ../../../docs/specs/requirements/FR-EX-35.md
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+pub(crate) fn migrate_symbol_coordinate(
+    runtime: &Runtime,
+    root: &Path,
+    config: &Config,
+) -> Result<Option<MigratedCoordinate>> {
+    let (from, holds_symbols) =
+        runtime.submit_read(|store| Ok((store.symbol_coordinate()?, store.holds_symbols()?)))?;
+    if from.is_none() && !holds_symbols {
+        return Ok(None);
+    }
+    let resolved = crate::config::resolve_project_id_confirmed(root, config);
+    let to = resolved.coordinate;
+    if from.as_deref() == Some(to.as_str()) {
+        return Ok(None);
+    }
+    // A derived coordinate this machine could not confirm — the name of a
+    // local `origin` that is gone, or the directory name when git cannot answer
+    // for the root (absent from PATH, or refusing the repository's ownership)
+    // — is a fallback, not the repository's identity: moving a recorded
+    // coordinate to it would rewrite the whole store, and the next open once
+    // the source is back or git answers would rewrite it back. Such a store
+    // keeps its coordinate until the derivation is confirmed again or a full
+    // index moves it.
+    if from.is_some() && !resolved.confirmed {
+        tracing::debug!(
+            recorded = from.as_deref().unwrap_or_default(),
+            derived = %to,
+            "the derived coordinate is unconfirmed; the store keeps its recorded coordinate"
+        );
+        return Ok(None);
+    }
+    let fault = runtime.persist_fault(COORDINATE_MIGRATION_FAULT_PATH);
+    let coordinate = to.clone();
+    let changes = runtime.submit_write(move |w| {
+        let changes = w.migrate_symbol_coordinate(&coordinate)?;
+        if fault {
+            anyhow::bail!(crate::runtime::INJECTED_FAULT_REASON);
+        }
+        w.set_project_metadata(SYMBOL_COORDINATE_KEY, &coordinate)?;
+        w.set_project_metadata(PROJECT_ID_KEY, &coordinate)?;
+        w.advance_graph_revision()?;
+        Ok(changes)
+    })?;
+    Ok(Some(MigratedCoordinate { from, to, changes }))
+}
+
 /// Wall-clock now as whole unix seconds, or `None` when the system clock sits
 /// before the epoch — the one reading [`record_full_index_at`] refuses to store.
 ///
@@ -1429,7 +1626,10 @@ fn unix_seconds_now() -> Option<u64> {
 /// actor so the read-modify-write is atomic with respect to every other write
 /// ([NFR-RA-10]). Called once per completed `index`, once per mutating `sync`,
 /// and once more by a `reconcile` or navigation prologue whose purge removed a
-/// file (CR-201: the purge writes outside the sync's own advance). Each caller
+/// file (CR-201: the purge writes outside the sync's own advance). The
+/// open-time coordinate migration ([`migrate_symbol_coordinate`], S-704)
+/// advances the revision itself, inside the batch that moves every symbol, so
+/// the two commit together. Each caller here
 /// advances only after its last write committed, which is what lets a reader
 /// that read the revision first cache what it then read under it. A no-op
 /// `sync` (no dirty files) and a read-only navigation never reach it, so the
@@ -1832,6 +2032,7 @@ fn extract_and_persist(
     runtime: &Runtime,
     registry: &LanguageRegistry,
     loaded: &[LoadedFile],
+    ctx: &SymbolContext,
     capture: bool,
     enrich: bool,
     warnings: &mut Vec<String>,
@@ -1845,14 +2046,13 @@ fn extract_and_persist(
         .map(|l| (l.rel.as_str(), l.hash.as_str()))
         .collect();
 
-    let ctx = SymbolContext::default();
     // Run the rayon-parallel extraction on the core-owned worker pool (AQ-04),
     // not the global rayon pool, so all CPU parallelism shares one pool.
     // Pass 1 is one of the instrumented pipeline passes (FR-OB-01).
     let (mut facts, extract_ms) = crate::observability::traced_infallible_timed(Tool::Extract, || {
         runtime
             .worker_pool()
-            .install(|| extract_files(&inputs, registry, &ctx))
+            .install(|| extract_files(&inputs, registry, ctx))
     });
 
     // swe-skills typed-node enrichment (S-039, FR-DG-07): a pure post-extraction
@@ -2851,11 +3051,21 @@ struct InsertedNodes {
 /// Insert a file's nodes and its intra-file edges (the Pass-1 `Contains`
 /// edges, both endpoints in this file). The symbol → node-id map lives only
 /// for edge wiring; cross-file linking is the resolution pass's job (S-011).
+///
+/// A node whose symbol another node already holds — a second declaration of
+/// this file, or any node elsewhere in the store — fails the file ([BR-74],
+/// S-703): the file's persistence errors with a reason naming the symbol, its
+/// isolation unit rolls it back alone, and the run records that reason
+/// ([FR-EH-05]). The same in every build profile; nothing is folded into the
+/// node that holds the symbol.
+///
+/// [BR-74]: ../../../docs/specs/software-spec.md#35-extraction--symbol-ids
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<InsertedNodes> {
     let mut symbol_to_node: HashMap<String, NodeId> = HashMap::with_capacity(facts.nodes.len());
     for n in &facts.nodes {
         let symbol_id = w.upsert_symbol(&n.symbol)?;
-        let node_id = w.insert_node(&NewNode {
+        let inserted = w.insert_new_node(&NewNode {
             file_id: Some(file_id),
             start_line: Some(i64::from(n.start_line)),
             end_line: Some(i64::from(n.end_line)),
@@ -2897,6 +3107,18 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             uninherited: n.uninherited,
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
+        let Some(node_id) = inserted else {
+            let holder = if symbol_to_node.contains_key(n.symbol.as_str()) {
+                "another declaration in this file"
+            } else {
+                "a node already in the store"
+            };
+            anyhow::bail!(
+                "duplicate symbol {} for {:?}: {holder} holds it, and a symbol names one node",
+                n.symbol,
+                n.name
+            );
+        };
         // The CR-005 winnowed near-clone shingle set (FR-EX-09) — persisted into
         // the inverted index keyed on the node just inserted; empty for a
         // non-callable or a body below the token floor.
@@ -2973,9 +3195,10 @@ fn framework_pass(
     registry: &LanguageRegistry,
     root: &Path,
     resolution: &crate::config::Resolution,
+    ctx: &SymbolContext,
     delta: Option<&crate::resolve::Delta>,
 ) -> Result<(FrameworkStats, Vec<String>)> {
-    crate::resolve::framework::run(runtime, registry, root, resolution, delta)
+    crate::resolve::framework::run(runtime, registry, root, resolution, ctx, delta)
 }
 
 /// The broker-topic promotion pass ([resolution-engine], S-256, [FR-WS-11],
@@ -2996,8 +3219,8 @@ fn framework_pass(
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
 /// [ADR-55]: ../../../docs/specs/architecture/decisions/ADR-55.md
-fn topics_pass(runtime: &Runtime) -> Result<()> {
-    let stats = crate::resolve::topics::run(runtime)?;
+fn topics_pass(runtime: &Runtime, ctx: &SymbolContext) -> Result<()> {
+    let stats = crate::resolve::topics::run(runtime, ctx)?;
     if stats.topics > 0 {
         tracing::debug!(
             topics = stats.topics,
@@ -3106,6 +3329,7 @@ fn annotate_pass(
     registry: &LanguageRegistry,
     root: &Path,
     config: &Config,
+    ctx: &SymbolContext,
     incremental: bool,
 ) -> Result<(AnnotationStats, u64)> {
     // Pass 3 — instrumented through the single emission seam (FR-OB-01).
@@ -3127,6 +3351,7 @@ fn annotate_pass(
             &config.semantics.entry_points,
             &config.semantics.test_markers,
             &reachable_exts,
+            ctx,
             incremental,
         )
     });

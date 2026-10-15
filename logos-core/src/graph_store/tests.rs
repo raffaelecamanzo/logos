@@ -3326,3 +3326,172 @@ fn the_append_refuses_an_unrecorded_offender_set_and_writes_nothing() {
     );
     assert_eq!(snapshot_count(&store), 0, "no snapshot row survives the refusal");
 }
+
+// ── S-704 / FR-EX-35: the coordinate migration's rewrite ─────────────────────
+
+/// Insert a node bound to `file_id` under `symbol`, returning its id.
+fn node_under(store: &SqliteGraphStore, symbol: &str, name: &str, file_id: Option<i64>) -> NodeId {
+    let symbol_id = store.upsert_symbol(&LogosSymbol::parse(symbol).unwrap()).unwrap();
+    let mut node = NewNode::plain(symbol_id, NodeKind::Function, name);
+    node.file_id = file_id;
+    store.insert_node(&node).unwrap()
+}
+
+/// Every value of `sql`'s one text column, sorted.
+fn texts(store: &SqliteGraphStore, sql: &str) -> Vec<String> {
+    let mut stmt = store.conn.prepare(sql).unwrap();
+    let mut out: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    out.sort();
+    out
+}
+
+/// `(node id, symbol id)` for every node — what a migration must not move.
+fn node_symbol_ids(store: &SqliteGraphStore) -> Vec<(i64, i64)> {
+    let mut stmt = store.conn.prepare("SELECT id, symbol_id FROM nodes ORDER BY id").unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+}
+
+/// A store holding every shape of symbol-bearing value a migration meets: a
+/// coordinate-less symbol, one under an older coordinate (a file an index
+/// could not load), a legacy policy symbol, a local symbol, an orphan, a
+/// capture-before-delete row, a `Path` row whose target merely looks like a
+/// symbol, and a declared type.
+fn store_to_migrate() -> SqliteGraphStore {
+    let mut store = mem();
+    let lib = store.insert_file("src/lib.rs", Some("rust"), Some("h-lib")).unwrap();
+    let java = store.insert_file("src/Order.java", Some("java"), Some("h-java")).unwrap();
+    let run = node_under(&store, "logos . . . src/`lib.rs`/run().", "run", Some(lib));
+    let helper = node_under(&store, "logos . example.com/old . src/`lib.rs`/helper().", "helper", Some(lib));
+    node_under(&store, "logos policy rules . layer/core/", "core", None);
+    node_under(&store, "local 7", "tmp", Some(lib));
+    node_under(&store, "logos . . . src/`Order.java`/Order#", "Order", Some(java));
+    store.upsert_symbol(&LogosSymbol::parse("logos . . . src/`lib.rs`/gone().").unwrap()).unwrap();
+    store.insert_edge(run, helper, EdgeKind::Calls).unwrap();
+    let run_symbol = "logos . . . src/`lib.rs`/run().";
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&path_ref(Some(lib), run_symbol, "helper"))?;
+            w.insert_unresolved_ref(&path_ref(Some(lib), run_symbol, "logos . . . src/`lib.rs`/x()."))?;
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                form: RefForm::Symbol,
+                ..path_ref(Some(lib), "logos . example.com/old . src/`lib.rs`/helper().", "logos . . . src/`lib.rs`/gone().")
+            })?;
+            w.replace_file_declared_types(
+                java,
+                &[NewDeclaredType {
+                    name: "Order",
+                    fqn: Some("com.acme.Order"),
+                    kind: "class",
+                    symbol: Some("logos . . . src/`Order.java`/Order#"),
+                    tree: Some("main"),
+                    reason: None,
+                }],
+            )?;
+            // A type an Avro schema declares has no node, so no symbol.
+            w.replace_avro_schema(&NewAvroSchema {
+                path: "schemas/order.avsc",
+                content_hash: Some("h-avsc"),
+                status: "read",
+                detail: None,
+                types: vec![NewDeclaredType {
+                    name: "OrderPlaced",
+                    fqn: Some("com.acme.OrderPlaced"),
+                    kind: "record",
+                    symbol: None,
+                    tree: None,
+                    reason: None,
+                }],
+            })
+        })
+        .unwrap();
+    store
+}
+
+#[test]
+fn a_coordinate_migration_rewrites_every_symbol_bearing_value_and_moves_no_node() {
+    let mut store = store_to_migrate();
+    let (nodes, edges, ids) = (node_count(&store), edge_count(&store), node_symbol_ids(&store));
+
+    let changes = store
+        .write_batch(|w| w.migrate_symbol_coordinate("example.com/new"))
+        .unwrap();
+    assert_eq!(
+        changes,
+        CoordinateMigration {
+            orphan_symbols_removed: 1,
+            symbols_rewritten: 4,
+            ref_symbols_rewritten: 4,
+            declared_type_symbols_rewritten: 1,
+            files_invalidated: 2,
+        }
+    );
+    assert_eq!(
+        texts(&store, "SELECT symbol FROM symbols"),
+        [
+            "local 7",
+            "logos . example.com/new . src/`Order.java`/Order#",
+            "logos . example.com/new . src/`lib.rs`/helper().",
+            "logos . example.com/new . src/`lib.rs`/run().",
+            "logos policy example.com/new . layer/core/",
+        ],
+        "the orphan is gone, the local symbol is untouched, every other slot moved"
+    );
+    assert_eq!(
+        texts(&store, "SELECT source_symbol || ' -> ' || target FROM unresolved_refs"),
+        [
+            "logos . example.com/new . src/`lib.rs`/helper(). -> logos . example.com/new . src/`lib.rs`/gone().",
+            "logos . example.com/new . src/`lib.rs`/run(). -> helper",
+            "logos . example.com/new . src/`lib.rs`/run(). -> logos . . . src/`lib.rs`/x().",
+        ],
+        "a capture row's target is a symbol and moves; a Path target is text and does not"
+    );
+    assert_eq!(
+        texts(&store, "SELECT ifnull(symbol, 'NULL') FROM declared_types"),
+        ["NULL", "logos . example.com/new . src/`Order.java`/Order#"],
+        "a schema-declared type keeps its NULL symbol"
+    );
+    assert_eq!(
+        texts(&store, "SELECT path || ':' || ifnull(content_hash, 'NULL') FROM files"),
+        ["src/Order.java:NULL", "src/lib.rs:NULL"],
+        "every file re-extracts on the next reconcile"
+    );
+    assert_eq!(
+        (node_count(&store), edge_count(&store), node_symbol_ids(&store)),
+        (nodes, edges, ids),
+        "no node, edge or node-to-symbol link moves"
+    );
+
+    let again = store
+        .write_batch(|w| w.migrate_symbol_coordinate("example.com/new"))
+        .unwrap();
+    assert_eq!(again, CoordinateMigration::default(), "a second pass finds nothing to change");
+}
+
+#[test]
+fn a_coordinate_migration_that_would_merge_two_nodes_fails_and_rolls_back_whole() {
+    let mut store = mem();
+    let lib = store.insert_file("src/a.rs", Some("rust"), Some("h")).unwrap();
+    node_under(&store, "logos . . . src/`a.rs`/f().", "f", Some(lib));
+    node_under(&store, "logos . example.com/new . src/`a.rs`/f().", "f", Some(lib));
+    store.upsert_symbol(&LogosSymbol::parse("logos . . . src/`a.rs`/gone().").unwrap()).unwrap();
+    let before = texts(&store, "SELECT symbol FROM symbols");
+
+    let err = store
+        .write_batch(|w| w.migrate_symbol_coordinate("example.com/new"))
+        .expect_err("two nodes cannot share one symbol");
+    assert!(format!("{err:#}").contains("another row already holds it"), "{err:#}");
+    assert_eq!(texts(&store, "SELECT symbol FROM symbols"), before, "the orphan delete rolled back too");
+    assert_eq!(
+        texts(&store, "SELECT ifnull(content_hash, 'NULL') FROM files"),
+        ["h"],
+        "and so did nothing else"
+    );
+}
+
+#[test]
+fn holds_symbols_reads_whether_any_symbol_row_exists() {
+    let store = mem();
+    assert!(!store.holds_symbols().unwrap(), "a fresh store holds none");
+    store.upsert_symbol(&LogosSymbol::parse("local 1").unwrap()).unwrap();
+    assert!(store.holds_symbols().unwrap(), "an orphan symbol row counts too");
+}

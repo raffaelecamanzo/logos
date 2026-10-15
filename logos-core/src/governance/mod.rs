@@ -1642,12 +1642,16 @@ fn materialise_and_evaluate(
     // re-materialised `is_dead` column matches what index/sync wrote — the same
     // registry-derived set keeps `check_rules` and the pipeline in agreement.
     let reachable_exts = registry.reachability_extensions();
+    // The policy nodes it re-materialises carry the coordinate the store's
+    // symbols already carry (S-703), whatever the project resolves to now.
+    let ctx = crate::pipeline::store_symbol_context(runtime)?;
     crate::annotate::run(
         runtime,
         &compiled.rules,
         &config.semantics.entry_points,
         &config.semantics.test_markers,
         &reachable_exts,
+        &ctx,
         false,
     )?;
     engine.advance_sync_stamp();

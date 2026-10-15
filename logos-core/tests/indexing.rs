@@ -33,6 +33,9 @@ use logos_core::{Engine, Runtime};
 mod graph_fingerprint;
 use graph_fingerprint::graph_fingerprint;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 /// Write `contents` to `<root>/<rel>`, creating parent directories.
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -639,6 +642,7 @@ fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) -> (Tem
     for (rel, body) in initial {
         write(tmp_a.path(), rel, body);
     }
+    coordinate::pin(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine a starts");
     engine_a.index();
     // The real watcher canonicalizes the root and `notify` reports *real* paths,
@@ -682,6 +686,7 @@ fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) -> (Tem
     for (rel, body) in &final_state {
         write(tmp_b.path(), rel, body);
     }
+    coordinate::pin(tmp_b.path());
     let engine_b = Engine::start(tmp_b.path()).expect("engine b starts");
     engine_b.index();
     let fp_reindex = graph_fingerprint(engine_b.runtime().expect("runtime b"));
@@ -781,6 +786,7 @@ fn sync_equiv_after_a_failed_persist_heals() {
     for (rel, body) in &initial {
         write(tmp_a.path(), rel, body);
     }
+    coordinate::pin(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine a starts");
     engine_a.index();
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root a");
@@ -797,6 +803,7 @@ fn sync_equiv_after_a_failed_persist_heals() {
     let tmp_b = TempDir::new().expect("temp b");
     write(tmp_b.path(), "a.rs", initial[0].1);
     write(tmp_b.path(), "b.rs", edited);
+    coordinate::pin(tmp_b.path());
     let engine_b = Engine::start(tmp_b.path()).expect("engine b starts");
     engine_b.index();
     assert_eq!(

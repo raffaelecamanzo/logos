@@ -119,7 +119,7 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
     expect(map.loaded.nodes[serviceId("api")]).toMatchObject({ label: "api", kind: "service" });
     // The namespace round-trips, so a canvas click resolves back to the member.
     expect(memberOfServiceId(serviceId("web"))).toBe("web");
-    expect(memberOfServiceId("logos . . . `lib.rs`/f().")).toBeNull();
+    expect(memberOfServiceId("logos . example.com/api . `lib.rs`/f().")).toBeNull();
   });
 
   it("collapses every binding between two services under one arm into ONE weighted edge", () => {

@@ -207,12 +207,14 @@ export function status(
     members: [
       {
         member: "api",
+        coordinate: "example.com/api",
         result: { indexed: true } as WorkspaceStatus["members"][0]["result"],
         warm_state: "warm",
         open_state: "opened",
       },
       {
         member: "web",
+        coordinate: "example.com/web",
         result: { indexed: true } as WorkspaceStatus["members"][0]["result"],
         warm_state: "warm",
         open_state: "opened",

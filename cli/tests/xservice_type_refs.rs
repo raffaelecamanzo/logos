@@ -151,6 +151,8 @@ fn workspace(members: &[&str], jvm: bool) -> TempDir {
             }
             _ => write(&dir, "src/lib.rs", "pub fn f() {}\n"),
         }
+        // A pinned coordinate (S-703): the symbols below name it.
+        write(&dir, ".logos/config.toml", &format!("[project]\nid = \"example.com/{name}\"\n"));
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-q", "-m", "init"]);
         assert!(logos(&dir, &["index"]).status.success(), "index {name}");
@@ -166,7 +168,7 @@ fn workspace(members: &[&str], jvm: bool) -> TempDir {
 
 const MEMBERS: [&str; 5] = ["lib", "app", "stray", "api", "web"];
 
-const DTO_NODE: &str = "logos . . . src/main/java/com/acme/lib/`Dto.java`/Dto#";
+const DTO_NODE: &str = "logos . example.com/lib . src/main/java/com/acme/lib/`Dto.java`/Dto#";
 
 /// **The `--json` snapshot** ([FR-WS-35]): the one provider, its one imported
 /// type with its declaration, and its one importer with file and line —
@@ -195,7 +197,7 @@ fn type_refs_lists_each_provider_type_with_its_importers_under_the_headline() {
                     "member": "app",
                     "file": "src/main/java/com/acme/app/App.java",
                     "line": 3,
-                    "symbol": "logos . . . src/main/java/com/acme/app/`App.java`/",
+                    "symbol": "logos . example.com/app . src/main/java/com/acme/app/`App.java`/",
                     "naming": "exact",
                     "form": "import",
                     "evidence": {"via": "build"}

@@ -43,10 +43,30 @@ pub fn write(root: &Path, rel: &str, contents: &str) {
     std::fs::write(path, contents).expect("write fixture");
 }
 
+/// The repository coordinate a member pins (S-703): `example.com/<member>`,
+/// named after its directory, so its symbols never depend on the temp tree the
+/// workspace sits in.
+pub fn member_coordinate(member: &str) -> String {
+    format!("example.com/{member}")
+}
+
+/// The canonical symbol `descriptors` (path and scope) carry in `member`.
+pub fn member_symbol(member: &str, descriptors: &str) -> String {
+    format!("logos . {} . {descriptors}", member_coordinate(member))
+}
+
 /// Index a member repo into its own `.logos/logos.db`, then drop the engine so
 /// the store is closed before the registry re-opens it (mirrors the logos-core
-/// `xservice_*` integration harnesses).
+/// `xservice_*` integration harnesses). The member's coordinate is pinned
+/// first ([`member_coordinate`]) unless its config already names one.
 pub fn index_member(root: &Path) {
+    let config = root.join(".logos/config.toml");
+    let mut body = std::fs::read_to_string(&config).unwrap_or_default();
+    if !body.contains("[project]") {
+        let name = root.file_name().expect("a member directory").to_string_lossy();
+        body.push_str(&format!("\n[project]\nid = \"{}\"\n", member_coordinate(&name)));
+        write(root, ".logos/config.toml", &body);
+    }
     let engine = Engine::start(root).expect("engine starts");
     engine.index();
     let _ = engine.sync(&[] as &[PathBuf]);

@@ -464,6 +464,7 @@ use crate::hooks::HOOKS_RELDIR;
 pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
     let mut steps = vec![
         write_if_absent(root, ".logos/config.toml", CONFIG_TEMPLATE)?,
+        append_project_id_if_absent(root)?,
         write_if_absent(root, ".logos/rules.toml", RULES_TEMPLATE)?,
         logos_dir_gitignore(root)?,
     ];
@@ -576,6 +577,156 @@ fn write_if_absent(root: &Path, rel: &str, content: &str) -> Result<InitStep> {
     }
     fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
     Ok(step(rel, InitAction::Created, ""))
+}
+
+/// The [`InitStep::target`] of the `[project] id` step — a key inside
+/// `config.toml`, reported apart from the file's own row.
+pub(crate) const PROJECT_ID_TARGET: &str = ".logos/config.toml [project] id";
+
+/// [FR-CF-10]: append `[project] id` to `config.toml` when the key is absent,
+/// set to the derived coordinate ([`crate::config::derive_project_id`]). A
+/// present `id` is the user's and is never touched — not even reformatted — so
+/// a re-run leaves the file byte-identical. Everything already in the file
+/// stays byte-identical too: the key is appended after it, or inserted on the
+/// line after an existing, key-less `[project]` header.
+///
+/// A file that cannot be read as text or is not valid TOML, or holds `project`
+/// in a shape the step cannot extend safely (an inline table, a non-table
+/// value), is `Skipped` with the reason (DL-06) — never guessed at.
+///
+/// When `config.toml` is git-ignored the written id cannot reach another
+/// checkout, and the row says so: elsewhere the derived default applies.
+///
+/// [FR-CF-10]: ../../../docs/specs/requirements/FR-CF-10.md
+fn append_project_id_if_absent(root: &Path) -> Result<InitStep> {
+    let path = root.join(".logos/config.toml");
+    // The file is the user's: one that cannot be read as text (TOML is UTF-8)
+    // is reported, never failed on, so every later step still runs (DL-06).
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            return Ok(step(
+                PROJECT_ID_TARGET,
+                InitAction::Skipped,
+                format!("config.toml could not be read, so `[project] id` was not written: {err}"),
+            ))
+        }
+    };
+    let derived = crate::config::derive_project_id(root);
+    let travel = project_id_travel_notice(root, &derived);
+    let table: toml::Table = match toml::from_str(&existing) {
+        Ok(table) => table,
+        Err(err) => {
+            return Ok(step(
+                PROJECT_ID_TARGET,
+                InitAction::Skipped,
+                format!("config.toml is not valid TOML, so `[project] id` was not written: {err}"),
+            ))
+        }
+    };
+    let updated = match table.get("project") {
+        None => Some(format!(
+            "{existing}{}{}",
+            if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" },
+            project_block(&derived)
+        )),
+        Some(toml::Value::Table(project)) if project.contains_key("id") => {
+            let valid = project
+                .get("id")
+                .and_then(toml::Value::as_str)
+                .is_some_and(crate::config::is_valid_coordinate);
+            return Ok(if valid {
+                step(
+                    PROJECT_ID_TARGET,
+                    InitAction::Unchanged,
+                    format!("already present — never overwritten{travel}"),
+                )
+            } else {
+                step(
+                    PROJECT_ID_TARGET,
+                    InitAction::Skipped,
+                    "the present `[project] id` is not a valid coordinate (letters, digits \
+                     and `._/@:-`, no spaces); it was left as is — fix it by hand",
+                )
+            });
+        }
+        Some(toml::Value::Table(_)) => insert_after_project_header(&existing, &derived),
+        Some(_) => None,
+    };
+    // Write only what re-reads as exactly the derived id, so no input shape this
+    // step mis-edits can ever reach the disk.
+    let verified = updated.filter(|text| {
+        toml::from_str::<toml::Table>(text).ok().is_some_and(|t| {
+            t.get("project").and_then(|p| p.get("id")).and_then(toml::Value::as_str)
+                == Some(derived.as_str())
+        })
+    });
+    let Some(updated) = verified else {
+        return Ok(step(
+            PROJECT_ID_TARGET,
+            InitAction::Skipped,
+            format!(
+                "`project` in config.toml is not a `[project]` table this step can extend; \
+                 add `id = \"{derived}\"` to it by hand"
+            ),
+        ));
+    };
+    crate::config::atomic::publish(&path, updated.as_bytes(), None)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(step(
+        PROJECT_ID_TARGET,
+        InitAction::Updated,
+        format!("id = \"{derived}\"{travel}"),
+    ))
+}
+
+/// The appended `[project]` table, with the comment that says what it is.
+fn project_block(id: &str) -> String {
+    format!(
+        "\n# Repository identity coordinate (FR-CF-10). Written once by `logos init` from\n\
+         # the `origin` remote (else the main worktree's directory name) and never\n\
+         # overwritten; edit it to pin a different coordinate.\n\
+         [project]\nid = \"{id}\"\n"
+    )
+}
+
+/// `existing` with `id = "<id>"` on the line after its `[project]` header, or
+/// `None` when no such header line exists (the table is spelled another way).
+fn insert_after_project_header(existing: &str, id: &str) -> Option<String> {
+    let mut offset = 0;
+    for line in existing.split_inclusive('\n') {
+        let header = line.trim_start();
+        let is_project = header.strip_prefix("[project]").is_some_and(|rest| {
+            let rest = rest.trim();
+            rest.is_empty() || rest.starts_with('#')
+        });
+        offset += line.len();
+        if is_project {
+            let newline = if line.ends_with('\n') { "" } else { "\n" };
+            return Some(format!(
+                "{}{newline}id = \"{id}\"\n{}",
+                &existing[..offset],
+                &existing[offset..]
+            ));
+        }
+    }
+    None
+}
+
+/// The clause an init row carries when `.logos/config.toml` is git-ignored: the
+/// id stays on this machine, and other checkouts derive the default. Empty when
+/// the file is tracked or committable, or `root` is not in a git repository.
+fn project_id_travel_notice(root: &Path, derived: &str) -> String {
+    let ignored = git(root, &["check-ignore", "-q", ".logos/config.toml"])
+        .is_some_and(|out| out.status.success());
+    if ignored {
+        format!(
+            "; .logos/config.toml is git-ignored, so this id will not travel — other \
+             checkouts and CI use the derived default (\"{derived}\")"
+        )
+    } else {
+        String::new()
+    }
 }
 
 // ── Managed blocks (DL-07) ─────────────────────────────────────────────────
@@ -1162,8 +1313,18 @@ mod tests {
         fs::create_dir_all(tmp.path().join(".logos")).unwrap();
         let steps = run(tmp.path(), &InitOptions::default()).expect("the default init runs");
 
-        let written: Vec<&str> = steps.iter().map(|s| s.target.as_str()).collect();
+        // The `[project] id` row (S-702) names a key inside `config.toml`, not a
+        // file of its own, so it is not a policy-file target.
+        let written: Vec<&str> = steps
+            .iter()
+            .map(|s| s.target.as_str())
+            .filter(|target| *target != PROJECT_ID_TARGET)
+            .collect();
         assert_eq!(written, COMMITTED_POLICY, "the policy list IS the default step set");
+        assert!(
+            steps.iter().any(|s| s.target == PROJECT_ID_TARGET),
+            "the default step set carries the `[project] id` row"
+        );
 
         // Matched as the globs they are — `logos.db*` is a pattern, not a name,
         // so a future `*.toml` would have to fail here rather than slip past a
