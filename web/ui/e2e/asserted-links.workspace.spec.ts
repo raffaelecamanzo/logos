@@ -14,8 +14,8 @@ import { expect, test } from "@playwright/test";
 
 const ASSERTED_EDGE = {
   relation: "route",
-  from: { member: "web", symbol: "logos . . . src/`main.rs`/render()." },
-  to: { member: "api", symbol: "logos . . . src/`main.rs`/route()." },
+  from: { member: "web", symbol: "logos . example.com/web . src/`main.rs`/render()." },
+  to: { member: "api", symbol: "logos . example.com/api . src/`main.rs`/route()." },
   intake: "asserted",
   from_value: { provenance: "literal" },
   to_value: { provenance: "literal" },

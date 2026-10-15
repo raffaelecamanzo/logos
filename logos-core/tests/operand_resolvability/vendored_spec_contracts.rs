@@ -206,7 +206,7 @@ pub fn operation_key(name: &str) -> Option<OpKey> {
 /// The member-relative path of the file a SCIP symbol is declared in — its
 /// descriptors up to the last `/` outside a backtick-quoted name, unquoted.
 ///
-/// `logos . . . api/src/main/resources/openapi/`v1.yaml`/v1-users#get#` →
+/// `logos . example.com/fixture . api/src/main/resources/openapi/`v1.yaml`/v1-users#get#` →
 /// `api/src/main/resources/openapi/v1.yaml`. `None` for a symbol with no
 /// descriptor path at all.
 pub fn document_path(symbol: &str) -> Option<String> {
@@ -1818,21 +1818,26 @@ mod tests {
     #[test]
     fn a_document_path_is_the_symbols_file_descriptor() {
         assert_eq!(
-            document_path("logos . . . api/src/main/resources/openapi/`v1.yaml`/v1-users#get#")
+            document_path("logos . example.com/fixture . api/src/main/resources/openapi/`v1.yaml`/v1-users#get#")
                 .as_deref(),
             Some("api/src/main/resources/openapi/v1.yaml")
         );
         assert_eq!(
-            document_path("logos . . . `PSS-API_index_v1.0.3_20231025.yaml`/prov-domain#get#")
+            document_path("logos . example.com/fixture . `PSS-API_index_v1.0.3_20231025.yaml`/prov-domain#get#")
                 .as_deref(),
             Some("PSS-API_index_v1.0.3_20231025.yaml")
         );
         // A `/` inside a quoted name is not a descriptor boundary.
         assert_eq!(
-            document_path("logos . . . src/`v1.yaml`/`a/b`#get#").as_deref(),
+            document_path("logos . example.com/fixture . src/`v1.yaml`/`a/b`#get#").as_deref(),
             Some("src/v1.yaml")
         );
-        assert_eq!(document_path("logos . . . op#get#"), None);
+        assert_eq!(document_path("logos . example.com/fixture . op#get#"), None);
+        // A coordinate-less symbol (before S-703) reads the same path.
+        assert_eq!(
+            document_path("logos . . . api/src/main/resources/openapi/`v1.yaml`/v1-users#get#").as_deref(),
+            Some("api/src/main/resources/openapi/v1.yaml")
+        );
     }
 
     #[test]
@@ -1861,10 +1866,10 @@ mod tests {
     #[test]
     fn documents_group_by_file_and_read_provision_off_the_tier() {
         let ops = vec![
-            ("m".to_string(), "logos . . . `a.yaml`/x#get#".to_string(), "GET /x".to_string()),
-            ("m".to_string(), "logos . . . `a.yaml`/y#get#".to_string(), "GET /y".to_string()),
-            ("m".to_string(), "logos . . . `a.yaml`/z#get#".to_string(), "get".to_string()),
-            ("m".to_string(), "logos . . . `b.yaml`/x#get#".to_string(), "GET /x".to_string()),
+            ("m".to_string(), "logos . example.com/fixture . `a.yaml`/x#get#".to_string(), "GET /x".to_string()),
+            ("m".to_string(), "logos . example.com/fixture . `a.yaml`/y#get#".to_string(), "GET /y".to_string()),
+            ("m".to_string(), "logos . example.com/fixture . `a.yaml`/z#get#".to_string(), "get".to_string()),
+            ("m".to_string(), "logos . example.com/fixture . `b.yaml`/x#get#".to_string(), "GET /x".to_string()),
         ];
         let mut provisions = BTreeMap::new();
         provisions.insert(("m".to_string(), ops[1].1.clone()), OpProvision::Other);
@@ -2402,8 +2407,8 @@ mod tests {
         }
     }
 
-    const OP: &str = "logos . . . src/main/resources/openapi/`v1.yaml`/v1-a#get#";
-    const SITE: &str = "logos . . . src/`Client.java`/Client#get().";
+    const OP: &str = "logos . example.com/fixture . src/main/resources/openapi/`v1.yaml`/v1-a#get#";
+    const SITE: &str = "logos . example.com/fixture . src/`Client.java`/Client#get().";
     fn unbound(reason: UnboundReason) -> CoverageState {
         CoverageState::Unbound { reason }
     }

@@ -85,7 +85,7 @@ fn app() -> Router {
 
 /// The queried symbol — `web`'s route, the provider endpoint of the one resolved
 /// cross-service edge.
-const ROUTE_SYMBOL: &str = "logos . . . src/`main.rs`/route/`GET /users/{user_id}`#";
+const ROUTE_SYMBOL: &str = "logos . example.com/web . src/`main.rs`/route/`GET /users/{user_id}`#";
 
 /// Both surfaces' `xservice_callers` payloads for the same query, over one
 /// workspace: `(cli, mcp)`.

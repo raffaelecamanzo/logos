@@ -18,8 +18,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
-    cross_service_coverage, discover, open_state, query, workspace_governance,
-    xservice_build_deps, BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope,
+    cross_service_coverage, discover, open_state, query, xservice_build_deps,
+    BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope,
     RegistryMode, TypeReferenceIndex, TypeReferences,
 };
 use logos_core::{model::NodeKind, Engine};
@@ -369,9 +369,14 @@ pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Outpu
             out.print(&query::workspace_reachability(&bridge, &registry).bound(scope))?;
         }
         WorkspaceCommands::Check => {
-            let bridge = ContractBridge::new();
-            let edges = query::edges(&bridge, &registry);
-            out.print(&workspace_governance(registry.federation(), &edges)?)?;
+            let report = query::workspace_check(&ContractBridge::new(), &registry)?;
+            out.print(&report)?;
+            // A rule that matched no provider is not a pass ([BR-48]); stderr
+            // keeps `--json` stdout machine-clean, as the degraded notice does.
+            let unmatched = report.as_ref().and_then(|r| r.unmatched_notice());
+            if let Some(notice) = unmatched.filter(|_| !out.quiet) {
+                eprintln!("{notice}");
+            }
         }
     }
     // Degraded members are read AFTER the read-model, deliberately: the

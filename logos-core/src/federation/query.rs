@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::model::NodeKind;
+use crate::model::{LogosSymbol, NodeKind};
 use crate::models::{AffectedResult, CallersResult, ImpactResult, SearchResult, StatusInfo, SymbolRef};
 use crate::Engine;
 
@@ -427,10 +427,10 @@ pub fn xservice_callers(
     repo: Option<&str>,
 ) -> XserviceCallers {
     // The cross-service tier matches the queried `(member, symbol)` pair, never
-    // the symbol string alone ([BR-73]): a `LogosSymbol` is unique within one
-    // member's store only, so two members declaring the same repo-relative
-    // declaration hold byte-identical symbols. `repo` pins the provider side;
-    // the consumer (`from`) may lie in any member.
+    // the symbol string alone ([BR-73]): a symbol written without a repository
+    // coordinate ([FR-EX-36]) answers in every member declaring that
+    // repo-relative declaration, each under its own coordinate. `repo` pins the
+    // provider side; the consumer (`from`) may lie in any member.
     let cross_service: Vec<BridgeEdge> =
         inputs.edges.iter().filter(|edge| is_queried(&edge.to, symbol, repo)).cloned().collect();
     // The asserted tier, by the same `(member, symbol)` match ([FR-WS-41]).
@@ -515,7 +515,7 @@ pub struct AssertedImpact {
 ///
 /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
 fn is_queried(endpoint: &BridgeEndpoint, symbol: &str, repo: Option<&str>) -> bool {
-    endpoint.symbol.as_str() == symbol && repo.is_none_or(|member| endpoint.member == member)
+    answers_to(&endpoint.symbol, symbol) && repo.is_none_or(|member| endpoint.member == member)
 }
 
 /// Whether a member's own fan-out row resolved to exactly the queried symbol —
@@ -524,7 +524,29 @@ fn is_queried(endpoint: &BridgeEndpoint, symbol: &str, repo: Option<&str>) -> bo
 ///
 /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
 fn holds(resolved: Option<&SymbolRef>, symbol: &str) -> bool {
-    resolved.is_some_and(|node| node.symbol == symbol)
+    resolved.is_some_and(|node| held_answers_to(&node.symbol, symbol))
+}
+
+/// [`answers_to`] over a held symbol still in its stored string form — a
+/// resolved row's, a type reference owner's: equal, or parsed and matched.
+fn held_answers_to(held: &str, symbol: &str) -> bool {
+    held == symbol || LogosSymbol::parse(held).is_ok_and(|held| answers_to(&held, symbol))
+}
+
+/// Whether `held`, a symbol a member holds, is the queried `symbol`: equal, or
+/// — for a symbol written without a repository coordinate ([FR-EX-36]) — equal
+/// once `held`'s coordinate is removed. Each member's own fan-out row upgrades
+/// such a query to that member's coordinate, so the cross-service tier must
+/// match the same per-member upgrade, or a member would answer the symbol while
+/// its bridge edges and its [BR-73] share went missing.
+///
+/// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn answers_to(held: &LogosSymbol, symbol: &str) -> bool {
+    held.as_str() == symbol
+        || (held.coordinate().is_some()
+            && held.descriptor_tail().is_some_and(|tail| symbol.ends_with(tail))
+            && held.with_coordinate(None).is_ok_and(|bare| bare.as_str() == symbol))
 }
 
 /// How an unscoped cross-service answer groups a symbol that two or more
@@ -960,20 +982,23 @@ struct ReachingReferences<'a> {
 ///
 /// `symbol` reaches a reference of `references` — the index's bound ones —
 /// when it is the owner's node — the node path, the owner pair
-/// [`references_to`](TypeReferenceIndex::references_to) answers — or the type's
-/// dotted name — the path [`importers`](TypeReferenceIndex::importers) answers,
-/// matched here in the same pass, which is how an
+/// [`references_to`](TypeReferenceIndex::references_to) answers, or, for a
+/// symbol written without a repository coordinate, the owner's node under its
+/// own coordinate ([FR-EX-36]), as [`holds`] matches a member's row — or the
+/// type's dotted name — the path [`importers`](TypeReferenceIndex::importers)
+/// answers, matched here in the same pass, which is how an
 /// Avro-declared type (no node in any store) is reached, and which a source
 /// type answers as well. The two never overlap: a `LogosSymbol` carries spaces
-/// and a dotted name none. A node symbol is unique within one member's store
-/// only, so two members declaring the same repo-relative type hold the same
-/// one: `repo` keeps the references whose **owner member** is the scope, on
-/// both paths, while the importer may lie in any member. Unscoped, every owner
+/// and a dotted name none. A dotted name, or a symbol written without a
+/// coordinate, can reach owners in two members at once, so `repo` keeps the
+/// references whose **owner member** is the scope, on both paths, while the
+/// importer may lie in any member. Unscoped, every owner
 /// is kept, grouped by owner member in roster order. Every owner the index
 /// builds names the member whose declarations it read, Avro included, so the
 /// unattributed group is empty unless the index and `roster` disagree.
 ///
 /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+/// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
 /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
 fn references_reaching<'a>(
     roster: &[Member],
@@ -981,7 +1006,12 @@ fn references_reaching<'a>(
     symbol: &str,
     repo: Option<&str>,
 ) -> ReachingReferences<'a> {
-    let reaching = references.iter().filter(|r| r.owner.symbol.as_deref() == Some(symbol) || r.fqn == symbol);
+    // Only a symbol written without a coordinate can answer to another
+    // spelling: any other query is matched as written, parsing no owner.
+    let old_form = LogosSymbol::parse(symbol).is_ok_and(|query| query.is_coordinate_less());
+    let owned_by = |held: &str| held == symbol || (old_form && held_answers_to(held, symbol));
+    let reaching =
+        references.iter().filter(|r| r.owner.symbol.as_deref().is_some_and(owned_by) || r.fqn == symbol);
     let mut attributed: Vec<(usize, &TypeReference)> = Vec::new();
     let mut unattributed = Vec::new();
     for reference in reaching {
@@ -1255,6 +1285,20 @@ pub struct MemberStatus {
     /// The member's index freshness, or why it could not be read.
     #[serde(flatten)]
     pub status: MemberResult<StatusInfo>,
+    /// The repository coordinate this member resolves to — its `[project] id`,
+    /// else the identity derived from its remote — the package slot of every
+    /// symbol its graph carries ([FR-WS-39], [ADR-85]).
+    ///
+    /// Always present, one per roster member: a member that could not be opened
+    /// still has an identity, and it is what tells two members apart when one is
+    /// excluded for sharing the other's (`open_state: degraded`, cause
+    /// `duplicate-coordinate`). Read off the registry's own resolution, the same
+    /// one that decides the exclusion, so the row and the verdict cannot
+    /// disagree.
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    /// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+    pub coordinate: String,
     /// This member's warm state — index presence ([FR-WS-15]).
     ///
     /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
@@ -1291,6 +1335,7 @@ impl MemberStatus {
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     fn labelled(
         status: MemberResult<StatusInfo>,
+        coordinate: &str,
         evidence: &WarmEvidence,
         open: MemberOpenState,
     ) -> Self {
@@ -1309,6 +1354,7 @@ impl MemberStatus {
         let warm = warm_state::derive_state(&status.member, indexed, evidence);
         Self {
             status,
+            coordinate: coordinate.to_string(),
             warm,
             open,
         }
@@ -1722,12 +1768,13 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     let members: Vec<MemberStatus> = freshness
         .into_iter()
         .zip(opens)
-        .map(|(status, open)| {
+        .zip(registry.member_coordinates())
+        .map(|((status, open), coordinate)| {
             debug_assert_eq!(
                 status.member, open.member,
                 "one roster order, two projections of it"
             );
-            MemberStatus::labelled(status, &evidence, open.state)
+            MemberStatus::labelled(status, coordinate, &evidence, open.state)
         })
         .collect();
 
@@ -1812,6 +1859,30 @@ pub fn edges(
     registry: &EngineRegistry<Engine>,
 ) -> Arc<Vec<BridgeEdge>> {
     bridge.edges(registry)
+}
+
+/// `workspace check` — the workspace governance report ([FR-WS-13]), the one
+/// entry point the CLI, MCP and HTTP surfaces share.
+///
+/// Reads the bridge edge set and, when a `no_cross_service_callers` rule is
+/// declared, every provider endpoint the members expose — at one stamp snapshot
+/// ([`ContractBridge::governance_read`](super::bridge::ContractBridge::governance_read)) —
+/// and evaluates the declared rules over them
+/// ([`workspace_governance`](super::governance::workspace_governance)).
+///
+/// # Errors
+/// A rule that could never fire because it is malformed, as
+/// [`workspace_governance`](super::governance::workspace_governance) defines.
+///
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+pub fn workspace_check(
+    bridge: &super::bridge::ContractBridge,
+    registry: &EngineRegistry<Engine>,
+) -> anyhow::Result<Option<super::governance::WorkspaceGovernance>> {
+    let federation = registry.federation();
+    let with_providers = !federation.governance.no_cross_service_callers.is_empty();
+    let (edges, providers) = bridge.governance_read(registry, with_providers);
+    super::governance::workspace_governance(federation, &edges, &providers)
 }
 
 /// One read of the bridge edge set, with the members read for it
@@ -1901,6 +1972,9 @@ pub fn workspace_reachability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The coordinate the row-shape fixtures below carry.
+    const TEST_COORDINATE: &str = "example.com/test";
 
     /// A bridge read of `edges` that names no member.
     fn read<const N: usize>(edges: [BridgeEdge; N]) -> BridgeRead {
@@ -2427,12 +2501,13 @@ mod tests {
     /// row** — the coherent table [FR-WS-16] extends, not two lists to join.
     #[test]
     fn a_member_row_carries_freshness_and_the_warm_label_in_one_record() {
-        let row = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none(), opened());
+        let row = MemberStatus::labelled(fresh("api", true), TEST_COORDINATE, &WarmEvidence::none(), opened());
         let value = serde_json::to_value(&row).unwrap();
 
         assert_eq!(value["member"], "api");
         assert_eq!(value["result"]["indexed"], true);
         assert_eq!(value["warm_state"], "warm", "one row, both facts: {value}");
+        assert_eq!(value["coordinate"], TEST_COORDINATE, "and its identity: {value}");
     }
 
     /// The member row's **exact key set**, pinned against literals.
@@ -2462,21 +2537,22 @@ mod tests {
             keys
         };
 
-        let healthy = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none(), opened());
+        let healthy = MemberStatus::labelled(fresh("api", true), TEST_COORDINATE, &WarmEvidence::none(), opened());
         assert_eq!(
             keys(&healthy),
-            ["member", "open_state", "result", "warm_state"],
-            "a healthy row: no `error`, no `reason`, no `degraded_*`, nothing shadowed"
+            ["coordinate", "member", "open_state", "result", "warm_state"],
+            "a healthy row: its coordinate, no `error`, no `reason`, no `degraded_*`, nothing shadowed"
         );
 
         let degraded = MemberStatus::labelled(
-            unopenable("web", "store is corrupt"),
+            unopenable("web", "store is corrupt"), TEST_COORDINATE,
             &WarmEvidence::none(),
             unopened("store is corrupt"),
         );
         assert_eq!(
             keys(&degraded),
             [
+                "coordinate",
                 "degraded_diagnostic",
                 "degraded_reason",
                 "error",
@@ -2494,7 +2570,7 @@ mod tests {
         // one, so an unidentified cause is an absent key rather than a default
         // ([NFR-CC-04]).
         let host_limited = MemberStatus::labelled(
-            unopenable("svc", "unable to open database file"),
+            unopenable("svc", "unable to open database file"), TEST_COORDINATE,
             &WarmEvidence::none(),
             MemberOpenState::degraded(
                 "unable to open database file",
@@ -2504,6 +2580,7 @@ mod tests {
         assert_eq!(
             keys(&host_limited),
             [
+                "coordinate",
                 "degraded_cause",
                 "degraded_diagnostic",
                 "degraded_reason",
@@ -2523,13 +2600,13 @@ mod tests {
         // axis. It is the *warm* axis' reason and nothing else: no `error`, no
         // `degraded_*`, and the freshness payload untouched.
         let warm_failed = MemberStatus::labelled(
-            fresh("api", false),
+            fresh("api", false), TEST_COORDINATE,
             &WarmEvidence::none().with_failures([("api", "index failed: exit status: 2")]),
             opened(),
         );
         assert_eq!(
             keys(&warm_failed),
-            ["member", "open_state", "reason", "result", "warm_state"],
+            ["coordinate", "member", "open_state", "reason", "result", "warm_state"],
             "a recorded warm failure adds exactly `reason` to a healthy row"
         );
         let value = serde_json::to_value(&warm_failed).unwrap();
@@ -2553,7 +2630,7 @@ mod tests {
     #[test]
     fn the_warm_axis_and_the_open_axis_are_independent_fields() {
         let deferred_but_openable =
-            MemberStatus::labelled(fresh("cold", false), &WarmEvidence::none(), opened());
+            MemberStatus::labelled(fresh("cold", false), TEST_COORDINATE, &WarmEvidence::none(), opened());
         let value = serde_json::to_value(&deferred_but_openable).unwrap();
         assert_eq!(value["warm_state"], "deferred");
         assert_eq!(
@@ -2562,7 +2639,7 @@ mod tests {
         );
 
         let unopenable_member = MemberStatus::labelled(
-            unopenable("broken", "no such table: nodes"),
+            unopenable("broken", "no such table: nodes"), TEST_COORDINATE,
             &WarmEvidence::none(),
             unopened("no such table: nodes"),
         );
@@ -2578,7 +2655,7 @@ mod tests {
         // `not-attempted` on the open axis with the warm axis untouched — the
         // shape a scoped fan-out produces ([NFR-PE-10]).
         let never_reached = MemberStatus::labelled(
-            fresh("lazy", false),
+            fresh("lazy", false), TEST_COORDINATE,
             &WarmEvidence::none(),
             MemberOpenState::NotAttempted,
         );
@@ -2597,11 +2674,11 @@ mod tests {
     fn index_presence_decides_warm_versus_deferred() {
         let evidence = WarmEvidence::none();
         assert_eq!(
-            MemberStatus::labelled(fresh("api", true), &evidence, opened()).warm,
+            MemberStatus::labelled(fresh("api", true), TEST_COORDINATE, &evidence, opened()).warm,
             MemberWarmState::Warm
         );
         assert_eq!(
-            MemberStatus::labelled(fresh("web", false), &evidence, opened()).warm,
+            MemberStatus::labelled(fresh("web", false), TEST_COORDINATE, &evidence, opened()).warm,
             MemberWarmState::Deferred
         );
     }
@@ -2614,7 +2691,7 @@ mod tests {
     #[test]
     fn an_unopenable_member_is_degraded_not_deferred() {
         let row = MemberStatus::labelled(
-            unopenable("web", "starting the engine for workspace member \"web\""),
+            unopenable("web", "starting the engine for workspace member \"web\""), TEST_COORDINATE,
             &WarmEvidence::none(),
             unopened("starting the engine for workspace member \"web\""),
         );
@@ -2659,7 +2736,7 @@ mod tests {
         assert_eq!(row.error.as_deref(), Some("no such table: edges"));
         assert!(
             matches!(
-                MemberStatus::labelled(row, &WarmEvidence::none(), opened()).warm,
+                MemberStatus::labelled(row, TEST_COORDINATE, &WarmEvidence::none(), opened()).warm,
                 MemberWarmState::Degraded { .. }
             ),
             "BR-44: the read was attempted and failed"
@@ -2674,7 +2751,7 @@ mod tests {
         let row = flatten_status(scoped(Ok(Ok(StatusInfo::default()))));
         assert!(row.error.is_none(), "a successful read carries no error");
         assert_eq!(
-            MemberStatus::labelled(row, &WarmEvidence::none(), opened()).warm,
+            MemberStatus::labelled(row, TEST_COORDINATE, &WarmEvidence::none(), opened()).warm,
             MemberWarmState::Deferred,
             "an honestly empty graph is deferred, which is the whole distinction"
         );
@@ -2693,7 +2770,7 @@ mod tests {
                 member: "ghost".to_string(),
                 result: None,
                 error: None,
-            },
+            }, TEST_COORDINATE,
             &WarmEvidence::none(),
             opened(),
         );
@@ -2709,11 +2786,11 @@ mod tests {
     fn the_rollup_agrees_with_the_rows_and_omits_warming() {
         let evidence = WarmEvidence::none();
         let rows: Vec<MemberStatus> = vec![
-            MemberStatus::labelled(fresh("api", true), &evidence, opened()),
-            MemberStatus::labelled(fresh("web", true), &evidence, opened()),
-            MemberStatus::labelled(fresh("svc", false), &evidence, opened()),
+            MemberStatus::labelled(fresh("api", true), TEST_COORDINATE, &evidence, opened()),
+            MemberStatus::labelled(fresh("web", true), TEST_COORDINATE, &evidence, opened()),
+            MemberStatus::labelled(fresh("svc", false), TEST_COORDINATE, &evidence, opened()),
             MemberStatus::labelled(
-                unopenable("old", "store is corrupt"),
+                unopenable("old", "store is corrupt"), TEST_COORDINATE,
                 &evidence,
                 unopened("store is corrupt"),
             ),
@@ -2889,6 +2966,34 @@ mod tests {
         assert!(is_queried(&svc_b, SHARED, None), "unscoped, every member holding the symbol is queried");
     }
 
+    /// **A symbol written without a repository coordinate is queried in each
+    /// member under that member's own coordinate** ([FR-EX-36]), as each member's
+    /// fan-out row resolves it: every holder's endpoint and resolved row answer
+    /// to it, under any coordinate. A symbol naming a coordinate stays exact,
+    /// and one descriptor off answers to nothing.
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+    #[test]
+    fn an_old_form_symbol_is_queried_under_each_members_own_coordinate() {
+        let in_a = at("svc-a", "logos . example.com/a . src/main/kotlin/`Dto.kt`/Dto#");
+        let in_b = at("svc-b", "logos . example.com/b . src/main/kotlin/`Dto.kt`/Dto#");
+        assert!(is_queried(&in_a, SHARED, None) && is_queried(&in_b, SHARED, None));
+        assert!(is_queried(&in_b, SHARED, Some("svc-b")) && !is_queried(&in_b, SHARED, Some("svc-a")));
+        assert!(!is_queried(&in_a, in_b.symbol.as_str(), None), "another coordinate is never rewritten");
+        assert!(!is_queried(&in_a, "logos . . . src/main/kotlin/`Dto.kt`/Dtos#", None), "a near miss");
+
+        let row = |symbol: &LogosSymbol| SymbolRef {
+            symbol: symbol.to_scip_string(),
+            name: "Dto".to_string(),
+            kind: NodeKind::Class,
+            file: None,
+            line: None,
+        };
+        assert!(holds(Some(&row(&in_a.symbol)), SHARED), "the member's upgraded row holds it");
+        assert!(holds(Some(&row(&in_a.symbol)), in_a.symbol.as_str()));
+        assert!(!holds(Some(&row(&in_a.symbol)), in_b.symbol.as_str()));
+    }
+
     /// **Unscoped over a symbol two members hold, the answer is grouped and
     /// flagged** ([BR-73]): every holder with its share — zero for one that
     /// holds the symbol and provides nothing — and a notice naming them and
@@ -2946,6 +3051,30 @@ mod tests {
         }
         let unscoped = references_reaching(&roster, &refs, SHARED, None);
         assert_eq!(importers(&unscoped.attributed), ["svc-b:UsesB.java", "svc-a:UsesA.java"]);
+    }
+
+    /// **A symbol written without a coordinate reaches each owner's node under
+    /// that owner's own coordinate** ([FR-EX-36]), as the bridge tier and the
+    /// member rows match it: two members holding one shape under two
+    /// coordinates are both reached, and the scope still keys on the owner. A
+    /// canonical symbol reaches its own owner alone, and a near miss nothing.
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+    #[test]
+    fn an_old_form_symbol_reaches_each_owners_node_under_its_own_coordinate() {
+        let in_a = "logos . example.com/a . src/main/kotlin/`Dto.kt`/Dto#";
+        let in_b = "logos . example.com/b . src/main/kotlin/`Dto.kt`/Dto#";
+        let refs = [
+            reference("svc-a", Some(in_a), "com.acme.a.Dto", "UsesA.java"),
+            reference("svc-b", Some(in_b), "com.acme.b.Dto", "UsesB.java"),
+        ];
+        let roster = roster(&["svc-a", "svc-b", "app"]);
+        let reached =
+            |symbol: &str, scope: Option<&str>| importers(&references_reaching(&roster, &refs, symbol, scope).attributed);
+        assert_eq!(reached(SHARED, None), ["svc-a:UsesA.java", "svc-b:UsesB.java"]);
+        assert_eq!(reached(SHARED, Some("svc-b")), ["svc-b:UsesB.java"]);
+        assert_eq!(reached(in_a, None), ["svc-a:UsesA.java"], "a canonical symbol is exact");
+        assert!(reached("logos . . . src/main/kotlin/`Dto.kt`/Dtos#", None).is_empty(), "a near miss");
     }
 
     /// **The dotted-name path takes the scope too** ([BR-73]): an Avro type has

@@ -115,7 +115,8 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 
 use crate::config::Rules;
-use crate::extract::escape_name;
+use crate::extract::symbol::build_symbol;
+use crate::extract::SymbolContext;
 use crate::graph_store::{AnnotationNodeRow, EdgeRow, FileRecord, NewNode};
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 use crate::models::pipeline::AnnotationStats;
@@ -213,6 +214,7 @@ pub fn run(
     entry_points: &[String],
     test_markers: &[String],
     reachable_exts: &HashSet<String>,
+    ctx: &SymbolContext,
     incremental: bool,
 ) -> Result<AnnotationStats> {
     let snap = runtime.submit_read(|store| {
@@ -365,8 +367,8 @@ pub fn run(
     stats.clones = clone_clusters.cloned_count();
     stats.clone_groups = clone_clusters.group_count();
 
-    let layer_nodes = layer_policy_nodes(rules)?;
-    let boundary_nodes = boundary_policy_nodes(rules)?;
+    let layer_nodes = layer_policy_nodes(ctx, rules)?;
+    let boundary_nodes = boundary_policy_nodes(ctx, rules)?;
     // FR-GV-12: `forbidden_dependency` edges now have two sources — boundary
     // crossings AND `[[forbidden_imports]]` glob matches. Dedupe so a pair
     // banned by both is materialised as a single derived edge (and the
@@ -658,13 +660,13 @@ fn assign_file_layers(rules: &Rules, files: &[FileRecord]) -> Result<Vec<(i64, O
 /// ([FR-AN-03]).
 ///
 /// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
-fn layer_policy_nodes(rules: &Rules) -> Result<Vec<PolicyNode>> {
+fn layer_policy_nodes(ctx: &SymbolContext, rules: &Rules) -> Result<Vec<PolicyNode>> {
     rules
         .layers
         .iter()
         .map(|layer| {
             Ok(PolicyNode {
-                symbol: policy_symbol("layer", &[&layer.name])?,
+                symbol: policy_symbol(ctx, "layer", &[&layer.name])?,
                 kind: NodeKind::Layer,
                 name: layer.name.clone(),
             })
@@ -676,13 +678,13 @@ fn layer_policy_nodes(rules: &Rules) -> Result<Vec<PolicyNode>> {
 /// declaration ([FR-AN-03]). Named `from->to` for search/display.
 ///
 /// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
-fn boundary_policy_nodes(rules: &Rules) -> Result<Vec<PolicyNode>> {
+fn boundary_policy_nodes(ctx: &SymbolContext, rules: &Rules) -> Result<Vec<PolicyNode>> {
     rules
         .boundaries
         .iter()
         .map(|boundary| {
             Ok(PolicyNode {
-                symbol: policy_symbol("boundary", &[&boundary.from, &boundary.to])?,
+                symbol: policy_symbol(ctx, "boundary", &[&boundary.from, &boundary.to])?,
                 kind: NodeKind::Boundary,
                 name: format!("{}->{}", boundary.from, boundary.to),
             })
@@ -801,23 +803,32 @@ fn forbidden_import_pairs(
 }
 
 /// Assemble the canonical symbol of a derived policy node:
-/// `logos policy rules . <kind>/<segment>/…` — the `policy` manager namespace
-/// keeps these synthetic identities disjoint from every extracted symbol, and
-/// [`escape_name`] makes arbitrary `rules.toml` names assemble into a valid
-/// SCIP string ([FR-AN-03]).
+/// `logos policy <coordinate> . <kind>/<segment>/…` ([FR-AN-03], [ADR-85]).
+///
+/// The shape: the `policy` manager keeps these synthetic identities disjoint
+/// from every extracted symbol (whose manager is `.`), and the package slot
+/// holds the repository coordinate `ctx` carries, exactly as an extracted
+/// symbol's does — so two repositories' `domain` layers are two nodes, and the
+/// one set of coordinate helpers ([`LogosSymbol::coordinate`],
+/// [`LogosSymbol::with_coordinate`]) reads and rewrites every node symbol alike.
+/// Before ADR-85 the slot held the fixed name `rules`; a policy node is
+/// re-materialised by every annotation pass, so no store keeps that form past
+/// its next one. [`build_symbol`] escapes each segment, so arbitrary
+/// `rules.toml` names assemble into a valid SCIP string.
 ///
 /// # Errors
 /// Returns an error only if the assembled string is rejected by the SCIP
 /// codec — escaping makes that unreachable for any non-empty name.
 ///
 /// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
-fn policy_symbol(kind: &str, segments: &[&str]) -> Result<LogosSymbol> {
-    let mut raw = format!("logos policy rules . {kind}/");
-    for segment in segments {
-        raw.push_str(&escape_name(segment));
-        raw.push('/');
-    }
-    LogosSymbol::parse(&raw).with_context(|| format!("assembling the {kind} policy symbol"))
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+fn policy_symbol(ctx: &SymbolContext, kind: &str, segments: &[&str]) -> Result<LogosSymbol> {
+    let policy = SymbolContext {
+        manager: "policy".to_string(),
+        ..ctx.clone()
+    };
+    let path: Vec<&str> = std::iter::once(kind).chain(segments.iter().copied()).collect();
+    build_symbol(&policy, &path, &[]).with_context(|| format!("assembling the {kind} policy symbol"))
 }
 
 mod clone;

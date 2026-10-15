@@ -480,12 +480,17 @@ impl Document {
 }
 
 /// The member-relative path of the file a SCIP symbol is declared in — its
-/// descriptors up to the last `/` outside a backtick-quoted name, unquoted.
+/// descriptor tail up to the last `/` outside a backtick-quoted name, unquoted.
 ///
-/// `logos . . . api/openapi/`v1.yaml`/v1-users#get#` → `api/openapi/v1.yaml`.
+/// `logos . github.com/acme/api . api/openapi/`v1.yaml`/v1-users#get#` →
+/// `api/openapi/v1.yaml`, and the same for the coordinate-less form
+/// (`logos . . . …`): the path is read from
+/// [`LogosSymbol::descriptor_tail`], never from the coordinate ([ADR-85]).
 /// `None` for a symbol with no descriptor path (a `local` symbol).
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
 pub fn document_path(symbol: &LogosSymbol) -> Option<String> {
-    let descriptors = symbol.as_str().splitn(5, ' ').nth(4)?;
+    let descriptors = symbol.descriptor_tail()?;
     let mut quoted = false;
     let mut last_slash = None;
     for (i, c) in descriptors.char_indices() {

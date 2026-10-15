@@ -36,6 +36,9 @@ use logos_core::model::NodeKind;
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 // ── git fixture helpers (mirroring tests/read_only_accessors.rs conventions) ──
 
 fn sh_git(cwd: &Path, args: &[&str]) {
@@ -1654,6 +1657,7 @@ fn go_dsm_leaves_the_rows_of_every_other_language_as_they_were() {
             "pub mod inner;\n\npub fn f() { inner::g(); }\n",
         );
         write(root, "src/inner.rs", "pub fn g() {}\n");
+        coordinate::pin(root);
     };
 
     let only_rust = TempDir::new().unwrap();

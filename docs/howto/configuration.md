@@ -698,6 +698,103 @@ Changing the policy needs no migration — resolution re-evaluates the whole
 unresolved-reference ledger on every run, so just `logos index` again. The same
 holds for `[resolution.import_roots]`.
 
+### `[project] id` — the repository's identity
+
+`[project] id` names the repository: one **coordinate** that stays the same in
+the main checkout, every linked worktree, every clone and CI
+([FR-CF-10](../specs/requirements/FR-CF-10.md)).
+
+```toml
+[project]
+id = "github.com/acme/payments"
+```
+
+`logos init` writes the key when it is absent, set to the derived default below,
+and never changes it afterwards. A re-run leaves the file byte-identical. A
+`config.toml` that already exists keeps every byte you wrote: the table is
+appended at the end, or the key goes on the line after an existing, empty
+`[project]` header. Edit the value to pin a different coordinate.
+
+**Without the key**, the same coordinate is derived each time it is needed:
+
+1. The `origin` remote, normalised. The scheme, credentials, port, query,
+   fragment and `.git` suffix are dropped and the host is lowercased, so a token
+   in a remote URL is never written. `git@h:o/r.git`,
+   `https://h/o/r`, `https://user@h/o/r.git` and `ssh://git@h/o/r` all give
+   `h/o/r`. A local remote (a path, or `file://`) that exists is followed: a
+   clone made from a checkout, a cache or a mirror resolves what that repository
+   resolves, its own remote included. A local remote that no longer exists gives
+   its last component, without `.git`.
+2. With no `origin`, the directory name of the repository's **main** worktree,
+   found through git's common directory. A linked worktree therefore resolves
+   like its main checkout, never by its own directory name. A bare repository's
+   worktree takes the bare repository's name, without `.git`.
+3. Outside git, the project directory's own name.
+
+A derived value never fails validation: a character outside the allowed set is
+replaced with `-`.
+
+**Validation.** The value must be non-empty and use only letters, digits and
+`. _ / @ : -`, with no spaces, and must not be a bare `.`, which in a symbol
+marks an empty field. Any other value fails the load with exit 2 naming
+`project.id`:
+
+```text
+invalid value for project.id: "my repo" is not a project coordinate: it must be non-empty, not `.`, and use only letters, digits and `._/@:-` (no spaces)
+```
+
+`id` is the table's only key. Any other key under `[project]` is an unknown
+field, rejected with exit 2 like an unknown key in any other table.
+
+**When `.logos/` is git-ignored** (many repositories ignore it whole), the id
+`init` writes stays on your machine. `init` says so on its `[project] id` row,
+and names the default other checkouts and CI derive instead. To make the id
+travel, commit `.logos/config.toml`.
+
+The coordinate in force is recorded in the store by `logos init`, by every
+full `logos index` and by the migration described below, and `logos status`
+reports it as `project_id`. Changing the key does not re-admit or purge any
+file.
+
+**Every symbol carries it.** A node's symbol names its repository in the SCIP
+package slot, so the same declaration in two repositories has two symbols:
+
+```text
+logos . github.com/acme/payments . src/`lib.rs`/run().
+```
+
+Broker topics (`logos . github.com/acme/payments . topic/orders#`) and the
+policy nodes `rules.toml` declares (`logos policy github.com/acme/payments . layer/domain/`)
+carry it too. A full `logos index` builds every symbol under the coordinate in
+force. An incremental sync keeps the coordinate the store's symbols already
+carry, so one store never mixes two. A sync that writes the first file into a
+store, such as a commit hook running before any index, takes the coordinate in
+force, as an index would.
+
+**Opening a store moves it to the coordinate in force.** A store built by an
+earlier release carries no coordinate. After a change of `[project] id` (or,
+without one, of the `origin` remote) a store's symbols still carry the old one.
+The first command that opens such a store migrates it in place, before anything
+syncs into it:
+
+- every symbol takes the coordinate;
+- symbol rows that no node references any more are removed;
+- every file is marked for re-reading, so the next reconcile (`logos scan`,
+  `logos check`) re-extracts it.
+
+Node and edge counts, snapshot history and the gate baseline are unchanged. The
+migration is one transaction: if it is interrupted, the store stays as it was
+and the next open runs it again. A store already at the coordinate opens without
+a write. A linked worktree seeded from main's store migrates its copy before its
+first sync. While `.logos/config.toml` does not load, the store is left as it is.
+Without an `id`, a store that already records a coordinate also keeps it while
+the derived value is only a fallback — git cannot answer for the repository (git
+missing from `PATH`, or refusing the repository's ownership), so only the
+directory name is left, or the local checkout `origin` names is away, so only its
+last path component is left. Following either would move the store back and
+forth as the condition comes and goes. A relative local `origin` is read from
+the main checkout, so a linked worktree derives what its main checkout derives.
+
 ## Documentation — indexing markdown
 
 The `[documentation]` table decides **whether** markdown is indexed and

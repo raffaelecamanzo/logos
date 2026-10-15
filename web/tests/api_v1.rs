@@ -450,6 +450,9 @@ fn precedent_engine() -> (TempDir, Arc<Engine>) {
          }\n",
         "feat: the registry",
     );
+    // A pinned coordinate (S-703): the queried symbol names it.
+    std::fs::create_dir_all(repo.join(".logos")).unwrap();
+    std::fs::write(repo.join(".logos/config.toml"), "[project]\nid = \"example.com/fixture\"\n").unwrap();
     let engine = Arc::new(Engine::start(repo).expect("engine starts"));
     engine.index();
     (tmp, engine)
@@ -467,7 +470,7 @@ async fn precedent_endpoint_serializes_the_read_model_with_its_reasons() {
     let (_tmp, engine) = precedent_engine();
     let router = web::router(engine);
 
-    let path = "/api/v1/precedent?target=logos%20.%20.%20.%20src/%60rustarm.rs%60/extract().";
+    let path = "/api/v1/precedent?target=logos%20.%20example.com%2Ffixture%20.%20src/%60rustarm.rs%60/extract().";
     let resp = router.clone().oneshot(get(path)).await.unwrap();
     let (status, body, headers) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "{body}");

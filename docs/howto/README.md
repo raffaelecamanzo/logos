@@ -147,9 +147,11 @@ automatically.
   is refused outright with an actionable message. One auditable contract across
   both surfaces — see [Error handling](error-handling.md).
 - **One node per symbol, structurally enforced** — the graph store holds exactly
-  one node per `symbol_id` (a `UNIQUE` constraint) and node insertion is an
-  idempotent upsert, so incremental `sync` can never accumulate duplicate or
-  orphan rows. `logos doctor` verifies this invariant cheaply and **hard-fails the
+  one node per `symbol_id` (a `UNIQUE` constraint), and a symbol names one node:
+  a file whose declaration would take a symbol another node already holds fails
+  to persist, with the reason recorded, instead of being folded into it. A
+  re-extracted file replaces its own nodes, so incremental `sync` can never
+  accumulate duplicate or orphan rows. `logos doctor` verifies this invariant cheaply and **hard-fails the
   gate** on drift (independent of the signal); `logos verify` deep-checks against a
   fresh shadow reindex. See [commands.md](commands.md#doctor).
 - **Deterministic** — same tree in, same graph and same metrics out,

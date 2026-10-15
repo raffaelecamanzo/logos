@@ -31,6 +31,9 @@ use logos_core::model::{EdgeKind, NodeId};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -42,6 +45,7 @@ fn indexed(fixture: fixtures::Fixture) -> (TempDir, Engine) {
     for (rel, source) in fixture {
         write(tmp.path(), rel, source);
     }
+    coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.index();
     (tmp, engine)
@@ -304,6 +308,7 @@ fn sync_equals_a_full_reindex_when_the_constructed_class_changes() {
         for (rel, _) in fixtures::PYTHON {
             write(fresh.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
         }
+        coordinate::pin(fresh.path());
         let engine = Engine::start(fresh.path()).expect("engine starts");
         engine.index();
         binding_facts(engine.runtime().unwrap())

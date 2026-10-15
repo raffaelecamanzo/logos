@@ -29,6 +29,9 @@ use logos_core::Engine;
 use logos_core::Runtime;
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -82,6 +85,7 @@ fn index(files: &[(&str, &str)]) -> (TempDir, Engine, FrameworkStats) {
     for (rel, text) in files {
         write(tmp.path(), rel, text);
     }
+    coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let result = engine.index();
     (tmp, engine, result.framework)
@@ -426,6 +430,7 @@ fn cold(tmp: &TempDir, files: &[&str]) -> (Facts, FrameworkStats) {
             write(copy.path(), rel, &text);
         }
     }
+    coordinate::pin(copy.path());
     let engine = Engine::start(copy.path()).expect("engine starts");
     let stats = engine.index().framework;
     (facts(engine.runtime().unwrap()), stats)

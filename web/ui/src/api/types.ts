@@ -57,7 +57,9 @@ export interface GraphElementEdge {
 
 /** The read-only nodes+edges snapshot the canvas consumes (mirrors `GraphElements`). */
 export interface GraphElements {
-  /** The seed the snapshot was scoped to, or `null` for the whole graph. */
+  /** The seed the snapshot was scoped to, or `null` for the whole graph. A seed
+   *  symbol without a repository coordinate is echoed in its canonical form
+   *  (FR-EX-36). */
   seed: string | null;
   /** The semantic cluster-zoom tier the snapshot was taken at. */
   granularity: GraphGranularity;
@@ -255,6 +257,9 @@ export interface StatusInfo {
   db_size_bytes: number;
   /** Unix-seconds string of the last full index, or `null`. */
   last_full_index_at: string | null;
+  /** The repository's identity coordinate (`[project] id`, else its derived
+   *  default), omitted until `init` or a full index has recorded it (S-702). */
+  project_id?: string;
   /** Unix-seconds string of the last incremental sync, or `null`. */
   last_sync_at: string | null;
   graph_revision: number;
@@ -1752,16 +1757,25 @@ export type MemberOpenStateLabel = "opened" | "not-attempted" | "degraded";
  *  store is present and its graph intact, so a re-index is NOT the remedy.
  *  `store-obstructed` — something that is not a regular file occupies the member's
  *  `.logos/logos.db` path; clear it, *then* re-index.
+ *  `duplicate-coordinate` — the member resolves to the repository coordinate an
+ *  earlier member already holds (FR-WS-39); its store is intact and a re-index is
+ *  NOT the remedy — a distinct `[project] id` in its `.logos/config.toml` is.
  *
  *  A failure whose store file is merely *missing* deliberately carries NO cause:
  *  the store is created on open, so a never-indexed member opens fine, and an
  *  absent file at failure time is equally consistent with descriptor exhaustion
  *  during creation. `degraded_reason` is then the verbatim diagnostic. */
-export type DegradedCause = "host-resource-limit" | "store-obstructed";
+export type DegradedCause = "host-resource-limit" | "store-obstructed" | "duplicate-coordinate";
 
 /** One member's row in {@link WorkspaceStatus}: its index freshness, its warm state
  *  and its open state in one record, so no join by member name is needed. */
 export interface MemberStatus extends MemberResult<StatusInfo> {
+  /** The repository coordinate this member resolves to (FR-WS-39) — its
+   *  `[project] id`, else the identity derived from its remote; the package slot of
+   *  every symbol its graph holds. Present on every row, a degraded one included.
+   *  Two members resolving to one coordinate are never folded: the later one reads
+   *  `open_state: "degraded"` with `degraded_cause: "duplicate-coordinate"`. */
+  coordinate: string;
   /** This member's warm state (FR-WS-15) — index presence. */
   warm_state: MemberWarmStateLabel;
   /** Why the *warm* attempt failed — present only when `warm_state` is
@@ -2245,6 +2259,10 @@ export interface WorkspaceGovernance {
    *  silently narrowed, so it is reported loudly. **Absent** when empty (the
    *  server skips it), never `[]`. */
   unknown_member_refs?: string[];
+  /** `no-cross-service-callers:<glob>` rules whose glob matches nothing any
+   *  member in their scope exposes to another service — evaluated over nothing,
+   *  so never a pass (BR-48, FR-WS-13). **Absent** when empty, never `[]`. */
+  unmatched_rules?: string[];
   violations: WorkspaceViolation[];
 }
 

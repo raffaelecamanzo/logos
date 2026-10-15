@@ -34,17 +34,23 @@ use tempfile::TempDir;
 mod graph_fingerprint;
 use graph_fingerprint::graph_fingerprint;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, contents).unwrap();
 }
 
+/// The fixture tree, its repository coordinate pinned (S-703) so two trees'
+/// stores hold the same symbols whatever their temp directories are called.
 fn tree(files: &[(&str, &str)]) -> TempDir {
     let tmp = TempDir::new().unwrap();
     for (rel, text) in files {
         write(tmp.path(), rel, text);
     }
+    coordinate::pin(tmp.path());
     tmp
 }
 

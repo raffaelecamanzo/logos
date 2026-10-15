@@ -521,7 +521,9 @@ pub trait MemberContracts {
     /// The rule the navigation tools resolve by, without their tie-break and
     /// restricted to nodes that can be a link endpoint
     /// ([`super::links::is_link_endpoint`]): an exact canonical-symbol hit is that
-    /// one symbol; otherwise every node whose name is `target`. Every match is
+    /// one symbol — a symbol written without a repository coordinate is tried
+    /// under the member's coordinate, as navigation does (FR-EX-36); otherwise
+    /// every node whose name is `target`. Every match is
     /// returned, so the caller can hold the link to exactly one and list the rest
     /// when it is not. Empty when nothing matches.
     ///
@@ -689,7 +691,10 @@ impl MemberContracts for crate::Engine {
         let target = target.to_string();
         let endpoint = |row: &NodeRow| super::links::is_link_endpoint(row.kind);
         runtime.submit_read(move |store| {
-            if let Some(row) = store.node_by_symbol(&target)? {
+            // The navigation resolvers' exact rung: a link written before
+            // symbols carried their repository coordinate resolves under this
+            // member's coordinate (S-705, FR-EX-36), so a manifest keeps working.
+            if let Some((row, _note)) = crate::navigate::resolve_exact(store, &target)? {
                 return Ok(endpoint(&row).then_some(row.symbol).into_iter().collect());
             }
             Ok(store
@@ -1564,19 +1569,26 @@ where
 /// ([FR-WS-04], [ADR-52]).
 ///
 /// Holds the derived read-models keyed on member sync-stamps — the edge set
-/// ([`edges`](Self::edges)), the unresolved egress residue ([CR-125]) and the
-/// declared `[[links]]` judged against those edges ([FR-WS-41]); the member set it reads is supplied
+/// ([`edges`](Self::edges)), the unresolved egress residue ([CR-125]), the
+/// declared `[[links]]` judged against those edges ([FR-WS-41]) and every
+/// provider endpoint the members expose ([FR-WS-13]); the member set it reads is supplied
 /// per call as an [`EngineRegistry`], so one bridge tracks one workspace's
 /// registry. Shareable behind an [`Arc`]: each interior cache is a [`Mutex`], so
 /// the serve surface and concurrent callers see one bridge.
 ///
-/// The caches are **three separate slots**, so an `xservice search` or
-/// `route-providers` call pays only for the edges and never for a residue or a
-/// link judgement it will not render ([NFR-PE-01]). They are nonetheless filled
-/// through single-snapshot entry points — [`reachability_read`](Self::reachability_read)
-/// (all three) and [`edges_and_links`](Self::edges_and_links) (edges and links) —
-/// each keyed on one stamp snapshot, because two independent snapshots can
-/// straddle a member re-sync and make the answer contradict its own residue.
+/// The caches are **four separate slots**, so an `xservice search` or
+/// `route-providers` call pays only for the edges and never for a residue, a
+/// link judgement or a provider list it will not render ([NFR-PE-01]). They are
+/// nonetheless filled through single-snapshot entry points —
+/// [`reachability_read`](Self::reachability_read) (edges, residue and links),
+/// [`edges_and_links`](Self::edges_and_links) (edges and links) and
+/// [`governance_read`](Self::governance_read) (edges and providers) — each keyed
+/// on one stamp snapshot, because two independent snapshots can straddle a
+/// member re-sync and make the answer contradict its own residue.
+///
+/// The provider slot is filled only by a `workspace check` whose manifest
+/// declares a `no_cross_service_callers` rule: it is the scope such a rule's
+/// glob must match something in (`provider_endpoints`).
 ///
 /// The link slot holds the declared `[[links]]` judged against the cached
 /// evidence edges ([FR-WS-41]) — what `callers`, `impact` and app-wide
@@ -1597,6 +1609,7 @@ where
 /// path too.)
 ///
 /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
@@ -1607,6 +1620,7 @@ pub struct ContractBridge {
     edge_cache: StampCache<EdgeSnapshot>,
     residue_cache: StampCache<WorkspaceEgressResidue>,
     link_cache: StampCache<Vec<LinkStatus>>,
+    provider_cache: StampCache<Vec<BridgeEndpoint>>,
 }
 
 /// The cached edge set, with the members it was computed **without**.
@@ -1636,7 +1650,7 @@ type Stamped<T> = Option<(Stamps, Arc<T>)>;
 /// One derived read-model cached against the member sync-stamps it was computed
 /// at ([FR-WS-04]).
 ///
-/// Generic over what it holds, and **shared** by the bridge's two slots rather
+/// Generic over what it holds, and **shared** by the bridge's slots rather
 /// than written once per slot: a second hand-mirrored copy of this
 /// read-check-compute-store dance is precisely the twin-that-diverges failure the
 /// federation modules have been bitten by, and the miss/hit accounting is the
@@ -1681,7 +1695,7 @@ impl<T> StampCache<T> {
     }
 
     /// The stamps this slot was last filled at, for the coherence guard that
-    /// asserts the bridge's two slots are keyed on one snapshot.
+    /// asserts the bridge's slots are keyed on one snapshot.
     #[cfg(test)]
     fn cached_stamps(&self) -> Option<Stamps> {
         self.lock().as_ref().map(|(stamps, _)| stamps.clone())
@@ -1819,6 +1833,38 @@ impl ContractBridge {
         let snapshot = self.edge_snapshot(&answer, stamps.clone());
         let links = self.link_slot(&answer, stamps, &snapshot);
         (Arc::clone(&snapshot.edges), links)
+    }
+
+    /// The edge set and every provider endpoint the members expose, at one stamp
+    /// snapshot — what workspace governance evaluates ([FR-WS-13], [BR-48]).
+    ///
+    /// A `no_cross_service_callers` glob is scoped to the providers
+    /// (`provider_endpoints`), bound or not: a glob that matches none of them
+    /// can never fire, and is reported rather than read as a pass. With
+    /// `with_providers` false no provider surface is read and the list is empty
+    /// — a workspace declaring no such rule has no glob to scope. Read at the
+    /// edge set's stamps, so the two cannot come from different generations.
+    ///
+    /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+    /// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+    pub fn governance_read<E>(
+        &self,
+        registry: &EngineRegistry<E>,
+        with_providers: bool,
+    ) -> (Arc<Vec<BridgeEdge>>, Arc<Vec<BridgeEndpoint>>)
+    where
+        E: MemberEngine + MemberContracts,
+    {
+        let answer = registry.answer();
+        let stamps = current_stamps(&answer);
+        let snapshot = self.edge_snapshot(&answer, stamps.clone());
+        let providers = if with_providers {
+            self.provider_cache
+                .get_or_compute(stamps, || provider_endpoints(&answer))
+        } else {
+            Arc::new(Vec::new())
+        };
+        (Arc::clone(&snapshot.edges), providers)
     }
 
     /// The link slot at `stamps`, judging the declared links against
@@ -2016,6 +2062,44 @@ where
         }
     }
     out
+}
+
+/// Every endpoint the members expose to a cross-service caller, bound or not —
+/// the provider side [`compute_edges`] indexes, read before any matching: each
+/// contract-surface node [`classify`] gives the provider role, and each
+/// provider-role invocation reference (a broker subscribe, which has no contract
+/// node behind it). Sorted and de-duplicated ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(super) fn provider_endpoints<E>(answer: &AnswerScope<'_, E>) -> Vec<BridgeEndpoint>
+where
+    E: MemberEngine + MemberContracts,
+{
+    let mut providers: Vec<BridgeEndpoint> = Vec::new();
+    for (member, surface) in read_members(answer, "contract surface", |e| e.contract_surface()) {
+        providers.extend(
+            surface
+                .into_iter()
+                .filter(|node| matches!(classify(node.kind, &node.name), Some((_, Role::Provider))))
+                .map(|node| BridgeEndpoint {
+                    member: member.clone(),
+                    symbol: node.symbol,
+                }),
+        );
+    }
+    for (member, refs) in read_members(answer, "invocation references", |e| e.invocation_refs()) {
+        providers.extend(
+            refs.into_iter()
+                .filter(|reference| reference.relation.bridge_role() == Some(BridgeRole::Provider))
+                .map(|reference| BridgeEndpoint {
+                    member: member.clone(),
+                    symbol: reference.symbol,
+                }),
+        );
+    }
+    providers.sort();
+    providers.dedup();
+    providers
 }
 
 /// Read every member's contract surface through its read pool, index providers
@@ -4971,6 +5055,57 @@ mod tests {
         assert_eq!(
             keys,
             ["from", "from_value", "intake", "relation", "to", "to_value"]
+        );
+    }
+
+    /// **Workspace governance's provider scope** (S-705, [FR-WS-13], [BR-48]):
+    /// every endpoint the members expose to a cross-service caller, bound or
+    /// not — a provider-role route and a broker subscribe, never a consumer-role
+    /// operation — read at the edge set's stamps, re-read when a member
+    /// re-syncs, and not read at all without a rule to scope.
+    ///
+    /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+    /// [BR-48]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+    #[test]
+    fn governance_read_lists_every_provider_at_the_edge_snapshot_and_follows_the_stamps() {
+        reset();
+        set_member("api", 0, vec![route("GET /users/{id}", "logos . . . api/route_get().")]);
+        set_member("web", 0, vec![op("GET /orders", "logos . . . web/op_orders().")]);
+        set_consumers("web", vec![broker_subscribe("orders.v1", "logos . . . web/on_order().")]);
+        let bridge = ContractBridge::new();
+        let reg = registry(&["api", "web"]);
+        let symbols = |bridge: &ContractBridge| -> Vec<String> {
+            let (_, providers) = bridge.governance_read(&reg, true);
+            providers.iter().map(|p| format!("{}:{}", p.member, p.symbol.as_str())).collect()
+        };
+
+        assert_eq!(
+            symbols(&bridge),
+            ["api:logos . . . api/route_get().", "web:logos . . . web/on_order()."],
+            "the route and the subscribe, not the consumer-role operation"
+        );
+        assert_eq!(
+            bridge.provider_cache.cached_stamps(),
+            bridge.edge_cache.cached_stamps(),
+            "providers and edges are read at one stamp snapshot"
+        );
+
+        let fresh = ContractBridge::new();
+        let (_, none) = fresh.governance_read(&reg, false);
+        assert!(none.is_empty(), "no rule, no provider read");
+        assert_eq!(fresh.provider_cache.cached_stamps(), None, "and the slot stays empty");
+
+        set_member(
+            "api",
+            1,
+            vec![
+                route("GET /users/{id}", "logos . . . api/route_get()."),
+                route("GET /legacy", "logos . . . api/legacy()."),
+            ],
+        );
+        assert!(
+            symbols(&bridge).contains(&"api:logos . . . api/legacy().".to_string()),
+            "a re-synced member's new provider is in scope"
         );
     }
 }

@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 use logos_core::graph_store::{AvroSchemaRow, DeclaredTypeRow, DECLARED_TYPES_EXTRACTED_KEY};
 use logos_core::{Engine, Runtime};
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
@@ -202,6 +205,7 @@ fn member(root: &Path) {
     write(root, "svc/src/main/kotlin/com/x/mail/Channels.kt", KOTLIN);
     write(root, "svc/src/main/avro/events.avsc", EVENTS);
     write(root, "svc/src/main/avro/audit.avsc", AUDIT);
+    coordinate::pin(root);
 }
 
 fn row<'a>(rows: &'a [(String, String, String, Option<String>)], fqn: &str) -> &'a (String, String, String, Option<String>) {
@@ -323,6 +327,7 @@ fn a_member_with_no_java_kotlin_or_avro_file_writes_nothing_but_the_marker() {
     let with_avro = tempfile::tempdir().unwrap();
     for root in [bare.path(), with_avro.path()] {
         write(root, "src/lib.rs", "pub fn hello() {}\npub fn world() { hello(); }\n");
+        coordinate::pin(root);
     }
     write(with_avro.path(), "src/main/avro/audit.avsc", AUDIT);
     for root in [bare.path(), with_avro.path()] {
@@ -417,6 +422,7 @@ fn changing_one_source_file_and_one_schema_resyncs_only_their_facts_and_sync_equ
     // records.
     let fresh = tempfile::tempdir().unwrap();
     copy_tree(root, fresh.path());
+    coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
     fresh_engine.index();
     assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "sync ≡ reindex over the declared types");
@@ -449,6 +455,7 @@ fn a_file_that_stops_declaring_any_type_loses_its_facts() {
     );
     let fresh = tempfile::tempdir().unwrap();
     copy_tree(root, fresh.path());
+    coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
     fresh_engine.index();
     assert_eq!(rows, types(fresh_engine.runtime().unwrap()), "sync ≡ reindex");
@@ -581,6 +588,7 @@ fn the_first_full_walk_backfills_an_upgraded_members_declared_types() {
 
     let fresh = tempfile::tempdir().unwrap();
     copy_tree(root, fresh.path());
+    coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
     fresh_engine.index();
     assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "backfilled ≡ freshly indexed");
@@ -620,6 +628,7 @@ fn a_backfill_file_that_fails_to_persist_keeps_the_backfill_open() {
     assert!(extracted(rt), "the retried backfill completes and marks the facts");
     let fresh = tempfile::tempdir().unwrap();
     copy_tree(root, fresh.path());
+    coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
     fresh_engine.index();
     assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "backfilled ≡ freshly indexed");

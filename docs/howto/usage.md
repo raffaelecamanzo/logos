@@ -92,6 +92,13 @@ logos context "add rate limiting to the login endpoint" --max-nodes 25
 `logos query` is a convenience façade: plain search by default,
 `--callers`/`--callees` to pivot (the two flags conflict by design).
 
+A symbol argument can be a bare name or a full symbol. A full symbol names its
+repository (`logos . github.com/acme/payments . src/`auth.rs`/fetch_user().`). A
+symbol saved before symbols carried that coordinate
+(`logos . . . src/`auth.rs`/fetch_user().`) still resolves: the answer is the
+canonical symbol's, with a one-line note in `warnings` naming the form to use.
+See [Navigation](commands.md#navigation).
+
 ### Documentation traceability
 
 Markdown under `docs/` (and top-level `*.md`/`README*`) is indexed alongside
@@ -1089,7 +1096,9 @@ no telemetry.
 
 `GET /api/v1/graph` returns the bounded graph-elements read-model
 (`nodes`/`edges` plus `total_*`/`elided_*` counts and `warnings`) that backs the
-Graph canvas. It accepts `?seed=<id>` and `?cap=<N>` plus three
+Graph canvas. It accepts `?seed=<id>` (a seed symbol saved before symbols
+carried their repository coordinate still anchors: the snapshot echoes the
+canonical seed and a note in `warnings`) and `?cap=<N>` plus three
 progressive-disclosure parameters: `?layers=code,docs,artifacts` and
 `?edge_types=calls,imports,…` **re-budget** the view server-side (the filter is
 applied to the in-scope set *before* the degree-rank+cap, so deselecting a layer

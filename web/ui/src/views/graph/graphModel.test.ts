@@ -176,9 +176,11 @@ describe("palettes & sizing", () => {
 
 describe("the /graph?seed= deep link (S-622, FR-UI-47)", () => {
   it("round-trips a symbol seed at the default tier and a file seed at the file tier", () => {
-    const symbol = "logos . . . src/`lib.rs`/f().";
-    expect(graphSeedHref(symbol)).not.toContain("granularity");
-    expect(graphSeedFromSearch(graphSeedHref(symbol).split("?")[1])).toEqual({ seed: symbol, granularity: "symbol" });
+    // The repository coordinate spells `/ . @ : -` (S-703); each survives the URL.
+    for (const symbol of ["logos . git@h.example:acme/svc-a . src/`lib.rs`/f().", "logos . . . src/`lib.rs`/f()."]) {
+      expect(graphSeedHref(symbol)).not.toContain("granularity");
+      expect(graphSeedFromSearch(graphSeedHref(symbol).split("?")[1])).toEqual({ seed: symbol, granularity: "symbol" });
+    }
     expect(graphSeedHref("src/a.rs", "file")).toBe("/graph?seed=src%2Fa.rs&granularity=file");
     expect(graphSeedFromSearch("?seed=src%2Fa.rs&granularity=file")).toEqual({ seed: "src/a.rs", granularity: "file" });
     expect(graphSeedFromSearch("?seed=m&granularity=module")).toEqual({ seed: "m", granularity: "module" });

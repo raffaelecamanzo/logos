@@ -411,6 +411,18 @@ describe("governance is advisory, beside its findings (FR-UI-38 AC4, ADR-56)", (
     expect(within(group).getByText("workspace-boundary:edge->core")).toBeInTheDocument();
   });
 
+  it("names a rule whose glob matches nothing, as not a pass (BR-48)", async () => {
+    await mount({
+      check: {
+        ...CLEAN_CHECK,
+        governance: { ...CLEAN_CHECK.governance!, unmatched_rules: ["no-cross-service-callers:*retired*"] },
+      },
+    });
+    expect(
+      await screen.findByText(/matching nothing a member exposes, so not a pass: no-cross-service-callers:\*retired\*/),
+    ).toBeInTheDocument();
+  });
+
   it("renders the honest empty — nothing was checked — never a passing report", async () => {
     await mount({ check: { ...CLEAN_CHECK, governance: null } });
     expect(await screen.findByText(/No governance rules were in effect, so nothing was checked/)).toBeInTheDocument();

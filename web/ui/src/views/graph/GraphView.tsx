@@ -51,7 +51,14 @@ export function GraphView() {
       }
     >
       {(elements) => (
-        <GraphExplorer initial={elements} initialFocus={link.seed} initialGranularity={link.granularity} />
+        // Focus on the seed the snapshot echoes: a coordinate-less symbol seed (a
+        // link bookmarked before symbols carried their repository coordinate,
+        // FR-EX-36) is echoed in its canonical form, the id its node carries.
+        <GraphExplorer
+          initial={elements}
+          initialFocus={elements.seed ?? link.seed}
+          initialGranularity={link.granularity}
+        />
       )}
     </AsyncResource>
   );

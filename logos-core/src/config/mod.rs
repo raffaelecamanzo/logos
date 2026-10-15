@@ -39,6 +39,7 @@ mod chat;
 mod discovery;
 mod error;
 mod ownership;
+mod project;
 // `pub(crate)`: `federation::enable::candidates_for_approval` reuses
 // `globs::compile` for `--exclude` matching (FR-WS-02) rather than
 // hand-rolling a second `GlobSet` compiler.
@@ -93,6 +94,10 @@ pub use rules::{
     Boundary, Constraints, Coverage, EffectiveCoverage, EffectiveHistory, ForbiddenImport, History,
     Layer, MaxDead, MaxDeadBaseline, MetricThresholds, RequireDocumented, RequireTested, Rules,
 };
+pub use project::{
+    derive_project_id, is_valid_coordinate, normalise_remote, resolve_project_id, Project,
+};
+pub(crate) use project::resolve_project_id_confirmed;
 pub use secrets::{load_secrets_from_root, ChatSecrets, MaskedSecret, Secrets};
 /// The credential store's path relative to a config root — also the entry the
 /// managed workspace-root `.gitignore` carries for the workspace tier ([FR-WS-30]).

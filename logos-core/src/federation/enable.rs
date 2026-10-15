@@ -280,13 +280,18 @@ impl WorkingTreeFootprint {
 /// untracked entry to report. An empty step set is not vacuously fresh — it
 /// means `init` wrote nothing at all.
 ///
+/// Only **file** targets count: the `[project] id` row ([`init::PROJECT_ID_TARGET`],
+/// S-702) names a key inside `config.toml`, appended (`Updated`) even into the
+/// file this same run created, so it says nothing about whether the directory
+/// is new.
+///
 /// [CRA-07]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
 /// [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
 fn created_logos_dir(result: &InitResult) -> bool {
     let mut steps = result
         .steps
         .iter()
-        .filter(|step| step.target.starts_with(".logos/"));
+        .filter(|step| step.target.starts_with(".logos/") && step.target != init::PROJECT_ID_TARGET);
     steps.next().is_some_and(|first| {
         first.action == InitAction::Created && steps.all(|s| s.action == InitAction::Created)
     })
@@ -947,12 +952,15 @@ mod tests {
         // A second run over the same members must not duplicate the MCP entry
         // or clobber the member's own config.
         let config_path = tmp.path().join("api").join(".logos").join("config.toml");
-        fs::write(&config_path, "# hand-edited\n").unwrap();
+        // It pins its own `[project] id` (S-702), so nothing is owed to it:
+        // every byte, the id included, is the user's.
+        let hand_edited = "# hand-edited\n[project]\nid = \"pinned/api\"\n";
+        fs::write(&config_path, hand_edited).unwrap();
 
         let report = enable(tmp.path(), "shop", &members, &[]).expect("re-enables");
         assert_eq!(report.manifest.action, crate::models::pipeline::InitAction::Unchanged);
         assert_eq!(report.mcp.action, crate::models::pipeline::InitAction::Unchanged);
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), "# hand-edited\n", "never clobbered");
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), hand_edited, "never clobbered");
 
         let mcp: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(tmp.path().join(".mcp.json")).unwrap()).unwrap();

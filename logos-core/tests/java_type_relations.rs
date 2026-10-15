@@ -25,6 +25,9 @@ use logos_core::Engine;
 use logos_core::Runtime;
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 /// The four kinds this story captures and binds.
 const TYPE_RELATIONS: [EdgeKind; 4] = [
     EdgeKind::Extends,
@@ -40,6 +43,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 fn index(tmp: &TempDir) -> Engine {
+    coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.index();
     engine

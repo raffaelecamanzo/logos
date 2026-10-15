@@ -97,13 +97,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 
 use super::budget::WorkspaceBudget;
-use super::open_state::{MemberOpen, MemberOpenState, StoreFile};
+use super::open_state::{duplicate_coordinate_reason, MemberOpen, MemberOpenState, StoreFile};
 use super::{discover, Federation, Member, MANIFEST_FILENAME};
 use crate::{Engine, SharedWorkerPool, WeakWorkerPool};
 
@@ -275,8 +275,9 @@ struct Admission {
     /// that turns a start into a *re*construction.
     started_before: HashSet<String>,
     /// The outcome of each member's most recent **cold open attempt**:
-    /// `None` — it opened; `Some(diagnostic)` — it was attempted and failed
-    /// ([FR-WS-16]).
+    /// `None` — it opened; `Some(diagnostic)` — it was attempted and failed, or
+    /// was refused before any attempt for sharing an earlier member's coordinate
+    /// ([FR-WS-16], [FR-WS-39]).
     ///
     /// Keyed on the member name, so a member absent from this map was never
     /// attempted at all. That three-way split — opened / never attempted /
@@ -298,9 +299,18 @@ struct Admission {
     /// attempt.
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
     opens: BTreeMap<String, Option<String>>,
+    /// The members whose latest failed attempt was a **refusal for sharing a
+    /// coordinate** ([`EngineRegistry::engine_for`], [FR-WS-39]) rather than a
+    /// failed store open — a subset of the failures in [`opens`](Self::opens),
+    /// kept apart so the open-state readout can name the cause without
+    /// re-deriving any member's identity.
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    duplicates: HashSet<String>,
     /// The one `rayon` pool every resident member engine shares ([NFR-PE-11],
     /// [ADR-63]) — held **weakly**, because the residents own it.
     ///
@@ -349,7 +359,18 @@ impl Admission {
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     fn record_open(&mut self, member: &str, failure: Option<String>) {
+        self.duplicates.remove(member);
         self.opens.insert(member.to_string(), failure);
+    }
+
+    /// Record that `member` was refused because it shares a coordinate with an
+    /// earlier member: an attempt-and-failure like any other, with the cause
+    /// remembered ([FR-WS-39]).
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    fn record_duplicate(&mut self, member: &str, reason: String) {
+        self.record_open(member, Some(reason));
+        self.duplicates.insert(member.to_string());
     }
 }
 
@@ -478,6 +499,22 @@ pub struct EngineRegistry<E: MemberEngine = Engine> {
     /// two-statement shape rather than of anything enforced here — the comment
     /// there records the hazard.
     admission: Mutex<Admission>,
+    /// Each member's resolved repository coordinate, parallel to
+    /// [`Federation::members`], resolved **on first need** and then kept
+    /// ([FR-WS-39]).
+    ///
+    /// Lazy per member because resolving one costs a config read and a short
+    /// `git` subprocess: a one-shot that touches a single member pays for that
+    /// member and the members before it in manifest order (the only ones that
+    /// can hold its coordinate), not the whole roster unless it is the last
+    /// ([NFR-PE-10]). A
+    /// coordinate is stable for a registry's lifetime — a changed `[project] id`
+    /// is picked up by the next registry, which is what "re-open the workspace"
+    /// means.
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    coordinates: Vec<OnceLock<String>>,
     /// Engine starts that rebuilt a previously-evicted member. The cost of the
     /// budget, counted so thrash is measurable ([NFR-PE-11]).
     ///
@@ -604,6 +641,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// layer their construction policy on top of.
     fn build(federation: Federation, mode: RegistryMode, budget: WorkspaceBudget) -> Self {
         Self {
+            coordinates: federation.members.iter().map(|_| OnceLock::new()).collect(),
             federation,
             mode,
             budget,
@@ -639,21 +677,45 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [`RegistryMode::Serve`] a freshly built engine is also watched.
     ///
     /// # Errors
-    /// Returns an error if `member` is not a member of this workspace, or if the
-    /// engine fails to start.
+    /// Returns an error if `member` is not a member of this workspace, if it
+    /// resolves to the repository coordinate an earlier member already holds
+    /// ([FR-WS-39]; no engine is started), or if the engine fails to start.
     ///
     /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     pub fn engine_for(&self, member: &str) -> Result<Arc<E>> {
-        let Some(target) = self.federation.members.iter().find(|m| m.name == member) else {
+        let Some(index) = self.federation.members.iter().position(|m| m.name == member) else {
             anyhow::bail!("no such workspace member: {member:?}");
         };
+        let target = &self.federation.members[index];
 
         // The hit path: a read lock, a clone, done. It never waits on an
         // in-flight admission, so a fan-out's cold starts no longer serialise
         // unrelated requests for members that are already resident.
         if let Some(engine) = self.touch_resident(member) {
             return Ok(engine);
+        }
+
+        // A member that shares an earlier member's coordinate is refused before
+        // anything is opened ([FR-WS-39]): its symbols would be that member's, so
+        // answering from it would fold two repositories into one. Checked on the
+        // cold path only — a duplicate is never resident, so the hit path above
+        // cannot be one — and before the admission lock, because resolving an
+        // identity runs a subprocess no other member's admission should queue
+        // behind. Every all-member walk, the bridge and the coverage tier open
+        // members through here, so the exclusion is one check and not one per
+        // read-model.
+        if let Some(holder) = self.coordinate_holder(index) {
+            let first = &self.federation.members[holder];
+            let reason = duplicate_coordinate_reason(
+                self.coordinate_at(index),
+                (&first.name, &first.root),
+                (&target.name, &target.root),
+            );
+            self.start_failures.fetch_add(1, Ordering::Relaxed);
+            self.lock_admission().record_duplicate(member, reason.clone());
+            anyhow::bail!(reason);
         }
 
         // The miss path is serialised end to end so two concurrent touches of
@@ -932,7 +994,10 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
     pub fn open_states(&self) -> Vec<MemberOpen> {
-        let opens = self.lock_admission().opens.clone();
+        let (opens, duplicates) = {
+            let admission = self.lock_admission();
+            (admission.opens.clone(), admission.duplicates.clone())
+        };
         self.federation
             .members
             .iter()
@@ -941,12 +1006,54 @@ impl<E: MemberEngine> EngineRegistry<E> {
                 state: match opens.get(&member.name) {
                     None => MemberOpenState::NotAttempted,
                     Some(None) => MemberOpenState::Opened,
+                    Some(Some(reason)) if duplicates.contains(&member.name) => {
+                        MemberOpenState::duplicate_coordinate(reason)
+                    }
                     Some(Some(diagnostic)) => {
                         MemberOpenState::degraded(diagnostic, store_file(&member.root))
                     }
                 },
             })
             .collect()
+    }
+
+    /// The coordinate the member at `index` of the roster resolves to,
+    /// resolving it on first use ([`Member::coordinate`]).
+    fn coordinate_at(&self, index: usize) -> &str {
+        self.coordinates[index].get_or_init(|| self.federation.members[index].coordinate())
+    }
+
+    /// Every roster member's resolved repository coordinate, **in manifest
+    /// order** — one entry per member, so the answer is over the workspace and
+    /// not over whatever subset was touched ([FR-WS-39], [NFR-RA-06]).
+    ///
+    /// Resolves each coordinate not yet resolved (a config read and a short
+    /// `git` subprocess apiece); opens no engine and reads no store, so it keeps
+    /// `workspace status`'s resident-engine ceiling ([NFR-PE-10]).
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub fn member_coordinates(&self) -> Vec<&str> {
+        (0..self.federation.members.len())
+            .map(|index| self.coordinate_at(index))
+            .collect()
+    }
+
+    /// The roster index of the **earlier** member whose coordinate the member at
+    /// `index` shares, or `None` when it is the first to hold it ([FR-WS-39]).
+    ///
+    /// "Earlier" is manifest order, so the first member to hold a coordinate
+    /// keeps it and every later one is the duplicate. The answer is the
+    /// **earliest** match, so three clones degrade the second and the third, each
+    /// naming the first and never one another.
+    ///
+    /// Resolves only the members up to `index`.
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    fn coordinate_holder(&self, index: usize) -> Option<usize> {
+        let own = self.coordinate_at(index);
+        (0..index).find(|&earlier| self.coordinate_at(earlier) == own)
     }
 
     /// Worker threads the workspace's **shared** `rayon` pool is running right
@@ -1719,6 +1826,8 @@ mod tests {
 
     use std::cell::Cell;
     use std::path::PathBuf;
+
+    use super::super::open_state;
 
     // Per-test-thread construction spies. Each `#[test]` runs on its own thread,
     // so thread-local counters are isolated per test — no cross-test bleed — and
@@ -4064,5 +4173,212 @@ mod tests {
                  admission; the fan-out serialises unrelated requests again",
             );
         });
+    }
+
+    /// A federation whose members sit at the given `(name, root)` pairs — so two
+    /// members can share a final directory name, which is the whole of what the
+    /// coordinate a non-repository member derives is made from.
+    fn fed_rooted(members: &[(&str, &str)]) -> Federation {
+        let mut federation = fed(&[]);
+        federation.members = members
+            .iter()
+            .map(|(name, root)| Member {
+                name: (*name).to_string(),
+                root: PathBuf::from(root),
+            })
+            .collect();
+        federation
+    }
+
+    fn lazy_rooted(members: &[(&str, &str)]) -> EngineRegistry<SpyEngine> {
+        EngineRegistry::with_budget(fed_rooted(members), RegistryMode::Lazy, roomy_budget())
+    }
+
+    /// [FR-WS-39]: the later of two members resolving to one coordinate is
+    /// refused **before an engine starts**, names both checkouts and the
+    /// override, and is reported degraded with its cause; the first holder and
+    /// an unrelated member answer normally.
+    #[test]
+    fn a_member_sharing_an_earlier_coordinate_is_refused_before_it_starts() {
+        reset_spies();
+        let registry = lazy_rooted(&[
+            ("one/svc", "/ws/one/svc"),
+            ("two/svc", "/ws/two/svc"),
+            ("other", "/ws/other"),
+        ]);
+
+        registry.engine_for("one/svc").expect("the first holder answers");
+        registry.engine_for("other").expect("an unrelated member answers");
+        let err = registry
+            .engine_for("two/svc")
+            .expect_err("the duplicate is refused");
+        let message = format!("{err:#}");
+        for needle in ["/ws/one/svc", "/ws/two/svc", "\"svc\"", "[project] id"] {
+            assert!(message.contains(needle), "{needle:?} missing from: {message}");
+        }
+        assert_eq!(starts(), 2, "the duplicate never reached `Engine::start`");
+        assert_eq!(registry.resident_members(), ["one/svc", "other"]);
+        assert_eq!(registry.start_failures(), 1, "a refusal is a failed open");
+
+        let states = registry.open_states();
+        let by_member = |name: &str| states.iter().find(|open| open.member == name).unwrap();
+        assert_eq!(by_member("one/svc").state, MemberOpenState::Opened);
+        assert_eq!(by_member("other").state, MemberOpenState::Opened);
+        let value = serde_json::to_value(&by_member("two/svc").state).unwrap();
+        assert_eq!(value["open_state"], "degraded", "{value}");
+        assert_eq!(value["degraded_cause"], "duplicate-coordinate", "{value}");
+        assert_eq!(value["degraded_reason"], message.as_str(), "{value}");
+        assert!(open_state::rollup(&states).degraded_members == ["two/svc"]);
+    }
+
+    /// The exclusion is at the one place every walk opens a member, so a fan-out
+    /// reports the duplicate as an `Err` row and runs over the others — the same
+    /// as any member that will not open ([FR-WS-16], [FR-WS-39]).
+    #[test]
+    fn a_fan_out_runs_over_the_first_holder_and_reports_the_duplicate_unread() {
+        reset_spies();
+        let registry = lazy_rooted(&[("a/svc", "/ws/a/svc"), ("b/svc", "/ws/b/svc")]);
+        let answer = registry.answer();
+
+        let rows = answer.fan_out(|member, _engine| member.name.clone());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].value.as_deref().ok(), Some("a/svc"));
+        assert!(rows[1].value.is_err(), "the duplicate is an unread member");
+        let reads = answer.reads();
+        assert!(reads.read.contains("a/svc"), "{reads:?}");
+        assert!(reads.unread.contains_key("b/svc"), "{reads:?}");
+    }
+
+    /// Three clones of one remote: the second and the third degrade, each naming
+    /// the **first** as the holder, and `member_coordinates` lists all three in
+    /// manifest order.
+    #[test]
+    fn every_later_clone_names_the_first_holder() {
+        reset_spies();
+        let registry = lazy_rooted(&[
+            ("a/svc", "/ws/a/svc"),
+            ("b/svc", "/ws/b/svc"),
+            ("c/svc", "/ws/c/svc"),
+        ]);
+        assert_eq!(registry.member_coordinates(), ["svc", "svc", "svc"]);
+        for (later, other_clone) in [("b/svc", "c/svc"), ("c/svc", "b/svc")] {
+            let message = format!("{:#}", registry.engine_for(later).err().unwrap());
+            assert!(message.contains("\"a/svc\" (/ws/a/svc) already holds"), "{message}");
+            assert!(message.starts_with(&format!("workspace member \"{later}\"")), "{message}");
+            assert!(
+                !message.contains(other_clone),
+                "the third clone does not blame the second: {message}"
+            );
+        }
+        assert_eq!(starts(), 0);
+    }
+
+    /// Distinct coordinates change nothing: no member is refused, and an
+    /// identical roster of distinct names reads exactly as before.
+    #[test]
+    fn distinct_coordinates_are_not_refused() {
+        reset_spies();
+        let registry = lazy(&["a", "b", "c"]);
+        for name in ["a", "b", "c"] {
+            registry.engine_for(name).expect("distinct coordinates all open");
+        }
+        assert_eq!(registry.member_coordinates(), ["a", "b", "c"]);
+        assert_eq!(registry.start_failures(), 0);
+        assert!(open_state::rollup(&registry.open_states()).all_opened());
+    }
+
+    /// Coordinates are compared whole: an earlier `svc-fork` does not make a
+    /// later `svc` a duplicate because one is a prefix of the other.
+    #[test]
+    fn a_coordinate_that_merely_extends_another_is_not_a_duplicate() {
+        reset_spies();
+        let registry = lazy_rooted(&[("x/svc-fork", "/ws/x/svc-fork"), ("y/svc", "/ws/y/svc")]);
+        assert_eq!(registry.member_coordinates(), ["svc-fork", "svc"]);
+        registry.engine_for("x/svc-fork").expect("the first answers");
+        registry.engine_for("y/svc").expect("a prefix of another coordinate is its own");
+        assert_eq!(registry.start_failures(), 0);
+    }
+
+    /// A refused duplicate costs nothing: it must not evict a resident member to
+    /// make room for an engine that is never started ([NFR-PE-11], [FR-WS-39]).
+    #[test]
+    fn a_refused_duplicate_evicts_no_resident_member() {
+        reset_spies();
+        let budget = WorkspaceBudget::from_limits(78, 12);
+        assert_eq!(budget.max_resident_members(), 2, "the fixture must bind");
+        let registry = EngineRegistry::<SpyEngine>::with_budget(
+            fed_rooted(&[("a/svc", "/ws/a/svc"), ("b/other", "/ws/b/other"), ("c/svc", "/ws/c/svc")]),
+            RegistryMode::Lazy,
+            budget,
+        );
+        registry.engine_for("a/svc").unwrap();
+        registry.engine_for("b/other").unwrap();
+        assert_eq!(registry.resident_members(), ["a/svc", "b/other"], "the budget is full");
+
+        assert!(registry.engine_for("c/svc").is_err(), "the duplicate is refused");
+        assert_eq!(
+            registry.resident_members(),
+            ["a/svc", "b/other"],
+            "and nothing was evicted for it"
+        );
+        assert_eq!(registry.reconstructions(), 0);
+    }
+
+    /// Under serve the refusal holds the same way — on the eager warm, the
+    /// default member and a named request ([FR-WS-39]).
+    #[test]
+    fn a_serving_registry_refuses_the_duplicate_too() {
+        reset_spies();
+        let registry = EngineRegistry::<SpyEngine>::with_budget(
+            fed_rooted(&[("a/svc", "/ws/a/svc"), ("b/svc", "/ws/b/svc")]),
+            RegistryMode::Serve,
+            roomy_budget(),
+        );
+        assert_eq!(registry.resident_members(), ["a/svc"], "the warm skipped the duplicate");
+        assert_eq!(starts(), 1);
+        assert_eq!(watches(), 1, "no watcher was spawned for it");
+        assert!(registry.engine_for("b/svc").is_err());
+        let state = open_state(&registry.open_states(), "b/svc");
+        assert!(state.is_degraded(), "{state:?}");
+    }
+
+    /// The cause belongs to the member refused as a duplicate and to no other: a
+    /// member whose store failed to open in the same registry keeps its own
+    /// reading, whatever else is degraded beside it.
+    #[test]
+    fn a_failed_open_beside_a_duplicate_keeps_its_own_reading() {
+        reset_spies();
+        struct PickyEngine;
+        impl MemberEngine for PickyEngine {
+            type Watcher = ();
+            fn start(
+                root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
+                if root.ends_with("broken") {
+                    anyhow::bail!("Too many open files (os error 24)");
+                }
+                Ok(Arc::new(PickyEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+        let registry = EngineRegistry::<PickyEngine>::with_budget(
+            fed_rooted(&[("a/svc", "/ws/a/svc"), ("b/svc", "/ws/b/svc"), ("c/broken", "/ws/c/broken")]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+        for member in ["a/svc", "b/svc", "c/broken"] {
+            let _ = registry.engine_for(member);
+        }
+        let states = registry.open_states();
+        let cause = |member: &str| {
+            serde_json::to_value(open_state(&states, member)).unwrap()["degraded_cause"].clone()
+        };
+        assert_eq!(open_state(&states, "a/svc"), MemberOpenState::Opened);
+        assert_eq!(cause("b/svc"), "duplicate-coordinate");
+        assert_eq!(cause("c/broken"), "host-resource-limit", "a real open failure is not relabelled");
     }
 }

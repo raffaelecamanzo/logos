@@ -999,11 +999,20 @@ pub struct StatusInfo {
     /// project, including a project whose walk admits no file: absent is
     /// reported as absent, never as `0` (NFR-CC-04).
     pub last_full_index_at: Option<String>,
+    /// The project's identity coordinate as the store last recorded it
+    /// ([FR-CF-10], S-702): `[project] id`, else its derived default, written by
+    /// `logos init`, by every full index and by the coordinate migration on
+    /// open (S-704). Elided until one has recorded it.
+    ///
+    /// [FR-CF-10]: ../../../docs/specs/requirements/FR-CF-10.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     /// Unix-seconds timestamp of the last observed store write (file mtime;
     /// best-effort — the persisted `last_sync_at` column is a later story).
     pub last_sync_at: Option<String>,
     /// The persisted monotonic graph revision (FR-SY-09, ADR-32): advanced on
-    /// every completed `index` and every graph-mutating `sync`, `0` before the
+    /// every completed `index`, every graph-mutating `sync` and every coordinate
+    /// migration on open (S-704), `0` before the
     /// first index. The durable, cross-process "has the graph changed?" signal
     /// the native wiki tier consumes — readable by a second process opening the
     /// same `logos.db`.
@@ -1874,7 +1883,11 @@ pub struct GraphElementEdge {
 #[derive(Debug, Default, Serialize)]
 pub struct GraphElements {
     /// The seed symbol the snapshot was scoped to, echoed back; `None` for the
-    /// whole-graph snapshot.
+    /// whole-graph snapshot. A coordinate-less symbol seed that anchored under
+    /// the store's coordinate is echoed in that canonical form, the id its node
+    /// carries (S-705, [FR-EX-36]).
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
     pub seed: Option<String>,
     /// The semantic cluster-zoom tier the snapshot was taken at, echoed back
     /// (S-124, [FR-UI-15], [ADR-36]): `module`/`file`/`symbol`. Defaults to

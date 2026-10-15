@@ -407,6 +407,7 @@ pub fn run(
     registry: &LanguageRegistry,
     root: &Path,
     resolution: &Resolution,
+    ctx: &SymbolContext,
     delta: Option<&super::Delta>,
 ) -> Result<(FrameworkStats, Vec<String>)> {
     let started = Instant::now();
@@ -553,7 +554,7 @@ pub fn run(
         .sum();
 
     // Its file-local fallback reads the same signature-free graph (S-606).
-    let desired = desired_set(&scanned, &bind_nodes, &bind_edges, &files, &index, policy);
+    let desired = desired_set(ctx, &scanned, &bind_nodes, &bind_edges, &files, &index, policy);
 
     let routes = desired
         .values()
@@ -2095,8 +2096,10 @@ enum DesiredEdge {
 
 /// Assemble the desired promoted set from the scanned matches: bind handler
 /// and state-type texts through the [`binder`] (exactly-one-or-nothing,
-/// [NFR-RA-05]) and build each promoted node's canonical symbol (ADR-07).
+/// [NFR-RA-05]) and build each promoted node's canonical symbol (ADR-07) under
+/// the run's `ctx` — the store's repository coordinate (ADR-85).
 fn desired_set(
+    ctx: &SymbolContext,
     scanned: &[(i64, &str, FileMatches)],
     nodes: &[NodeRow],
     edges: &[crate::graph_store::EdgeRow],
@@ -2104,8 +2107,6 @@ fn desired_set(
     index: &binder::Index,
     policy: BindingPolicy,
 ) -> HashMap<String, DesiredNode> {
-    let ctx = SymbolContext::default();
-
     // Same-file declarations by name — the file-local binding fallback's
     // candidate index (see [`bind_text`]).
     let mut by_file_name: HashMap<(&str, &str), Vec<(NodeId, NodeKind)>> = HashMap::new();
@@ -2149,7 +2150,7 @@ fn desired_set(
                 descriptor_for(NodeKind::Module, "route", 0),
                 descriptor_for(NodeKind::Route, &name, 0),
             ];
-            let Ok(symbol) = build_symbol(&ctx, &segments, &chain) else {
+            let Ok(symbol) = build_symbol(ctx, &segments, &chain) else {
                 continue;
             };
             let mut node_edges = vec![DesiredEdge::ContainedBy(module.id)];
@@ -2222,7 +2223,7 @@ fn desired_set(
                 descriptor_for(NodeKind::Module, "component", 0),
                 descriptor_for(NodeKind::Component, &type_node.name, 0),
             ];
-            let Ok(symbol) = build_symbol(&ctx, &type_segments, &chain) else {
+            let Ok(symbol) = build_symbol(ctx, &type_segments, &chain) else {
                 continue;
             };
             let mut node_edges = vec![DesiredEdge::References(target)];

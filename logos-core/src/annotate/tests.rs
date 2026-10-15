@@ -13,6 +13,12 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::{Boundary, ForbiddenImport, Layer, Rules};
 
+/// The coordinate-less symbol context — these fixtures build their nodes by
+/// hand, so no coordinate is in force.
+fn coordinate_less() -> SymbolContext {
+    SymbolContext::default()
+}
+
 /// A live runtime over a fresh on-disk store.
 fn runtime() -> (Runtime, TempDir) {
     let dir = TempDir::new().expect("temp dir");
@@ -242,7 +248,7 @@ fn incremental_annotate_is_byte_identical_to_a_full_re_annotate() {
     seed_edge(&rt, root, dup_a, EdgeKind::Calls);
 
     // A full annotate establishes the baseline.
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let full = verdicts(&rt);
     // The baseline must actually carry a spread of verdicts to preserve.
     assert_eq!(row(&snapshot(&rt), helper).is_dead, Some(true));
@@ -252,7 +258,7 @@ fn incremental_annotate_is_byte_identical_to_a_full_re_annotate() {
 
     // An incremental re-annotate over the unchanged graph leaves every stored
     // verdict identical — the diff-write skips the no-op writes (S-024-HF).
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), true).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), true).unwrap();
     assert_eq!(
         full,
         verdicts(&rt),
@@ -270,14 +276,14 @@ fn incremental_annotate_persists_a_cross_node_verdict_flip() {
     let helper = seed_node(&rt, 1, "helper", NodeKind::Function, false, None, None);
 
     // Baseline: helper is unreferenced ⇒ dead.
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), true).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), true).unwrap();
     assert_eq!(row(&snapshot(&rt), helper).is_dead, Some(true));
 
     // Add a call from the live root to helper — helper is now reachable. An
     // incremental annotate must recompute whole-graph and write helper's flip to
     // live even though helper's own inputs did not change.
     seed_edge(&rt, root, helper, EdgeKind::Calls);
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), true).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), true).unwrap();
     assert_eq!(
         row(&snapshot(&rt), helper).is_dead,
         Some(false),
@@ -372,7 +378,7 @@ fn unreferenced_private_function_is_dead_and_exported_one_is_live() {
     );
     let public = seed_node(&rt, 2, "open_api", NodeKind::Function, true, None, None);
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -412,7 +418,7 @@ fn documentation_is_outside_the_dead_code_scope() {
     let doc = seed_node(&rt, 2, "Usage", NodeKind::DocSection, false, None, None);
     seed_edge(&rt, doc, dead, EdgeKind::DocReference);
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -439,7 +445,7 @@ fn liveness_propagates_transitively_over_calls() {
     seed_edge(&rt, api, step, EdgeKind::Calls);
     seed_edge(&rt, step, core, EdgeKind::Calls);
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, step).is_dead, Some(false), "called from the API");
@@ -455,7 +461,7 @@ fn entry_points_root_the_reachability_walk() {
     let callee = seed_node(&rt, 2, "do_work", NodeKind::Function, false, None, None);
     seed_edge(&rt, main, callee, EdgeKind::Calls);
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, main).is_dead, Some(false), "entry point is live");
@@ -470,7 +476,7 @@ fn route_nodes_root_their_handlers() {
     let handler = seed_node(&rt, 2, "list_users", NodeKind::Function, false, None, None);
     seed_edge(&rt, route, handler, EdgeKind::RoutesTo);
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -485,7 +491,7 @@ fn non_callable_kinds_keep_the_null_verdicts() {
     let (rt, _dir) = runtime();
     let strukt = seed_node(&rt, 1, "Widget", NodeKind::Struct, false, None, None);
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     let s = row(&snap, strukt);
@@ -532,7 +538,7 @@ fn non_capable_language_callable_renders_null_not_dead() {
         Some(js_file),
     );
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -571,7 +577,7 @@ fn an_empty_capability_set_renders_every_callable_null() {
     let public = seed_node(&rt, 2, "open_api", NodeKind::Function, true, None, None);
 
     let empty = std::collections::HashSet::new();
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &empty, false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &empty, &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -608,9 +614,9 @@ fn capability_gated_dead_code_is_byte_identical_across_runs() {
         Some(js_file),
     );
 
-    let first = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let first = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let v1 = verdicts(&rt);
-    let second = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let second = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let v2 = verdicts(&rt);
 
     assert_eq!(v1, v2, "a clean re-run is byte-identical (NFR-RA-06)");
@@ -649,7 +655,7 @@ fn callable_with_no_or_extensionless_path_renders_null() {
     let noext_file = seed_lang_file(&rt, "scripts/run", "shell");
     let noext = seed_node(&rt, 1, "ext_less", NodeKind::Function, false, None, Some(noext_file));
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -686,7 +692,7 @@ fn capable_live_callable_is_some_false_beside_a_null_non_capable() {
         Some(js_file),
     );
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(
@@ -737,7 +743,7 @@ fn matching_fingerprints_flag_both_duplicates_and_spare_the_distinct_one() {
         None,
     );
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, twin_a).is_duplicate, Some(true));
@@ -779,7 +785,7 @@ fn exact_duplicates_need_a_body_and_the_token_floor() {
     let decl_b = seed_body_node(&rt, 4, "perimeter", "fp-decl", Some(false), Some(0));
 
     // Default floor (50): the twins only.
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, twin_a).is_duplicate, Some(true));
     assert_eq!(row(&snap, twin_b).is_duplicate, Some(true));
@@ -793,7 +799,7 @@ fn exact_duplicates_need_a_body_and_the_token_floor() {
     assert_eq!(stats.duplicates, 2, "only the two twins count");
 
     // Floor 5: the overrides are duplicates again; the bodyless pair is not.
-    let stats = run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     for id in &overrides {
         assert_eq!(row(&snap, *id).is_duplicate, Some(true), "duplicate at floor 5");
@@ -801,7 +807,7 @@ fn exact_duplicates_need_a_body_and_the_token_floor() {
     assert_eq!(stats.duplicates, 28, "26 overrides + 2 twins; the bodyless pair stays out");
 
     // Floor 1 — the lowest a validated config allows — still spares a bodyless pair.
-    run(&rt, &rules_with_duplicate_floor(1), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &rules_with_duplicate_floor(1), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     for id in [decl_a, decl_b] {
         assert_eq!(
@@ -822,7 +828,7 @@ fn the_duplicate_floor_is_inclusive_and_probed_at_its_near_miss() {
     let under_a = seed_body_node(&rt, 3, "under_a", "fp-under", Some(true), Some(49));
     let under_b = seed_body_node(&rt, 4, "under_b", "fp-under", Some(true), Some(49));
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, at_a).is_duplicate, Some(true));
     assert_eq!(row(&snap, at_b).is_duplicate, Some(true));
@@ -840,7 +846,7 @@ fn a_recorded_bodyless_declaration_is_excluded_whatever_its_count() {
     let a = seed_body_node(&rt, 1, "area", "fp-decl", Some(false), Some(80));
     let b = seed_body_node(&rt, 2, "perimeter", "fp-decl", Some(false), Some(80));
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, a).is_duplicate, Some(false));
     assert_eq!(row(&snap, b).is_duplicate, Some(false));
@@ -856,7 +862,7 @@ fn a_null_body_fact_keeps_pre_floor_eligibility() {
     let a = seed_body_node(&rt, 1, "first", "fp-legacy", None, None);
     let b = seed_body_node(&rt, 2, "second", "fp-legacy", None, None);
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, a).has_body, None, "the fixture really is un-extracted");
     assert_eq!(
@@ -877,7 +883,7 @@ fn an_ineligible_function_does_not_pair_with_an_eligible_one() {
     let small = seed_body_node(&rt, 2, "small", "fp-shared", Some(true), Some(8));
     let declared = seed_body_node(&rt, 3, "declared", "fp-shared", Some(false), Some(0));
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let snap = snapshot(&rt);
     for id in [big, small, declared] {
         assert_eq!(row(&snap, id).is_duplicate, Some(false));
@@ -898,13 +904,13 @@ fn an_edited_floor_flips_verdicts_through_an_incremental_run() {
         (row(&snap, a).is_duplicate, row(&snap, b).is_duplicate)
     };
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     assert_eq!(dup(&rt), (Some(false), Some(false)), "12 tokens < the default 50");
 
-    run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), true).unwrap();
+    run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), &coordinate_less(), true).unwrap();
     assert_eq!(dup(&rt), (Some(true), Some(true)), "an incremental run honours the lowered floor");
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), true).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), true).unwrap();
     assert_eq!(dup(&rt), (Some(false), Some(false)), "and flips back when the floor is restored");
 }
 
@@ -927,7 +933,7 @@ fn the_duplicate_floor_leaves_near_clone_groups_byte_identical() {
         seed_shingles(&rt, c, &shingle_set(900, 20));
         seed_shingles(&rt, d, &shingle_set(300, 5));
         seed_shingles(&rt, e, &shingle_set(300, 5));
-        let stats = run(&rt, &rules_with_duplicate_floor(floor), &entries(), &markers(), &reach(), false).unwrap();
+        let stats = run(&rt, &rules_with_duplicate_floor(floor), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
         let rows: Vec<(NodeId, Option<NodeId>)> = snapshot(&rt)
             .iter()
             .map(|n| (n.id, n.clone_group))
@@ -962,7 +968,7 @@ fn near_clones_group_and_an_unrelated_function_does_not() {
     seed_shingles(&rt, clone_b, &b);
     seed_shingles(&rt, unrelated, &shingle_set(900, 20)); // disjoint
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     let group = row(&snap, clone_a).clone_group;
@@ -1005,7 +1011,7 @@ fn annotation_pass_uses_the_configured_clone_thresholds() {
     let b0 = seed_node(&rt_default, 2, "tally", NodeKind::Function, false, None, None);
     seed_shingles(&rt_default, a0, &short);
     seed_shingles(&rt_default, b0, &short);
-    let default_stats = run(&rt_default, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let default_stats = run(&rt_default, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     assert_eq!(
         default_stats.clone_groups, 0,
         "5 shingles < the default floor of 11 → no group under Rules::default()"
@@ -1026,7 +1032,7 @@ fn annotation_pass_uses_the_configured_clone_thresholds() {
         },
         ..Default::default()
     };
-    let tuned_stats = run(&rt_tuned, &tuned_rules, &entries(), &markers(), &reach(), false).unwrap();
+    let tuned_stats = run(&rt_tuned, &tuned_rules, &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     assert_eq!(
         tuned_stats.clone_groups, 1,
         "clone_min_tokens = 1 makes the short pair eligible → one group"
@@ -1049,13 +1055,13 @@ fn near_clone_clustering_is_deterministic_and_idempotent() {
     seed_shingles(&rt, a, &set);
     seed_shingles(&rt, b, &set);
 
-    let first = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let first = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let groups_first: Vec<(NodeId, Option<NodeId>)> = snapshot(&rt)
         .iter()
         .map(|n| (n.id, n.clone_group))
         .collect();
 
-    let second = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let second = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let groups_second: Vec<(NodeId, Option<NodeId>)> = snapshot(&rt)
         .iter()
         .map(|n| (n.id, n.clone_group))
@@ -1120,7 +1126,7 @@ fn near_clone_pass_leaves_exact_duplicate_verdicts_untouched() {
     seed_shingles(&rt, near_a, &set);
     seed_shingles(&rt, near_b, &set);
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     // The near clones group …
@@ -1178,7 +1184,7 @@ fn layered_rules_materialise_policy_nodes_and_flag_the_violation() {
     seed_edge(&rt, domain_fn, ui_fn, EdgeKind::Calls); // forbidden: domain -> presentation
     seed_edge(&rt, ui_caller, domain_fn, EdgeKind::Calls); // allowed: presentation -> domain
 
-    let stats = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     // Layer membership lands on the nodes (FR-AN-04 native columns).
     let snap = snapshot(&rt);
@@ -1226,7 +1232,7 @@ fn no_rules_means_no_policy_artifacts_and_null_layers() {
     let file = seed_file(&rt, "src/lib.rs");
     let f = seed_node(&rt, 1, "f", NodeKind::Function, true, None, Some(file));
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert_eq!(row(&snap, f).layer_membership, None);
@@ -1264,8 +1270,8 @@ fn rerunning_the_pass_is_idempotent() {
     );
     seed_edge(&rt, domain_fn, ui_fn, EdgeKind::Calls);
 
-    let first = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), false).unwrap();
-    let second = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), false).unwrap();
+    let first = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
+    let second = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     // Same counts both runs: cleared-then-rematerialised, never accumulated.
     assert_eq!(first.layer_nodes, second.layer_nodes);
@@ -1312,10 +1318,10 @@ fn rules_flip_reannotates_honestly() {
     );
     seed_edge(&rt, domain_fn, ui_fn, EdgeKind::Calls);
 
-    run(&rt, &layered_rules(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &layered_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     // The architect deletes every rule: the policy graph must vanish and the
     // memberships clear — annotations never outlive the contract they came from.
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert!(snap.iter().all(|n| !n.derived), "policy nodes cleared");
@@ -1337,14 +1343,28 @@ fn rules_flip_reannotates_honestly() {
 fn policy_symbols_survive_arbitrary_layer_names() {
     // A layer name full of SCIP-hostile characters must still assemble into a
     // valid canonical symbol (escape_name backtick-wraps it).
-    let sym = policy_symbol("layer", &["my layer (v2)!"]).expect("escaped symbol parses");
-    assert!(sym.as_str().starts_with("logos policy rules . layer/"));
+    let sym = policy_symbol(&coordinate_less(), "layer", &["my layer (v2)!"])
+        .expect("escaped symbol parses");
+    assert_eq!(sym.as_str(), "logos policy . . layer/`my layer (v2)!`/");
 
-    let plain = policy_symbol("boundary", &["domain", "presentation"]).unwrap();
-    assert_eq!(
-        plain.as_str(),
-        "logos policy rules . boundary/domain/presentation/"
-    );
+    let plain = policy_symbol(&coordinate_less(), "boundary", &["domain", "presentation"]).unwrap();
+    assert_eq!(plain.as_str(), "logos policy . . boundary/domain/presentation/");
+}
+
+#[test]
+fn a_policy_symbol_carries_the_repository_coordinate() {
+    // ADR-85 / S-703: the package slot holds the coordinate, as an extracted
+    // symbol's does; the `policy` manager keeps the two namespaces apart.
+    let ctx = SymbolContext::for_coordinate(Some("github.com/acme/svc-a"));
+    let layer = policy_symbol(&ctx, "layer", &["domain"]).unwrap();
+    assert_eq!(layer.as_str(), "logos policy github.com/acme/svc-a . layer/domain/");
+    assert_eq!(layer.coordinate(), Some("github.com/acme/svc-a"));
+    assert_eq!(layer.descriptor_tail(), Some("layer/domain/"));
+
+    // Two repositories' `domain` layers are two symbols.
+    let other = policy_symbol(&SymbolContext::for_coordinate(Some("github.com/acme/svc-b")), "layer", &["domain"])
+        .unwrap();
+    assert_ne!(layer, other);
 }
 
 // ── FR-GV-12 / CR-002: [[forbidden_imports]] edge materialisation ────────────
@@ -1392,7 +1412,7 @@ fn forbidden_import_materialises_one_derived_edge() {
     seed_edge(&rt, web_fn, util_fn, EdgeKind::Imports);
     seed_edge(&rt, web_fn, db_fn, EdgeKind::Calls);
 
-    let stats = run(&rt, &forbidden_import_rules(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &forbidden_import_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let forbidden: Vec<_> = rt
         .submit_read(|s| s.all_edges())
@@ -1440,8 +1460,8 @@ fn forbidden_import_materialisation_is_idempotent() {
     );
     seed_edge(&rt, web_fn, db_fn, EdgeKind::Imports);
 
-    let first = run(&rt, &forbidden_import_rules(), &entries(), &markers(), &reach(), false).unwrap();
-    let second = run(&rt, &forbidden_import_rules(), &entries(), &markers(), &reach(), false).unwrap();
+    let first = run(&rt, &forbidden_import_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
+    let second = run(&rt, &forbidden_import_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     assert_eq!(first.forbidden_edges, second.forbidden_edges);
 
     let count = |rt: &Runtime| {
@@ -1453,7 +1473,7 @@ fn forbidden_import_materialisation_is_idempotent() {
     };
     assert_eq!(count(&rt), 1, "no duplicate derived edges on re-run");
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     assert_eq!(count(&rt), 0, "forbidden-import edge cleared with the rule");
 }
 
@@ -1505,7 +1525,7 @@ fn is_test_set_by_evidence_path_or_marker_but_not_production_caller() {
     );
     seed_edge(&rt, prod_caller, marker_fn, EdgeKind::Calls);
 
-    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert!(
@@ -1556,7 +1576,7 @@ fn unreferenced_test_is_a_live_root_never_dead() {
         Some(prod_file),
     );
 
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
     assert!(row(&snap, orphan_test).is_test);
@@ -1680,8 +1700,8 @@ fn is_test_recomputation_is_idempotent() {
         None,
         Some(tests_file),
     );
-    let first = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
-    let second = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let first = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
+    let second = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     assert_eq!(first.tests, second.tests, "test count stable across runs");
     assert!(row(&snapshot(&rt), t).is_test);
 }
@@ -1758,7 +1778,7 @@ fn annotation_is_byte_identical_across_worker_counts() {
 
     let (baseline_rt, _b) = runtime_with_workers(1);
     seed_annotate_fixture(&baseline_rt);
-    run(&baseline_rt, &rules, &entries(), &markers(), &reach(), false).unwrap();
+    run(&baseline_rt, &rules, &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let baseline = verdicts(&baseline_rt);
 
     // The baseline must carry the full verdict spread, or the equivalence check
@@ -1777,7 +1797,7 @@ fn annotation_is_byte_identical_across_worker_counts() {
     for workers in [2, 4, 8] {
         let (rt, _d) = runtime_with_workers(workers);
         seed_annotate_fixture(&rt);
-        run(&rt, &rules, &entries(), &markers(), &reach(), false).unwrap();
+        run(&rt, &rules, &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
         assert_eq!(
             baseline,
             verdicts(&rt),
@@ -1794,10 +1814,10 @@ fn annotation_is_byte_identical_across_worker_counts() {
 fn annotation_is_stable_under_repeated_multiworker_runs() {
     let (rt, _d) = runtime_with_workers(8);
     seed_annotate_fixture(&rt);
-    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
     let first = verdicts(&rt);
     for run_ix in 0..30 {
-        run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+        run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
         assert_eq!(first, verdicts(&rt), "verdicts drifted on repeat run {run_ix}");
     }
 }

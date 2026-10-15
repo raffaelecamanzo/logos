@@ -499,10 +499,14 @@ impl TypeReferenceIndex {
         self.references.iter().filter(move |r| r.fqn == fqn)
     }
 
-    /// Every bound reference whose owner is `symbol` in `member`. The
-    /// cross-member `callers`/`impact` stitch matches the same owner pair, and
-    /// the dotted name [`importers`](Self::importers) answers, in one pass over
-    /// [`references`](Self::references) (`federation::query`).
+    /// Every bound reference whose owner is exactly `symbol` in `member`. The
+    /// cross-member `callers`/`impact` stitch (`federation::query`) matches the
+    /// same owner pair, and the dotted name [`importers`](Self::importers)
+    /// answers, in one pass over [`references`](Self::references) — and there
+    /// also lets a symbol written without a coordinate reach the owner's node
+    /// under its own coordinate ([FR-EX-36]), which this exact lookup does not.
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
     pub fn references_to<'a>(
         &'a self,
         member: &'a str,

@@ -29,10 +29,13 @@
 //!
 //! # Identity: a topic is repo-scoped, a producer/consumer is site-scoped
 //! A [`Topic`](NodeKind::Topic) is the *shared* identity two sides meet on, so its
-//! symbol carries **no file path** (`logos . . . topic/orders#`): two files
-//! publishing `orders` share one topic node, which is precisely what makes a
+//! symbol carries **no file path** (`logos . <coordinate> . topic/orders#`): two
+//! files publishing `orders` share one topic node, which is precisely what makes a
 //! per-repo topic graph visible *before* any cross-repo match exists
-//! ([FR-WS-11], [ADR-55]). It is also the only promoted node with no `file_id` —
+//! ([FR-WS-11], [ADR-55]). The repository coordinate in its package slot
+//! ([ADR-85]) keeps it per-repository: two repositories' `orders` topics are two
+//! nodes, which the workspace bridge joins on the topic name, never by an equal
+//! symbol. It is also the only promoted node with no `file_id` —
 //! a topic is not declared at a line, and anchoring it to an arbitrary one of its
 //! call sites would fabricate a location.
 //!
@@ -84,6 +87,7 @@
 //! [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 //! [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
 //! [ADR-55]: ../../../docs/specs/architecture/decisions/ADR-55.md
+//! [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 //! [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
@@ -128,7 +132,11 @@ const PROMOTED: [NodeKind; 3] = [NodeKind::Topic, NodeKind::Producer, NodeKind::
 /// rolls back wholesale, [NFR-RA-07]).
 ///
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
-pub fn run(runtime: &Runtime) -> Result<TopicStats> {
+/// `ctx` is the store's repository coordinate ([ADR-85]): every topic symbol is
+/// built under it.
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+pub fn run(runtime: &Runtime, ctx: &SymbolContext) -> Result<TopicStats> {
     let started = Instant::now();
 
     // The no-topic fast path (see the module docs): a graph with no broker footprint
@@ -165,7 +173,7 @@ pub fn run(runtime: &Runtime) -> Result<TopicStats> {
     let file_id_by_path: HashMap<&str, i64> =
         files.iter().map(|f| (f.path.as_str(), f.id)).collect();
     let corpus = member_corpus(runtime, &refs)?;
-    let desired = desired_set(&refs, &nodes, &file_id_by_path, &corpus);
+    let desired = desired_set(ctx, &refs, &nodes, &file_id_by_path, &corpus);
 
     // Belt and braces behind the footprint probe: a ledger that carries a broker row
     // whose enclosing declaration is unknown (so it promotes nothing) leaves an empty
@@ -419,8 +427,11 @@ fn broker_refs<'a>(
         .collect()
 }
 
-/// The repo-scoped symbol of a topic: no path segments, so every member of the
-/// repo that names `key` meets on **one** node ([FR-WS-11]).
+/// The repo-scoped symbol of a topic: no path segments, so every file of the
+/// repo that names `key` meets on **one** node ([FR-WS-11]), and the repository
+/// coordinate in `ctx`, so no other repository's `key` does ([ADR-85]).
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
 fn topic_symbol(ctx: &SymbolContext, key: &str) -> Result<LogosSymbol> {
     crate::extract::symbol::build_symbol(
         ctx,
@@ -481,12 +492,12 @@ fn site_symbol(enclosing: &LogosSymbol, kind: NodeKind, key: &str) -> Result<Log
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 fn desired_set(
+    ctx: &SymbolContext,
     refs: &[UnresolvedRefRow],
     nodes: &[NodeRow],
     file_id_by_path: &HashMap<&str, i64>,
     corpus: &dyn ConfigLookup,
 ) -> BTreeMap<String, DesiredNode> {
-    let ctx = SymbolContext::default();
     let node_by_symbol: HashMap<&str, &NodeRow> =
         nodes.iter().map(|n| (n.symbol.as_str(), n)).collect();
 
@@ -494,7 +505,7 @@ fn desired_set(
 
     for r in broker_refs(refs, &node_by_symbol, corpus) {
         let topic_key = r.topic.as_str();
-        let Ok(topic) = topic_symbol(&ctx, topic_key) else {
+        let Ok(topic) = topic_symbol(ctx, topic_key) else {
             continue; // a key that cannot be encoded as a symbol is refused, not coerced
         };
         let Ok(site) = site_symbol(&r.enclosing.symbol, r.kind, topic_key) else {

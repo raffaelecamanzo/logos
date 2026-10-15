@@ -385,6 +385,11 @@ function GovernanceFindings({
               Rules name members this workspace does not have: {report.unknown_member_refs.join(", ")}.
             </p>
           )}
+          {report.unmatched_rules && report.unmatched_rules.length > 0 && (
+            <p className={styles.inherited}>
+              Rules matching nothing a member exposes, so not a pass: {report.unmatched_rules.join(", ")}.
+            </p>
+          )}
           {report.violations.length > 0 && (
             <DataTable
               caption="Workspace governance findings"

@@ -31,6 +31,9 @@ use tempfile::TempDir;
 
 use logos_core::{Engine, Runtime};
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 /// Write `contents` to `<root>/<rel>`, creating parent directories.
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -448,6 +451,7 @@ fn incremental_sync_converges_byte_identically_with_a_fresh_index() {
     let root_a = &tmp_a.path().canonicalize().expect("canonicalize root A");
     write(root_a, "src/lib.rs", "pub fn alpha() {\n    crate::util::run();\n}\n");
     write(root_a, "src/util.rs", "pub fn run() {}\n");
+    coordinate::pin(root_a);
     let engine_a = Engine::start(root_a).expect("engine A starts");
     let rt_a = engine_a.runtime().expect("runtime A");
     engine_a.index();
@@ -473,6 +477,7 @@ fn incremental_sync_converges_byte_identically_with_a_fresh_index() {
     let tmp_b = TempDir::new().expect("temp root B");
     let root_b = &tmp_b.path().canonicalize().expect("canonicalize root B");
     build_tree(root_b);
+    coordinate::pin(root_b);
     let engine_b = Engine::start(root_b).expect("engine B starts");
     let rt_b = engine_b.runtime().expect("runtime B");
     engine_b.index();

@@ -157,6 +157,22 @@ and leaves existing content untouched.
 **Bare (`logos init`)** — creates `.logos/` and `logos.db`; the same implicit
 bootstrap that `logos index` performs.
 
+**Project identity.** Every form also writes `[project] id` into
+`.logos/config.toml` when the key is absent. The value is the repository's
+derived coordinate: the normalised `origin` remote, else the main worktree's
+directory name ([`[project] id`](configuration.md#project-id--the-repositorys-identity)).
+A present id is never rewritten, and a re-run leaves the file byte-identical. The
+step reports on its own row, `.logos/config.toml [project] id`:
+
+- `Updated` with the value it wrote;
+- `Unchanged` when the key was already there;
+- `Skipped` with the reason when the file is not valid TOML, holds `project` in a
+  shape `init` cannot extend, or holds an invalid id.
+
+When `.logos/config.toml` is git-ignored, the row adds that the id will not
+travel and names the default other checkouts derive. `init` then records the
+coordinate in the store, where `status` reads it.
+
 **Interactive (`-i`)** — additionally writes starter policy templates
 (`config.toml`, `rules.toml`), a managed `.logos/.gitignore` block, a
 `logos` entry in the project's `.mcp.json`, a managed usage block in
@@ -446,10 +462,19 @@ Index health: file/node/edge counts, store size, unresolved-reference ledger,
 resolution coverage (both the single global figure and `resolution_by_language`,
 see below), last index/sync timestamps, a persisted monotonic
 `graph_revision` (a counter bumped once per `index`/`sync` that actually
-changes the graph — a no-op `sync` leaves it untouched; consumers can compare
+changes the graph, and once when opening a store migrates it to the repository
+coordinate — a no-op `sync` leaves it untouched; consumers can compare
 it across processes to detect a stale cache), and the freshness posture
 (navigation serves the latest committed snapshot; it never reconciles per
 call).
+
+`project_id` is the repository's identity coordinate
+([`[project] id`](configuration.md#project-id--the-repositorys-identity)): the
+configured key, else its derived default. It is recorded by `logos init`, by
+every full `logos index` and by the migration that moves an existing store to
+the coordinate when it is opened
+([configuration.md](configuration.md#project-id--the-repositorys-identity)),
+and omitted until one of them has run.
 
 While any file's facts could not be persisted, `status` (and `scan`) carry a
 `persistence` object — `failed_to_persist`, the count, and `stale_files`, those
@@ -643,6 +668,27 @@ a fresh `index` of the same tree, on the CLI, `--json`, MCP and HTTP alike.
 >
 > **Caveat:** a row counts edges *leaving* its language. An inbound answer whose
 > callers live in another language carries only its anchor's row.
+
+> **A symbol written before symbols named their repository still resolves.**
+> Every symbol carries its repository's coordinate in the package slot
+> (`logos . github.com/acme/payments . src/`lib.rs`/run().`; see
+> [project identity](configuration.md#project-id--the-repositorys-identity)). A
+> symbol argument whose package slot is empty — `logos . . . src/`lib.rs`/run().`,
+> from a script, a bookmark or an older answer — is resolved under the coordinate
+> this store's symbols carry, and the answer says so in one line in `warnings`:
+>
+> ```text
+> "logos . . . src/`lib.rs`/run()." carries no repository coordinate; resolved as "logos . github.com/acme/payments . src/`lib.rs`/run().", the form this store holds
+> ```
+>
+> Every tool that takes a symbol does this: `node`, `callers`, `callees`,
+> `impact`, `explore`, `precedent`, `impact-intersection`, `implements`,
+> `referencing-docs`, the web graph's `?seed=`, and in a workspace `xservice
+> callers` and `xservice impact`, where each member resolves it under its own
+> coordinate and the cross-service rows follow. A symbol in the canonical
+> form answers exactly as before, with no note. A symbol naming another
+> repository's coordinate is never rewritten: it resolves as unknown, with
+> suggestions. Pass the canonical form to drop the note.
 
 
 ### `search`
@@ -1398,9 +1444,9 @@ nor counted yet.
     "providers": [ { "member": "lib", "types": [ {
         "fqn": "com.acme.lib.Dto",
         "owner": { "member": "lib", "origin": "source", "declared_in": "src/main/java/com/acme/lib/Dto.java",
-                   "symbol": "logos . . . src/main/java/com/acme/lib/`Dto.java`/Dto#", "kind": "class" },
+                   "symbol": "logos . example.com/lib . src/main/java/com/acme/lib/`Dto.java`/Dto#", "kind": "class" },
         "importers": [ { "member": "app", "file": "src/main/java/com/acme/app/App.java", "line": 3,
-                         "symbol": "logos . . . src/main/java/com/acme/app/`App.java`/",
+                         "symbol": "logos . example.com/app . src/main/java/com/acme/app/`App.java`/",
                          "naming": "exact", "form": "import", "evidence": { "via": "build" } } ] } ] } ] }
   ```
 
@@ -1555,6 +1601,58 @@ Per-member freshness (each member's index/sync state, including the durable
 is bucketed separately (`no-provider-in-workspace` never depresses
 `spec_conformance_ratio`) and never feeds any member's quality gate
 ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
+
+##### Each member's coordinate, and the duplicate it refuses
+
+Every member row carries `coordinate`: the repository coordinate the member
+resolves to, which is the package slot of every symbol its graph holds (its
+[`[project] id`](configuration.md#project-id--the-repositorys-identity), else
+the identity derived from its `origin` remote). It is present on every row, a
+degraded one included, in human and `--json` output and in
+`GET /api/v1/workspace/status`; all three print the one read-model, so they
+cannot disagree.
+
+```jsonc
+// logos workspace status --json
+"members": [
+  { "member": "orders-a", "coordinate": "github.com/acme/orders", "open_state": "opened", … },
+  { "member": "billing",  "coordinate": "github.com/acme/billing", "open_state": "opened", … }
+]
+```
+
+Two members that resolve to **one** coordinate — two clones of one remote, or a
+copied checkout — would hold the same symbols byte for byte, so the workspace
+never folds them. The **later** member in manifest order is reported
+`open_state: "degraded"` with `degraded_cause: "duplicate-coordinate"`; its
+`degraded_reason` names both checkouts and the override:
+
+```text
+workspace member "orders-b" (/ws/orders-b) resolves to repository coordinate
+"github.com/acme/orders", which member "orders-a" (/ws/orders-a) already holds, so
+it is excluded rather than folded into it. Set a distinct `[project] id` in
+/ws/orders-b/.logos/config.toml, then re-open the workspace
+```
+
+The first member keeps answering. The duplicate is excluded from every
+fan-out, from the bridge and from the coverage figures exactly as a
+member that cannot be opened is (`workspace telemetry` reads each member's
+`telemetry.db` without opening an engine and still sums its usage): it is named in `degraded_rollup`, the figures
+carry `covers_all_members: false`, and the command exits 1
+(see the exit code below). Three clones degrade the second and the
+third, each naming the first. Setting a distinct `[project] id` in the later
+member's `.logos/config.toml` and re-running the command clears the
+degradation: opening that member migrates its store to the new coordinate in
+place (see *Opening a store moves it to the coordinate in force* in
+`configuration.md`), so no re-index is needed. A
+workspace whose members all resolve distinct coordinates is otherwise
+unchanged: the only difference in its output is the added `coordinate` field.
+
+A member with no `origin` remote takes its directory name as its coordinate, so
+two remote-less repositories that share a directory name (`a/api` and `b/api`)
+resolve one coordinate as well, and the later is degraded the same way: the
+remedy is the same `[project] id`. A malformed `[project] id` fails the member's
+config load (exit 2 naming `project.id`) and the member then takes the derived
+identity in this roster, so fix the id before relying on the override.
 
 ##### `exclusion` — what `[workspace] exclude` left out
 
@@ -2194,6 +2292,10 @@ failures — a recorded one and a live one — on the same row.
 - `store-obstructed` — something that is not a regular file occupies the
   member's `.logos/logos.db` path (a directory, a socket, a dangling symlink).
   Clear that path, *then* run `logos index` in that member.
+- `duplicate-coordinate` — the member resolves to the
+  [repository coordinate](#each-members-coordinate-and-the-duplicate-it-refuses)
+  an earlier member already holds. Its store is intact, so **a re-index is not
+  the remedy**; give the later checkout a distinct `[project] id`.
 
 `degraded_cause` is **absent** when the diagnostic identifies no cause, and
 `degraded_reason` is then the verbatim engine diagnostic. Notably, a failure whose
@@ -2329,8 +2431,38 @@ it is a separate family from the per-repo rules ([`check`](#check---rules-file--
 alters any member's per-repo quality gate, and a governance violation **never
 moves the exit code** — it is *reported*, not *gated*. With no `[governance]`
 rules declared, there is no output at all (`null` under `--json`) — an honest
-empty, never a fabricated passing report. Rule targets match by glob on symbol,
-with an optional member scope.
+empty, never a fabricated passing report.
+
+A `[[governance.no_cross_service_callers]]` rule's `symbol` glob matches the
+provider symbol's **descriptor tail** — its path and scope, without the
+repository coordinate — and the optional `member` scope names the repository:
+
+```toml
+[[governance.no_cross_service_callers]]
+member = "orders"
+symbol = "src/`routes.ts`/legacy*"
+reason = "deprecated in v3"
+```
+
+A glob written against the whole symbol before symbols carried a coordinate
+(`logos . . . src/`routes.ts`/legacy*`) keeps matching the same bindings: it is
+also matched against the symbol's coordinate-less form. A glob written as a
+path, which matched nothing before because the whole symbol began with `logos`,
+now matches by its tail and can report violations. A glob that spells a
+coordinate (`logos . github.com/acme/orders . …`) matches neither; use `member`.
+
+A glob that matches **no provider in its scope** — no endpoint any member in the
+rule's `member` scope (every member when unscoped) exposes to a cross-service
+caller, called or not — can never fire, so it is never read as a pass. It is
+listed under `unmatched_rules` (absent when every rule matched), and stderr
+names it:
+
+```text
+1 workspace rule(s) matched no provider in scope and were not counted as passing: no-cross-service-callers:*retired*
+```
+
+A glob that matches a provider nobody calls is the rule holding, and is not
+listed. Like a violation, an unmatched rule does not move the exit code.
 
 An **unopenable member** does exit 1, here as for every `workspace` subcommand
 (see [`workspace status`](#workspace-status)): that is the answer being

@@ -36,7 +36,7 @@
   },
   "symbols": [
     {
-      "symbol": "logos . . . src/`callee.rs`/",
+      "symbol": "logos . example.com/fixture . src/`callee.rs`/",
       "kind": "Module",
       "name": "callee",
       "file": "src/callee.rs",
@@ -44,7 +44,7 @@
       "end_line": 11
     },
     {
-      "symbol": "logos . . . src/`callee.rs`/helper().",
+      "symbol": "logos . example.com/fixture . src/`callee.rs`/helper().",
       "kind": "Function",
       "name": "helper",
       "file": "src/callee.rs",
@@ -52,7 +52,7 @@
       "end_line": 7
     },
     {
-      "symbol": "logos . . . src/`callee.rs`/target().",
+      "symbol": "logos . example.com/fixture . src/`callee.rs`/target().",
       "kind": "Function",
       "name": "target",
       "file": "src/callee.rs",
@@ -60,7 +60,7 @@
       "end_line": 3
     },
     {
-      "symbol": "logos . . . src/`callee.rs`/unused().",
+      "symbol": "logos . example.com/fixture . src/`callee.rs`/unused().",
       "kind": "Function",
       "name": "unused",
       "file": "src/callee.rs",
@@ -68,7 +68,7 @@
       "end_line": 11
     },
     {
-      "symbol": "logos . . . src/`caller.rs`/",
+      "symbol": "logos . example.com/fixture . src/`caller.rs`/",
       "kind": "Module",
       "name": "caller",
       "file": "src/caller.rs",
@@ -76,7 +76,7 @@
       "end_line": 5
     },
     {
-      "symbol": "logos . . . src/`caller.rs`/caller().",
+      "symbol": "logos . example.com/fixture . src/`caller.rs`/caller().",
       "kind": "Function",
       "name": "caller",
       "file": "src/caller.rs",
@@ -84,7 +84,7 @@
       "end_line": 5
     },
     {
-      "symbol": "logos . . . src/`lib.rs`/",
+      "symbol": "logos . example.com/fixture . src/`lib.rs`/",
       "kind": "Module",
       "name": "crate",
       "file": "src/lib.rs",
@@ -92,7 +92,7 @@
       "end_line": 3
     },
     {
-      "symbol": "logos . . . src/`lib.rs`/callee/",
+      "symbol": "logos . example.com/fixture . src/`lib.rs`/callee/",
       "kind": "Module",
       "name": "callee",
       "file": "src/lib.rs",
@@ -100,7 +100,7 @@
       "end_line": 2
     },
     {
-      "symbol": "logos . . . src/`lib.rs`/caller/",
+      "symbol": "logos . example.com/fixture . src/`lib.rs`/caller/",
       "kind": "Module",
       "name": "caller",
       "file": "src/lib.rs",
@@ -108,7 +108,7 @@
       "end_line": 1
     },
     {
-      "symbol": "logos . . . src/`lib.rs`/twin/",
+      "symbol": "logos . example.com/fixture . src/`lib.rs`/twin/",
       "kind": "Module",
       "name": "twin",
       "file": "src/lib.rs",
@@ -116,7 +116,7 @@
       "end_line": 3
     },
     {
-      "symbol": "logos . . . src/`twin.rs`/",
+      "symbol": "logos . example.com/fixture . src/`twin.rs`/",
       "kind": "Module",
       "name": "twin",
       "file": "src/twin.rs",
@@ -124,7 +124,7 @@
       "end_line": 3
     },
     {
-      "symbol": "logos . . . src/`twin.rs`/target().",
+      "symbol": "logos . example.com/fixture . src/`twin.rs`/target().",
       "kind": "Function",
       "name": "target",
       "file": "src/twin.rs",
@@ -134,63 +134,63 @@
   ],
   "edges": [
     {
-      "source": "logos . . . src/`callee.rs`/",
-      "target": "logos . . . src/`callee.rs`/helper().",
+      "source": "logos . example.com/fixture . src/`callee.rs`/",
+      "target": "logos . example.com/fixture . src/`callee.rs`/helper().",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`callee.rs`/",
-      "target": "logos . . . src/`callee.rs`/target().",
+      "source": "logos . example.com/fixture . src/`callee.rs`/",
+      "target": "logos . example.com/fixture . src/`callee.rs`/target().",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`callee.rs`/",
-      "target": "logos . . . src/`callee.rs`/unused().",
+      "source": "logos . example.com/fixture . src/`callee.rs`/",
+      "target": "logos . example.com/fixture . src/`callee.rs`/unused().",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`callee.rs`/target().",
-      "target": "logos . . . src/`callee.rs`/helper().",
+      "source": "logos . example.com/fixture . src/`callee.rs`/target().",
+      "target": "logos . example.com/fixture . src/`callee.rs`/helper().",
       "kind": "Calls"
     },
     {
-      "source": "logos . . . src/`caller.rs`/",
-      "target": "logos . . . src/`callee.rs`/target().",
+      "source": "logos . example.com/fixture . src/`caller.rs`/",
+      "target": "logos . example.com/fixture . src/`callee.rs`/target().",
       "kind": "Imports"
     },
     {
-      "source": "logos . . . src/`caller.rs`/",
-      "target": "logos . . . src/`caller.rs`/caller().",
+      "source": "logos . example.com/fixture . src/`caller.rs`/",
+      "target": "logos . example.com/fixture . src/`caller.rs`/caller().",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`caller.rs`/caller().",
-      "target": "logos . . . src/`callee.rs`/target().",
+      "source": "logos . example.com/fixture . src/`caller.rs`/caller().",
+      "target": "logos . example.com/fixture . src/`callee.rs`/target().",
       "kind": "Calls"
     },
     {
-      "source": "logos . . . src/`caller.rs`/caller().",
-      "target": "logos . . . src/`twin.rs`/target().",
+      "source": "logos . example.com/fixture . src/`caller.rs`/caller().",
+      "target": "logos . example.com/fixture . src/`twin.rs`/target().",
       "kind": "Calls"
     },
     {
-      "source": "logos . . . src/`lib.rs`/",
-      "target": "logos . . . src/`lib.rs`/callee/",
+      "source": "logos . example.com/fixture . src/`lib.rs`/",
+      "target": "logos . example.com/fixture . src/`lib.rs`/callee/",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`lib.rs`/",
-      "target": "logos . . . src/`lib.rs`/caller/",
+      "source": "logos . example.com/fixture . src/`lib.rs`/",
+      "target": "logos . example.com/fixture . src/`lib.rs`/caller/",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`lib.rs`/",
-      "target": "logos . . . src/`lib.rs`/twin/",
+      "source": "logos . example.com/fixture . src/`lib.rs`/",
+      "target": "logos . example.com/fixture . src/`lib.rs`/twin/",
       "kind": "Contains"
     },
     {
-      "source": "logos . . . src/`twin.rs`/",
-      "target": "logos . . . src/`twin.rs`/target().",
+      "source": "logos . example.com/fixture . src/`twin.rs`/",
+      "target": "logos . example.com/fixture . src/`twin.rs`/target().",
       "kind": "Contains"
     }
   ]

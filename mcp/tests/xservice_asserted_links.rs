@@ -16,15 +16,15 @@ use serde_json::{Map, Value};
 
 #[path = "support/federated.rs"]
 mod federated;
-use federated::{boot, call, index_member, member, registry_with_links, write};
+use federated::{boot, call, index_member, member, member_symbol, registry_with_links, write};
 
 const WEB_LIB: &str = "use reqwest::Client;\n\npub async fn fetch_cart(client: Client, url: String) {\n    \
                        let _ = client.get(url).await;\n}\n";
 
 const API_LIB: &str = "async fn get_cart() {\n    load_cart();\n}\n\nfn load_cart() {}\n";
 
-fn symbol(name: &str) -> String {
-    format!("logos . . . src/`lib.rs`/{name}().")
+fn symbol(member: &str, name: &str) -> String {
+    member_symbol(member, &format!("src/`lib.rs`/{name}()."))
 }
 
 fn link() -> Link {
@@ -51,15 +51,15 @@ async fn the_mcp_tools_carry_an_asserted_link_labelled_as_the_cli_read_model_doe
         let registry = registry_with_links("shop", root, members.clone(), vec![link()]);
         let inputs = query::reachability_inputs(&ContractBridge::new(), &registry);
         [
-            serde_json::to_value(query::xservice_callers(&registry, &inputs, &symbol("get_cart"), None, None)).unwrap(),
-            serde_json::to_value(query::xservice_impact(&registry, &inputs, &symbol("fetch_cart"), None, None)).unwrap(),
+            serde_json::to_value(query::xservice_callers(&registry, &inputs, &symbol("api", "get_cart"), None, None)).unwrap(),
+            serde_json::to_value(query::xservice_impact(&registry, &inputs, &symbol("web", "fetch_cart"), None, None)).unwrap(),
         ]
     };
 
     let (client, server) = boot(registry_with_links("shop", root, members, vec![link()])).await;
-    let args = |name: &str| Map::from_iter([("symbol".to_string(), Value::from(symbol(name)))]);
-    let callers = call(&client, "xservice_callers", args("get_cart")).await;
-    let impact = call(&client, "xservice_impact", args("fetch_cart")).await;
+    let args = |member: &str, name: &str| Map::from_iter([("symbol".to_string(), Value::from(symbol(member, name)))]);
+    let callers = call(&client, "xservice_callers", args("api", "get_cart")).await;
+    let impact = call(&client, "xservice_impact", args("web", "fetch_cart")).await;
 
     let row = &callers["via_asserted_link"][0];
     assert_eq!((row["intake"].as_str(), row["reached"].as_str()), (Some("asserted"), Some("(asserted)")), "{callers}");

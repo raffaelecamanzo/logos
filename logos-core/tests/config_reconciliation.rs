@@ -27,6 +27,9 @@ use tempfile::TempDir;
 use logos_core::model::{EdgeKind, NodeKind};
 use logos_core::{Engine, Runtime};
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 /// Write `contents` to `<root>/<rel>`, creating parent directories.
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -37,9 +40,11 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 /// Write a `.logos/config.toml` carrying `body` (the `.logos/` dir is pruned by
-/// discovery, so the config file itself is never indexed).
+/// discovery, so the config file itself is never indexed), the fixture's
+/// pinned coordinate kept in it (S-703).
 fn write_config(root: &Path, body: &str) {
     write(root, ".logos/config.toml", body);
+    coordinate::pin(root);
 }
 
 /// The canonical, rowid-independent identity of the graph: the sorted set of
@@ -129,6 +134,7 @@ fn write_cross_file_fixture(root: &Path) {
         "pub fn alpha() {\n    crate::util::run();\n}\n",
     );
     write(root, "src/util.rs", "pub fn run() {}\n");
+    coordinate::pin(root);
 }
 
 // ── FR-SY-07: narrowing config purges now-unadmitted nodes on reconcile ───────

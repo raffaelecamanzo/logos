@@ -248,6 +248,80 @@ pub struct Member {
     pub root: PathBuf,
 }
 
+impl Member {
+    /// The repository coordinate this member resolves to ([FR-WS-39], [ADR-85]):
+    /// its configured `[project] id`, else the identity derived from its
+    /// remote — what the member's symbols carry once its store is indexed, and
+    /// what makes them distinct from every other member's.
+    ///
+    /// Resolved through [`crate::config::resolve_project_id`], the one
+    /// definition, so a member and a single-root project of the same checkout
+    /// can never disagree. A config the member cannot load (a syntax error, an
+    /// unknown key) must not move its identity: the engine opens without reading
+    /// the config, so the member still serves a store whose symbols carry the
+    /// coordinate the file declared. The `[project] id` is therefore read from
+    /// the raw file when the full config does not load, and only when that
+    /// holds no valid id either does the member take the derived identity.
+    ///
+    /// Runs one config read and up to two short `git` subprocesses; callers
+    /// resolve it once per member (the registry caches it) and never per symbol.
+    ///
+    /// [FR-WS-39]: ../../../docs/specs/requirements/FR-WS-39.md
+    /// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+    #[must_use]
+    pub fn coordinate(&self) -> String {
+        match crate::config::load_config_from_root(&self.root) {
+            Ok(config) => crate::config::resolve_project_id(&self.root, &config),
+            Err(_) => declared_project_id(&self.root)
+                .unwrap_or_else(|| crate::config::derive_project_id(&self.root)),
+        }
+    }
+}
+
+/// The `[project] id` a member's `.logos/config.toml` declares, read from the
+/// raw file when the config as a whole does not load ([`Member::coordinate`]).
+///
+/// A file that is TOML but fails config validation (an unknown key, a bad glob)
+/// is read as a table. A file that is not TOML at all has no table to read, so
+/// its `[project]` section is scanned line by line for an `id = "…"` entry: the
+/// engine does not read the config either, and the coordinate the file declared
+/// is still the one its store's symbols carry.
+///
+/// `None` when the file is unreadable or declares no valid id
+/// ([`crate::config::is_valid_coordinate`]).
+fn declared_project_id(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(".logos").join("config.toml")).ok()?;
+    let declared = match text.parse::<toml::Table>() {
+        Ok(table) => table
+            .get("project")?
+            .as_table()?
+            .get("id")?
+            .as_str()
+            .map(str::to_string),
+        Err(_) => scan_project_id(&text),
+    };
+    declared.filter(|id| crate::config::is_valid_coordinate(id))
+}
+
+/// The `id = "…"` line of the `[project]` section of `text`, for a file too
+/// broken to parse as TOML ([`declared_project_id`]).
+fn scan_project_id(text: &str) -> Option<String> {
+    let mut in_project = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_project = line == "[project]";
+        } else if in_project {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.trim() == "id" {
+                return value.trim().strip_prefix('"')?.split_once('"').map(|(id, _)| id.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// A discovered application workspace — the resolved member set the overlay
 /// federates ([FR-WS-01], [ADR-52]).
 ///
@@ -1264,5 +1338,24 @@ mod tests {
         let mut out = Vec::new();
         walk(root, &mut out);
         out
+    }
+
+    /// The raw-file read of `[project] id` takes only the `[project]` section's
+    /// own `id`, and only a valid one — the near misses a looser scan would
+    /// accept (another section's `id`, a sub-table, a different key, an invalid
+    /// value) all read as none.
+    #[test]
+    fn a_broken_configs_project_id_is_read_from_its_own_section_only() {
+        let read = |text: &str| scan_project_id(text);
+        assert_eq!(read("[project]\nid = \"a/b\"\nnot toml\n").as_deref(), Some("a/b"));
+        assert_eq!(read("not toml\n[project]\n  id  =  \"a/b\"  \n").as_deref(), Some("a/b"));
+        assert_eq!(read("[other]\nid = \"a/b\"\n"), None, "another section's id");
+        assert_eq!(read("[project.sub]\nid = \"a/b\"\n"), None, "a sub-table");
+        assert_eq!(read("[project]\nidx = \"a/b\"\n"), None, "a different key");
+        assert_eq!(read("[project]\nid = a/b\n"), None, "an unquoted value");
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".logos")).unwrap();
+        fs::write(dir.path().join(".logos/config.toml"), "[project]\nid = \"bad id\"\nnot toml\n").unwrap();
+        assert_eq!(declared_project_id(dir.path()), None, "an invalid id is not a declared one");
     }
 }

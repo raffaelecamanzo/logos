@@ -36,6 +36,9 @@ use logos_core::Engine;
 use logos_core::Runtime;
 use tempfile::TempDir;
 
+#[path = "support/coordinate.rs"]
+mod coordinate;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -43,6 +46,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 fn index(tmp: &Path) -> Engine {
+    coordinate::pin(tmp);
     let engine = Engine::start(tmp).expect("engine starts");
     engine.index();
     engine
@@ -654,6 +658,7 @@ fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only(
     );
     assert!(!alone.reasons.contains_key(&R::TypeInAnotherMember));
 
+    coordinate::detach(&app, "example.com/app");
     write(
         ws.path(),
         "logos.workspace.toml",
@@ -729,6 +734,9 @@ fn another_members_default_package_type_is_not_a_named_package_files_type() {
 /// The `app` member's Java residue in `workspace status` over `root`, whose
 /// manifest this writes for the members `lib` and `app`.
 fn workspace_java_residue(root: &Path, member: &str) -> CallResidue {
+    // Both members were indexed under the one fixture coordinate; the workspace
+    // must resolve two (S-706).
+    coordinate::detach(&root.join("app"), "example.com/app");
     write(
         root,
         "logos.workspace.toml",

@@ -48,7 +48,7 @@ use petgraph::Direction;
 use crate::engine::Engine;
 use crate::graph_store::{GraphStore, NodeRow};
 use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
-use crate::model::{EdgeKind, NodeId, NodeKind};
+use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 use crate::runtime::Runtime;
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
@@ -425,15 +425,15 @@ pub(crate) fn explore(
     // Anchor resolution is forgiving (explore is the fuzzy tool): exact
     // symbol/name first — a bare name preferring code, and naming what it passed
     // over ([FR-NV-15]) — else the best FTS match, which passes over nothing.
-    let (anchor, passed_over, suggestions) = runtime.submit_read(|store| {
-        if let Some((row, passed_over)) = resolve_preferring_code(store, query)? {
-            return Ok((Some(row), passed_over, Vec::new()));
+    let (anchor, passed_over, note, suggestions) = runtime.submit_read(|store| {
+        if let Some((row, passed_over, note)) = resolve_preferring_code(store, query)? {
+            return Ok((Some(row), passed_over, note, Vec::new()));
         }
         let mut hits = store.search(query, None, 1)?;
         if let Some(row) = hits.pop() {
-            return Ok((Some(row), Vec::new(), Vec::new()));
+            return Ok((Some(row), Vec::new(), None, Vec::new()));
         }
-        Ok((None, Vec::new(), store.suggest(query, SUGGEST_LIMIT)?))
+        Ok((None, Vec::new(), None, store.suggest(query, SUGGEST_LIMIT)?))
     })?;
     let Some(anchor) = anchor else {
         return Ok(ExploreResult {
@@ -508,7 +508,7 @@ pub(crate) fn explore(
         total_files,
         suggestions: Vec::new(),
         alternatives: passed_over.iter().map(symbol_ref).collect(),
-        warnings: Vec::new(),
+        warnings: note.into_iter().collect(),
     })
 }
 
@@ -517,14 +517,14 @@ pub(crate) fn explore(
 pub(crate) fn node(engine: &Engine, symbol: &str, include_code: bool) -> Result<NodeInfo> {
     let runtime = engine.nav_runtime()?;
     let resolved = runtime.submit_read(|store| {
-        let Some((row, passed_over)) = resolve_preferring_code(store, symbol)? else {
+        let Some((row, passed_over, note)) = resolve_preferring_code(store, symbol)? else {
             return Ok(Err(store.suggest(symbol, SUGGEST_LIMIT)?));
         };
         let inbound = store.neighbours_in(row.id)?;
         let outbound = store.neighbours_out(row.id)?;
-        Ok(Ok((row, passed_over, inbound, outbound)))
+        Ok(Ok((row, passed_over, note, inbound, outbound)))
     })?;
-    let (row, passed_over, inbound, outbound) = match resolved {
+    let (row, passed_over, note, inbound, outbound) = match resolved {
         Ok(found) => found,
         Err(suggestions) => {
             return Ok(NodeInfo {
@@ -572,7 +572,7 @@ pub(crate) fn node(engine: &Engine, symbol: &str, include_code: bool) -> Result<
         }),
         suggestions: Vec::new(),
         alternatives: passed_over.iter().map(symbol_ref).collect(),
-        warnings: Vec::new(),
+        warnings: note.into_iter().collect(),
     })
 }
 
@@ -645,7 +645,7 @@ pub(crate) fn callers(
     limit: Option<usize>,
 ) -> Result<CallersResult> {
     let page = adjacency(engine, symbol, limit, AdjacencyKind::Callers)?;
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = page.note.into_iter().collect();
     let resolution_denominator =
         symbol_denominator(engine.nav_runtime()?, page.resolved.as_ref(), &mut warnings);
     Ok(CallersResult {
@@ -667,7 +667,7 @@ pub(crate) fn callees(
     limit: Option<usize>,
 ) -> Result<CalleesResult> {
     let page = adjacency(engine, symbol, limit, AdjacencyKind::Callees)?;
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = page.note.into_iter().collect();
     let resolution_denominator =
         symbol_denominator(engine.nav_runtime()?, page.resolved.as_ref(), &mut warnings);
     Ok(CalleesResult {
@@ -693,20 +693,21 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
     // The same pooled read resolves the symbol AND collects the doc sections
     // referencing it — the doc-aware dimension of impact (FR-NV-10): which docs
     // a change to the symbol may oblige updating. Empty when none point at it.
-    let (resolved, passed_over, docs, suggestions) =
+    let (resolved, passed_over, note, docs, suggestions) =
         runtime.submit_read(|store| match resolve_preferring_code(store, symbol)? {
-            Some((row, passed_over)) => {
+            Some((row, passed_over, note)) => {
                 let docs = doc_links(store.neighbours_in(row.id)?, Endpoint::DocSource);
-                Ok((Some(row), passed_over, docs, Vec::new()))
+                Ok((Some(row), passed_over, note, docs, Vec::new()))
             }
             None => Ok((
                 None,
                 Vec::new(),
+                None,
                 Vec::new(),
                 store.suggest(symbol, SUGGEST_LIMIT)?,
             )),
         })?;
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = note.into_iter().collect();
     let Some(row) = resolved else {
         return Ok(ImpactResult {
             query: symbol.to_string(),
@@ -777,9 +778,12 @@ struct DeclaredSymbol {
     item: usize,
     /// The symbol text as declared.
     text: String,
-    /// The resolved node and how many candidates the name matched; `None` when
-    /// the graph knows nothing by that name.
-    hit: Option<(NodeRow, usize)>,
+    /// The resolved node, how many candidates the name matched, and the note a
+    /// coordinate-less symbol resolved under ([FR-EX-36]); `None` when the graph
+    /// knows nothing by that name.
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+    hit: Option<(NodeRow, usize, UpgradeNote)>,
     /// "Did you mean" names, populated only for a miss ([FR-NV-09]).
     suggestions: Vec<String>,
 }
@@ -876,7 +880,7 @@ pub(crate) fn impact_intersection(
         suggestions,
     } in resolved
     {
-        let Some((row, candidates)) = hit else {
+        let Some((row, candidates, note)) = hit else {
             coverage.unresolved.push(UnresolvedDeclaration {
                 item: items[index].id.clone(),
                 symbol: text,
@@ -891,6 +895,7 @@ pub(crate) fn impact_intersection(
         // verdict*, and silently picking the wrong `new` would manufacture the
         // false `safe_parallel` this query exists to prevent, so the ambiguity is
         // said out loud ([NFR-CC-04]).
+        warnings.extend(note);
         warnings.extend(ambiguity_warning(&text, candidates, row.symbol.as_str()));
         rows[index].resolved.push(symbol_ref(&row));
         match view.index_of(row.symbol.as_str()) {
@@ -1218,8 +1223,15 @@ struct PrecedentAnchor {
 
 /// What a precedent query's target text turned out to name.
 enum PrecedentTarget {
-    /// One symbol, with how many nodes its name matched ([NFR-CC-04]).
-    Symbol { row: NodeRow, candidates: usize },
+    /// One symbol, with how many nodes its name matched ([NFR-CC-04]) and the
+    /// note a coordinate-less symbol resolved under ([FR-EX-36]).
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+    Symbol {
+        row: NodeRow,
+        candidates: usize,
+        note: UpgradeNote,
+    },
     /// A project-relative file and the symbols it defines, with the count
     /// before [`MAX_FILE_SEEDS`] truncation.
     File {
@@ -1295,11 +1307,16 @@ pub(crate) fn precedent(
             });
             return Ok(result);
         }
-        PrecedentTarget::Symbol { row, candidates } => {
+        PrecedentTarget::Symbol {
+            row,
+            candidates,
+            note,
+        } => {
             // The same disclosure `impact_intersection` makes: a bare name can
             // match many symbols and the resolver picks one. Here the answer is
             // "copy this precedent", so being shown the precedents of the wrong
             // `new` is a wasted edit ([NFR-CC-04]).
+            result.warnings.extend(note);
             result
                 .warnings
                 .extend(ambiguity_warning(target, candidates, row.symbol.as_str()));
@@ -1606,8 +1623,12 @@ fn precedent_shell(query: &str) -> PrecedentResult {
 /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn resolve_precedent_target(store: &dyn GraphStore, target: &str) -> Result<PrecedentTarget> {
-    if let Some((row, candidates)) = resolve_counting_candidates(store, target)? {
-        return Ok(PrecedentTarget::Symbol { row, candidates });
+    if let Some((row, candidates, note)) = resolve_counting_candidates(store, target)? {
+        return Ok(PrecedentTarget::Symbol {
+            row,
+            candidates,
+            note,
+        });
     }
     let path = target.strip_prefix("./").unwrap_or(target);
     // `node_names_for_path` carries no DISTINCT and `nodes_by_name` has no
@@ -1830,13 +1851,13 @@ fn precedent_explanation(facet: PrecedentFacet, via: &[SymbolRef], total: u32) -
 pub(crate) fn implements(engine: &Engine, doc: &str) -> Result<ImplementorsResult> {
     let runtime = engine.nav_runtime()?;
     let resolved = runtime.submit_read(|store| {
-        let Some(row) = resolve_symbol(store, doc)? else {
+        let Some((row, note)) = resolve_symbol(store, doc)? else {
             return Ok(Err(store.suggest(doc, SUGGEST_LIMIT)?));
         };
         let outbound = store.neighbours_out(row.id)?;
-        Ok(Ok((row, outbound)))
+        Ok(Ok((row, note, outbound)))
     })?;
-    let (row, outbound) = match resolved {
+    let (row, note, outbound) = match resolved {
         Ok(found) => found,
         Err(suggestions) => {
             return Ok(ImplementorsResult {
@@ -1850,6 +1871,7 @@ pub(crate) fn implements(engine: &Engine, doc: &str) -> Result<ImplementorsResul
         query: doc.to_string(),
         resolved: Some(symbol_ref(&row)),
         implementors: doc_links(outbound, Endpoint::CodeTarget),
+        warnings: note.into_iter().collect(),
         ..ImplementorsResult::default()
     })
 }
@@ -1864,13 +1886,13 @@ pub(crate) fn implements(engine: &Engine, doc: &str) -> Result<ImplementorsResul
 pub(crate) fn referencing_docs(engine: &Engine, symbol: &str) -> Result<ReferencingDocsResult> {
     let runtime = engine.nav_runtime()?;
     let resolved = runtime.submit_read(|store| {
-        let Some(row) = resolve_symbol(store, symbol)? else {
+        let Some((row, note)) = resolve_symbol(store, symbol)? else {
             return Ok(Err(store.suggest(symbol, SUGGEST_LIMIT)?));
         };
         let inbound = store.neighbours_in(row.id)?;
-        Ok(Ok((row, inbound)))
+        Ok(Ok((row, note, inbound)))
     })?;
-    let (row, inbound) = match resolved {
+    let (row, note, inbound) = match resolved {
         Ok(found) => found,
         Err(suggestions) => {
             return Ok(ReferencingDocsResult {
@@ -1884,6 +1906,7 @@ pub(crate) fn referencing_docs(engine: &Engine, symbol: &str) -> Result<Referenc
         query: symbol.to_string(),
         resolved: Some(symbol_ref(&row)),
         docs: doc_links(inbound, Endpoint::DocSource),
+        warnings: note.into_iter().collect(),
         ..ReferencingDocsResult::default()
     })
 }
@@ -1928,11 +1951,12 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
     //
     // A pure read either way — `status` never writes on read (ADR-28).
     let mut warnings = Vec::new();
-    let (indexed_loc, test_loc, full_index_at) = runtime.submit_read(|store| {
+    let (indexed_loc, test_loc, full_index_at, project_id) = runtime.submit_read(|store| {
         Ok((
             store.project_metadata(crate::perf::INDEXED_LOC_KEY)?,
             store.project_metadata(crate::perf::TEST_LOC_KEY)?,
             store.project_metadata(crate::graph_store::LAST_FULL_INDEX_AT_KEY)?,
+            store.project_metadata(crate::graph_store::PROJECT_ID_KEY)?,
         ))
     })?;
     let indexed_loc = indexed_loc.and_then(|raw| raw.parse::<u64>().ok());
@@ -2072,6 +2096,7 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         db_path: db_path.display().to_string(),
         db_size_bytes: size,
         last_full_index_at,
+        project_id,
         last_sync_at: mtime.map(|secs| secs.to_string()),
         graph_revision,
         refs_total: counts.refs_total,
@@ -2222,15 +2247,22 @@ pub(crate) fn graph_elements(
     // contract spirit): no vertex to anchor on, so nothing is fabricated. At a
     // rollup tier the seed is a cluster key (a file path / module key); a symbol
     // string that names no cluster simply does not resolve, yielding the same
-    // honest-empty snapshot.
+    // honest-empty snapshot. A coordinate-less symbol seed (a bookmarked
+    // `?seed=` from before [ADR-85]) anchors under the store's coordinate and
+    // echoes the canonical seed, with a note ([FR-EX-36], [`seed_vertex`]).
+    //
+    // [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+    // [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+    let mut seed_note: UpgradeNote = None;
     let (mut in_scope, seed_echo, seed_dist): (Vec<NodeIndex>, Option<String>, Option<HashMap<NodeIndex, u32>>) = match seed {
         None => (graph.node_indices().collect::<Vec<_>>(), None, None),
-        Some(s) => match view.index_of(s) {
-            Some(start) => {
+        Some(s) => match seed_vertex(engine, &view, s)? {
+            Some((start, echo, note)) => {
+                seed_note = note;
                 let reach = reachable_from(graph, start);
                 let dist: HashMap<NodeIndex, u32> = reach.iter().copied().collect();
                 let nodes: Vec<NodeIndex> = reach.into_iter().map(|(idx, _)| idx).collect();
-                (nodes, Some(s.to_string()), Some(dist))
+                (nodes, Some(echo), Some(dist))
             }
             None => {
                 return Ok(GraphElements {
@@ -2493,8 +2525,42 @@ pub(crate) fn graph_elements(
         elided_edges,
         nodes,
         edges,
-        warnings: Vec::new(),
+        warnings: seed_note.into_iter().collect(),
     })
+}
+
+/// The vertex a `graph_elements` seed anchors on, the seed the snapshot echoes,
+/// and its [`UpgradeNote`] ([FR-EX-36]).
+///
+/// The seed as given is looked up first, so a canonical seed (or a rollup
+/// tier's cluster key) anchors exactly as before and echoes itself. On a miss, a
+/// coordinate-less symbol is looked up under the store's coordinate
+/// ([`upgraded_input`]) and the snapshot echoes the canonical symbol — the
+/// vertex id the client marks as the seed. `None` is an unknown seed.
+///
+/// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+fn seed_vertex(
+    engine: &Engine,
+    view: &GraphView,
+    seed: &str,
+) -> Result<Option<(NodeIndex, String, UpgradeNote)>> {
+    if let Some(start) = view.index_of(seed) {
+        return Ok(Some((start, seed.to_string(), None)));
+    }
+    // A rollup tier's cluster key is a path, not a symbol: no store read.
+    let Some(symbol) = coordinate_less(seed) else {
+        return Ok(None);
+    };
+    let Some(canonical) = engine
+        .nav_runtime()?
+        .submit_read(|store| under_store_coordinate(store, &symbol))?
+    else {
+        return Ok(None);
+    };
+    Ok(view.index_of(canonical.as_str()).map(|start| {
+        let note = upgrade_note(seed, &canonical);
+        (start, canonical.to_scip_string(), Some(note))
+    }))
 }
 
 /// The connected neighbourhood of `start` over **undirected** adjacency — the
@@ -2821,6 +2887,10 @@ struct AdjacencyPage {
     rows: Vec<SymbolRef>,
     /// "Did you mean" names when nothing resolved.
     suggestions: Vec<String>,
+    /// The note a coordinate-less symbol argument resolved under ([FR-EX-36]).
+    ///
+    /// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+    note: UpgradeNote,
 }
 
 /// Shared body of [`callers`]/[`callees`]: resolve, fetch the full direct
@@ -2834,7 +2904,7 @@ fn adjacency(
     let runtime = engine.nav_runtime()?;
     let limit = limit.unwrap_or(DEFAULT_ADJACENCY_LIMIT);
     runtime.submit_read(|store| {
-        let Some((row, passed_over)) = resolve_preferring_code(store, symbol)? else {
+        let Some((row, passed_over, note)) = resolve_preferring_code(store, symbol)? else {
             return Ok(AdjacencyPage {
                 suggestions: store.suggest(symbol, SUGGEST_LIMIT)?,
                 ..AdjacencyPage::default()
@@ -2852,6 +2922,7 @@ fn adjacency(
             total,
             rows: adjacent.iter().map(symbol_ref).collect(),
             suggestions: Vec::new(),
+            note,
         })
     })
 }
@@ -2893,8 +2964,81 @@ fn seed_query(task: &str) -> Option<String> {
     }
 }
 
+/// The note an answer carries when its symbol argument resolved only under the
+/// store's coordinate ([FR-EX-36]): one line, naming the canonical form to use.
+///
+/// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+type UpgradeNote = Option<String>;
+
+/// `text` under the store's repository coordinate, when it is a coordinate-less
+/// symbol (the form every symbol had before [ADR-85]) and the store records a
+/// coordinate ([FR-EX-36]). A store has exactly one coordinate, so the upgrade
+/// is unambiguous.
+///
+/// `None` — nothing to upgrade — for text that is not a symbol (a bare name, a
+/// path), for a symbol that already carries a coordinate (another repository's
+/// is never rewritten), and on a store that records no coordinate, whose own
+/// symbols are coordinate-less and match the text as given. Only a miss on the
+/// exact text reaches this, so a canonical input never pays the extra reads.
+///
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+/// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+fn upgraded_input(store: &dyn GraphStore, text: &str) -> Result<Option<LogosSymbol>> {
+    match coordinate_less(text) {
+        Some(symbol) => under_store_coordinate(store, &symbol),
+        None => Ok(None),
+    }
+}
+
+/// `text` as a coordinate-less symbol, or `None` — the half of
+/// [`upgraded_input`] that needs no store read.
+fn coordinate_less(text: &str) -> Option<LogosSymbol> {
+    LogosSymbol::parse(text)
+        .ok()
+        .filter(LogosSymbol::is_coordinate_less)
+}
+
+/// `symbol` under the coordinate the store records, or `None` when it records
+/// none — the half of [`upgraded_input`] that reads the store.
+fn under_store_coordinate(store: &dyn GraphStore, symbol: &LogosSymbol) -> Result<Option<LogosSymbol>> {
+    let Some(coordinate) = store.symbol_coordinate()? else {
+        return Ok(None);
+    };
+    Ok(symbol.with_coordinate(Some(&coordinate)).ok())
+}
+
+/// The one-line [`UpgradeNote`] for `text`, resolved as `canonical`.
+fn upgrade_note(text: &str, canonical: &LogosSymbol) -> String {
+    format!(
+        "{text:?} carries no repository coordinate; resolved as {:?}, the form this store holds",
+        canonical.as_str()
+    )
+}
+
+/// The exact canonical-symbol match for a navigation `symbol` argument — the
+/// first rung of every resolver below, and of a `[[links]]` endpoint's
+/// resolution in a workspace — and its [`UpgradeNote`].
+///
+/// The text as given is tried first, so a canonical input answers exactly as it
+/// did before [FR-EX-36] and carries no note. On a miss, a coordinate-less
+/// symbol is tried under the store's coordinate ([`upgraded_input`]).
+///
+/// [FR-EX-36]: ../../../docs/specs/requirements/FR-EX-36.md
+pub(crate) fn resolve_exact(store: &dyn GraphStore, text: &str) -> Result<Option<(NodeRow, UpgradeNote)>> {
+    if let Some(row) = store.node_by_symbol(text)? {
+        return Ok(Some((row, None)));
+    }
+    let Some(canonical) = upgraded_input(store, text)? else {
+        return Ok(None);
+    };
+    Ok(store
+        .node_by_symbol(canonical.as_str())?
+        .map(|row| (row, Some(upgrade_note(text, &canonical)))))
+}
+
 /// Resolve a navigation `symbol` argument to a node: exact canonical-symbol
-/// match first, then exact name match (lowest id wins — deterministic).
+/// match first ([`resolve_exact`], which upgrades a coordinate-less symbol and
+/// returns its note), then exact name match (lowest id wins — deterministic).
 /// `None` means unknown → the caller assembles the graceful empty result.
 ///
 /// The documentation lookups (`implements`, `referencing_docs`) keep this rule;
@@ -2902,11 +3046,15 @@ fn seed_query(task: &str) -> Option<String> {
 /// [`resolve_preferring_code`] instead.
 ///
 /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
-fn resolve_symbol(store: &dyn GraphStore, text: &str) -> Result<Option<NodeRow>> {
-    if let Some(row) = store.node_by_symbol(text)? {
-        return Ok(Some(row));
+fn resolve_symbol(store: &dyn GraphStore, text: &str) -> Result<Option<(NodeRow, UpgradeNote)>> {
+    if let Some(exact) = resolve_exact(store, text)? {
+        return Ok(Some(exact));
     }
-    Ok(store.nodes_by_name(text)?.into_iter().next())
+    Ok(store
+        .nodes_by_name(text)?
+        .into_iter()
+        .next()
+        .map(|row| (row, None)))
 }
 
 /// How a bare name's matches are preferred — the lower the better ([FR-NV-15]).
@@ -2974,11 +3122,11 @@ fn prefer_code(mut matches: Vec<NodeRow>) -> Option<(NodeRow, Vec<NodeRow>)> {
 fn resolve_preferring_code(
     store: &dyn GraphStore,
     text: &str,
-) -> Result<Option<(NodeRow, Vec<NodeRow>)>> {
-    if let Some(row) = store.node_by_symbol(text)? {
-        return Ok(Some((row, Vec::new())));
+) -> Result<Option<(NodeRow, Vec<NodeRow>, UpgradeNote)>> {
+    if let Some((row, note)) = resolve_exact(store, text)? {
+        return Ok(Some((row, Vec::new(), note)));
     }
-    Ok(prefer_code(store.nodes_by_name(text)?))
+    Ok(prefer_code(store.nodes_by_name(text)?).map(|(row, passed_over)| (row, passed_over, None)))
 }
 
 /// [`resolve_symbol`] that also reports HOW MANY nodes the name matched.
@@ -2991,13 +3139,13 @@ fn resolve_preferring_code(
 fn resolve_counting_candidates(
     store: &dyn GraphStore,
     text: &str,
-) -> Result<Option<(NodeRow, usize)>> {
-    if let Some(row) = store.node_by_symbol(text)? {
-        return Ok(Some((row, 1)));
+) -> Result<Option<(NodeRow, usize, UpgradeNote)>> {
+    if let Some((row, note)) = resolve_exact(store, text)? {
+        return Ok(Some((row, 1, note)));
     }
     let candidates = store.nodes_by_name(text)?;
     let count = candidates.len();
-    Ok(candidates.into_iter().next().map(|row| (row, count)))
+    Ok(candidates.into_iter().next().map(|row| (row, count, None)))
 }
 
 /// The [NFR-CC-04] disclosure for a bare name that matched more than one symbol,
