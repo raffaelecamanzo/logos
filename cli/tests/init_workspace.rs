@@ -182,9 +182,11 @@ fn exclude_drops_a_matching_member() {
         .collect();
     assert_eq!(names, ["api"], "web is excluded, api remains");
 
+    // The glob is now PERSISTED (FR-WS-40), so the word `web` legitimately
+    // appears in the manifest — under `exclude`, never under `members`.
     let manifest = fs::read_to_string(tmp.path().join("logos.workspace.toml")).unwrap();
-    assert!(manifest.contains("api"));
-    assert!(!manifest.contains("web"));
+    assert!(manifest.contains("members = [\"api\"]"), "{manifest}");
+    assert!(manifest.contains("exclude = [\"web\"]"), "the flag's glob is written:\n{manifest}");
 }
 
 /// A second run injects no duplicate workspace MCP entry — exactly one

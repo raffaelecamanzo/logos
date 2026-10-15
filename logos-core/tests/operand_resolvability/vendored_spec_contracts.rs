@@ -1369,6 +1369,9 @@ pub fn row_use(row: &ReferenceCoverage) -> RowUse {
                 (false, _) => RowUse::Outside,
             }
         }
+        // A declared `[[links]]` claim is never a coverage row ([BR-75]); were one
+        // to arrive, it is in neither population.
+        BridgeIntake::Asserted => RowUse::Outside,
     }
 }
 
@@ -2394,6 +2397,7 @@ mod tests {
                     summary: String::new(),
                 }
             }),
+            asserted_by: Vec::new(),
             provenance,
         }
     }

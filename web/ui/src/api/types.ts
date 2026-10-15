@@ -1105,9 +1105,13 @@ export interface BridgeEndpoint {
 /** How a bridge edge entered the overlay (CR-083). An `invocation` edge is a
  *  captured call site (HTTP client call, gRPC stub call, broker publish/subscribe,
  *  FR-WS-08–FR-WS-10); a `contract-surface` edge is a declared contract match (an
- *  OpenAPI operation → framework route). Only invocation edges seed app-wide
- *  reachability roots (FR-WS-12). */
-export type BridgeIntake = "invocation" | "contract-surface";
+ *  OpenAPI operation → framework route). Only invocation edges seed
+ *  `live-via-cross-service` roots (FR-WS-12).
+ *
+ *  An `asserted` edge is a valid `[[links]]` entry (S-709, FR-WS-41): a CLAIM,
+ *  never evidence (BR-75) — it is never in a figure, and a view must always label
+ *  it as declared, never draw or count it as a measured binding. */
+export type BridgeIntake = "invocation" | "contract-surface" | "asserted";
 
 /** A cross-service link the bridge resolved: a consumer bound to exactly one
  *  provider in another member (`relation` is the arm — `route`, `grpc-call`,
@@ -1315,7 +1319,46 @@ interface ReferenceCoverageRow {
    *  `ambiguous` count into a diagnosis — four aggregator members on one
    *  template is the architecture, not a matcher defect (FR-CG-09 Notes). */
   candidates?: ProviderCandidates;
+  /** The valid `[[links]]` entries declaring the coupling this residue row could
+   *  not resolve (S-709, FR-WS-41) — as written in the manifest. A pointer only:
+   *  the row keeps its state and reason and stays in every count (BR-75).
+   *  Absent when no valid link covers the row. */
+  asserted_by?: ManifestLink[];
 }
+
+/** One `[[links]]` entry as written in the manifest — the editor's read of
+ *  it, what a residue row's `asserted_by` points at, and the declaration a
+ *  `workspace status` link row echoes (S-709). */
+export interface ManifestLink {
+  relation: string;
+  from: string;
+  to: string;
+}
+
+/** The declared links counted BESIDE the coverage headline, never inside it
+ *  (S-709, FR-WS-41, BR-75) — mirrors `AssertedEdges`. */
+export interface AssertedEdges {
+  /** Links that are one asserted edge each. */
+  valid: number;
+  /** Links that name no edge, of every reason. */
+  invalid: number;
+  /** `invalid` by reason (`unknown-member`, `member-degraded`, `no-match`,
+   *  `ambiguous`, `same-member`) — treat the keys as OPEN. */
+  invalid_by_reason: Record<string, number>;
+  /** Links repeating an edge already held. */
+  redundant: number;
+  /** The three counts as one line — render it verbatim. */
+  summary: string;
+}
+
+/** One `workspace status` `links` row (S-708/S-709, FR-WS-41): the declaration
+ *  as written, and what it became. Only a `valid` row carries an asserted edge. */
+export type WorkspaceLink = ManifestLink &
+  (
+    | { status: "valid"; edge: BridgeEdge }
+    | { status: "redundant"; duplicates: BridgeEdge }
+    | { status: "invalid"; reason: string; endpoint?: "from" | "to"; detail: string }
+  );
 
 /** One cross-boundary reference's coverage classification, with its value
  *  provenance flattened onto it (S-382).
@@ -1466,6 +1509,9 @@ export interface CrossServiceCoverage {
    *  member declares. A bound row stays `no-provider-in-workspace` in every count
    *  above. ABSENT when no member declares a named external. */
   bound_external?: BoundExternal;
+  /** The declared `[[links]]`, counted beside this headline (S-709). ABSENT when
+   *  the manifest declares no link. */
+  asserted_edges?: AssertedEdges;
 }
 
 // ── Declared contracts and named externals (S-458/S-459/S-461, CR-147) ───────
@@ -1799,6 +1845,10 @@ export interface WorkspaceStatus {
    *  holds a build manifest, so a manifest-less workspace's payload, and every
    *  view over it, is unchanged. */
   build_dependency?: BuildDependencyHeadline;
+  /** Every declared `[[links]]` entry and its verdict (S-708, FR-WS-41). ABSENT
+   *  when the manifest declares no link — the service map then draws no asserted
+   *  layer and renders exactly as before. */
+  links?: WorkspaceLink[];
 }
 
 // ── The build-dependency relation (S-464, FR-WS-33, ADR-69) ──────────────────
@@ -1916,6 +1966,21 @@ export interface CrossServiceImpact {
   impact: ImpactResult;
 }
 
+/** One far-side impact reached across an ASSERTED edge (S-709, FR-WS-41) — the
+ *  stitched impact beside the server's own marker, which a view renders as is. */
+export interface AssertedImpact extends CrossServiceImpact {
+  /** Always `"(asserted)"`. */
+  reached: string;
+}
+
+/** One member's share of a cross-service answer's resolved rows (S-701, BR-73),
+ *  carried when two or more members hold the queried symbol and no `repo` chose
+ *  one — mirrors `MemberResolved`. */
+export interface MemberResolved {
+  member: string;
+  resolved: number;
+}
+
 /** One refusal reason with the number of unresolved egress sites carrying it
  *  (mirrors `ResidueReason`). `reason` is an [FR-WS-05] wire token — treat the
  *  union as OPEN, exactly as `UnboundReason` is treated elsewhere here. */
@@ -1959,8 +2024,19 @@ export interface EgressResidue {
 export interface XserviceImpact {
   query: string;
   scope?: string;
+  /** Set when no scope was applied and two or more members hold the queried
+   *  symbol (S-701, BR-73): it names them and the way to choose one. Render it
+   *  verbatim; absent otherwise. */
+  ambiguity_warning?: string;
   seed: MemberResult<ImpactResult>[];
   cross_service: CrossServiceImpact[];
+  /** Each holding member's share of `cross_service`, present exactly when
+   *  `ambiguity_warning` is (S-701). A view renders it and recomputes nothing. */
+  resolved_by_member?: MemberResolved[];
+  /** Far-side impacts reached across a declared `[[links]]` edge (S-709) —
+   *  APART from `cross_service` and in no count. Absent when no valid link names
+   *  the symbol. */
+  via_asserted_link?: AssertedImpact[];
   /** The unresolved egress residue, absent exactly when it is zero (CR-125). */
   unresolved_egress?: EgressResidue;
 }
@@ -2022,6 +2098,10 @@ export interface CoverageRider {
   spec_conformance_measured: number;
   /** Members whose surface this rider actually read. */
   members_read: number;
+  /** The asserted call edges (valid `[[links]]` declaring a call) the view's
+   *  `live-via-asserted-link` roots were seeded from (S-709). ABSENT at zero —
+   *  never part of the evidence figures above. */
+  asserted_call_edges?: number;
   /** Members in the roster it was computed over.
    *
    *  This rider carries **no `covers_all_members` flag** — unlike
@@ -2046,14 +2126,23 @@ export interface MemberReachability {
   dead_per_repo: number;
   /** Of those, the ones the union view promotes to live. */
   live_via_cross_service: number;
+  /** Asserted call endpoints that resolved here and seeded the asserted walk
+   *  (S-709). Absent at zero. */
+  asserted_roots?: number;
+  /** Asserted call endpoints naming a symbol this member does not carry. Absent
+   *  at zero. */
+  unresolved_asserted_roots?: number;
+  /** Of the per-repo dead, the ones only a declared link keeps live (S-709).
+   *  Absent at zero. */
+  live_via_asserted_link?: number;
   /** Of those, the ones still dead app-wide. Always
-   *  `dead_per_repo - live_via_cross_service`. */
+   *  `dead_per_repo - live_via_cross_service - (live_via_asserted_link ?? 0)`. */
   dead_app_wide: number;
 }
 
 /** The union-view verdict on one callable (mirrors `AppWideVerdict`). Treat the
  *  union as OPEN, as every other wire token here is. */
-export type AppWideVerdict = "live-via-cross-service" | "dead";
+export type AppWideVerdict = "live-via-cross-service" | "live-via-asserted-link" | "dead";
 
 /** One claim of the app-wide reachability view (mirrors `ReachabilityClaim`). */
 export interface ReachabilityClaim {
@@ -2089,6 +2178,10 @@ export interface BoundedReachability {
   skipped_members: string[];
   /** The promotions: dead per-repo, live across the union. Always carried. */
   live_via_cross_service: ReachabilityClaim[];
+  /** The callables only a declared `[[links]]` call keeps live
+   *  (`live-via-asserted-link`, S-709) — a claim, apart from the measured
+   *  promotions. ABSENT when there is none. */
+  live_via_asserted_link?: ReachabilityClaim[];
   /** The app-wide dead set, or `null` when the promotions-only default SUPPRESSED
    *  it — deliberately distinct from `[]` ("computed, and genuinely empty"). A
    *  view must never render `null` as "no dead code" (NFR-CC-04). */
@@ -2205,7 +2298,7 @@ export interface WorkspaceManifest {
     /** A bare `[workspace.warm]` table arrives as `{}` — declared, no override. */
     warm?: { concurrency?: number };
   };
-  links?: { relation: string; from: string; to: string }[];
+  links?: ManifestLink[];
   governance?: {
     service_layers?: ManifestServiceLayer[];
     boundaries?: ManifestServiceBoundary[];

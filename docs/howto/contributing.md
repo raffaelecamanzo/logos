@@ -24,7 +24,9 @@ a change that is already public.
 
 1. On `main`, bring local `main` up to date with the public one, then merge the
    approved sprint into it (the script refuses, exit 2, while `sprint/N` is not
-   merged into `main`):
+   merged into `main`). The sprint coordinator makes this merge commit when the
+   sprint is approved; if it already has, the second command reports "Already up
+   to date":
 
    ```bash
    git fetch origin && git merge origin/main
@@ -77,8 +79,9 @@ git checkout main && git fetch origin && git merge origin/main
 git checkout sprint/N && git merge main
 ```
 
-Then run the integration check on `sprint/N`. This is a manual step until the
-sprint coordinator performs it.
+Then run the integration check on `sprint/N`. The sprint coordinator runs these
+merges itself at sprint start, at every iteration boundary and before the sprint
+merges into `main`; run them by hand only outside a coordinated sprint.
 
 ## Status labels
 

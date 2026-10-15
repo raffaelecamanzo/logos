@@ -1,0 +1,2 @@
+# Opt-in marker for sprint branches (swe-skills B-33): the sprint-coordinator runs each
+# sprint on sprint/N and merges it into main after approval. Contents are ignored.

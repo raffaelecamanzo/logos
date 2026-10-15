@@ -106,6 +106,16 @@ describe("the provenance stroke channel (S-419, CR-132 AC3)", () => {
     const link = buildSeries(set, NO_SELECTION, CENTER, 1, 0.5, 5).links[0];
     expect(link.lineStyle.type).toBe("dashed"); // EDGE_STYLE.route, as before S-419
   });
+
+  // S-709: an asserted `[[links]]` line is stroked dashed in its OWN hue, so the
+  // canvas never draws a declared coupling as a measured binding (BR-75).
+  it("strokes an asserted-link edge dashed, in the asserted hue", () => {
+    const set = loadedFrom([n("a"), n("b")], [e("a", "b", "asserted-link")]);
+    const link = buildSeries(set, NO_SELECTION, CENTER, 1, 0.5, 5).links[0];
+    expect(link.lineStyle.type).toBe("dashed");
+    expect(link.lineStyle.color).toBe("#a16207");
+    expect(link.edge_type).toBe("asserted-link");
+  });
 });
 
 describe("label level-of-detail", () => {

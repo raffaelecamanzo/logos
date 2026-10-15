@@ -54,6 +54,88 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 
 ---
 
+## Answering for one workspace member: `--repo`
+
+Under a [workspace](#init--i---hooks---workspace---yes---exclude-glob) a
+single-member question can name the member it is about, exactly as the MCP tools'
+`repo` parameter does ([usage.md](usage.md#asking-about-one-workspace-member-repo)):
+
+```bash
+logos node beta_only --repo svc-b            # found: svc-b holds it
+logos node beta_only                         # at the workspace root: the default member answers — not found there
+logos callers helper_beta_only --repo svc-b --json
+```
+
+**Which commands take it.** The CLI twins of the read-only MCP tools, plus the `query` façade over three of them, and nothing else:
+[`status`](#status), [`search`](#search), [`query`](#query), [`context`](#context),
+[`explore`](#explore), [`node`](#node), [`callers` / `callees`](#callers--callees),
+[`impact`](#impact), [`impact-intersection`](#impact-intersection),
+[`precedent`](#precedent), [`branch-overlap`](#branch-overlap),
+[`health`](#health), [`hotspots`](#hotspots), [`dsm`](#dsm---granularity-g),
+[`evolution`](#evolution) and [`coverage status`](#coverage-status). `health` keeps its
+exit code, projected from the member it answered for. The `xservice` and
+`workspace` groups already took `--repo` with a meaning of their own: it scopes their
+fan-out and, for [`xservice callers` and `impact`](#xservice-workspace-federation-queries),
+names whose symbol is meant. They do not refuse a name that is no member (exit 0):
+`callers`, `impact` and `search` report it as a per-member error inside the answer, with
+no cross-service row, and `route-providers` and `reachability` answer empty — check the
+spelling before reading an empty answer as "nothing".
+
+**Which commands cannot target another member.** The write and gate commands act on
+the repository they run in, and refuse `--repo` as an unknown argument (exit 2):
+`index`, `sync`, `scan`, `check`, `gate`, `verify`, `doctor`, `session-start`,
+`session-end`, `coverage ingest`, `coverage refresh`, `quality-report` and `hook`. Their
+MCP twins — `scan`, `rescan`, `check_rules`, `verify`, `doctor`, `session_start`,
+`session_end`, `coverage_ingest`, `coverage_refresh` — take no `repo` either, and say they act on
+the default member. `affected`, `implements`, `referencing-docs`, `doc-gaps`,
+`stats` and `languages` have no MCP twin that takes `repo`, so they answer for the
+repository they run in.
+
+**The default member.** `[workspace] default` in `logos.workspace.toml`, else the first
+member. Run at the **workspace root** (the directory holding the manifest) without
+`--repo`, the read-only commands above answer for it, as `logos serve --mcp` does on a
+workspace — and say so: the payload carries `member`, first, ahead of the answer's own
+fields (an answer that is not an object is wrapped as `{"member": …, "answer": …}`).
+Run inside a **member's own directory** without `--repo`, a command answers for that
+repository and its payload is exactly what it was before `--repo` existed — no
+`member`. (`serve --mcp` started inside a member serves the workspace's default member
+instead; ask `--repo` to be explicit.) In a plain repository, or inside a member, a blank
+`--repo` is no `--repo`, and nothing changes: no `member` is added. A workspace root whose
+manifest cannot answer without a `--repo` — one that does not parse, or names no member —
+answers for the repository itself, as before; `--repo` on such a manifest is the error
+(exit 2).
+
+A member is read as an unindexed repository is: one that was never indexed is refused
+(exit 3, `run \`logos index\``, naming its path) and nothing is written into it. Index it
+first: `logos --project <MEMBER-PATH> index`. This is the one place the CLI and the MCP
+`repo` differ: `serve --mcp` indexes a never-indexed member on first selection and
+answers, as it always has for its default member.
+
+At the workspace root the write and gate commands do not borrow the default member:
+there is no index there for them to act on, and they refuse as they always did
+(exit 3, `run \`logos index\``).
+
+**Errors** are the MCP parameter's, word for word, from the one core function both
+surfaces call:
+
+| Situation | Message | Exit |
+|---|---|---|
+| `--repo` names no member | `no workspace member "nope"; the members are: svc-a, svc-b, svc-c` | 2 |
+| `--repo` with no workspace | `repo "svc-b" selects a workspace member, and no workspace is loaded: this server answers for its one repository` | 2 |
+| the member's store will not open | `workspace member "svc-c" is degraded: <the reason>` | 3 |
+
+```bash
+logos node x --repo nope       # exit 2, lists the members
+logos node x --repo svc-c      # exit 3, names the member and why it would not open
+```
+
+The member is found by walking up from `--project` (or the current directory) to the
+manifest, so `--repo` works from the workspace root and from inside any member. A member
+built for the first time by `--repo` is admitted under the workspace's connection budget
+like any other.
+
+---
+
 ## Index & freshness
 
 ### `init [-i] [--hooks] [--workspace] [--yes] [--exclude <GLOB>]`
@@ -162,13 +244,19 @@ it from the directory that contains your service repos. It:
    all discovered members non-interactively; `--exclude <GLOB>` drops members
    whose workspace-relative name matches the glob (repeatable). The exclude
    applies only to newly-proposed candidates — members already in an existing
-   manifest are never re-prompted or re-excluded.
+   manifest are never re-prompted or re-excluded. **The globs are persisted**:
+   each one is added to the manifest's
+   [`[workspace] exclude`](configuration.md#workspace-exclude--keeping-a-directory-out-for-good)
+   (sorted, de-duplicated, never removed), so a later `init --workspace --yes`
+   that does not repeat the flag neither proposes nor adds the directory — and
+   with `autodiscover` on it does not rejoin the workspace either.
 3. **Initialises each member** — runs the ordinary per-member `init`
    (write-if-absent, **never** clobbering an existing member config).
 4. **Writes the manifest** — a `logos.workspace.toml` at the parent listing the
    approved members, plus your hand-written
-   `default`/`autodiscover`/`[workspace.warm]`/`[[links]]`/`[governance]`
-   preserved verbatim on a re-run.
+   `default`/`autodiscover`/`exclude`/`[workspace.warm]`/`[[links]]`/`[governance]`
+   preserved verbatim on a re-run (`exclude` only ever gains the globs of the
+   run's `--exclude` flags).
 5. **Injects one MCP entry** — a single `logos-workspace` server key in the
    parent `.mcp.json` (distinct from the per-repo `logos` key so a member's own
    entry is never shadowed).
@@ -351,6 +439,7 @@ pipeline failed), with `"failed": true` in the result.
 
 ```bash
 logos status --json
+logos status --repo <MEMBER>       # under a workspace: that member's index
 ```
 
 Index health: file/node/edge counts, store size, unresolved-reference ledger,
@@ -559,7 +648,7 @@ a fresh `index` of the same tree, on the CLI, `--json`, MCP and HTTP alike.
 ### `search`
 
 ```bash
-logos search <QUERY> [--kind <KIND>] [--limit <N>]    # default limit 20
+logos search <QUERY> [--kind <KIND>] [--limit <N>] [--repo <MEMBER>]    # default limit 20
 ```
 
 FTS5 full-text search over symbol names. `--kind` filters by node kind
@@ -576,7 +665,7 @@ suggestions.
 ### `query`
 
 ```bash
-logos query <SYMBOL> [--kind <KIND>] [--limit <N>]
+logos query <SYMBOL> [--kind <KIND>] [--limit <N>] [--repo <MEMBER>]
 logos query <SYMBOL> --callers
 logos query <SYMBOL> --callees
 ```
@@ -587,7 +676,7 @@ One entry point for the three most common questions. `--callers` and
 ### `context`
 
 ```bash
-logos context <TASK>... [--max-nodes <N>] [--no-code]   # default 25 nodes
+logos context <TASK>... [--max-nodes <N>] [--no-code] [--repo <MEMBER>]   # default 25 nodes
 ```
 
 The token-saving tool: given a free-text task description, assembles a
@@ -602,7 +691,7 @@ code symbols).
 ### `explore`
 
 ```bash
-logos explore <QUERY> [--max-files <N>]                 # default 10 files
+logos explore <QUERY> [--max-files <N>] [--repo <MEMBER>]   # default 10 files
 ```
 
 Anchors on the best-matching symbol and walks its neighbourhood, returning
@@ -615,7 +704,7 @@ to the best full-text match, which passes over nothing.
 ### `node`
 
 ```bash
-logos node <SYMBOL> [--code]
+logos node <SYMBOL> [--code] [--repo <MEMBER>]
 ```
 
 Everything about one symbol: kind, location, export status, annotations
@@ -640,8 +729,8 @@ what they passed over in the same `alternatives` key (see below).
 ### `callers` / `callees`
 
 ```bash
-logos callers <SYMBOL> [--limit <N>]                    # default 50
-logos callees <SYMBOL> [--limit <N>]
+logos callers <SYMBOL> [--limit <N>] [--repo <MEMBER>]   # default 50
+logos callees <SYMBOL> [--limit <N>] [--repo <MEMBER>]
 ```
 
 Direct call-graph neighbours, one hop each way.
@@ -657,7 +746,7 @@ when passed back; a SCIP symbol or a name only one node carries has no
 ### `impact`
 
 ```bash
-logos impact <SYMBOL> [--depth <N>]                     # default depth 3
+logos impact <SYMBOL> [--depth <N>] [--repo <MEMBER>]      # default depth 3
 ```
 
 Transitive closure in both directions, labeled: *upstream* (what breaks if
@@ -669,7 +758,7 @@ for `node` and the nodes it passed over are listed under `alternatives`
 
 ```bash
 logos impact-intersection --item <ID>=<SYMBOL>[,<SYMBOL>...] \
-                          --item <ID>=<SYMBOL>[,<SYMBOL>...] [--depth <N>]
+                          --item <ID>=<SYMBOL>[,<SYMBOL>...] [--depth <N>] [--repo <MEMBER>]
 ```
 
 Which planned work items collide, and on what. Give each work item the symbols
@@ -708,7 +797,7 @@ errors; omitting `--item` entirely is a usage fault (exit 2).
 ### `precedent`
 
 ```bash
-logos precedent <SYMBOL|FILE> [--limit <N>]              # default 20, capped at 100
+logos precedent <SYMBOL|FILE> [--limit <N>] [--repo <MEMBER>]   # default 20, capped at 100
 ```
 
 Which existing code plays the same structural role as the thing you are about to
@@ -762,7 +851,7 @@ payloads, never errors; omitting the target entirely is a usage fault (exit 2).
 
 ```bash
 logos branch-overlap --ref <REF> --ref <REF> [--ref <REF>...] \
-                     [--base <REF>] [--merge <REF>]
+                     [--base <REF>] [--merge <REF>] [--repo <MEMBER>]
 ```
 
 Which git refs collide, and what a merge did not carry. Given the refs about to
@@ -1064,10 +1153,11 @@ The same thick-core read-models back every surface identically — the `logos
 xservice` / `logos workspace` CLI here and the `/api/v1/workspace/*` HTTP
 endpoints under [`serve --ui`](#serve) (both live now) — so the
 coverage/service-map/impact numbers are always the same whichever way you reach
-them. The matching `xservice_*` MCP tools are implemented on the federated MCP
-server but are **not yet exposed over `serve --mcp`** (which still runs
-single-backed today); wiring the served MCP loop to the workspace lands with a
-later CR-061 story.
+them. The matching `xservice_*` and `workspace_*` MCP tools are served by
+`serve --mcp` started in a workspace (the build with the web UI): the host then
+sees 34 tools, the 25 single-root ones plus these nine, and the read-only tools
+take `repo` ([usage.md](usage.md#asking-about-one-workspace-member-repo)).
+`--standalone`, and the slim headless build, serve the one repository instead.
 
 **One exception, since S-474:** `xservice type-refs` and the
 `via_type_reference` section of `callers`/`impact` are on the CLI and its MCP
@@ -1211,10 +1301,17 @@ nor counted yet.
 
   Both sections sit **apart from** `cross_service` and are never merged with
   it: a type reference is not a bridge edge, and `unresolved_egress` counts
-  neither. Name the type by its node (``…/`Dto.java`/Dto#``) or by its dotted
+  neither. A third, `via_asserted_link`, lists the edges a valid `[[links]]`
+  entry asserts, marked `"reached": "(asserted)"` — also apart, also uncounted
+  (see [where a valid link shows up](#links--what-each-declared-links-entry-became)). Name the type by its node (``…/`Dto.java`/Dto#``) or by its dotted
   name (`com.acme.lib.Dto`); an Avro-declared type has no node, so its dotted
-  name is the only way to reach it. The match is on the symbol alone, like the
-  bridge tier, whatever `--repo` says. A member whose declared types could
+  name is the only way to reach it. Like the bridge tier, the match keys on
+  the declaring member as well as the symbol: under `--repo` only the types
+  that member declares are reached, on both the node and the dotted-name
+  paths, whichever member imports them; unscoped, the entries are grouped by
+  declaring member. A reference whose declaring member is not in the
+  workspace is never dropped — it is listed apart, in
+  `type_reference_unattributed`, under any scope. A member whose declared types could
   not be read (not yet extracted after an upgrade, or a store that will not
   open) holds references nobody can reach, so both answers then carry
   `type_reference_unread`, naming each such member with its reason — an absent
@@ -1370,11 +1467,31 @@ graph missing that many outbound calls. `--repo` scopes the residue to that
 member's egress, the same narrowing it applies to the answer's own fan-out. The
 residue is advisory — it is never a gate input and moves no verdict or baseline.
 
-`--repo` narrows the per-member fan-out and the residue; it does **not** narrow
-the cross-service tier, which matches on the queried symbol alone. Under a scope
-the `summary` line therefore names the population of each half — the resolved
-count as *workspace-wide*, the residue as the member it covers — so the two are
-never read as one figure.
+**`--repo` names which member's symbol you mean.** A symbol is unique within one
+member only: two members that declare the same file and declaration — services
+generated from one template, a fork and its original — hold the same symbol
+string. So the cross-service tier matches the member *and* the symbol: under
+`--repo` it keeps only the edges whose queried end (the provider for `callers`,
+the near end for `impact`) is that member's, while the callers and the far side
+stay in whatever member they lie. Under a scope the `summary` line names the
+population of each half — the resolved count as *that member's symbol, from any
+member*, the residue as the member's own egress — so the two are never read as
+one figure.
+
+Without `--repo`, a symbol that two or more members hold is answered **grouped
+per member, never pooled**: every `cross_service` row already names its
+members, `resolved_by_member` gives each holding member's share of the resolved
+count (a member that holds the symbol and provides nothing reads `0`), the
+`summary` line names the same breakdown, and `ambiguity_warning` names the
+members and tells you to pass `--repo` to choose one. A symbol one member holds
+answers exactly as before — neither field appears.
+
+The `via_type_reference` section follows the same rule: with `--repo X` it lists
+only the references whose owning member is `X`; without it, every entry is listed, its
+owner named under `via`. A type reference whose owner names no member of the workspace
+cannot be claimed or excluded by any scope, so it is listed under
+`type_reference_unattributed` whatever `--repo` says — reported, never dropped.
+The section is absent when every reference reaching the symbol has an owner.
 
 [BR-53]: ../specs/software-spec.md#327-workspace-federation
 [CR-125]: ../requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
@@ -1438,6 +1555,110 @@ Per-member freshness (each member's index/sync state, including the durable
 is bucketed separately (`no-provider-in-workspace` never depresses
 `spec_conformance_ratio`) and never feeds any member's quality gate
 ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
+
+##### `exclusion` — what `[workspace] exclude` left out
+
+When the manifest declares
+[`[workspace] exclude`](configuration.md#workspace-exclude--keeping-a-directory-out-for-good),
+`workspace status` (human and `--json`) gains an `exclusion` block, so an
+exclusion is visible instead of silent:
+
+```jsonc
+// logos workspace status --json
+"exclusion": {
+  "globs": ["*-fork"],              // the declared list, as written
+  "excluded": ["svc-fork"],         // autodiscovered directories the globs kept out (absent from every row below)
+  "conflicts": [                    // explicit `members` entries that match a glob and were KEPT
+    { "entry": "svc-fork", "glob": "*-fork", "warning": "[workspace] members entry \"svc-fork\" matches …" }
+  ]
+}
+```
+
+The block is absent when the manifest has no `exclude`, so such a workspace's
+output is byte-identical to before the key existed.
+
+##### `links` — what each declared `[[links]]` entry became
+
+A `[[links]]` entry asserts a cross-service coupling the static bridge cannot
+see — a runtime-composed URL, a computed topic. `relation` is `http_call`,
+`grpc_call` or `publishes`; anything else is a parse error (exit 2). `from` and
+`to` are each `<member>::<target>`, where `<target>` is a canonical symbol or a
+name, resolved by **that member's own index**:
+
+```toml
+[[links]]
+relation = "http_call"
+from = "web::fetch_cart"
+to = "api::get_cart"
+```
+
+`workspace status` (human and `--json`) reports every declared link, in
+manifest order, with what became of it:
+
+```jsonc
+// logos workspace status --json
+"links": [
+  { "relation": "http_call", "from": "web::fetch_cart", "to": "api::get_cart",
+    "status": "valid",
+    "edge": { "relation": "route", "from": {…}, "to": {…}, "intake": "asserted", … } },
+  { "relation": "http_call", "from": "web::fetch_cart", "to": "other::get_cart",
+    "status": "invalid", "reason": "ambiguous", "endpoint": "to",
+    "candidates": { "symbols": ["…", "…"], "total": 2, "omitted": 0 },
+    "detail": "`to` endpoint's target `get_cart` matches 2 nodes in member `other` (2 listed); name one by its canonical symbol" }
+]
+```
+
+- `valid` — both endpoints resolved to exactly one node, in two different
+  members: the link is one bridge edge with intake `asserted`, filed under the
+  relation class a measured coupling of that kind uses (`route`, `grpc-call`,
+  `broker-topic`).
+- `invalid` — no edge, with a `reason`: `unknown-member` (no such member,
+  including one `[workspace] exclude` removed), `member-degraded` (the member
+  could not be opened or read, so the answer is unknown), `no-match`,
+  `ambiguous` (at most 8 candidates listed, the rest counted in `omitted`), or
+  `same-member` (both ends in one member — that edge is the member's own graph's).
+  `endpoint` says which end the reason is about.
+- `redundant` — valid, but an edge already joins the same two endpoints; it
+  names that edge under `duplicates` and adds no second one. **A route and the
+  handler it serves are one endpoint**: a measured HTTP edge ends at the route
+  node (`GET /users/{user_id}`), so a link naming the handler behind an
+  already-bound route is `redundant`, naming that measured edge, and is never
+  listed beside it. A handler no bound route serves is a different endpoint.
+
+A link is a **claim, never evidence**: no asserted edge enters the bridge's
+matcher, the coverage figures, `resolved_cross_service_edges`,
+`egress_resolution`, `spec_conformance_ratio` or workspace governance. The block
+is absent when the manifest declares no `[[links]]`, so such a workspace's
+output is byte-identical to before links were interpreted.
+
+**Where a valid link shows up — always labelled `asserted`:**
+
+- **`xservice callers` / `xservice impact`** (CLI, MCP, web) list the asserted
+  edges whose queried end is the `(member, symbol)` pair, under their own
+  `via_asserted_link` key — **apart from** `cross_service`, and in neither its
+  resolved count, `resolved_by_member`, nor the residue line. Each row carries
+  `intake: "asserted"` (a callers row at its top level, an impact row on its
+  `via` edge) and `"reached": "(asserted)"`, which is what the human rendering
+  shows beside it. `--repo` narrows them exactly as it narrows `cross_service`.
+- **`workspace reachability`**: a link declaring a **call** (`http_call`,
+  `grpc_call`) roots its target, and what only it reaches is listed under
+  `live_via_asserted_link` with verdict `live-via-asserted-link` — never
+  `live-via-cross-service`, which stays the measured verdict and wins when both
+  reach a callable. A `publishes` link reaches a topic, not a callable, and roots
+  nothing. The rider's `asserted_call_edges` and the per-member
+  `asserted_roots` / `live_via_asserted_link` counts are absent at zero.
+- **`workspace status`**: `coverage.asserted_edges` counts the links **beside**
+  the headline — `valid`, `invalid` (and `invalid_by_reason`), `redundant`, and
+  a `summary` line. A residue row (an invocation reference that did not bind)
+  that a valid link starts from keeps its state and reason and gains an
+  `asserted_by` pointer naming the link as written.
+- **The web UI** draws each valid link as a dashed line in its own colour on the
+  service map, with an *Asserted links* legend entry and widget, and lists the
+  callables only a link keeps live apart on the Workspace Dashboard.
+
+A link is re-judged on every answer: rename its target and re-sync the member,
+and the link turns `invalid` (`no-match`) and its `live-via-asserted-link`
+roots disappear on the next query.
 
 ##### The headline: `resolved_cross_service_edges` and `egress_resolution`
 
@@ -2042,10 +2263,14 @@ labeled union of every member's `Calls` / `RoutesTo` adjacency plus the bridge's
 cross-service invocation edges folded in as extra live roots. It answers the one
 question a per-repo dead-code verdict structurally cannot: *is this callable dead
 only because the thing that calls it lives in another repo?* A handler reachable
-only via a matched cross-service call is reported live in this view.
+only via a matched cross-service call is reported live in this view. A valid
+`[[links]]` call also roots its target, apart and under its own verdict
+(`live_via_asserted_link`, `live-via-asserted-link`) — see
+[where a valid link shows up](#links--what-each-declared-links-entry-became).
 
 **Scope and default.** By default the response carries only the **promotions**
-(nodes the union view flips from per-repo-dead to app-wide-live) — the payload a
+(nodes the union view flips from per-repo-dead to app-wide-live: the measured
+ones, and the asserted ones listed apart) — the payload a
 consumer almost always wants, kept well within the surface budget. The full
 per-repo-dead set is large and is suppressed unless you pass `--all`; `--repo
 <member>` narrows either view to a single workspace member. The response states
@@ -2468,7 +2693,7 @@ installed hook script to exec; you would not normally run it by hand.
 ### `health`
 
 ```bash
-logos health [--no-reconcile]     # unhealthy graph exits 1
+logos health [--no-reconcile] [--repo <MEMBER>]     # unhealthy graph exits 1
 logos health --json
 ```
 
@@ -2675,7 +2900,7 @@ torn down on completion. Drift exits 1.
 ### `evolution`
 
 ```bash
-logos evolution [--limit <N>]    # default: all snapshots
+logos evolution [--limit <N>] [--repo <MEMBER>]    # default: all snapshots
 ```
 
 Signal trend over stored snapshots — the architecture-drift detector. Reports
@@ -2686,7 +2911,7 @@ snapshot. The first snapshot shows null deltas. Reads the append-only
 ### `dsm [--granularity <G>]`
 
 ```bash
-logos dsm                          # module-level coupling (default)
+logos dsm [--repo <MEMBER>]           # module-level coupling (default)
 logos dsm --granularity file       # file-level coupling
 ```
 
@@ -2732,7 +2957,7 @@ in this section can move the 0–10000 signal (see
 ### `hotspots`
 
 ```bash
-logos hotspots                     # all ranked files
+logos hotspots [--repo <MEMBER>]      # all ranked files
 logos hotspots --limit 20          # top 20 by score
 logos hotspots --untested          # only files with no fresh positive coverage
 logos hotspots --untested --production-scope   # exclude whole test files from the board
@@ -2815,7 +3040,7 @@ artifact first.
 ### `coverage status`
 
 ```bash
-logos coverage status              # human summary
+logos coverage status [--repo <MEMBER>]   # human summary
 logos coverage status --json       # per-file freshness + overall fraction
 ```
 

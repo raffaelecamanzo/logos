@@ -36,6 +36,8 @@ import {
   WIDGET_STATES,
   type AppStubOptions,
 } from "./appViewFixtures.ts";
+import { EDGE_COLOR } from "../graph/graphModel.ts";
+import { ASSERTED_EDGE_TYPE } from "./serviceMapModel.ts";
 import { WorkspaceDashboardView } from "./WorkspaceDashboardView.tsx";
 
 /** The two reads this view issues, each with the card that read alone supplies.
@@ -642,5 +644,87 @@ describe("every widget explains itself, in one stack (S-613)", () => {
   it("Members states BR-56 as one plain sentence", async () => {
     const { container } = await mount();
     expect(within(widget(container, "Members")).getByText(DASHBOARD_TEXT.notAveraged)).toBeInTheDocument();
+  });
+});
+
+// ── S-709: what only a declared link keeps live ──────────────────────────────
+
+describe("WorkspaceDashboardView — asserted reachability (S-709, FR-WS-41, BR-75)", () => {
+  const claim = (name: string) => ({
+    member: "api",
+    symbol: `local ${name}`,
+    name,
+    kind: "function" as const,
+    verdict: "live-via-asserted-link" as const,
+    coverage: coverageRider({ asserted_call_edges: 1 }),
+  });
+
+  it("lists the asserted promotions apart, after a dashed legend entry, never in the measured count", async () => {
+    const { container } = await mount({
+      reachability: reachabilityAnswer({
+        coverage: coverageRider({ asserted_call_edges: 1 }),
+        live_via_asserted_link: [claim("get_cart"), claim("load_cart")],
+      }),
+    });
+    const w = widget(container, "Cross-service reachability");
+    // The measured lead is untouched: one measured promotion, as before.
+    expect(w.querySelector('[data-widget-part="figure"] p')?.textContent).toBe(DASHBOARD_TEXT.keepThem(1, false));
+    expect(w.textContent).toContain(DASHBOARD_TEXT.keptByLinks(2, 1));
+    const row = within(w).getByText(DASHBOARD_TEXT.assertedLegend).closest("li")!;
+    const line = row.querySelector("line")!;
+    expect(line.getAttribute("stroke-dasharray"), "the swatch is dashed").toBe("6 4");
+    expect(line.getAttribute("stroke")).toBe(EDGE_COLOR[ASSERTED_EDGE_TYPE]);
+    const table = within(w).getByRole("table", { name: /kept in use only by a declared link \(asserted\)/ });
+    expect(within(table).getAllByRole("cell", { name: /^(get_cart|load_cart)$/ }).map((c) => c.textContent)).toEqual([
+      "get_cart",
+      "load_cart",
+    ]);
+  });
+
+  it("adds the asserted promotions to the Members row so its figures still add up", async () => {
+    const { container } = await mount({
+      reachability: reachabilityAnswer({
+        coverage: coverageRider({ asserted_call_edges: 1 }),
+        members: [
+          {
+            member: "api",
+            extra_roots: 4,
+            unresolved_roots: 1,
+            dead_per_repo: 10,
+            live_via_cross_service: 3,
+            asserted_roots: 1,
+            live_via_asserted_link: 2,
+            dead_app_wide: 5,
+          },
+        ],
+        live_via_asserted_link: [claim("get_cart"), claim("load_cart")],
+      }),
+    });
+    const table = within(widget(container, "Members")).getByRole("table");
+    const headers = within(table).getAllByRole("columnheader").map((th) => th.textContent ?? "");
+    const at = headers.findIndex((h) => h.includes("kept by a declared link (asserted)"));
+    expect(at, headers.join(" | ")).toBeGreaterThan(-1);
+    const api = within(table).getByRole("cell", { name: "api" }).closest("tr")!;
+    const cells = [...api.querySelectorAll("td")].map((td) => td.textContent);
+    const col = (needle: string) => cells[headers.findIndex((h) => h.includes(needle))];
+    expect([col("Unused in"), col("used by another service"), col("kept by a declared link"), col("Unused across")]).toEqual([
+      "10",
+      "3",
+      "2",
+      "5",
+    ]);
+  });
+
+  it("keeps the Members table's columns when no member has an asserted promotion", async () => {
+    const { container } = await mount();
+    const table = within(widget(container, "Members")).getByRole("table");
+    expect(table.textContent).not.toContain("declared link");
+  });
+
+  it("renders nothing asserted when the answer carries no asserted promotion", async () => {
+    const { container } = await mount();
+    const w = widget(container, "Cross-service reachability");
+    expect(w.textContent).not.toContain("declared link");
+    expect(within(w).queryByText(DASHBOARD_TEXT.assertedLegend)).toBeNull();
   });
 });

@@ -179,10 +179,13 @@ pub fn serve_surfaces_with_assets(
             .inspect_err(|e| tracing::warn!(target: "logos::web", "serving without a watcher: {e:#}"))
             .ok()
     });
-    // The engine the shared single-root surfaces (`/api/v1/*`, and the MCP loop)
-    // run against: the one engine under `Single`, or the workspace's default
-    // member. Resolving it once fails loud if a federated default cannot start.
-    let engine = backing
+    // Resolve the default engine once, for two effects only — nothing reads the
+    // binding: it fails loud if a federated default cannot start, and holding it
+    // for the process lifetime keeps the default member resident (a held engine
+    // is never evicted). `serve_web` resolves its own engine from the backing,
+    // and the MCP loop is handed the whole backing, so its read-only tools can
+    // answer for any member (FR-WS-42).
+    let _default_engine = backing
         .default_engine()
         .context("resolving the default engine for the serve surface")?;
     // Current-thread runtime: HTTP + MCP I/O only (ADR-03). `enable_all` brings
@@ -198,10 +201,10 @@ pub fn serve_surfaces_with_assets(
             // keeps stdout; the web surface is stderr-only).
             (true, true) => tokio::select! {
                 r = serve_web(Arc::clone(&backing), port, host, assets) => r,
-                r = mcp::serve_stdio_on(Arc::clone(&engine), host) => r,
+                r = mcp::serve_stdio_on(Arc::clone(&backing), host) => r,
             },
             (false, true) => serve_web(backing, port, host, assets).await,
-            (true, false) => mcp::serve_stdio_on(engine, host).await,
+            (true, false) => mcp::serve_stdio_on(backing, host).await,
             // clap guarantees at least one of --mcp/--ui; defend anyway.
             (false, false) => anyhow::bail!("serve needs --mcp and/or --ui"),
         }

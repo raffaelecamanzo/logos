@@ -58,6 +58,7 @@ use super::bridge::{
 };
 use super::declared_contracts::{self, DeclaredContractRelation, OperationProviders, SpecOperation};
 use super::external_join::{self, BaseFacts, BoundExternal, JoinCall};
+use super::links::{links_covering, AssertedEdges, LinkStatus};
 use super::manifest::MemberKind;
 use super::registry::{AnswerScope, MemberEngine};
 
@@ -466,9 +467,13 @@ impl CoverageState {
 /// [`ProviderCandidates::omitted`] states the remainder and
 /// [`ProviderCandidates::summary`] says it in words.
 ///
+/// Also the bound on an ambiguous `[[links]]` target's candidates
+/// ([`super::links::LinkCandidates`]), so one bound governs every list of tied
+/// candidates the workspace payloads carry.
+///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-const CANDIDATE_LIMIT: usize = 8;
+pub(super) const CANDIDATE_LIMIT: usize = 8;
 
 /// What the providers listed on a coverage row *are* to that row ([CR-118]).
 ///
@@ -786,6 +791,23 @@ pub struct ReferenceCoverage {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidates: Option<ProviderCandidates>,
+    /// The valid `[[links]]` entries declaring the coupling this **residue**
+    /// row could not resolve — an invocation row that did not bind (unbound for
+    /// any reason, ambiguous, or with no provider in the workspace) whose
+    /// consumer endpoint and relation class a valid link's asserted edge starts
+    /// from ([FR-WS-41], [BR-75]).
+    ///
+    /// A pointer, and nothing more: the row keeps its state and reason, stays in
+    /// every count and in the residue, and no figure reads this field — an
+    /// assertion explains a gap, it does not close it. **Absent** when no valid
+    /// link covers the row, which is every row of a workspace without
+    /// `[[links]]`; filled on `workspace status` by
+    /// [`CrossServiceCoverage::with_links`].
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asserted_by: Vec<super::manifest::Link>,
     /// Whether this reference's target was **written at the call site** or
     /// **read from committed configuration** — and, when read, the key, the
     /// defining sources and the profile set it was read under (S-382,
@@ -863,6 +885,7 @@ impl ReferenceCoverage {
             to,
             intake: provenance.intake,
             candidates,
+            asserted_by: Vec::new(),
             provenance: provenance.value,
         }
     }
@@ -945,10 +968,15 @@ impl ClassificationCounts {
 /// without a consumer re-classifying [`CrossServiceCoverage::references`]
 /// itself ([NFR-CC-04]).
 ///
-/// One field per [`BridgeIntake`] variant, and the mapping is exhaustive in both
-/// directions — [`population_mut`](Self::population_mut) matches on the enum and
-/// [`total`](Self::total) destructures the struct — so a third intake fails to
-/// compile until it is reported here.
+/// One field per **evidence** [`BridgeIntake`] variant, and the mapping is
+/// exhaustive in both directions — [`population_mut`](Self::population_mut)
+/// matches on the enum and [`total`](Self::total) destructures the struct — so a
+/// new intake fails to compile until it is either reported here or stated to be
+/// no population at all. [`Asserted`](BridgeIntake::Asserted) is the one that is
+/// none: a declared link is a claim, and a population is a count of evidence
+/// ([BR-75]).
+///
+/// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
@@ -970,13 +998,18 @@ pub struct IntakeSplit {
 }
 
 impl IntakeSplit {
-    /// The population `intake` belongs to. Exhaustive on the enum on purpose: a
-    /// new [`BridgeIntake`] variant does not compile until it has a field here,
-    /// so no population can be silently folded into another's counts.
-    fn population_mut(&mut self, intake: BridgeIntake) -> &mut ClassificationCounts {
+    /// The population `intake` belongs to, or `None` for an intake that is not
+    /// evidence and so is counted nowhere ([BR-75]). Exhaustive on the enum on
+    /// purpose: a new [`BridgeIntake`] variant does not compile until it has a
+    /// field here or is stated to have none, so no population can be silently
+    /// folded into another's counts.
+    ///
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    fn population_mut(&mut self, intake: BridgeIntake) -> Option<&mut ClassificationCounts> {
         match intake {
-            BridgeIntake::ContractSurface => &mut self.contract_surface,
-            BridgeIntake::Invocation => &mut self.invocation,
+            BridgeIntake::ContractSurface => Some(&mut self.contract_surface),
+            BridgeIntake::Invocation => Some(&mut self.invocation),
+            BridgeIntake::Asserted => None,
         }
     }
 
@@ -1365,6 +1398,49 @@ pub struct CrossServiceCoverage {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_external: Option<BoundExternal>,
+    /// The declared `[[links]]`, counted **beside** this headline and never
+    /// inside it ([FR-WS-41], [BR-75]): valid (one asserted edge each), invalid
+    /// by reason, and redundant. No figure above reads it — an asserted edge is
+    /// a claim, and every count here is over evidence.
+    ///
+    /// **Absent** when the manifest declares no link, so such a workspace
+    /// serializes exactly as before; filled on `workspace status` by
+    /// [`with_links`](Self::with_links).
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asserted_edges: Option<AssertedEdges>,
+}
+
+impl CrossServiceCoverage {
+    /// Report the declared `links` beside this classification ([FR-WS-41],
+    /// [BR-75]): the [`asserted_edges`](Self::asserted_edges) tally, and on each
+    /// residue row a valid link covers, an
+    /// [`asserted_by`](ReferenceCoverage::asserted_by) pointer to it.
+    ///
+    /// A residue row is an **invocation** row that did not bind — the
+    /// population [`super::residue`] is drawn from, with the
+    /// `no-provider-in-workspace` rows it buckets apart. Nothing else moves: no
+    /// count, no state, no reason, no rate. With no link this returns `self`
+    /// unchanged.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[must_use]
+    pub fn with_links(mut self, links: &[LinkStatus]) -> Self {
+        self.asserted_edges = AssertedEdges::tally(links);
+        if self.asserted_edges.is_none() {
+            return self;
+        }
+        for row in &mut self.references {
+            let residue = row.intake == BridgeIntake::Invocation && !matches!(row.state, CoverageState::Bound);
+            if residue {
+                row.asserted_by = links_covering(links, &row.relation, &row.from);
+            }
+        }
+        self
+    }
 }
 
 /// The contract-surface rows of members **declared** `documentation` or
@@ -2725,7 +2801,13 @@ impl Tally {
         // The row's own intake selects the population, so the count and the
         // discriminator the row publishes are read from one value — a split a
         // consumer could not reproduce from `references` would be worse than none.
-        self.by_intake.population_mut(provenance.intake).record(&state);
+        // An intake with no population is not evidence: it is neither counted nor
+        // listed, so no headline or residue derived from the rows can include it
+        // ([BR-75]). No loop above files one today; this is the guard if one does.
+        let Some(population) = self.by_intake.population_mut(provenance.intake) else {
+            return;
+        };
+        population.record(&state);
         self.references
             .push(ReferenceCoverage::new(relation, from, state, provenance));
     }
@@ -2854,6 +2936,9 @@ impl Tally {
             declared_contracts: None,
             // Joined against that relation, after it — the same reason.
             bound_external: None,
+            // Reported beside the headline by `with_links`, on `workspace
+            // status` only: no classification reads a declared link.
+            asserted_edges: None,
         }
     }
 }
@@ -3442,6 +3527,7 @@ mod tests {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         }
     }
 
@@ -4221,6 +4307,7 @@ mod tests {
             let population = match row.intake {
                 BridgeIntake::ContractSurface => "contract_surface",
                 BridgeIntake::Invocation => "invocation",
+                BridgeIntake::Asserted => panic!("a coverage row is never asserted: {row:?}"),
             };
             // `no-provider-in-workspace` arrives inside the `unbound` display
             // bucket while its counter sits outside `unbound` ([ADR-53]) — the same
@@ -4257,53 +4344,208 @@ mod tests {
         }
     }
 
-    /// **Every [`BridgeIntake`] variant has a population of its own** — the
-    /// table-driven half of the exhaustiveness guard, mirroring
-    /// `federation::reach::tests`' own intake table.
+    /// **Every evidence [`BridgeIntake`] variant has a population of its own, and
+    /// the asserted one has none** — the table-driven half of the exhaustiveness
+    /// guard, mirroring `federation::reach::tests`' own intake table.
     ///
-    /// The compiler already refuses a third variant twice over
+    /// The compiler already refuses a new variant twice over
     /// ([`IntakeSplit::population_mut`] matches on the enum,
     /// [`IntakeSplit::total`] destructures the struct). What that cannot catch is
     /// **two variants sharing one field** — `population_mut` returning
     /// `contract_surface` for both arms compiles, and would silently report an
     /// invocation row as a declared one, which is the misreading the split exists
-    /// to end. So each variant is filed and read back separately.
+    /// to end — nor an asserted claim filed into an evidence count ([BR-75]). So
+    /// each variant is filed and read back separately.
+    ///
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[test]
     fn every_bridge_intake_variant_is_counted_under_its_own_population() {
         // Every variant must appear here AND in `population_mut`'s match; the fixed
         // length is what makes adding one to the enum a compile error here too.
-        const ALL: [BridgeIntake; 2] = [BridgeIntake::ContractSurface, BridgeIntake::Invocation];
+        const ALL: [BridgeIntake; 3] =
+            [BridgeIntake::ContractSurface, BridgeIntake::Invocation, BridgeIntake::Asserted];
 
         for (i, intake) in ALL.into_iter().enumerate() {
             let mut split = IntakeSplit::default();
             // A distinct count per variant, so a shared field shows up as a sum
             // rather than as an equal-looking value.
             for _ in 0..=i {
-                split.population_mut(intake).record(&CoverageState::Bound);
+                if let Some(population) = split.population_mut(intake) {
+                    population.record(&CoverageState::Bound);
+                }
             }
-            let expected = (i + 1) as u64;
             let filed = match intake {
-                BridgeIntake::ContractSurface => split.contract_surface,
-                BridgeIntake::Invocation => split.invocation,
+                BridgeIntake::ContractSurface => Some(split.contract_surface),
+                BridgeIntake::Invocation => Some(split.invocation),
+                BridgeIntake::Asserted => None,
             };
             assert_eq!(
-                filed.bound, expected,
-                "{intake:?} is counted under its own population"
+                intake.is_evidence(),
+                filed.is_some(),
+                "{intake:?}: a population exists exactly for an evidence intake"
+            );
+            let expected = if filed.is_some() { (i + 1) as u64 } else { 0 };
+            assert_eq!(
+                filed.map_or(0, |counts| counts.bound),
+                expected,
+                "{intake:?} is counted under its own population, or nowhere"
             );
             assert_eq!(
                 split.total().bound, expected,
-                "{intake:?} reaches the derived total, and nothing else does"
+                "{intake:?} reaches the derived total only if it is evidence"
             );
         }
 
-        // And the two never collide: filing one of each leaves 1 in both fields.
+        // And none collide: filing one of each leaves 1 in both evidence fields
+        // and the asserted one in neither.
         let mut split = IntakeSplit::default();
         for intake in ALL {
-            split.population_mut(intake).record(&CoverageState::Bound);
+            if let Some(population) = split.population_mut(intake) {
+                population.record(&CoverageState::Bound);
+            }
         }
         assert_eq!(split.contract_surface.bound, 1);
         assert_eq!(split.invocation.bound, 1);
         assert_eq!(split.total().bound, 2);
+    }
+
+    /// **A link explains a residue row without closing it** ([FR-WS-41],
+    /// [BR-75]): `with_links` adds the `asserted_edges` tally beside the
+    /// headline and a pointer on each **non-bound invocation** row a valid link
+    /// starts from — and moves nothing else. Every figure, state and reason
+    /// serializes byte-identically once the two additive keys are taken out; a
+    /// bound row a link also starts from gains no pointer (it is no residue), nor
+    /// does an unbound contract-surface row (a declaration, not egress), and an
+    /// invalid link points nowhere.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn with_links_points_residue_rows_at_their_link_and_moves_no_figure() {
+        use super::super::bridge::BridgeEdge;
+        use super::super::links::{InvalidLink, InvalidReason, LinkStatus, LinkVerdict};
+        use super::super::manifest::LinkRelation;
+        let link = |consumer: &str, valid: bool| {
+            let edge = BridgeEdge {
+                relation: "route".to_string(),
+                from: BridgeEndpoint {
+                    member: "web".to_string(),
+                    symbol: LogosSymbol::parse(&format!("local {consumer}")).unwrap(),
+                },
+                to: BridgeEndpoint {
+                    member: "orders".to_string(),
+                    symbol: LogosSymbol::parse("local get_order").unwrap(),
+                },
+                intake: BridgeIntake::Asserted,
+                from_value: Provenance::Literal,
+                to_value: Provenance::Literal,
+            };
+            LinkStatus {
+                relation: LinkRelation::HttpCall,
+                from: format!("web::{consumer}"),
+                to: "orders::get_order".to_string(),
+                verdict: if valid {
+                    LinkVerdict::Valid { edge }
+                } else {
+                    LinkVerdict::Invalid(InvalidLink {
+                        reason: InvalidReason::NoMatch,
+                        endpoint: None,
+                        candidates: None,
+                        detail: String::new(),
+                    })
+                },
+            }
+        };
+        let links = [
+            link("fetch_nonsense", true),
+            link("fetch_tied", true),
+            link("fetch_nowhere", true),
+            link("fetch_user", true),
+            link("emitOrder", false),
+            // A link from a contract-surface row's endpoint: that row is a
+            // declaration, never egress, so it is no residue and gains nothing.
+            link("spec_op", true),
+        ];
+        // The egress fixture holds invocation rows only; give it one unbound
+        // contract-surface row a valid link starts from.
+        let with_declared_row = |mut cov: CrossServiceCoverage| {
+            let mut row = cov
+                .references
+                .iter()
+                .find(|r| r.from.symbol.as_str() == "local fetch_nonsense")
+                .expect("the fixture's unbound row")
+                .clone();
+            row.intake = BridgeIntake::ContractSurface;
+            row.from.symbol = LogosSymbol::parse("local spec_op").unwrap();
+            cov.references.push(row);
+            cov
+        };
+        let without = with_declared_row(every_egress_shape_at_once());
+        let with = with_declared_row(every_egress_shape_at_once()).with_links(&links);
+
+        let mut stripped = serde_json::to_value(&with).unwrap();
+        stripped.as_object_mut().unwrap().remove("asserted_edges");
+        for row in stripped["references"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("asserted_by");
+        }
+        assert_eq!(
+            serde_json::to_string(&stripped).unwrap(),
+            serde_json::to_string(&without).unwrap(),
+            "a link moves no figure, state or reason"
+        );
+
+        let pointed: Vec<(&str, &str, usize)> = with
+            .references
+            .iter()
+            .filter(|row| row.intake == BridgeIntake::Invocation)
+            .map(|row| (row.from.symbol.as_str(), row.bucket, row.asserted_by.len()))
+            .collect();
+        for (symbol, bucket, pointers) in pointed {
+            let expected = match symbol {
+                "local fetch_nonsense" | "local fetch_tied" | "local fetch_nowhere" => 1,
+                _ => 0,
+            };
+            assert_eq!(pointers, expected, "{symbol} ({bucket})");
+        }
+        let declared = with.references.iter().find(|r| r.from.symbol.as_str() == "local spec_op").unwrap();
+        assert!(declared.asserted_by.is_empty(), "a contract-surface row is no residue: {declared:?}");
+        let tally = with.asserted_edges.as_ref().expect("links declared, tally present");
+        assert_eq!((tally.valid, tally.invalid, tally.redundant), (5, 1, 0));
+        assert_eq!(without.with_links(&[]).asserted_edges, None, "no link, no tally");
+    }
+
+    /// **An asserted row is filed nowhere** ([BR-75], [FR-WS-41]): neither the
+    /// headline counts, nor the intake split, nor the `references` every
+    /// derived figure (the residue, the egress rate) is recomputed from.
+    ///
+    /// No coverage loop builds such a row today — asserted edges are made by
+    /// `federation::links` and never enter the classification — so this drives
+    /// [`Tally::record`] directly, the one place a row is filed.
+    ///
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    #[test]
+    fn coverage_files_an_asserted_row_nowhere() {
+        let mut tally = Tally::default();
+        for intake in [BridgeIntake::Invocation, BridgeIntake::Asserted] {
+            tally.record(
+                "route".to_string(),
+                BridgeEndpoint {
+                    member: "web".to_string(),
+                    symbol: LogosSymbol::parse("local fetch").unwrap(),
+                },
+                CoverageState::Bound,
+                RowProvenance {
+                    providers: ProviderEvidence::Unnamed,
+                    intake,
+                    value: Provenance::Literal,
+                },
+            );
+        }
+        assert_eq!(tally.references.len(), 1, "only the evidence row is listed");
+        assert_eq!(tally.references[0].intake, BridgeIntake::Invocation);
+        assert_eq!(tally.by_intake.invocation.bound, 1);
+        assert_eq!(tally.by_intake.total().bound, 1, "the asserted row is counted nowhere");
     }
 
     /// The wire tokens the split's two keys are read under, pinned against the
@@ -7672,15 +7914,19 @@ mod tests {
             match intake {
                 BridgeIntake::ContractSurface => "contract-surface",
                 BridgeIntake::Invocation => "invocation",
+                BridgeIntake::Asserted => "asserted",
             }
         }
         /// Every variant. The fixed length is the second half of the guard: adding
         /// one without extending this fails to compile.
-        const ALL: [BridgeIntake; 2] = [BridgeIntake::ContractSurface, BridgeIntake::Invocation];
+        const ALL: [BridgeIntake; 3] =
+            [BridgeIntake::ContractSurface, BridgeIntake::Invocation, BridgeIntake::Asserted];
 
         // The tokens really are what serde emits, and the keys really are what the
         // split serializes — otherwise this guard would check strings the payload
-        // never carries, which is how a green guard covers nothing.
+        // never carries, which is how a green guard covers nothing. An asserted
+        // intake is no population ([BR-75]): the split must NOT carry its key, and
+        // since no coverage row carries it, the coverage surfaces need not name it.
         let split = serde_json::to_value(IntakeSplit::default()).unwrap();
         for intake in ALL {
             assert_eq!(
@@ -7688,14 +7934,16 @@ mod tests {
                 wire(intake),
                 "{intake:?} must serialise as its documented token"
             );
-            assert!(
+            assert_eq!(
                 split.get(wire(intake).replace('-', "_")).is_some(),
-                "the split must carry a population key for {intake:?}: {split}"
+                intake.is_evidence(),
+                "the split carries a population key for {intake:?} exactly when it is \
+                 evidence: {split}"
             );
         }
 
         for (rel, text) in payload_surfaces() {
-            for intake in ALL {
+            for intake in ALL.into_iter().filter(|intake| intake.is_evidence()) {
                 let token = wire(intake);
                 // The row token, in an enumeration shape rather than as a bare
                 // word: `invocation` is also an English word and the name of a
@@ -8831,6 +9079,7 @@ mod tests {
             to: None,
             intake: BridgeIntake::Invocation,
             candidates: Some(tied),
+            asserted_by: Vec::new(),
             provenance: Provenance::Literal,
         };
 

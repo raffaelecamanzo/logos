@@ -28,8 +28,10 @@ mod server;
 pub use server::{LogosMcp, INSTRUCTIONS};
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use logos_core::{federation::Backing, Engine};
 use logos_ext::ExtensionHost;
 use rmcp::ServiceExt;
 
@@ -66,11 +68,18 @@ pub fn serve_stdio(root: impl AsRef<Path>, host: &ExtensionHost) -> Result<()> {
         .enable_time()
         .build()
         .context("building the MCP I/O runtime")?;
-    runtime.block_on(serve_stdio_on(engine, host))
+    runtime.block_on(serve_stdio_on(Arc::new(Backing::Single(engine)), host))
 }
 
-/// Run the MCP stdio serve loop on the **caller's** runtime over a shared
-/// `Engine`, until the host disconnects (FR-MC-01, FR-WT-04).
+/// Run the MCP stdio serve loop on the **caller's** runtime over a shared serve
+/// [`Backing`], until the host disconnects (FR-MC-01, FR-WT-04).
+///
+/// The backing, not one engine: under a discovered workspace the server is the
+/// federated one ([`LogosMcp::over`]), so its read-only tools can answer for any
+/// member ([FR-WS-42]) and its cross-service tools are served; under a single
+/// root it is the one engine, exactly as before.
+///
+/// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
 ///
 /// Split out of [`serve_stdio`] so the combined `serve --mcp --ui` process
 /// (CR-012, FR-UI-01) can race this loop against the web surface on **one**
@@ -81,11 +90,8 @@ pub fn serve_stdio(root: impl AsRef<Path>, host: &ExtensionHost) -> Result<()> {
 /// Returns an error if the initialize handshake fails for a reason other than a
 /// pre-handshake disconnect (which winds down cleanly, exit 0), or the serve
 /// loop fails irrecoverably.
-pub async fn serve_stdio_on(
-    engine: std::sync::Arc<logos_core::Engine>,
-    host: &ExtensionHost,
-) -> Result<()> {
-    let service = match LogosMcp::new(engine, host).serve(rmcp::transport::stdio()).await {
+pub async fn serve_stdio_on(backing: Arc<Backing<Engine>>, host: &ExtensionHost) -> Result<()> {
+    let service = match LogosMcp::over(backing, host).serve(rmcp::transport::stdio()).await {
         Ok(service) => service,
         // A host that closes stdin before (or during) the initialize handshake
         // is a disconnect, not a fault: wind down cleanly with exit 0, same as

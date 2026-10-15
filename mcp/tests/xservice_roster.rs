@@ -3,11 +3,16 @@
 //!
 //! The load-bearing guarantee: introducing the federated backing and the
 //! `xservice_*` cross-service tools must leave the single-root tool roster
-//! **byte-for-byte unchanged** — same tools, same schemas, no `repo`
-//! dimension. Federation only ever *adds* tools, and only when a workspace is
-//! present. This drives the roster directly through [`LogosMcp::list_tools`]
+//! **byte-for-byte unchanged** — same tools, same schemas. Federation only ever
+//! *adds* tools, and only when a workspace is present. Since S-710 the
+//! read-only single-root tools carry an optional `repo` under both backings
+//! ([FR-WS-42]); a single-root server refuses it.
+//!
+//! This drives the roster directly through [`LogosMcp::list_tools`]
 //! (engine-free: the router is built from the static tool attrs, independent of
 //! the backing's engines).
+//!
+//! [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
 
 use std::collections::BTreeMap;
 
@@ -40,6 +45,7 @@ fn federated_tools() -> Vec<rmcp::model::Tool> {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy), &logos_ext::ExtensionHost::new()).list_tools()
 }
@@ -55,20 +61,18 @@ fn names(tools: &[rmcp::model::Tool]) -> Vec<String> {
 }
 
 /// The single-root roster is exactly the set declared in `tests/support/roster.rs`,
-/// and none of them carries a `repo` parameter — the single-root wire contract is
-/// unchanged (FR-WS-05).
+/// and no cross-service tool leaks into it.
 ///
 /// S-358/CR-114 raised the roster 27→28 for `impact_intersection` ([FR-NV-11]),
 /// S-359/CR-114 28→29 for `precedent` ([FR-NV-12]), and S-360/CR-114 29→30 for
 /// `branch_overlap` ([FR-NV-13]): each is one more single-root navigation tool,
 /// delegating to one `Engine` method like every other. The count is the guard's
-/// whole point — a tool added to the federated roster only, or one that silently
-/// gained a `repo` dimension, must fail here.
+/// whole point — a tool added to the federated roster only must fail here.
 ///
 /// [FR-NV-11]: ../../docs/specs/requirements/FR-NV-11.md
 /// [FR-NV-12]: ../../docs/specs/requirements/FR-NV-12.md
 #[test]
-fn single_root_roster_is_the_declared_set_with_no_repo_dimension() {
+fn single_root_roster_is_the_declared_set() {
     let single = single_tools();
     assert_eq!(
         single.len(),
@@ -77,20 +81,62 @@ fn single_root_roster_is_the_declared_set_with_no_repo_dimension() {
         roster::SINGLE_ROOT,
         names(&single)
     );
-
     for tool in &single {
         assert!(
             !tool.name.starts_with("xservice_") && !tool.name.starts_with("workspace_"),
             "no cross-service tool leaks into the single-root roster: {}",
             tool.name
         );
-        let schema = serde_json::to_string(&tool.input_schema).expect("schema serialises");
-        assert!(
-            !schema.contains("\"repo\""),
-            "single-root tool {} must not gain a repo param (byte-identity): {schema}",
-            tool.name
-        );
     }
+}
+
+/// Every single-root tool, and whether it takes `repo` (S-710, [FR-WS-42]): the
+/// read-only tools do — an optional string, so an existing call without it is
+/// unchanged — and every write or gate tool does not, its description saying it
+/// acts on the default member. Listed per tool, so a tool that gains or loses
+/// the parameter, or a description that drops the sentence, names itself.
+///
+/// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
+#[test]
+fn exactly_the_read_only_tools_take_repo_and_the_rest_say_they_act_on_the_default_member() {
+    let mut table = Vec::new();
+    for tool in single_tools() {
+        let name = tool.name.to_string();
+        let repo = tool
+            .input_schema
+            .get("properties")
+            .and_then(|properties| properties.get("repo"))
+            .cloned();
+        let selectable = roster::MEMBER_SELECTABLE_TOOLS.contains(&name.as_str());
+        table.push(format!("{name}: repo={}", repo.is_some()));
+        if selectable {
+            let repo = repo.unwrap_or_else(|| panic!("read-only tool {name} must take repo"));
+            assert_eq!(repo["type"], serde_json::json!(["string", "null"]), "{name}: repo is optional");
+            assert_eq!(
+                repo["description"],
+                logos_ext::mcp::REPO_PARAM_DESCRIPTION,
+                "{name}: the core and extension seams word repo alike"
+            );
+            let required = tool.input_schema.get("required").cloned().unwrap_or_default();
+            assert!(
+                !required.as_array().is_some_and(|r| r.iter().any(|v| v == "repo")),
+                "{name}: repo must not be required"
+            );
+        } else {
+            assert!(repo.is_none(), "write/gate tool {name} must not take repo");
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(
+                description.ends_with(logos_ext::mcp::DEFAULT_MEMBER_DESCRIPTION),
+                "write/gate tool {name} must say it acts on the default member: {description}"
+            );
+        }
+    }
+    let selectable = table.iter().filter(|row| row.ends_with("repo=true")).count();
+    assert_eq!(
+        selectable,
+        roster::MEMBER_SELECTABLE_TOOLS.len(),
+        "every listed read-only tool is registered and takes repo: {table:#?}"
+    );
 }
 
 /// The single-root tools appear **byte-identical** under the federated

@@ -75,6 +75,7 @@ import {
   fetchWorkspaceStatus,
 } from "../../api/workspaceClient.ts";
 import type {
+  AssertedImpact,
   BoundExternal,
   BuildDependencyHeadline,
   CrossContextHint,
@@ -82,7 +83,9 @@ import type {
   CrossServiceImpact,
   ImpactEntry,
   ImpactResult,
+  MemberResolved,
   MemberTopics,
+  WorkspaceLink,
   WorkspaceStatus,
   XserviceBuildDeps,
   XserviceImpact,
@@ -112,6 +115,7 @@ import {
   declaredRelations,
 } from "../../copy/coverage.copy.ts";
 import {
+  assertedLinks,
   BINDING_KIND_LABEL,
   bindingEvidence,
   crossContextHint,
@@ -132,6 +136,8 @@ import {
 } from "./coverageModel.ts";
 import { CoveragePanel } from "./CoverageBoards.tsx";
 import {
+  ASSERTED_EDGE_TYPE,
+  assertedLayer,
   BINDING_KIND_FILTERS,
   BUILD_EDGE_TYPE,
   buildLayer,
@@ -148,6 +154,8 @@ import {
   memberOfServiceId,
   NO_LINK_FILTER,
   serviceMembers,
+  type AssertedLayer,
+  type AssertedLink,
   type BoundCall,
   type BuildLink,
   type DeclaredLayer,
@@ -251,6 +259,7 @@ function WorkspaceContent({
                 topics={status.topics ?? []}
                 build={status.build_dependency}
                 coverage={status.coverage}
+                links={status.links}
               />
             ),
           },
@@ -284,6 +293,7 @@ function ServiceMapPanel({
   topics,
   build,
   coverage,
+  links,
 }: {
   services: ServiceMember[];
   topics: MemberTopics[];
@@ -294,6 +304,9 @@ function ServiceMapPanel({
   /** The status payload's coverage, the one source of the declared relations
    *  (S-461) — read from what the view already fetched, never a second request. */
   coverage: CrossServiceCoverage;
+  /** The status payload's `[[links]]` rows (S-709): the asserted layer is drawn
+   *  from their verdicts. Absent, there is no layer and the map is unchanged. */
+  links?: WorkspaceLink[];
 }) {
   const bindings = useApiResource<XserviceRouteProviders>(() => fetchWorkspaceBindings(), []);
   // Read beside the bindings rather than on the toggle, so the cross-context hint
@@ -313,6 +326,7 @@ function ServiceMapPanel({
           topics={topics}
           build={build}
           coverage={coverage}
+          links={links}
           deps={deps.data ?? null}
           depsError={deps.error ?? null}
         />
@@ -1084,6 +1098,7 @@ function ServiceMap({
   topics,
   build,
   coverage,
+  links,
   deps,
   depsError,
 }: {
@@ -1092,6 +1107,7 @@ function ServiceMap({
   topics: MemberTopics[];
   build?: BuildDependencyHeadline;
   coverage: CrossServiceCoverage;
+  links?: WorkspaceLink[];
   deps: XserviceBuildDeps | null;
   depsError: Error | null;
 }) {
@@ -1103,13 +1119,20 @@ function ServiceMap({
   const layer = showBuild && deps ? buildLayer(deps, services) : null;
   // Drawn whenever the status carries the relation (S-461); `null` otherwise.
   const declared = declaredLayer(coverage.declared_contracts, coverage.bound_external, services);
-  // With neither layer the canvas gets the runtime set itself, not a copy — the
+  // Drawn whenever a valid `[[links]]` entry exists (S-709); `null` otherwise.
+  const asserted = assertedLayer(links, services);
+  // With no layer the canvas gets the runtime set itself, not a copy — the
   // map is the pre-S-464 map, object for object.
   const loaded =
-    layer || declared
+    layer || declared || asserted
       ? {
           nodes: declared ? { ...map.loaded.nodes, ...declared.nodes } : map.loaded.nodes,
-          edges: [...map.loaded.edges, ...(declared?.edges ?? []), ...(layer?.edges ?? [])],
+          edges: [
+            ...map.loaded.edges,
+            ...(declared?.edges ?? []),
+            ...(asserted?.edges ?? []),
+            ...(layer?.edges ?? []),
+          ],
         }
       : map.loaded;
   /* The one gate on every rendering the provenance channel adds (S-419,
@@ -1205,6 +1228,19 @@ function ServiceMap({
                   observed call, and counted apart from every binding above:{" "}
                   {coverage.declared_contracts.headline.summary}
                 </p>
+              </>
+            )}
+            {/* The asserted layer (S-709): its own dashed class, rendered only when
+                a valid link is drawn. */}
+            {asserted && (
+              <>
+                <span className={graphStyles.legendHeading}>Asserted links</span>
+                <ul className={graphStyles.legendList}>
+                  <EdgeRow type={ASSERTED_EDGE_TYPE} label={SERVICE_MAP_TEXT.assertedLegend} />
+                </ul>
+                {coverage.asserted_edges && (
+                  <p className={graphStyles.legendNote}>{coverage.asserted_edges.summary}</p>
+                )}
               </>
             )}
             {/* The build layer's toggle (S-464): rendered only when a relation
@@ -1307,6 +1343,8 @@ function ServiceMap({
         <DeclaredContractsCard layer={declared} join={coverage.bound_external} />
       )}
 
+      {asserted && <AssertedLinksCard layer={asserted} />}
+
       {layer && layer.links.length > 0 && (
         <Widget panel="buildLayerTable" title="Build dependencies">
           <DataTable
@@ -1321,6 +1359,57 @@ function ServiceMap({
 
       {deps && <CrossContextHintCard hints={deps.cross_context} />}
     </WidgetStack>
+  );
+}
+
+// ── The asserted layer (S-709, FR-WS-41) ─────────────────────────────────────
+
+/** The asserted layer's accessible twin: one row per drawn member pair. */
+const ASSERTED_LINK_COLUMNS: Column<AssertedLink>[] = [
+  { key: "from", header: "Consumer", mono: true, cell: (l) => l.from, sortValue: (l) => l.from },
+  { key: "to", header: "Provider", mono: true, cell: (l) => l.to, sortValue: (l) => l.to },
+  {
+    key: "relations",
+    header: "Kind",
+    cell: (l) => l.relations.map(armLabel).join(", "),
+    sortValue: (l) => l.relations.join(","),
+  },
+  {
+    key: "declared",
+    header: "Declared links",
+    mono: true,
+    cell: (l) => (
+      <ul className={styles.reasons}>
+        {l.declared.map((d) => (
+          <li key={`${d.from}->${d.to}`}>
+            {d.from} → {d.to} <span className="muted">(asserted)</span>
+          </li>
+        ))}
+      </ul>
+    ),
+    sortValue: (l) => l.declared.length,
+  },
+];
+
+/** The couplings the manifest's `[[links]]` assert (S-709) — a claim, so the
+ *  badge says so and none of it is a binding above. */
+function AssertedLinksCard({ layer }: { layer: AssertedLayer }) {
+  const declared = layer.links.reduce((n, l) => n + l.declared.length, 0);
+  return (
+    <Widget
+      title="Asserted links"
+      badge={<Badge tone="muted">Declared</Badge>}
+      copy={assertedLinks}
+      figure={<p>{SERVICE_MAP_TEXT.assertedFigure(layer.links.length, declared)}</p>}
+    >
+      <DataTable
+        caption="Asserted links (the accessible twin of the dashed asserted layer)"
+        columns={ASSERTED_LINK_COLUMNS}
+        rows={layer.links}
+        rowKey={(l) => `${l.from}->${l.to}`}
+        pageSize={DEFAULT_TABLE_PAGE_SIZE}
+      />
+    </Widget>
   );
 }
 
@@ -1377,6 +1466,40 @@ function CrossServicePanel({ far }: { far: CrossServiceImpact }) {
   );
 }
 
+/** The end of `far`'s link that is not the far member — the holder of the
+ *  traced symbol this row was stitched from. */
+function nearMember(far: AssertedImpact): string {
+  return far.via.to.member === far.member ? far.via.from.member : far.via.to.member;
+}
+
+/** A far-side impact reached across a declared `[[links]]` edge (S-709): the
+ *  server's own `(asserted)` marker in the title, so it never reads as a
+ *  resolved binding, and the near holder named, so two members holding the
+ *  traced symbol (S-701) give two distinguishable panels. */
+function AssertedPanel({ far }: { far: AssertedImpact }) {
+  return (
+    <ImpactTable
+      label={`${far.member} — reached from ${nearMember(far)} across an asserted ${armLabel(far.via.relation)} link ${far.reached}`}
+      impact={far.impact}
+    />
+  );
+}
+
+/** The per-member breakdown an unscoped answer carries when two or more members
+ *  hold the symbol (S-701, BR-73): each holder's share, as the server counted
+ *  it — rendered, never recomputed. */
+function ResolvedByMember({ shares }: { shares: MemberResolved[] }) {
+  return (
+    <ul className={styles.reasons} aria-label="Resolved per member">
+      {shares.map((share) => (
+        <li key={share.member}>
+          <span className="mono">{share.member}</span>: {share.resolved} resolved
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function ImpactPanel() {
   const [symbol, setSymbol] = useState("");
   const [query, setQuery] = useState("");
@@ -1416,6 +1539,15 @@ function ImpactPanel() {
           {(model) =>
             model === null ? null : (
               <>
+                {/* S-701/BR-73: a symbol two members hold is answered per
+                    member, never pooled — the server's notice and its
+                    per-member shares, verbatim. */}
+                {model.ambiguity_warning && (
+                  <Widget panel="impactAmbiguity" title="Held by several members">
+                    <p>{model.ambiguity_warning}</p>
+                    {model.resolved_by_member && <ResolvedByMember shares={model.resolved_by_member} />}
+                  </Widget>
+                )}
                 {model.seed.map((m) =>
                   m.result ? (
                     <ImpactTable key={m.member} label={`${m.member} (seed)`} impact={m.result} />
@@ -1453,10 +1585,26 @@ function ImpactPanel() {
                     </Widget>
                   )
                 ) : (
+                  // Keyed on the whole edge: a consumer calling two routes of one
+                  // far member gives two rows sharing the member and the `from`.
                   model.cross_service.map((far) => (
-                    <CrossServicePanel key={`${far.member}:${far.via.from.symbol}`} far={far} />
+                    <CrossServicePanel
+                      key={`${far.member}:${far.via.from.member}:${far.via.from.symbol}->${far.via.to.member}:${far.via.to.symbol}`}
+                      far={far}
+                    />
                   ))
                 )}
+                {/* S-709: what a declared link reaches — apart from the
+                    resolved bindings, and marked by the server as asserted.
+                    Keyed on the far member as well as the edge: a link whose
+                    two ends both hold the traced symbol is stitched from each
+                    end (S-701), giving two rows over one edge. */}
+                {model.via_asserted_link?.map((far) => (
+                  <AssertedPanel
+                    key={`asserted:${far.member}:${far.via.from.member}:${far.via.from.symbol}->${far.via.to.member}:${far.via.to.symbol}`}
+                    far={far}
+                  />
+                ))}
               </>
             )
           }

@@ -118,10 +118,11 @@ fn assembling_the_residue_moves_no_gate_verdict_and_writes_no_member_store() {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
     let bridge = ContractBridge::new();
-    let (_edges, residue, _) = bridge.reachability_read(&registry);
+    let logos_core::federation::ReachabilityRead { edges: _edges, residue, .. } = bridge.reachability_read(&registry);
 
     // Guard the guard: a residue of zero would make every assertion below pass
     // over a read that did nothing.

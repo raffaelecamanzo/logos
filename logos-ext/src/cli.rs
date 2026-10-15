@@ -110,13 +110,25 @@ impl CliContext<'_> {
 /// [FR-WT-03]: ../../docs/specs/requirements/FR-WT-03.md
 /// [FR-EH-01]: ../../docs/specs/requirements/FR-EH-01.md
 pub fn indexed_engine(root: &Path) -> anyhow::Result<Engine> {
+    require_index(root)?;
+    Engine::start(root)
+}
+
+/// The guard behind [`indexed_engine`], for a caller that starts the engine itself
+/// — a workspace member a read selects (`--repo`) is started by the registry, and
+/// must be refused the same way, before a store is created in it.
+///
+/// # Errors
+/// [`CoreError::NoIndex`]: `root` has no `.logos/logos.db` and no seedable primary
+/// store.
+pub fn require_index(root: &Path) -> anyhow::Result<()> {
     if !root.join(".logos").join("logos.db").exists() && workspace::seed_source(root).is_none() {
         return Err(CoreError::NoIndex {
             root: root.to_path_buf(),
         }
         .into());
     }
-    Engine::start(root)
+    Ok(())
 }
 
 /// `command` with each core subcommand an extension re-exposes as a hidden

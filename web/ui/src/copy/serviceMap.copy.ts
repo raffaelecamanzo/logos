@@ -34,6 +34,13 @@ export const declaredContracts: CopyEntry = {
   why: "A declared contract is written down, never observed in code, so none of these is a binding above; it shows which services expect each other.",
 };
 
+// ── Asserted links (S-709) ───────────────────────────────────────────────────
+
+export const assertedLinks: CopyEntry = {
+  what: "The couplings declared by hand in the workspace manifest's [[links]], drawn dashed on the map: one row per consumer and provider, with the links behind it.",
+  why: "A declared link is a claim, never an observed call, so none of these is a binding above or part of any coverage figure; it records a coupling the code does not show.",
+};
+
 // ── Cross-context model hint (item 9) ────────────────────────────────────────
 
 export const crossContextHint: CopyEntry = {
@@ -90,6 +97,11 @@ export const SERVICE_MAP_TEXT = {
   /** A relation that names externals and declares nothing. */
   noDeclaredLinks:
     "No member on this map declares a contract. The externals below are still named: each is held by a declared mock member standing in for it.",
+  /** The asserted figure: the drawn pairs, from how many valid links. */
+  assertedFigure: (pairs: number, links: number) =>
+    `${pairs} asserted ${plural(pairs, "coupling", "couplings")}, from ${links} declared ${plural(links, "link", "links")}`,
+  /** The legend row for the asserted layer. */
+  assertedLegend: "Asserted — declared in [[links]], never observed",
   /** The hint figure. */
   hintFigure: (n: number) =>
     `${n} ${plural(n, "member depends", "members depend")} on the model libraries of two or more contexts`,

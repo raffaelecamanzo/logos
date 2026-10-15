@@ -464,6 +464,7 @@ mod tests {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         }
     }
 

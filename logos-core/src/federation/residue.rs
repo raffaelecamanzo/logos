@@ -198,31 +198,69 @@ pub struct EgressResidue {
 ///
 /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AnswerReach {
-    /// How many cross-service rows the answer resolved. **Workspace-wide**: the
-    /// cross-service tier matches on the queried symbol alone and `--repo` does
-    /// not narrow it, which is why [`EgressResidue::compose`] says so whenever a
-    /// scope is in force.
+pub struct AnswerReach<'a> {
+    /// How many cross-service rows the answer resolved: the rows whose **queried**
+    /// endpoint is the queried `(member, symbol)` pair ([BR-73]). Under `--repo`
+    /// that is the scoped member's symbol alone, its far side in any member;
+    /// unscoped, every member holding the symbol — which [`by_member`](Self::by_member)
+    /// breaks down when there are two or more.
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
     pub resolved: usize,
     /// What one of those rows is, singular — the composed line pluralises it
     /// itself, because it reads "1 resolved cross-service caller" at arity one.
     pub noun: &'static str,
+    /// The per-member breakdown of [`resolved`](Self::resolved) for an unscoped
+    /// answer whose symbol two or more members hold; empty otherwise, so every
+    /// other line reads as it did before [BR-73].
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    pub by_member: &'a [MemberResolved],
 }
 
-impl AnswerReach {
-    /// The answer's own half of the composed line.
+/// One member's share of a cross-service answer's resolved count, carried when
+/// the queried symbol is held by two or more members and no `--repo` chose one
+/// ([BR-73]): the answer is grouped per member and never pooled.
+///
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemberResolved {
+    /// A member holding the queried symbol.
+    pub member: String,
+    /// The answer's resolved rows whose queried endpoint is this member's.
+    pub resolved: usize,
+}
+
+impl AnswerReach<'_> {
+    /// The answer's own half of the composed line, naming the population its
+    /// count covers ([NFR-CC-04]).
     ///
-    /// `scoped` qualifies the count as **workspace-wide**, which it always is:
-    /// `--repo` narrows the answer's per-member fan-out and the residue, but not
-    /// the cross-service tier this counts. Saying nothing would leave the line
-    /// joining a workspace-wide numerator to a member-scoped residue with no
-    /// sign that the two halves cover different populations ([NFR-CC-04]).
-    fn phrase(self, scoped: bool) -> String {
-        let where_ = if scoped { " workspace-wide" } else { "" };
-        match self.resolved {
-            0 => format!("no resolved {}s{where_}", self.noun),
-            1 => format!("1 resolved {}{where_}", self.noun),
-            n => format!("{n} resolved {}s{where_}", self.noun),
+    /// Under a `scope` the count is the rows of **that member's** symbol, reached
+    /// from any member — `--repo` narrows the queried side and never the far
+    /// side ([BR-73]) — while the residue half covers the member's own egress;
+    /// the line says which is which. Unscoped over a symbol several members hold,
+    /// it names the members and each one's share.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    fn phrase(self, scope: Option<&str>) -> String {
+        let count = match self.resolved {
+            0 => format!("no resolved {}s", self.noun),
+            1 => format!("1 resolved {}", self.noun),
+            n => format!("{n} resolved {}s", self.noun),
+        };
+        match scope {
+            Some(member) => format!("{count} of {member}'s symbol, from any member"),
+            None if !self.by_member.is_empty() => {
+                let shares: Vec<String> =
+                    self.by_member.iter().map(|share| format!("{} {}", share.member, share.resolved)).collect();
+                format!(
+                    "{count} across the {} members holding the symbol ({})",
+                    self.by_member.len(),
+                    shares.join(", ")
+                )
+            }
+            None => count,
         }
     }
 }
@@ -251,7 +289,7 @@ impl WorkspaceEgressResidue {
     ///
     /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-    pub fn beside(&self, repo: Option<&str>, reach: AnswerReach) -> Option<EgressResidue> {
+    pub fn beside(&self, repo: Option<&str>, reach: AnswerReach<'_>) -> Option<EgressResidue> {
         let rows: Vec<&MemberEgressResidue> = self
             .members
             .iter()
@@ -298,21 +336,21 @@ impl EgressResidue {
     /// not reach, then the separately-bucketed out-of-workspace remainder.
     ///
     /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
-    fn compose(&self, reach: AnswerReach) -> String {
+    fn compose(&self, reach: AnswerReach<'_>) -> String {
         let reasons: Vec<String> = self
             .by_reason
             .iter()
             .map(|entry| format!("{} {}", entry.reason.as_str(), entry.sites))
             .collect();
-        // The residue's own half names the members it covers, because `--repo`
-        // narrows it and not the resolved count it sits beside.
+        // The residue's own half names the members it covers: their own egress,
+        // where the resolved half beside it counts rows reached from any member.
         let scope = match self.scope.as_deref() {
             Some(member) => format!(" in {member}"),
             None => " in scope".to_string(),
         };
         let mut line = format!(
             "{}; {} of {} did not resolve across {} ({})",
-            reach.phrase(self.scope.is_some()),
+            reach.phrase(self.scope.as_deref()),
             self.unresolved_sites,
             plural(self.measured_sites, "captured outbound site", &scope),
             plural(self.members_in_scope, "member", ""),
@@ -455,9 +493,10 @@ mod tests {
     use crate::resolve::binding::Provenance;
 
     /// The two nouns the reachability verbs answer with ([BR-53]).
-    const CALLERS: AnswerReach = AnswerReach {
+    const CALLERS: AnswerReach<'static> = AnswerReach {
         resolved: 0,
         noun: "cross-service caller",
+        by_member: &[],
     };
 
     fn reference(
@@ -477,6 +516,7 @@ mod tests {
             to: None,
             intake,
             candidates: None,
+            asserted_by: Vec::new(),
             provenance: Provenance::Literal,
         }
     }
@@ -711,15 +751,17 @@ mod tests {
     }
 
     /// **Under `--repo` the line names which population each half covers**
-    /// ([NFR-CC-04]).
+    /// ([NFR-CC-04], [BR-73]).
     ///
-    /// `--repo` narrows the answer's per-member fan-out and the residue, but
-    /// **not** the cross-service tier, which matches on the queried symbol alone.
-    /// So the resolved count beside a scoped residue is workspace-wide, and a
-    /// line that said only "no resolved cross-service callers; 1 of 1 captured
-    /// outbound sites **in scope**" would join two populations with nothing to
-    /// tell them apart — the same silent conflation this whole block exists to
-    /// remove, one level down.
+    /// `--repo` narrows the queried side of the cross-service tier to that
+    /// member's symbol, while the callers it counts may lie in any member; the
+    /// residue it sits beside is the member's own egress. A line that said only
+    /// "no resolved cross-service callers; 1 of 1 captured outbound sites **in
+    /// scope**" would join those two populations with nothing to tell them
+    /// apart, so the resolved half names its own: `api`'s symbol, reached from
+    /// any member.
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[test]
     fn a_scoped_residue_says_which_population_each_half_of_the_line_covers() {
         let refs = [
@@ -731,10 +773,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             scoped.summary,
-            "no resolved cross-service callers workspace-wide; 1 of 1 captured \
-             outbound site in api did not resolve across 1 member \
+            "no resolved cross-service callers of api's symbol, from any member; \
+             1 of 1 captured outbound site in api did not resolve across 1 member \
              (base-url-runtime 1)",
-            "the resolved half is workspace-wide; the residue half names `api`"
+            "the resolved half names `api`'s symbol; the residue half names `api`"
         );
 
         // At arity ONE on the resolved half too — the `1 =>` arm of `phrase`
@@ -745,8 +787,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             one.summary,
-            "1 resolved cross-service caller workspace-wide; 1 of 1 captured \
-             outbound site in api did not resolve across 1 member \
+            "1 resolved cross-service caller of api's symbol, from any member; \
+             1 of 1 captured outbound site in api did not resolve across 1 member \
              (base-url-runtime 1)"
         );
 
@@ -757,6 +799,38 @@ mod tests {
             "no resolved cross-service callers; 2 of 2 captured outbound sites in \
              scope did not resolve across 2 members (ambiguous 1, base-url-runtime 1)",
             "unscoped there is one population, and the line says `in scope`"
+        );
+    }
+
+    /// **Unscoped over a symbol two members hold, the resolved half is broken
+    /// down per member, never pooled** ([BR-73]); the residue half, its scope
+    /// and its denominator are exactly the unscoped line's.
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn an_unscoped_line_over_a_symbol_two_members_hold_names_each_ones_share() {
+        let refs = [
+            unbound("api", UnboundReason::BaseUrlRuntime),
+            unbound("web", UnboundReason::Ambiguous),
+        ];
+        let shares = [
+            MemberResolved { member: "svc-a".to_string(), resolved: 0 },
+            MemberResolved { member: "svc-b".to_string(), resolved: 1 },
+        ];
+        let grouped = residue_from(&refs, true)
+            .beside(None, AnswerReach { resolved: 1, by_member: &shares, ..CALLERS })
+            .unwrap();
+        assert_eq!(
+            grouped.summary,
+            "1 resolved cross-service caller across the 2 members holding the symbol \
+             (svc-a 0, svc-b 1); 2 of 2 captured outbound sites in scope did not \
+             resolve across 2 members (ambiguous 1, base-url-runtime 1)"
+        );
+        let pooled = residue_from(&refs, true).beside(None, AnswerReach { resolved: 1, ..CALLERS }).unwrap();
+        assert_eq!(
+            (grouped.measured_sites, grouped.unresolved_sites, grouped.scope),
+            (pooled.measured_sites, pooled.unresolved_sites, pooled.scope),
+            "the breakdown moves the resolved half only"
         );
     }
 
@@ -785,6 +859,36 @@ mod tests {
             residue_from(&refs, true).members.is_empty(),
             "and contributes no member row at all"
         );
+    }
+
+    /// An **asserted** row (a `[[links]]` claim) is not egress either, bound or
+    /// not: a declared coupling explains a gap but neither closes nor widens it
+    /// ([BR-75], [FR-WS-41]). Beside one invocation row, the residue counts that
+    /// row alone.
+    ///
+    /// [BR-75]: ../../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-41]: ../../../../docs/specs/requirements/FR-WS-41.md
+    #[test]
+    fn an_asserted_reference_is_not_egress() {
+        let refs = [
+            reference(
+                "web",
+                BridgeIntake::Asserted,
+                CoverageState::Unbound {
+                    reason: UnboundReason::BaseUrlRuntime,
+                },
+            ),
+            reference("web", BridgeIntake::Asserted, CoverageState::Bound),
+            unbound("api", UnboundReason::BaseUrlRuntime),
+        ];
+        let residue = residue_from(&refs, true);
+        assert_eq!(
+            residue.members.iter().map(|row| row.member.as_str()).collect::<Vec<_>>(),
+            ["api"],
+            "the asserted rows contribute no member row"
+        );
+        let beside = residue.beside(None, CALLERS).expect("the invocation row is residue");
+        assert_eq!((beside.unresolved_sites, beside.measured_sites), (1, 1));
     }
 
     /// Most sites first, ties broken by the wire token — deterministic output

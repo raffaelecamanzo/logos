@@ -791,7 +791,7 @@ function TierGroup() {
     [generation],
   );
   return (
-    <ConfigGroup title="Workspace config tier" file="<workspace-root>/.logos/config.toml">
+    <ConfigGroup title="Workspace settings" file="<workspace-root>/.logos/config.toml">
       <AsyncResource resource={loaded} loadingLabel="Loading the workspace config…">
         {(l) => (
           <TierEditor

@@ -285,6 +285,7 @@ pub fn mcp_rosters(host: &ExtensionHost) -> (String, String) {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
     let federated = render_tools(LogosMcp::federated(registry, host).list_tools());

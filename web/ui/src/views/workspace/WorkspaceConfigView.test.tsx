@@ -588,7 +588,7 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
         <WorkspaceConfigView />
       </WorkspaceProvider>,
     );
-    await screen.findByText("Workspace config tier");
+    await screen.findByText("Workspace settings");
     return api;
   }
 
@@ -608,7 +608,10 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
     expect(screen.queryByLabelText("Stub title")).toBeNull();
     expect(screen.queryByText(STUB_NOTE)).toBeNull();
     // Core group first, then the tier the extension's fields edit, then its panel.
-    expect(expectOneWidgetStack(document.body).map(widgetTitle)).toEqual(["Workspace manifest", "Workspace config tier"]);
+    const groups = expectOneWidgetStack(document.body);
+    expect(groups.map(widgetTitle)).toEqual(["Workspace manifest", "Workspace settings"]);
+    // Both groups are the registered tool panel, and their copy keeps the vocabulary rule.
+    for (const group of groups) expectToolPanel(group, "workspaceConfigGroup");
     const stack = document.body.querySelector("[data-widget-stack]") as HTMLElement;
     expect(stack.lastElementChild).toBe(screen.getByTestId("stub-workspace-panel"));
     // The manifest form carries no extension field.
@@ -622,7 +625,7 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
     registerExtensionUi(STUB_FIELDS_UI);
     setActiveExtensions(extensionsInfo());
     const { gets } = await mount({ tiers: [tier()] });
-    expect(screen.queryByText("Workspace config tier")).toBeNull();
+    expect(screen.queryByText("Workspace settings")).toBeNull();
     expect(document.body.querySelector("[data-extension-fields]")).toBeNull();
     expect(gets.some((u) => u.startsWith("/api/v1/workspace/config"))).toBe(false);
   });
@@ -748,7 +751,7 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
         <WorkspaceConfigView />
       </WorkspaceProvider>,
     );
-    expect(await screen.findByText("Workspace config tier")).toBeInTheDocument();
+    expect(await screen.findByText("Workspace settings")).toBeInTheDocument();
     expect(await screen.findByLabelText("Stub count")).toHaveValue(3);
   });
 });

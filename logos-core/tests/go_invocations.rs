@@ -723,6 +723,7 @@ fn federation(root: &Path, members: Vec<Member>) -> Federation {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     }
 }
 

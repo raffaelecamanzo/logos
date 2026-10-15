@@ -1,7 +1,7 @@
 //! `logos init --workspace` enablement orchestration ([FR-WS-02]): candidate
 //! discovery for the approval gate, the non-clobber per-member `init` loop,
 //! and the idempotent workspace MCP injection. The manifest write itself is
-//! owned by [`super::manifest::upsert`]; the interactive gate and the
+//! owned by [`super::manifest::upsert_with_exclude`]; the interactive gate and the
 //! background index warm are CLI-surface concerns (terminal I/O / process
 //! spawning) that live in the `cli` crate, not here.
 //!
@@ -483,8 +483,13 @@ impl fmt::Display for ParentOfRepos {
 }
 
 /// Candidate members not already part of the workspace, after dropping
-/// anything matching an `--exclude` glob ([FR-WS-02]): the approval-gate
-/// input. Pure and testable — no interactivity, no writes.
+/// anything matching an `exclude` glob ([FR-WS-02], [FR-WS-40]): the
+/// approval-gate input. Pure and testable — no interactivity, no writes.
+///
+/// `exclude` is the **union** the caller wants honoured: the manifest's
+/// persisted `[workspace] exclude` ([`super::Exclusion::globs`]) plus this run's
+/// `--exclude` flags, so a re-run that does not repeat the flag neither
+/// proposes nor — under `--yes` — auto-accepts an excluded directory.
 ///
 /// Reuses the crate's single glob compiler ([`globs::compile`]) rather than
 /// hand-rolling a second one — the same "fail loud on a bad glob" primitive
@@ -494,6 +499,7 @@ impl fmt::Display for ParentOfRepos {
 /// A malformed `--exclude` glob ([`crate::config::ConfigError::BadGlob`]).
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
 pub fn candidates_for_approval(
     root: &Path,
     already_included: &[String],
@@ -506,6 +512,69 @@ pub fn candidates_for_approval(
         .filter(|m| !already_included.contains(&m.name))
         .filter(|m| !excluded.is_match(&m.name))
         .collect())
+}
+
+/// The workspace's members and this run's proposals once the exclusion is
+/// applied ([FR-WS-40]): `(kept, proposed)`.
+///
+/// `already` is the resolved member set of the existing manifest;
+/// `persisted` is its `[workspace] exclude`, `flag` this run's `--exclude`
+/// globs. `proposed` is [`candidates_for_approval`] over `persisted ∪ flag`.
+///
+/// `kept` is `already` minus the **autodiscovered** members a `flag` glob
+/// matches. Such a member is listed in no `members` array, so writing the run's
+/// member set back would *pin* it as an explicit entry beside the very glob that
+/// excludes it — and the next load would warn about a contradiction `init` had
+/// just written. An **explicit** `members` entry that matches stays (an explicit
+/// member wins), with the same warning a workspace load gives. Members matching
+/// only a `persisted` glob never reach `already`: [`super::discover`] has
+/// dropped them.
+///
+/// # Errors
+/// A malformed `flag` glob ([`crate::config::ConfigError::BadGlob`]); the
+/// existing manifest failing to parse.
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+pub fn plan_members(
+    root: &Path,
+    already: Vec<Member>,
+    persisted: &[String],
+    flag: &[String],
+) -> Result<(Vec<Member>, Vec<Member>)> {
+    let names: Vec<String> = already.iter().map(|m| m.name.clone()).collect();
+    let effective: Vec<String> = persisted.iter().chain(flag).cloned().collect();
+    let proposed = candidates_for_approval(root, &names, &effective)?;
+    if flag.is_empty() || already.is_empty() {
+        return Ok((already, proposed));
+    }
+
+    let explicit: std::collections::HashSet<String> =
+        super::manifest::parse(&root.join(super::MANIFEST_FILENAME))?
+            .workspace
+            .members
+            .iter()
+            .filter_map(|spec| super::resolve_explicit_member(root, spec))
+            .map(|m| m.name)
+            .collect();
+    // Compiled above by `candidates_for_approval`, so this cannot fail here.
+    let flag_set = super::ExcludeSet::compile(flag)?;
+    let mut kept = Vec::with_capacity(already.len());
+    for member in already {
+        match flag_set.first_match(&member.name) {
+            Some(glob) if explicit.contains(&member.name) => {
+                let conflict = super::ExcludeConflict::new(&member.name, glob);
+                tracing::warn!(entry = %conflict.entry, glob = %conflict.glob, "{}", conflict.warning);
+                kept.push(member);
+            }
+            Some(glob) => tracing::info!(
+                member = %member.name,
+                glob = %glob,
+                "autodiscovered member matches --exclude — left out of the written members"
+            ),
+            None => kept.push(member),
+        }
+    }
+    Ok((kept, proposed))
 }
 
 /// The workspace chat's conversation store at the workspace root and its WAL
@@ -599,8 +668,18 @@ fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
 /// be written; a member's own `init` failure is caught and reported
 /// [`MemberOutcome::Degraded`], never fatal to the rest of the command.
 ///
+/// `exclude` is this run's `--exclude` globs: they are persisted into the
+/// manifest's `[workspace] exclude` (additively, [`super::manifest::upsert_with_exclude`])
+/// so the exclusion outlives the run that made it ([FR-WS-40]).
+///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
-pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEnableReport> {
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+pub fn enable(
+    root: &Path,
+    name: &str,
+    members: &[Member],
+    exclude: &[String],
+) -> Result<WorkspaceEnableReport> {
     let reports: Vec<MemberReport> = members
         .iter()
         .map(|member| MemberReport {
@@ -629,7 +708,7 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
 
     let footprint = footprint(&reports);
     let member_names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
-    let manifest_step = super::manifest::upsert(root, name, &member_names)?;
+    let manifest_step = super::manifest::upsert_with_exclude(root, name, &member_names, exclude)?;
     let mcp_step = init::inject_mcp_entry(root, WORKSPACE_MCP_SERVER_KEY, init::mcp_server_entry())?;
     let root_ignore = maintain_root_ignore(root)?;
 
@@ -738,6 +817,73 @@ mod tests {
         assert!(candidates_for_approval(tmp.path(), &[], &["a{b".to_string()]).is_err());
     }
 
+    /// FR-WS-40: the persisted `[workspace] exclude` keeps a directory out of a
+    /// later run that does not repeat the flag — the candidate list is built
+    /// from the persisted globs, and `enable` writes the flag's globs once.
+    #[test]
+    fn a_persisted_exclusion_outlives_the_run_that_made_it() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        init_repo(&tmp.path().join("svc-fork"));
+        let flag = vec!["svc-fork".to_string()];
+
+        // Run 1: `--exclude svc-fork` — only `api` is proposed; the glob is written.
+        let proposed = candidates_for_approval(tmp.path(), &[], &flag).unwrap();
+        assert_eq!(proposed.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["api"]);
+        enable(tmp.path(), "shop", &proposed, &flag).expect("enables");
+        let text = fs::read_to_string(tmp.path().join(super::super::manifest::MANIFEST_FILENAME)).unwrap();
+        assert!(text.contains("exclude = [\"svc-fork\"]"), "{text}");
+
+        // Run 2: no flag. The federation carries the persisted globs, and the
+        // directory is neither proposed nor (under `--yes`) added.
+        let fed = super::super::discover(tmp.path()).unwrap().expect("a manifest");
+        assert_eq!(fed.exclusion.globs, ["svc-fork"]);
+        let names: Vec<String> = fed.members.iter().map(|m| m.name.clone()).collect();
+        let proposed = candidates_for_approval(tmp.path(), &names, &fed.exclusion.globs).unwrap();
+        assert!(proposed.is_empty(), "svc-fork is not re-proposed: {proposed:?}");
+        enable(tmp.path(), "shop", &fed.members, &[]).expect("re-enables");
+        let after = super::super::discover(tmp.path()).unwrap().unwrap();
+        assert_eq!(after.members.len(), 1);
+        assert_eq!(after.exclusion.globs, ["svc-fork"], "never removed by a bare re-run");
+
+        // Without the persisted globs the same directory IS proposed — the
+        // control that makes the assertion above mean something.
+        let unfiltered = candidates_for_approval(tmp.path(), &names, &[]).unwrap();
+        assert_eq!(unfiltered.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["svc-fork"]);
+    }
+
+    /// `plan_members`: a `--exclude` glob takes an autodiscovered member out of
+    /// the set to be written (it would otherwise be pinned beside its own
+    /// exclusion), keeps an explicit one, and leaves a non-matching one alone.
+    #[test]
+    fn plan_members_drops_autodiscovered_matches_and_keeps_explicit_ones() {
+        let tmp = TempDir::new().unwrap();
+        for name in ["api", "web", "svc-fork", "old-fork"] {
+            init_repo(&tmp.path().join(name));
+        }
+        fs::write(
+            tmp.path().join(super::super::manifest::MANIFEST_FILENAME),
+            "[workspace]\nname = \"shop\"\nmembers = [\"old-fork\"]\n\n[workspace.autodiscover]\n",
+        )
+        .unwrap();
+        let fed = super::super::discover(tmp.path()).unwrap().unwrap();
+        let names = |ms: &[Member]| ms.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&fed.members), ["old-fork", "api", "svc-fork", "web"]);
+
+        let (kept, proposed) =
+            plan_members(&fed.root, fed.members.clone(), &[], &["*-fork".to_string()]).unwrap();
+        assert_eq!(names(&kept), ["old-fork", "api", "web"], "svc-fork is not pinned; explicit old-fork stays");
+        assert!(proposed.is_empty(), "everything else is already a member: {proposed:?}");
+
+        // No flag: nothing changes, and the manifest is not even read.
+        let (kept, _) = plan_members(&fed.root, fed.members.clone(), &[], &[]).unwrap();
+        assert_eq!(names(&kept), names(&fed.members));
+
+        // A malformed flag glob is the flag's own BadGlob, not a manifest-key error.
+        let err = plan_members(&fed.root, fed.members, &[], &["a{b".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("invalid glob"), "{err}");
+    }
+
     // ── enable (FR-WS-02) ──────────────────────────────────────────────────
 
     #[test]
@@ -749,7 +895,7 @@ mod tests {
         let members = discover_candidates(tmp.path());
         assert_eq!(members.len(), 2);
 
-        let report = enable(tmp.path(), "shop", &members).expect("enables");
+        let report = enable(tmp.path(), "shop", &members, &[]).expect("enables");
         assert_eq!(report.workspace, "shop");
         assert_eq!(report.members.len(), 2);
         for m in &report.members {
@@ -775,7 +921,7 @@ mod tests {
         init_repo(&tmp.path().join("api"));
         let members = discover_candidates(tmp.path());
 
-        let report = enable(tmp.path(), "shop", &members).expect("enables");
+        let report = enable(tmp.path(), "shop", &members, &[]).expect("enables");
         let MemberOutcome::Ready(result) = &report.members[0].outcome else {
             panic!("api must init successfully: {:?}", report.members[0].outcome);
         };
@@ -797,13 +943,13 @@ mod tests {
         init_repo(&tmp.path().join("api"));
         let members = discover_candidates(tmp.path());
 
-        enable(tmp.path(), "shop", &members).unwrap();
+        enable(tmp.path(), "shop", &members, &[]).unwrap();
         // A second run over the same members must not duplicate the MCP entry
         // or clobber the member's own config.
         let config_path = tmp.path().join("api").join(".logos").join("config.toml");
         fs::write(&config_path, "# hand-edited\n").unwrap();
 
-        let report = enable(tmp.path(), "shop", &members).expect("re-enables");
+        let report = enable(tmp.path(), "shop", &members, &[]).expect("re-enables");
         assert_eq!(report.manifest.action, crate::models::pipeline::InitAction::Unchanged);
         assert_eq!(report.mcp.action, crate::models::pipeline::InitAction::Unchanged);
         assert_eq!(fs::read_to_string(&config_path).unwrap(), "# hand-edited\n", "never clobbered");
@@ -830,7 +976,7 @@ mod tests {
         let ok = discover_candidates(tmp.path());
         let members: Vec<Member> = ok.into_iter().chain(std::iter::once(broken)).collect();
 
-        let report = enable(tmp.path(), "shop", &members).expect("the command itself still succeeds");
+        let report = enable(tmp.path(), "shop", &members, &[]).expect("the command itself still succeeds");
         let ghost = report.members.iter().find(|m| m.name == "ghost").unwrap();
         assert!(matches!(ghost.outcome, MemberOutcome::Degraded { .. }));
         let api = report.members.iter().find(|m| m.name == "api").unwrap();
@@ -990,11 +1136,11 @@ mod tests {
         init_repo(&tmp.path().join("web"));
         let members = discover_candidates(tmp.path());
 
-        let first = enable(tmp.path(), "shop", &members).expect("enables");
+        let first = enable(tmp.path(), "shop", &members, &[]).expect("enables");
         assert_eq!((first.footprint.fresh, first.footprint.unchanged), (2, 0));
         assert!(first.footprint.notice().is_some());
 
-        let second = enable(tmp.path(), "shop", &members).expect("re-enables");
+        let second = enable(tmp.path(), "shop", &members, &[]).expect("re-enables");
         assert_eq!((second.footprint.fresh, second.footprint.unchanged), (0, 2));
         assert!(second.footprint.notice().is_none(), "nothing new to report");
     }
@@ -1016,7 +1162,7 @@ mod tests {
         sh_git(&member, &["commit", "-q", "-m", "gitignore"]);
 
         let members = discover_candidates(tmp.path());
-        let report = enable(tmp.path(), "shop", &members).expect("enables");
+        let report = enable(tmp.path(), "shop", &members, &[]).expect("enables");
         assert_eq!(report.footprint.fresh, 1);
 
         assert_eq!(fs::read_to_string(member.join("f.txt")).unwrap(), "x\n", "tracked file untouched");
@@ -1060,7 +1206,7 @@ mod tests {
         let root = tmp.path();
         init_repo(root);
 
-        let report = enable(root, "shop", &[]).expect("enables");
+        let report = enable(root, "shop", &[], &[]).expect("enables");
         assert_eq!(report.root_ignore.target, ".gitignore");
         assert_eq!(report.root_ignore.action, InitAction::Created);
 
@@ -1097,7 +1243,7 @@ mod tests {
         let root = tmp.path();
         init_repo(root);
 
-        let report = enable(root, "shop", &[]).expect("enables");
+        let report = enable(root, "shop", &[], &[]).expect("enables");
         assert_eq!(report.root_ignore.action, InitAction::Created);
         sh_git(root, &["add", "-A"]);
         sh_git(root, &["commit", "-q", "-m", "enable"]);
@@ -1136,7 +1282,7 @@ mod tests {
         let root = tmp.path();
         init_repo(root);
 
-        enable(root, "shop", &[]).expect("enables");
+        enable(root, "shop", &[], &[]).expect("enables");
         sh_git(root, &["add", "-A"]);
         sh_git(root, &["commit", "-q", "-m", "enable"]);
 
@@ -1184,7 +1330,7 @@ mod tests {
 
         let members = discover_candidates(root);
         assert_eq!(members.len(), 1, "the member repo is discovered");
-        let report = enable(root, "shop", &members).expect("enables");
+        let report = enable(root, "shop", &members, &[]).expect("enables");
         assert_eq!(report.root_ignore.action, InitAction::Created);
 
         // AC: no member's `.logos/.gitignore` changes — it is FR-IN-04's file,
@@ -1223,7 +1369,7 @@ mod tests {
         init_repo(&tmp.path().join("api"));
 
         let members = discover_candidates(tmp.path());
-        let report = enable(tmp.path(), "shop", &members).expect("enables");
+        let report = enable(tmp.path(), "shop", &members, &[]).expect("enables");
 
         assert_eq!(report.root_ignore.action, InitAction::Skipped);
         assert!(
@@ -1235,7 +1381,7 @@ mod tests {
         // already written at the root, a re-run still reports the step as a
         // skip WITH its reason — present in the machine report, never omitted.
         crate::config::write_secret(tmp.path(), "sk-untracked-root-key-nt02").expect("writes");
-        let again = enable(tmp.path(), "shop", &members).expect("re-enables");
+        let again = enable(tmp.path(), "shop", &members, &[]).expect("re-enables");
         assert_eq!(again.root_ignore.action, InitAction::Skipped);
         assert!(
             again.root_ignore.detail.contains("not the top level of a git repository"),
@@ -1259,7 +1405,7 @@ mod tests {
         let own = "# the operator's own\n/build\n*.log\n";
         fs::write(root.join(".gitignore"), own).unwrap();
 
-        let first = enable(root, "shop", &[]).expect("enables");
+        let first = enable(root, "shop", &[], &[]).expect("enables");
         assert_eq!(first.root_ignore.action, InitAction::Updated);
         let after = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(
@@ -1267,7 +1413,7 @@ mod tests {
             "unmanaged lines are preserved byte-for-byte, got:\n{after}"
         );
 
-        let second = enable(root, "shop", &[]).expect("re-enables");
+        let second = enable(root, "shop", &[], &[]).expect("re-enables");
         assert_eq!(second.root_ignore.action, InitAction::Unchanged);
         let again = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert_eq!(again, after, "a re-run rewrites nothing");
@@ -1290,7 +1436,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         init_repo(root);
-        let report = enable(root, "shop", &[]).expect("enables");
+        let report = enable(root, "shop", &[], &[]).expect("enables");
         // Prove the entry was actually written before asking git anything.
         // Without this the whole test can pass on a host whose global excludes
         // file happens to name the sidecar, even with the write path disabled —

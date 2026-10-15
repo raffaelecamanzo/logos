@@ -13,6 +13,76 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-10-15
+
+### Added
+
+- **`[workspace] exclude` keeps a directory out of a workspace for good.** A glob
+  list in `logos.workspace.toml`, matched against the member name, removes
+  matching directories from autodiscovery and from `init --workspace`'s
+  candidates, so an excluded fork no longer returns on the next `init` and no
+  longer makes real cross-service bindings ambiguous. `init --workspace --exclude
+  <glob>` now writes its globs into the key. An explicit `members` entry that
+  matches a glob is kept and warned about, and `workspace status` lists the
+  directories it excluded. A malformed glob exits 2 naming `workspace.exclude`;
+  a manifest without the key is unchanged byte for byte.
+- **A cross-service answer matches the member and the symbol.** `xservice callers`
+  and `xservice impact` (CLI, MCP and `/api/v1/workspace/{callers,impact}`) match a
+  bridge edge on the queried `(member, symbol)` pair, never on the symbol string
+  alone, so two members that declare the same handler no longer receive each
+  other's cross-service callers or impact. `--repo` names which member's symbol is
+  meant: it scopes the provider end (`callers`) or the near end (`impact`) of each
+  edge, the per-member fan-out and the residue, while the other side stays in any
+  member. Without `--repo`, a symbol two or more members hold is answered per
+  member — `resolved_by_member` and an `ambiguity_warning` naming the members —
+  and the web Impact panel shows both. A type reference whose owner is no member
+  is listed under `type_reference_unattributed`, never dropped. A symbol one
+  member holds answers byte for byte as before.
+- **`[[links]]` entries are validated.** `workspace status` (human and `--json`)
+  lists every declared link with what became of it: `valid` (one bridge edge with
+  intake `asserted`), `invalid` with its reason (`unknown-member`,
+  `member-degraded`, `no-match`, `ambiguous`, `same-member`), or `redundant`,
+  naming the measured edge it repeats. An asserted edge never enters the bridge's
+  exactly-one matcher, so adding a link never makes an evidence binding ambiguous.
+- **A declared `[[links]]` entry is used in the answers, labelled `asserted`.** A
+  valid link joins `xservice callers` and `xservice impact` (CLI, MCP and web)
+  under its own `via_asserted_link` key, each row carrying `intake: "asserted"`
+  and the `(asserted)` marker, matched on the queried `(member, symbol)` pair. In
+  `workspace reachability` a link declaring an `http_call` or `grpc_call` keeps
+  its target live under the distinct verdict `live-via-asserted-link`, never
+  `live-via-cross-service`; a `publishes` link roots nothing. `workspace status`
+  counts the links beside the coverage headline (`coverage.asserted_edges`), and
+  a residue row a valid link covers keeps its reason and points at the link.
+  The web service map draws asserted links dashed, with a legend entry. A link
+  naming the handler of a route a measured edge already binds is `redundant`.
+  `resolved_cross_service_edges`, egress resolution and `spec_conformance_ratio`
+  do not change with or without `[[links]]`, and a workspace without them
+  answers byte for byte as before.
+- **Read-only tools answer for any workspace member.** Under a workspace the
+  read-only MCP tools (`search`, `context`, `explore`, `node`, `callers`,
+  `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`,
+  `status`, `health`, `hotspots`, `dsm`, `evolution`, `coverage_status`) take an
+  optional `repo`, and their CLI twins (and `query`) take `--repo <member>`.
+  Without it the default member answers (`[workspace] default`, else the first
+  member). Every answer under a workspace carries `member`; a single-root answer
+  is unchanged. A name that is no member, or `--repo` with no workspace, is
+  refused (exit 2) in the same words on both surfaces; a member whose store will
+  not open is reported with its reason. The write and gate tools take no `repo`,
+  refuse one, and say they act on the default member; an extension's MCP tool
+  does the same unless it is registered with `McpTool::read_only`.
+
+### Changed
+
+- **`logos serve --mcp` in a workspace serves the workspace** (the build with the
+  web UI): the read-only tools take `repo` and the `xservice_*` / `workspace_*`
+  tools are listed. `--standalone` keeps the single-repository server.
+- **A read-only command run at a workspace root answers for the default member**,
+  with `member` first in its `--json`, where it used to refuse with `no Logos
+  index found` (exit 3). Run inside a member's own directory or in a plain
+  repository, a command answers exactly as before.
+- **A `[[links]]` `relation` other than `http_call`, `grpc_call` or `publishes` is
+  a parse error (exit 2)**; any value used to be read and ignored.
+
 ## [1.16.4] — 2026-10-14
 
 The first binary release since 1.15.8: Homebrew, the shell installer and the

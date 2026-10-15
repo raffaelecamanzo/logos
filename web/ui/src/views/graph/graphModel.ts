@@ -115,6 +115,9 @@ export const EDGE_STYLE: Record<string, "solid" | "dashed" | "dotted"> = {
   // declared contract — DECLARED, never an observed call (BR-57). Dotted, so
   // the stroke alone already says it is not a resolved binding.
   "declares-contract": "dotted",
+  // The service map's asserted layer (S-709, FR-WS-41): a `[[links]]` entry —
+  // DECLARED by a human, never measured (BR-75). Dashed, in its own hue.
+  "asserted-link": "dashed",
 };
 
 /** Edge color by relationship kind — distinct, mutually-legible hues (CR-030). */
@@ -149,6 +152,9 @@ export const EDGE_COLOR: Record<string, string> = {
   build: "#65a30d",
   // The declared layer (S-461) likewise takes a hue no runtime arm uses.
   "declares-contract": "#c2410c",
+  // The asserted layer (S-709) takes one more, so a declared link never shares
+  // a measured arm's colour.
+  "asserted-link": "#a16207",
 };
 
 /** Node sizing — a base scaled gently by degree; the selection is bumped so it pops. */
@@ -332,11 +338,12 @@ export function nodeIdsWithinDepth(set: LoadedSet, rootId: string, depth: number
  *  reads as coupling degree, and a build dependency is never a runtime coupling
  *  (BR-58), so switching the layer on must not grow a node. A `declares-contract`
  *  edge (S-461) is not counted either, for the same reason: a declared contract
- *  is never an observed call (BR-57). */
+ *  is never an observed call (BR-57) — nor an `asserted-link` edge (S-709): an
+ *  asserted link is a claim, never a measured coupling (BR-75). */
 export function degreeMap(set: LoadedSet, visible: Set<string>): Record<string, number> {
   const deg: Record<string, number> = {};
   for (const e of set.edges) {
-    if (e.edge_type === "build" || e.edge_type === "declares-contract") continue;
+    if (e.edge_type === "build" || e.edge_type === "declares-contract" || e.edge_type === "asserted-link") continue;
     if (visible.has(e.source) && visible.has(e.target)) {
       deg[e.source] = (deg[e.source] || 0) + 1;
       deg[e.target] = (deg[e.target] || 0) + 1;

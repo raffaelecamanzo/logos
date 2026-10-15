@@ -46,7 +46,7 @@ directories documented above — a member keeps its own `.logos/` and its own
 
 | Path (at the workspace root) | What it is | Check in? |
 |---|---|---|
-| `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `[workspace.warm]` / `[workspace.member.<name>]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves their keys and values; it re-serialises the file, so comments and formatting are not kept. Editable in the app — see [Editing the manifest from the app](#editing-the-manifest-from-the-app). | Yes |
+| `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `exclude` / `[workspace.warm]` / `[workspace.member.<name>]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves their keys and values; it re-serialises the file, so comments and formatting are not kept. Editable in the app — see [Editing the manifest from the app](#editing-the-manifest-from-the-app). | Yes |
 | `.logos.workspace.warm.json` | Machine-written record of the last background warm's per-member outcome. Derived, host-local, safe to delete. | No |
 | `.mcp.json` | Gains a single `logos-workspace` server key, deliberately distinct from a member's own `logos` key so neither shadows the other. | Yes |
 | `.gitignore` | A managed block ignoring the warm sidecar and the other host-local files under the root's `.logos/`, maintained **only when the root is a git working tree** — a parent-of-repos root that is not a repository gains no file (`init --workspace` then reports `root_ignore: skipped`). | Yes |
@@ -103,6 +103,81 @@ conservative default, low enough that a slipped digit fails instead of forking 2
 indexers. Know what you are buying — each of the K is a full `logos index` child
 that is itself parallel over your cores, so K costs roughly **K × cores** worker
 threads, not K.
+
+### `[workspace] exclude` — keeping a directory out for good
+
+A fork of a service re-exposes the routes of the service it was forked from. The
+cross-service bridge binds a reference only when **exactly one** member provides
+it, so the fork turns every shared route into an ambiguous reference, and the
+coupling disappears from the answers without anything visibly failing. Leaving
+the fork out of the workspace once is not enough if the next `init --workspace`
+or an `autodiscover` brings it back; `exclude` makes the decision last.
+
+```toml
+[workspace]
+name = "shop"
+exclude = ["*-fork", "legacy-billing"]
+
+[workspace.autodiscover]
+```
+
+- **The key.** A list of globs, matched with the engine `init --workspace
+  --exclude` always used, against the **member name**: the directory's path
+  relative to the workspace root (`svc-fork`, `services/svc-fork`). `*` matches
+  across `/`. A glob that does not compile, or that tries to leave the workspace
+  (`..`, an absolute path), is **rejected at parse time** (exit 2), and the error
+  names `workspace.exclude` and the glob. The key is optional; a manifest without
+  it behaves exactly as before and `init --workspace` never writes it.
+- **What it filters.** The directories `autodiscover` would add, and the
+  candidates `init --workspace` proposes. An excluded directory is not a member,
+  so it is absent from the cross-service fan-out, the bridge, the coverage
+  figures and every other per-member answer.
+- **An explicit `members` entry wins.** An entry in `members` that matches a glob
+  is **kept**: an exclusion that overrode a line you wrote would be a silent
+  contradiction. Every workspace load logs a warning that names the entry and the
+  glob, and `workspace status` carries the same under `exclusion.conflicts`. To
+  exclude such a member, remove it from `members`.
+- **`init --workspace --exclude <glob>` persists.** Each `--exclude` glob is added
+  to `exclude` (sorted, de-duplicated) and none is ever removed, so the next
+  `init --workspace --yes`, with or without the flag, neither proposes nor adds
+  the directory. Edit the file by hand to drop a glob. A run that would leave
+  the workspace with no member at all writes nothing, the flag included.
+  A member that is only autodiscovered, and that a new `--exclude` glob
+  matches, is left out of the written `members` rather than pinned there; an
+  explicit `members` entry that matches stays, with the warning above.
+- **It is visible.** `workspace status`, in both forms, gains an `exclusion`
+  block: the declared `globs`, the `excluded` directories (the autodiscovered ones the
+  globs kept out; empty when `autodiscover` is off, since nothing is
+  autodiscovered then), and the `conflicts` above. A glob broad enough to
+  swallow a real service shows up there rather than as a member that is quietly
+  missing. The block is
+  absent when the manifest declares no `exclude`.
+
+### `[[links]]` — declaring a coupling the bridge cannot see
+
+The bridge binds what it can read: a literal URL, a literal topic. A call whose
+URL is composed at runtime binds nothing, and a human who knows the coupling can
+declare it:
+
+```toml
+[[links]]
+relation = "http_call"          # or "grpc_call", "publishes"; anything else is exit 2
+from = "web::fetch_cart"         # <member>::<canonical symbol or name>
+to = "api::get_cart"
+```
+
+Each endpoint must resolve to **exactly one** node in its own member, and the
+two members must differ. A link that does is one bridge edge labelled
+`asserted`; one that does not is reported with its reason (`unknown-member`,
+`member-degraded`, `no-match`, `ambiguous`, `same-member`), and one that repeats
+an edge already held — the same two endpoints, a route and the handler it serves
+counting as one — is reported `redundant`. `workspace status` lists every
+link under [`links`](commands.md#links--what-each-declared-links-entry-became).
+An asserted edge is a claim, never evidence: it moves no coverage figure and no
+governance check. It does show up, labelled `asserted`, in `xservice callers` /
+`impact`, in `workspace reachability` (as `live-via-asserted-link`) and dashed on
+the web service map. A member `[workspace] exclude` removed is not a member, so a
+link naming it is `unknown-member`.
 
 ### `[workspace.member.<name>] kind` — documentation and mock members
 
@@ -396,7 +471,7 @@ when the key is unset. The groups render after the built-in fields:
 
 - in a member's **Config** view, in the `config.toml` form — saved by its **Save**,
   together with everything else in that form;
-- in the workspace **Config** view, in a *Workspace config tier* group over the
+- in the workspace **Config** view, in a *Workspace settings* group over the
   workspace root's `.logos/config.toml` — saved against the fingerprint its read
   returned (`GET /api/v1/workspace/config`, `POST /api/v1/workspace/config/save`),
   so a file changed on disk since the load is refused with `409` and shown, as the
@@ -412,7 +487,7 @@ written, read-only, and left untouched; edit it in the raw pane. A pick-from-a-s
 value outside its set is shown as written and stays as written until you choose
 another. Logos validates the saved document as it always does, so a value the
 extension rejects is refused with `422` and nothing is written. A build that composes
-no extension shows none of these fields, and no *Workspace config tier* group.
+no extension shows none of these fields, and no *Workspace settings* group.
 
 ```toml
 # Optional code-language admission allowlist (grammar names from `logos languages`).

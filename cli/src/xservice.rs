@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
-    app_wide_reachability, cross_service_coverage, discover, open_state, query, workspace_governance,
+    cross_service_coverage, discover, open_state, query, workspace_governance,
     xservice_build_deps, BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope,
     RegistryMode, TypeReferenceIndex, TypeReferences,
 };
@@ -83,7 +83,7 @@ pub(crate) enum XserviceCommands {
         /// Maximum intra-repo callers per member (default 50).
         #[arg(long)]
         limit: Option<usize>,
-        /// Scope the intra-repo fan-out to one workspace member.
+        /// The member whose symbol is meant: scopes the intra-repo fan-out, the residue and each cross-service edge's provider end; the callers stay in any member.
         #[arg(long)]
         repo: Option<String>,
     },
@@ -105,7 +105,7 @@ pub(crate) enum XserviceCommands {
         /// Traversal depth bound per member (default 3).
         #[arg(long)]
         depth: Option<usize>,
-        /// Scope the seed impact to one workspace member.
+        /// The member whose symbol is meant: scopes the seed impact, the residue and each stitched edge's near end; the far side stays in any member.
         #[arg(long)]
         repo: Option<String>,
     },
@@ -211,9 +211,10 @@ pub(crate) enum WorkspaceCommands {
     /// never a gate input, never alters a repo's own dead-code verdict. Every
     /// claim carries a coverage rider.
     ///
-    /// By default the payload is bounded to only the cross-service promotions and
-    /// states every applied bound, so a bounded reply is never read as the complete
-    /// dead-set ([NFR-CC-04]).
+    /// By default the payload is bounded to only the promotions — the measured
+    /// cross-service ones, and apart from them the ones a valid `[[links]]` call
+    /// keeps live (`live-via-asserted-link`) — and states every applied bound, so a
+    /// bounded reply is never read as the complete dead-set ([NFR-CC-04]).
     Reachability {
         /// Scope the union view to one workspace member (its workspace-relative name).
         #[arg(long)]
@@ -364,9 +365,8 @@ pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Outpu
         WorkspaceCommands::Status => out.print(&query::workspace_status(&registry))?,
         WorkspaceCommands::Reachability { repo, all } => {
             let bridge = ContractBridge::new();
-            let edges = query::edges(&bridge, &registry);
             let scope = ReachabilityScope::new(repo, all);
-            out.print(&app_wide_reachability(&registry, &edges).bound(scope))?;
+            out.print(&query::workspace_reachability(&bridge, &registry).bound(scope))?;
         }
         WorkspaceCommands::Check => {
             let bridge = ContractBridge::new();

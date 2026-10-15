@@ -104,7 +104,7 @@ use serde::Serialize;
 
 use super::budget::WorkspaceBudget;
 use super::open_state::{MemberOpen, MemberOpenState, StoreFile};
-use super::{Federation, Member};
+use super::{discover, Federation, Member, MANIFEST_FILENAME};
 use crate::{Engine, SharedWorkerPool, WeakWorkerPool};
 
 /// A per-member unit the [`EngineRegistry`] multiplexes ([FR-WS-03]).
@@ -794,12 +794,21 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     pub fn default_engine(&self) -> Result<Arc<E>> {
         let member = self
-            .federation
-            .default
-            .clone()
-            .or_else(|| self.federation.members.first().map(|m| m.name.clone()))
-            .context("the workspace has no members to answer a single-root query")?;
+            .default_member()
+            .context("the workspace has no members to answer a single-root query")?
+            .to_string();
         self.engine_for(&member)
+    }
+
+    /// The **default member's** name — `[workspace] default`, else the first
+    /// member in discovery order; `None` for a workspace with no members. The
+    /// one spelling of the policy [`default_engine`](Self::default_engine) and
+    /// [`Backing::engine_for`] both resolve through.
+    pub fn default_member(&self) -> Option<&str> {
+        self.federation
+            .default
+            .as_deref()
+            .or_else(|| self.federation.members.first().map(|m| m.name.as_str()))
     }
 
     /// Mint a fresh [`AnswerScope`] — **one answer's** worth of member walks
@@ -1402,11 +1411,12 @@ impl<E: MemberEngine> Backing<E> {
         matches!(self, Backing::Federated(_))
     }
 
-    /// The engine the shared single-root surfaces run against: the one engine
-    /// under [`Backing::Single`], or the federated workspace's default member
-    /// ([`EngineRegistry::default_engine`]). The default-member policy lives here
-    /// in the core so every adapter (MCP, web) shares **one** definition
-    /// (NFR-MA-02) rather than copy-pasting the `Single`/`Federated` unwrap.
+    /// The engine the shared single-root `/api/v1/*` surface runs against: the
+    /// one engine under [`Backing::Single`], or the federated workspace's default
+    /// member ([`EngineRegistry::default_engine`]). The MCP surface selects through
+    /// [`engine_for`](Self::engine_for) instead, whose `None` is this same member:
+    /// both resolve it through [`EngineRegistry::default_member`], so the
+    /// default-member policy has **one** definition in the core (NFR-MA-02).
     ///
     /// # Errors
     /// Under [`Backing::Federated`], the workspace has no members or the resolved
@@ -1415,6 +1425,279 @@ impl<E: MemberEngine> Backing<E> {
         match self {
             Backing::Single(engine) => Ok(Arc::clone(engine)),
             Backing::Federated(registry) => registry.default_engine(),
+        }
+    }
+
+    /// The engine a **single-member** read answers from, chosen by the caller's
+    /// `repo` ([FR-WS-42], [CR-225]) — the selection path and error contract of
+    /// the MCP `repo` parameter, which the CLI's `--repo` reaches through
+    /// [`one_shot`](Self::one_shot).
+    ///
+    /// - `None`, or a blank `repo`: the single-root engine, or the workspace's
+    ///   [default member](EngineRegistry::default_member).
+    /// - `Some(member)` under a workspace: that member's engine, through
+    ///   [`EngineRegistry::engine_for`] — so a member built here is admitted
+    ///   under the workspace budget and evicts like any other ([NFR-PE-11]).
+    ///
+    /// The returned [`SelectedEngine`] names the member it answers for, so the
+    /// answer can say so ([`SelectedEngine::answer`]).
+    ///
+    /// # Errors
+    /// A [`MemberSelectionError`] (downcastable from the returned error): `repo`
+    /// under a single-root backing, a `repo` naming no member, or a member whose
+    /// engine will not start. A workspace with no members is a plain error, as
+    /// under [`default_engine`](Self::default_engine).
+    ///
+    /// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+    /// [CR-225]: ../../../docs/requests/CR-225-per-member-single-root-tools.md
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    pub fn engine_for(&self, repo: Option<&str>) -> Result<SelectedEngine<E>> {
+        // A blank or whitespace-only `repo` is "unscoped", never a member named
+        // `""` — the reading the web selector gives its `?repo=` (S-250).
+        let repo = repo.map(str::trim).filter(|repo| !repo.is_empty());
+        let registry = match (self, repo) {
+            (Backing::Single(engine), None) => {
+                return Ok(SelectedEngine {
+                    member: None,
+                    engine: Arc::clone(engine),
+                })
+            }
+            (Backing::Single(_), Some(repo)) => {
+                return Err(MemberSelectionError::NoWorkspace {
+                    requested: repo.to_string(),
+                }
+                .into())
+            }
+            (Backing::Federated(registry), _) => registry,
+        };
+        let member = match repo {
+            // Absence is decided against the roster, without starting anything,
+            // so it is never confused with a start failure below.
+            Some(repo) if !registry.members().iter().any(|m| m.name == repo) => {
+                return Err(MemberSelectionError::UnknownMember {
+                    requested: repo.to_string(),
+                    members: registry.members().iter().map(|m| m.name.clone()).collect(),
+                }
+                .into())
+            }
+            Some(repo) => repo,
+            None => registry
+                .default_member()
+                .context("the workspace has no members to answer a single-root query")?,
+        }
+        .to_string();
+        match registry.engine_for(&member) {
+            Ok(engine) => Ok(SelectedEngine {
+                member: Some(member),
+                engine,
+            }),
+            // The start failure stays the error's source, so a typed core error
+            // inside it is still classified by `error::classify` (ADR-14);
+            // the selection error is the context a caller downcasts to.
+            Err(err) => {
+                let reason = format!("{err:#}");
+                Err(err.context(MemberSelectionError::Degraded { member, reason }))
+            }
+        }
+    }
+
+    /// The engine a **one-shot** command (the CLI) answers a single-member read
+    /// from — [`engine_for`](Self::engine_for)'s selection for a process that
+    /// builds its backing per invocation ([FR-WS-42], [CR-225]).
+    ///
+    /// The workspace is looked for **only when the caller asked for it**:
+    ///
+    /// - a `repo` is given — discovery walks up-tree from `root`, so any member's
+    ///   directory reaches its workspace, as `serve --mcp` does;
+    /// - or `root` itself holds the manifest — the workspace root, where there is
+    ///   no single repository to answer and the default member answers, as it
+    ///   does on a workspace server.
+    ///
+    /// Everywhere else — a plain repository, or a member's own directory with no
+    /// `repo` — no manifest is read, so a command answers for `root` exactly as
+    /// before this function existed and its payload carries no `member`. So does a
+    /// workspace root that cannot answer without a `repo`: a manifest that will not
+    /// parse (its error is returned only if `single` fails too) or one that names no
+    /// member. `single` builds that engine (the surface's index guard lives in it)
+    /// and runs only then. `ready` is the surface's index guard, asked of the selected member's
+    /// root before the registry starts it, so a read never creates a store in a
+    /// member that was never indexed.
+    ///
+    /// # Errors
+    /// As [`engine_for`](Self::engine_for), plus a malformed manifest
+    /// ([`discover`]), whatever `ready` refuses a member with, and whatever `single` fails with. A `repo` with no
+    /// workspace is refused before `single` runs, so it is never masked by an
+    /// unindexed root.
+    ///
+    /// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+    /// [CR-225]: ../../../docs/requests/CR-225-per-member-single-root-tools.md
+    pub fn one_shot(
+        root: &Path,
+        repo: Option<&str>,
+        ready: impl FnOnce(&Path) -> Result<()>,
+        single: impl FnOnce() -> Result<E>,
+    ) -> Result<SelectedEngine<E>> {
+        let repo = repo.map(str::trim).filter(|repo| !repo.is_empty());
+        let own = |single: Result<E>| single.map(|engine| SelectedEngine { member: None, engine: Arc::new(engine) });
+        let federation = if repo.is_some() || root.join(MANIFEST_FILENAME).is_file() {
+            match discover(root) {
+                // A manifest in `root` that discovery did not adopt as its own (`root`
+                // sits inside another working tree) is not the workspace root; one
+                // with no members has no default member to answer for.
+                Ok(found) => found.filter(|f| repo.is_some() || (!f.members.is_empty() && root.canonicalize().ok().as_deref() == Some(f.root.as_path()))),
+                Err(err) if repo.is_some() => return Err(err.into()),
+                // No `repo` asked for the workspace, so a manifest that will not
+                // parse does not take the root's own answer away: it answers as it
+                // did before, and only if it cannot is the manifest the reason given.
+                Err(err) => return own(single()).map_err(|_| err.into()),
+            }
+        } else {
+            None
+        };
+        match (federation, repo) {
+            (Some(federation), repo) => {
+                let registry = EngineRegistry::new(federation, RegistryMode::Lazy);
+                // A member the registry would start is first asked whether it has an
+                // index, as the single-root engine is: starting one creates its store.
+                // A name the roster lacks is left to `engine_for`, which says so.
+                let selected = repo.or_else(|| registry.default_member());
+                if let Some(member) = selected.and_then(|name| registry.members().iter().find(|m| m.name == name)) {
+                    ready(&member.root)?;
+                }
+                Backing::Federated(Box::new(registry)).engine_for(repo)
+            }
+            (None, Some(requested)) => Err(MemberSelectionError::NoWorkspace { requested: requested.to_string() }.into()),
+            (None, None) => own(single()),
+        }
+    }
+}
+
+/// Why [`Backing::engine_for`] could not select the member a caller asked for
+/// ([FR-WS-42], [FR-WS-16]) — the error contract of the MCP `repo` parameter and
+/// of the CLI's `--repo`, which refuse in the same words; the CLI's exit code for
+/// it is `error::exit_code`'s.
+///
+/// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+/// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberSelectionError {
+    /// A `repo` was given, and no workspace is loaded: the server answers for
+    /// its one repository.
+    NoWorkspace {
+        /// The member the caller named.
+        requested: String,
+    },
+    /// No member of this workspace has the requested name.
+    UnknownMember {
+        /// The member the caller named.
+        requested: String,
+        /// Every member of the workspace, in manifest order.
+        members: Vec<String>,
+    },
+    /// The member exists, and its engine will not start. Returned as the
+    /// **context** of the start failure, which stays the error's source: render
+    /// the error with `{:#}` for the reason.
+    Degraded {
+        /// The member.
+        member: String,
+        /// The start failure, rendered with its whole cause chain.
+        reason: String,
+    },
+}
+
+impl MemberSelectionError {
+    /// Whether the caller can fix this by changing the request — every case
+    /// but [`Degraded`](Self::Degraded), which is the member's state, not the
+    /// caller's mistake.
+    pub fn is_caller_mistake(&self) -> bool {
+        !matches!(self, MemberSelectionError::Degraded { .. })
+    }
+}
+
+impl std::fmt::Display for MemberSelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemberSelectionError::NoWorkspace { requested } => write!(
+                f,
+                "repo {requested:?} selects a workspace member, and no workspace is loaded: \
+                 this server answers for its one repository"
+            ),
+            MemberSelectionError::UnknownMember { requested, members } => write!(
+                f,
+                "no workspace member {requested:?}; the members are: {}",
+                members.join(", ")
+            ),
+            // The reason is the source's to render (`{:#}`), not repeated here.
+            MemberSelectionError::Degraded { member, .. } => {
+                write!(f, "workspace member {member:?} is degraded")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MemberSelectionError {}
+
+/// The engine [`Backing::engine_for`] selected, and the member it belongs to.
+pub struct SelectedEngine<E: MemberEngine = Engine> {
+    /// The member answering — `None` under a single-root backing, where there
+    /// is no member to name.
+    pub member: Option<String>,
+    /// That member's engine (or the single-root engine).
+    pub engine: Arc<E>,
+}
+
+impl<E: MemberEngine> SelectedEngine<E> {
+    /// `answer` as this selection serves it: carrying `member` under a
+    /// workspace, verbatim under a single-root backing ([`MemberAnswer`]).
+    pub fn answer<T>(&self, answer: T) -> MemberAnswer<T> {
+        MemberAnswer {
+            member: self.member.clone(),
+            answer,
+        }
+    }
+}
+
+/// A single-member answer declaring the member it was computed for ([CR-137],
+/// [FR-WS-42]) — every answer under a workspace, the default member's included,
+/// so a reader never has to infer which repository answered.
+///
+/// Serialises as:
+/// - **no member** (single-root): `answer` itself, byte for byte — nothing is
+///   re-encoded;
+/// - **an object answer**: `member` first, then the answer's own fields in
+///   their order;
+/// - **any other answer**, or an object already carrying its own `member`:
+///   `{"member": …, "answer": …}`, so no field is ever overwritten.
+///
+/// [CR-137]: ../../../docs/requests/CR-137-a-view-declares-the-scope-it-answers-for.md
+/// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+pub struct MemberAnswer<T> {
+    member: Option<String>,
+    answer: T,
+}
+
+impl<T: Serialize> Serialize for MemberAnswer<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error as _, SerializeMap as _};
+        let Some(member) = &self.member else {
+            return self.answer.serialize(serializer);
+        };
+        let answer = serde_json::to_value(&self.answer).map_err(S::Error::custom)?;
+        match answer {
+            serde_json::Value::Object(fields) if !fields.contains_key("member") => {
+                let mut map = serializer.serialize_map(Some(fields.len() + 1))?;
+                map.serialize_entry("member", member)?;
+                for (key, value) in &fields {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+            answer => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("member", member)?;
+                map.serialize_entry("answer", &answer)?;
+                map.end()
+            }
         }
     }
 }
@@ -1558,6 +1841,7 @@ mod tests {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         }
     }
 
@@ -3096,6 +3380,370 @@ mod tests {
         let registry = backing.as_federated().expect("federated backing");
         assert_eq!(registry.resident_members(), ["a", "b"]);
         assert_eq!((starts(), watches()), (2, 2), "the workspace members are warmed");
+    }
+
+    // ── single-member selection: `Backing::engine_for` (FR-WS-42 / CR-225) ──
+
+    fn lazy_backing(federation: Federation, budget: WorkspaceBudget) -> Backing<SpyEngine> {
+        Backing::Federated(Box::new(EngineRegistry::with_budget(
+            federation,
+            RegistryMode::Lazy,
+            budget,
+        )))
+    }
+
+    fn single_backing() -> Backing<SpyEngine> {
+        Backing::Single(
+            SpyEngine::start(Path::new("/solo"), 1, SharedWorkerPool::with_threads(1).unwrap())
+                .unwrap(),
+        )
+    }
+
+    /// The [`MemberSelectionError`] a selection failed with.
+    fn selection_error<E: MemberEngine>(selected: Result<SelectedEngine<E>>) -> MemberSelectionError {
+        let Err(err) = selected else {
+            panic!("the selection was expected to fail")
+        };
+        err.downcast_ref::<MemberSelectionError>()
+            .unwrap_or_else(|| panic!("not a member-selection error: {err:#}"))
+            .clone()
+    }
+
+    // ── one-shot selection: `Backing::one_shot` (FR-WS-42 / CR-225, S-711) ──
+
+    /// A workspace of git-root members `a` (the default) and `b` under a temp dir.
+    fn one_shot_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for member in ["a", "b"] {
+            let dir = tmp.path().join(member);
+            std::fs::create_dir_all(&dir).unwrap();
+            let git = std::process::Command::new("git")
+                .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0", "init", "-q"])
+                .arg(&dir)
+                .env("GIT_CEILING_DIRECTORIES", tmp.path())
+                .status()
+                .unwrap();
+            assert!(git.success(), "git init {member}");
+        }
+        std::fs::write(
+            tmp.path().join(MANIFEST_FILENAME),
+            "[workspace]\nname = \"w\"\nmembers = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// `one_shot` over a spy: the selection, and whether `single` was asked to
+    /// build the single-root engine.
+    fn one_shot(root: &Path, repo: Option<&str>) -> (Result<SelectedEngine<SpyEngine>>, bool) {
+        let built = Cell::new(false);
+        let selected = Backing::<SpyEngine>::one_shot(root, repo, |_| Ok(()), || {
+            built.set(true);
+            // Counted as a live connection, because dropping a spy gives it back.
+            LIVE_CONNECTIONS.with(|c| c.set(c.get() + 1));
+            Ok(SpyEngine {
+                root: root.to_path_buf(),
+                read_connections: 1,
+                worker_pool: SharedWorkerPool::with_threads(1).unwrap(),
+            })
+        });
+        (selected, built.get())
+    }
+
+    /// The workspace is looked for only when asked: no manifest and no `repo` is
+    /// the single-root engine, a `repo` without a workspace is refused **before**
+    /// the single-root engine is built, and a manifest in the root answers for the
+    /// default member — never for the root's own (non-)store.
+    #[test]
+    fn one_shot_reads_the_workspace_only_when_asked() {
+        reset_spies();
+        let tmp = tempfile::tempdir().unwrap();
+        let (answer, built) = one_shot(tmp.path(), None);
+        assert_eq!(answer.unwrap().member, None, "a plain root names no member");
+        assert!(built, "a plain root is answered by the single-root engine");
+
+        let (blank, built) = one_shot(tmp.path(), Some("  "));
+        assert_eq!(blank.unwrap().member, None, "a blank `repo` is no `repo`");
+        assert!(built);
+
+        let (refusal, built) = one_shot(tmp.path(), Some("a"));
+        assert!(!built, "the refusal comes before the single-root engine is built");
+        assert_eq!(selection_error(refusal), MemberSelectionError::NoWorkspace { requested: "a".into() });
+
+        let ws = one_shot_workspace();
+        let (answer, built) = one_shot(ws.path(), None);
+        let answer = answer.unwrap();
+        assert_eq!(answer.member.as_deref(), Some("a"), "the workspace root answers for the default member");
+        assert!(answer.engine.root.ends_with("a"), "from the member's own root: {:?}", answer.engine.root);
+        assert!(!built, "the single-root engine is not built at a workspace root");
+
+        let (answer, _) = one_shot(ws.path(), Some(" b "));
+        assert_eq!(answer.unwrap().member.as_deref(), Some("b"), "`repo` is trimmed, then selects");
+    }
+
+    /// A workspace root that cannot answer without a `repo` — a manifest that will
+    /// not parse, or one naming no member — answers for the root itself, as it did
+    /// before `one_shot`; `repo` on the first is a usage fault, on the second an
+    /// unknown member. (A repository whose top level holds such a manifest.)
+    #[test]
+    fn one_shot_leaves_a_workspace_root_that_cannot_answer_to_its_own_engine() {
+        reset_spies();
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::write(broken.path().join(MANIFEST_FILENAME), "[workspace\nnot toml\n").unwrap();
+        let (answer, built) = one_shot(broken.path(), None);
+        assert_eq!(answer.unwrap().member, None);
+        assert!(built, "the root's own engine answers");
+        let (asked, built) = one_shot(broken.path(), Some("a"));
+        assert!(asked.is_err() && !built, "`repo` still fails loud on the manifest");
+
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join(MANIFEST_FILENAME), "[workspace]\nname = \"w\"\nmembers = []\n").unwrap();
+        let (answer, built) = one_shot(empty.path(), None);
+        assert_eq!(answer.unwrap().member, None, "no member, no default member to answer");
+        assert!(built);
+        let (asked, _) = one_shot(empty.path(), Some("a"));
+        assert!(matches!(
+            selection_error(asked),
+            MemberSelectionError::UnknownMember { members, .. } if members.is_empty()
+        ));
+
+        // The manifest's error is the one given when the root cannot answer either.
+        let unanswerable = Backing::<SpyEngine>::one_shot(broken.path(), None, |_| Ok(()), || anyhow::bail!("no index"));
+        let message = format!("{:#}", unanswerable.err().expect("both fail"));
+        assert!(message.contains("TOML") || message.contains("toml"), "{message}");
+    }
+
+    /// The surface's index guard is asked of the member the registry would start —
+    /// the one `repo` names, or the default member at a workspace root — before it
+    /// is started, and what it refuses with is the answer; a name the roster lacks
+    /// is not the guard's to judge.
+    #[test]
+    fn one_shot_asks_the_guard_before_a_member_is_started() {
+        reset_spies();
+        let ws = one_shot_workspace();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let select = |repo: Option<&str>| {
+            asked.borrow_mut().clear();
+            let selected = Backing::<SpyEngine>::one_shot(
+                ws.path(),
+                repo,
+                |root| {
+                    asked.borrow_mut().push(root.file_name().unwrap().to_string_lossy().into_owned());
+                    anyhow::bail!("no index in {}", root.display())
+                },
+                || unreachable!("a workspace root never builds the single-root engine"),
+            );
+            (selected.err().map(|e| format!("{e:#}")), asked.borrow().clone(), starts())
+        };
+        let (err, asked_of, started) = select(None);
+        assert!(err.unwrap().contains("no index in"), "the guard's refusal is the answer");
+        assert_eq!((asked_of, started), (vec!["a".to_string()], 0), "the default member, never started");
+        let (_, asked_of, started) = select(Some("b"));
+        assert_eq!((asked_of, started), (vec!["b".to_string()], 0));
+        let (err, asked_of, _) = select(Some("nope"));
+        assert!(asked_of.is_empty(), "an unknown name never reaches the guard");
+        assert!(err.unwrap().contains("no workspace member \"nope\""));
+    }
+
+    /// A manifest the root does not own — `root` is inside a member that holds a
+    /// manifest of its own, itself inside another workspace — is not `root`'s
+    /// workspace: it answers as the single-root engine, naming no member.
+    #[test]
+    fn one_shot_does_not_adopt_a_manifest_the_root_does_not_own() {
+        reset_spies();
+        let ws = one_shot_workspace();
+        let sub = ws.path().join("a").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(MANIFEST_FILENAME), "[workspace]\nname = \"x\"\nmembers = [\"y\"]\n").unwrap();
+        let (answer, built) = one_shot(&sub, None);
+        assert_eq!(answer.unwrap().member, None, "the outer workspace is not this root's");
+        assert!(built);
+    }
+
+    /// Inside a member, no `repo` is the member's own engine and names no member
+    /// — the answer a command gave before `--repo` existed — while `repo` reaches
+    /// a sibling through the manifest found up-tree.
+    #[test]
+    fn one_shot_inside_a_member_answers_for_it_unless_told_otherwise() {
+        reset_spies();
+        let ws = one_shot_workspace();
+        let inside = ws.path().join("b");
+        let (answer, built) = one_shot(&inside, None);
+        assert_eq!(answer.unwrap().member, None, "no `repo`, no stamp, no workspace read");
+        assert!(built);
+
+        let (answer, built) = one_shot(&inside, Some("a"));
+        let answer = answer.unwrap();
+        assert_eq!(answer.member.as_deref(), Some("a"));
+        assert!(answer.engine.root.ends_with("a") && !built);
+    }
+
+    /// Under a single-root backing, no `repo` selects the one engine and names
+    /// no member; a `repo` is an error saying no workspace is loaded.
+    #[test]
+    fn single_root_selection_names_no_member_and_refuses_a_repo() {
+        let backing = single_backing();
+        let selected = backing.engine_for(None).unwrap();
+        assert_eq!(selected.member, None, "single-root names no member");
+        assert_eq!(selected.engine.root, Path::new("/solo"));
+        // Blank is unscoped, never a member named "".
+        assert_eq!(backing.engine_for(Some("  ")).unwrap().member, None);
+
+        let err = selection_error(backing.engine_for(Some("svc-b")));
+        assert_eq!(err, MemberSelectionError::NoWorkspace { requested: "svc-b".into() });
+        assert!(err.is_caller_mistake());
+        assert!(err.to_string().contains("no workspace is loaded"), "{err}");
+    }
+
+    /// Under a workspace, no `repo` selects the default member and names it; a
+    /// `repo` selects that member, building only it.
+    #[test]
+    fn federated_selection_names_the_default_member_or_the_requested_one() {
+        reset_spies();
+        let mut federation = fed(&["a", "b", "c"]);
+        federation.default = Some("b".to_string());
+        let backing = lazy_backing(federation, roomy_budget());
+
+        let default = backing.engine_for(None).unwrap();
+        assert_eq!(default.member.as_deref(), Some("b"), "the declared default answers");
+        assert_eq!(default.engine.root, Path::new("/ws/b"));
+        assert_eq!(backing.engine_for(Some("")).unwrap().member.as_deref(), Some("b"));
+
+        let chosen = backing.engine_for(Some(" c ")).unwrap();
+        assert_eq!(chosen.member.as_deref(), Some("c"), "the trimmed repo answers");
+        assert_eq!(chosen.engine.root, Path::new("/ws/c"));
+        assert_eq!(starts(), 2, "only the two members asked for were built");
+    }
+
+    /// An unknown `repo` lists the members and starts nothing.
+    #[test]
+    fn an_unknown_repo_lists_the_members_and_starts_nothing() {
+        reset_spies();
+        let backing = lazy_backing(fed(&["svc-a", "svc-b"]), roomy_budget());
+        let err = selection_error(backing.engine_for(Some("svc-z")));
+        assert_eq!(
+            err,
+            MemberSelectionError::UnknownMember {
+                requested: "svc-z".into(),
+                members: vec!["svc-a".into(), "svc-b".into()],
+            }
+        );
+        assert!(err.is_caller_mistake());
+        assert!(err.to_string().contains("the members are: svc-a, svc-b"), "{err}");
+        assert_eq!(starts(), 0, "absence is decided against the roster");
+    }
+
+    /// A member whose engine will not start is a degraded-member error carrying
+    /// the start failure as its reason ([FR-WS-16]) — not the caller's mistake.
+    #[test]
+    fn a_degraded_repo_errors_with_its_reason() {
+        #[derive(Debug)]
+        struct CorruptB;
+        impl MemberEngine for CorruptB {
+            type Watcher = ();
+            fn start(root: &Path, _: usize, _: SharedWorkerPool) -> Result<Arc<Self>> {
+                if root.ends_with("b") {
+                    anyhow::bail!("store is corrupt");
+                }
+                Ok(Arc::new(CorruptB))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+        let backing: Backing<CorruptB> = Backing::Federated(Box::new(EngineRegistry::with_budget(
+            fed(&["a", "b"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        )));
+        assert!(backing.engine_for(Some("a")).is_ok(), "the healthy member answers");
+        let err = selection_error(backing.engine_for(Some("b")));
+        let MemberSelectionError::Degraded { member, reason } = &err else {
+            panic!("expected a degraded-member error, got {err:?}")
+        };
+        assert_eq!(member, "b");
+        assert!(reason.contains("store is corrupt"), "the reason is the start failure: {reason}");
+        assert!(!err.is_caller_mistake());
+        // The start failure is the error's source, not a string: the core's own
+        // classification still reaches it, and `{:#}` renders it once.
+        let raw = backing.engine_for(Some("b")).err().expect("still degraded");
+        assert_eq!(raw.root_cause().to_string(), "store is corrupt");
+        assert_eq!(
+            format!("{raw:#}"),
+            "workspace member \"b\" is degraded: starting the engine for workspace member \"b\": \
+             store is corrupt"
+        );
+    }
+
+    /// Members selected one at a time through `engine_for` obey the workspace
+    /// budget and its eviction ([NFR-PE-11]): selecting every member of a
+    /// workspace several times larger than the budget never holds more than the
+    /// budgeted live connections, and evicts to stay inside it.
+    #[test]
+    fn selected_members_obey_the_workspace_budget_and_eviction() {
+        let budget = stock_macos_budget();
+        let members = 72;
+        assert!(
+            members > budget.max_resident_members(),
+            "the fixture must hold more members than the budget admits ({})",
+            budget.max_resident_members()
+        );
+        reset_spies();
+        let backing = lazy_backing(big_fed(members), budget);
+        for i in 0..members {
+            // Dropped at the end of each iteration, as one tool call drops its
+            // engine: a held engine is never evicted.
+            let selected = backing.engine_for(Some(&format!("m{i:03}"))).unwrap();
+            assert_eq!(selected.member, Some(format!("m{i:03}")));
+        }
+        let registry = backing.as_federated().unwrap();
+        assert_eq!(starts(), members, "every selected member was built");
+        assert!(
+            registry.resident_count() <= budget.max_resident_members(),
+            "{} members resident, over the budgeted {}",
+            registry.resident_count(),
+            budget.max_resident_members()
+        );
+        assert!(
+            peak_connections() <= budget.total_read_connections(),
+            "peaked at {} live read connections, over the budgeted {}",
+            peak_connections(),
+            budget.total_read_connections()
+        );
+    }
+
+    /// The answer stamp: verbatim without a member; `member` first on an object;
+    /// nested when the answer is not an object or already carries a `member`.
+    #[test]
+    fn a_member_answer_carries_member_and_is_verbatim_without_one() {
+        #[derive(Serialize)]
+        struct Answer {
+            zeta: u8,
+            alpha: &'static str,
+        }
+        let render = |member: Option<&str>, answer: serde_json::Value| {
+            let stamped = MemberAnswer { member: member.map(str::to_string), answer };
+            serde_json::to_string(&stamped).unwrap()
+        };
+        let plain = serde_json::to_string(&Answer { zeta: 1, alpha: "x" }).unwrap();
+        let single = MemberAnswer { member: None, answer: Answer { zeta: 1, alpha: "x" } };
+        assert_eq!(serde_json::to_string(&single).unwrap(), plain, "single-root is verbatim");
+
+        let member = MemberAnswer { member: Some("svc-b".into()), answer: Answer { zeta: 1, alpha: "x" } };
+        assert_eq!(
+            serde_json::to_string(&member).unwrap(),
+            r#"{"member":"svc-b","zeta":1,"alpha":"x"}"#,
+            "member first, then the answer's own fields in their order"
+        );
+        assert_eq!(
+            render(Some("svc-b"), serde_json::json!([1, 2])),
+            r#"{"member":"svc-b","answer":[1,2]}"#
+        );
+        assert_eq!(
+            render(Some("svc-b"), serde_json::json!({"member": "own", "n": 1})),
+            r#"{"member":"svc-b","answer":{"member":"own","n":1}}"#,
+            "an answer's own member field is never overwritten"
+        );
     }
 
     // ── the shared worker pool (S-325, NFR-PE-11, NFR-PE-08, ADR-63) ───────

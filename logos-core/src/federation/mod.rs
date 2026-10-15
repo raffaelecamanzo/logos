@@ -139,6 +139,7 @@ pub mod declared_contracts;
 pub mod enable;
 pub mod external_join;
 pub mod governance;
+pub mod links;
 pub mod manifest;
 pub mod open_state;
 pub mod query;
@@ -161,7 +162,7 @@ use crate::workspace::{is_git_root, resolve_root};
 
 pub use bridge::{
     BridgeEdge, BridgeEndpoint, BridgeIntake, ContractBridge, ContractNode, InvocationRef,
-    MemberContracts,
+    MemberContracts, ReachabilityRead,
 };
 pub use coverage::{
     cross_service_coverage, ClassificationCounts, CoverageState, CrossServiceCoverage,
@@ -178,9 +179,13 @@ pub use external_join::{
     ExternalBinding, ExternalJoinRow, JoinAccounting, JoinOutcome, JoinRefusal, OperationMatch,
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
+pub use links::{
+    asserted_edges, resolve_links, InvalidLink, InvalidReason, LinkCandidates, LinkEnd, LinkStatus,
+    LinkVerdict,
+};
 pub use manifest::{
-    Governance, Link, MemberDecl, MemberKind, NoCrossServiceCallers, ServiceBoundary, ServiceLayer,
-    MANIFEST_FILENAME,
+    ExcludeSet, Governance, Link, LinkRelation, MemberDecl, MemberKind, NoCrossServiceCallers, ServiceBoundary,
+    ServiceLayer, EXCLUDE_KEY, MANIFEST_FILENAME,
 };
 pub use reach::{
     app_wide_reachability, AppWideReachability, AppWideVerdict, BoundedReachability, CoverageRider,
@@ -202,7 +207,8 @@ pub use build_deps::{
 pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
 pub use registry::{
-    AnswerScope, Backing, EngineRegistry, MemberEngine, MemberReads, MemberScoped, RegistryMode,
+    AnswerScope, Backing, EngineRegistry, MemberAnswer, MemberEngine, MemberReads, MemberScoped,
+    MemberSelectionError, RegistryMode, SelectedEngine,
 };
 // The surfaces serialize `EgressResidue`/`ResidueReason` and pass
 // `WorkspaceEgressResidue` through; `AnswerReach` and `egress_residue` are the
@@ -210,7 +216,7 @@ pub use registry::{
 // "assembled once" is a property of the export surface and not only of today's
 // call sites ([CR-125] §4.4).
 pub use residue::{
-    EgressResidue, MemberEgressResidue, ResidueReason, WorkspaceEgressResidue,
+    EgressResidue, MemberEgressResidue, MemberResolved, ResidueReason, WorkspaceEgressResidue,
 };
 pub use telemetry::{
     workspace_statistics, UnreadMember, UnreadReason, WorkspaceStatistics,
@@ -266,9 +272,11 @@ pub struct Federation {
     /// named a member that survived resolution; otherwise `None`.
     pub default: Option<String>,
     /// User-asserted cross-service links (`[[links]]`), carried through verbatim
-    /// for the contract bridge ([FR-WS-04]).
+    /// for [`links::resolve_links`] to validate into `asserted` bridge edges
+    /// ([FR-WS-04], [FR-WS-41]).
     ///
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
     pub links: Vec<Link>,
     /// The `[governance]` workspace rule family ([FR-WS-13]), carried through
     /// verbatim for [`governance::workspace_governance`] to compile and evaluate
@@ -315,6 +323,82 @@ pub struct Federation {
     /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub member_kinds: BTreeMap<String, MemberKind>,
+    /// What `[workspace] exclude` removed from this workspace, and which
+    /// explicit members it did **not** remove ([FR-WS-40]) — read by
+    /// `logos init --workspace` (the persisted globs feed its candidate list) and
+    /// by `workspace status` (so an exclusion is visible rather than silent).
+    ///
+    /// Skipped on serialisation when the manifest declares no `exclude`, so a
+    /// workspace without the key serialises byte-identically to before it existed.
+    ///
+    /// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+    #[serde(skip_serializing_if = "Exclusion::is_unset")]
+    pub exclusion: Exclusion,
+}
+
+/// What a manifest's `[workspace] exclude` did to the workspace it declares
+/// ([FR-WS-40]) — the read-model `workspace status` publishes and `init
+/// --workspace` reads its persisted globs from.
+///
+/// All three lists are empty exactly when the manifest declares no `exclude`;
+/// [`is_unset`](Self::is_unset) is that test and the serde skip predicate.
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Exclusion {
+    /// The declared globs, as written (`[workspace] exclude`).
+    pub globs: Vec<String>,
+    /// The directories the globs dropped — child repositories autodiscovery
+    /// would otherwise have added, by member name, sorted. Empty when
+    /// autodiscovery is off: nothing is autodiscovered, so nothing is dropped
+    /// (`init --workspace` filters its own candidates by the same globs). A
+    /// directory an explicit `members` entry keeps is not listed here; it is in
+    /// [`conflicts`](Self::conflicts).
+    pub excluded: Vec<String>,
+    /// Each explicit `members` entry that matches a glob and was **kept**
+    /// anyway ([FR-WS-40]: an explicit member wins).
+    ///
+    /// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+    pub conflicts: Vec<ExcludeConflict>,
+}
+
+impl Exclusion {
+    /// Whether the manifest declared no `exclude` — nothing was filtered, nothing
+    /// is reported.
+    #[must_use]
+    pub fn is_unset(&self) -> bool {
+        self.globs.is_empty()
+    }
+}
+
+/// An explicit `members` entry that matches a `[workspace] exclude` glob: kept,
+/// and said so ([FR-WS-40], [NFR-CC-04]).
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExcludeConflict {
+    /// The `members` entry as written in the manifest.
+    pub entry: String,
+    /// The glob it matches.
+    pub glob: String,
+    /// The one-line warning naming both and the fix, as logged on every
+    /// workspace load.
+    pub warning: String,
+}
+
+impl ExcludeConflict {
+    fn new(entry: &str, glob: &str) -> Self {
+        Self {
+            entry: entry.to_string(),
+            glob: glob.to_string(),
+            warning: format!(
+                "[workspace] members entry {entry:?} matches [workspace] exclude glob {glob:?} — \
+                 kept, because an explicit member wins; remove the entry from `members` to \
+                 exclude it"
+            ),
+        }
+    }
 }
 
 /// Discover the workspace by walking **up** from `hint`'s resolved root
@@ -376,7 +460,15 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         .to_path_buf();
     let root = root_raw.canonicalize().unwrap_or(root_raw);
 
-    let members = resolve_members(&root, &manifest.workspace);
+    let (members, exclusion) = resolve_members(&root, &manifest.workspace)?;
+    for conflict in &exclusion.conflicts {
+        tracing::warn!(
+            entry = %conflict.entry,
+            glob = %conflict.glob,
+            "{}",
+            conflict.warning
+        );
+    }
 
     // Keep `default` only when it names a member that survived resolution, so
     // downstream can trust it points at a real member. Match by the SAME
@@ -404,6 +496,7 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         governance: manifest.governance,
         warm_concurrency,
         member_kinds,
+        exclusion,
     }))
 }
 
@@ -452,32 +545,80 @@ fn find_manifest_uptree(start: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve and validate the member set: explicit members (manifest order) then
-/// autodiscovered children (sorted), de-duplicated by canonical root.
-fn resolve_members(root: &Path, workspace: &manifest::WorkspaceSection) -> Vec<Member> {
+/// autodiscovered children (sorted), de-duplicated by canonical root — and
+/// apply `[workspace] exclude` ([FR-WS-40]).
+///
+/// The exclusion filters the **autodiscovered** children only. An explicit
+/// `members` entry that matches a glob is kept and recorded as an
+/// [`ExcludeConflict`]; an exclusion that overrode an explicit entry would be a
+/// silent contradiction. The returned [`Exclusion`] also lists the directories
+/// the globs dropped, so `workspace status` can show them.
+///
+/// The child scan runs once, and only when autodiscovery is on — exactly as
+/// before the key existed. A manifest that declares `exclude` without
+/// autodiscovery pays nothing for it: no child is autodiscovered, so none is
+/// excluded, and `init --workspace` applies the globs to its own candidates.
+///
+/// # Errors
+/// A malformed `exclude` glob ([`ConfigError::InvalidValue`]). [`discover`]
+/// has already parsed the manifest, which validates it, so this is the second
+/// line of defence for a hand-built [`manifest::WorkspaceSection`].
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+fn resolve_members(
+    root: &Path,
+    workspace: &manifest::WorkspaceSection,
+) -> Result<(Vec<Member>, Exclusion), ConfigError> {
+    let exclude = ExcludeSet::compile(&workspace.exclude)?;
     let mut members: Vec<Member> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut conflicts: Vec<ExcludeConflict> = Vec::new();
 
-    let mut push = |members: &mut Vec<Member>, member: Member| {
+    // A fn, not a closure: the autodiscovery pass below reads `seen` between
+    // pushes, which a closure holding it mutably would forbid.
+    fn push(
+        seen: &mut std::collections::HashSet<PathBuf>,
+        members: &mut Vec<Member>,
+        member: Member,
+    ) {
         if seen.insert(member.root.clone()) {
             members.push(member);
         }
-    };
+    }
 
     // Explicit members, in manifest order — resolved to a distinct git root.
     for spec in &workspace.members {
         if let Some(member) = resolve_explicit_member(root, spec) {
-            push(&mut members, member);
+            if let Some(glob) = exclude.first_match(&member.name) {
+                conflicts.push(ExcludeConflict::new(spec, glob));
+            }
+            push(&mut seen, &mut members, member);
         }
     }
 
     // Autodiscovered children (git root OR carries a .logos DB), when enabled.
+    let mut excluded: Vec<String> = Vec::new();
     if workspace.autodiscover.as_ref().is_some_and(|a| a.enabled) {
         for member in discover_candidates(root) {
-            push(&mut members, member);
+            if exclude.first_match(&member.name).is_some() {
+                // A directory an explicit entry already admitted is the
+                // conflict above, not an exclusion.
+                if !seen.contains(&member.root) {
+                    excluded.push(member.name);
+                }
+                continue;
+            }
+            push(&mut seen, &mut members, member);
         }
     }
+    excluded.sort();
 
-    members
+    let exclusion = Exclusion {
+        globs: workspace.exclude.clone(),
+        excluded,
+        conflicts,
+    };
+    Ok((members, exclusion))
 }
 
 /// Resolve one explicit `members` entry (a path relative to the workspace root)
@@ -760,6 +901,141 @@ mod tests {
         }
     }
 
+    /// `[workspace] exclude` drops a matching autodiscovered child from the
+    /// member set (so from fan-out, bridge and coverage, which all read it) and
+    /// lists it as excluded; near-miss names stay members ([FR-WS-40]).
+    #[test]
+    fn exclude_drops_an_autodiscovered_fork_and_lists_it() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("svc"));
+        init_repo(&root.join("svc-fork"));
+        init_repo(&root.join("svc-forked")); // near miss: `*-fork` is a suffix glob
+        init_repo(&root.join("fork"));
+        write_manifest(
+            root,
+            "[workspace]\nname = \"w\"\nexclude = [\"*-fork\"]\n\n[workspace.autodiscover]\n",
+        );
+
+        let fed = discover(root).unwrap().unwrap();
+        assert_eq!(names(&fed), ["fork", "svc", "svc-forked"]);
+        assert_eq!(fed.exclusion.globs, ["*-fork"]);
+        assert_eq!(fed.exclusion.excluded, ["svc-fork"]);
+        assert!(fed.exclusion.conflicts.is_empty());
+        assert!(!fed.exclusion.is_unset());
+    }
+
+    /// Without the key the exclusion is unset and the member set is exactly what
+    /// autodiscovery found — the byte-identity contract for existing manifests.
+    #[test]
+    fn a_manifest_without_exclude_filters_nothing_and_reports_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("svc"));
+        init_repo(&root.join("svc-fork"));
+        write_manifest(root, "[workspace]\nname = \"w\"\n\n[workspace.autodiscover]\n");
+
+        let fed = discover(root).unwrap().unwrap();
+        assert_eq!(names(&fed), ["svc", "svc-fork"]);
+        assert!(fed.exclusion.is_unset());
+        assert_eq!(fed.exclusion, Exclusion::default());
+        let json = serde_json::to_value(&fed).unwrap();
+        assert!(json.get("exclusion").is_none(), "skipped on the wire: {json}");
+    }
+
+    /// An explicit `members` entry that matches a glob is kept and recorded as a
+    /// conflict naming the entry and the glob; the same directory is not also
+    /// listed as excluded ([FR-WS-40]).
+    #[test]
+    fn an_explicit_member_matching_a_glob_is_kept_and_warned() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("svc"));
+        init_repo(&root.join("svc-fork"));
+        init_repo(&root.join("old-fork"));
+        write_manifest(
+            root,
+            "[workspace]\nname = \"w\"\nmembers = [\"./svc-fork\"]\nexclude = [\"*-fork\"]\n\n\
+             [workspace.autodiscover]\n",
+        );
+
+        let fed = discover(root).unwrap().unwrap();
+        assert_eq!(names(&fed), ["svc-fork", "svc"], "explicit kept, autodiscovered fork dropped");
+        assert_eq!(fed.exclusion.excluded, ["old-fork"], "the kept one is not 'excluded'");
+        assert_eq!(fed.exclusion.conflicts.len(), 1);
+        let conflict = &fed.exclusion.conflicts[0];
+        assert_eq!(conflict.entry, "./svc-fork", "the entry as written");
+        assert_eq!(conflict.glob, "*-fork");
+        assert!(
+            conflict.warning.contains("\"./svc-fork\"") && conflict.warning.contains("\"*-fork\""),
+            "the warning names both: {}",
+            conflict.warning
+        );
+    }
+
+    /// The conflict is matched on the resolved member NAME, not on the entry's
+    /// text: `./svc-fork` and `svc-fork/` name the member `svc-fork`, so the
+    /// literal glob `svc-fork` catches both, and the entry is reported as
+    /// written. (A glob like `*-fork` matches the raw text too, so it cannot tell
+    /// the two apart.)
+    #[test]
+    fn an_explicit_conflict_matches_the_member_name_not_the_entry_text() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("svc-fork"));
+        init_repo(&root.join("web"));
+        write_manifest(
+            root,
+            "[workspace]\nname = \"w\"\nmembers = [\"./svc-fork\", \"web/\"]\nexclude = [\"svc-fork\"]\n",
+        );
+
+        let fed = discover(root).unwrap().unwrap();
+        assert_eq!(names(&fed), ["svc-fork", "web"], "both explicit entries are kept");
+        let conflicts: Vec<(&str, &str)> = fed
+            .exclusion
+            .conflicts
+            .iter()
+            .map(|c| (c.entry.as_str(), c.glob.as_str()))
+            .collect();
+        assert_eq!(conflicts, [("./svc-fork", "svc-fork")], "only the matching one, as written");
+    }
+
+    /// Autodiscovery off: no child is autodiscovered, so a glob drops nothing and
+    /// lists nothing — an unlisted repository beside the members does not appear
+    /// out of nowhere, and the scan is not paid for.
+    #[test]
+    fn exclude_with_autodiscover_off_admits_and_lists_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("svc"));
+        init_repo(&root.join("svc-fork"));
+        init_repo(&root.join("other"));
+        write_manifest(
+            root,
+            "[workspace]\nname = \"w\"\nmembers = [\"svc\"]\nexclude = [\"*-fork\"]\n",
+        );
+
+        let fed = discover(root).unwrap().unwrap();
+        assert_eq!(names(&fed), ["svc"], "only the explicit member");
+        assert_eq!(fed.exclusion.globs, ["*-fork"]);
+        assert!(fed.exclusion.excluded.is_empty());
+    }
+
+    /// A malformed glob fails the workspace load (exit 2, naming the key) rather
+    /// than silently discovering the fork.
+    #[test]
+    fn a_malformed_exclude_glob_fails_the_workspace_load() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("svc"));
+        write_manifest(
+            tmp.path(),
+            "[workspace]\nname = \"w\"\nexclude = [\"{svc\"]\n\n[workspace.autodiscover]\n",
+        );
+        let err = discover(tmp.path()).expect_err("fails loud");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("workspace.exclude"), "{err}");
+    }
+
     /// A disabled autodiscover section falls back to explicit members only.
     #[test]
     fn autodiscover_disabled_keeps_only_explicit_members() {
@@ -829,7 +1105,7 @@ mod tests {
         );
         let fed = discover(root).unwrap().unwrap();
         assert_eq!(fed.links.len(), 1);
-        assert_eq!(fed.links[0].relation, "http_call");
+        assert_eq!(fed.links[0].relation, LinkRelation::HttpCall);
     }
 
     /// A manifest whose every declared member is dropped still yields a

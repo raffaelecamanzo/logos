@@ -13,8 +13,9 @@
 //!
 //! - The per-repo verdict already **is** reachability from the per-repo roots
 //!   over `Calls`/`RoutesTo` ([`crate::annotate`], [FR-AN-01]).
-//! - An **invocation** [`BridgeEdge`](super::BridgeEdge) contributes **roots**,
-//!   never adjacency.
+//! - An **invocation** [`BridgeEdge`](super::BridgeEdge) — and, under its own
+//!   verdict, an asserted call (see below) — contributes **roots**, never
+//!   adjacency.
 //! - Reachability from `per-repo roots ∪ bridge roots` therefore equals
 //!   `per-repo live set ∪ closure(bridge roots)` over the *same* adjacency.
 //!
@@ -29,7 +30,7 @@
 //! not yet extracted the caller) can only fail to promote — it can never demote a
 //! live handler to dead ([FR-WS-12], [NFR-RA-05]).
 //!
-//! # Only an invocation edge is a root ([FR-WS-12], [CR-083])
+//! # Only an invocation edge is a measured root ([FR-WS-12], [CR-083])
 //!
 //! The view roots the provider (`to`) endpoint of every **invocation** bridge edge
 //! ([FR-WS-08]–[FR-WS-10]) — a captured call, stub call, or publish/subscribe —
@@ -47,6 +48,23 @@
 //! hazard rather than changing any current output ([CR-083]).
 //!
 //! [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
+//!
+//! # A declared call is a root of its own kind ([FR-WS-41], [BR-75])
+//!
+//! An **asserted** edge — a valid `[[links]]` entry — declared as a call
+//! (`http_call`, `grpc_call`; [`seeds_asserted_root`]) roots its provider
+//! endpoint too, in a **second** walk, and what only that walk reaches is
+//! `live-via-asserted-link`, never `live-via-cross-service`: a reader can always
+//! tell a human claim from a measured one. A node both walks reach is
+//! `live-via-cross-service` — the measurement is the stronger statement. A
+//! `publishes` link reaches a topic and no callable, and seeds nothing. The
+//! composition stays monotone toward live: an asserted root only ever adds.
+//!
+//! A renamed link target resolves to nothing on the next answer, so its link
+//! is invalid (`no-match`) and its root disappears with it.
+//!
+//! [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+//! [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //!
 //! # The promotion path is reachable on a real index (S-291, [CR-081])
 //!
@@ -117,7 +135,13 @@ use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 
 use super::bridge::{read_members, BridgeEdge, MemberContracts};
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
+use super::links::seeds_asserted_root;
 use super::registry::{EngineRegistry, MemberEngine};
+
+/// `serde`'s skip predicate for a count that is absent at zero.
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
 
 /// The view's label ([ADR-56]) — the union view is *explicitly labeled* so no
 /// consumer can mistake it for a member's gated per-repo dead-code signal.
@@ -426,6 +450,17 @@ pub struct CoverageRider {
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_apart: Option<RowsApart>,
+    /// The **asserted** call edges — valid `[[links]]` declaring a call — the
+    /// view seeded its `live-via-asserted-link` roots from ([FR-WS-41]): what
+    /// such a claim rests on, apart from every evidence figure above, which no
+    /// link moves ([BR-75]). Counted with [`seeds_asserted_root`] over the same
+    /// slice the walk seeds from. **Absent** at zero, so a workspace without
+    /// `[[links]]` serializes as before.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "is_zero")]
+    pub asserted_call_edges: u64,
 }
 
 /// The rider's projection of [`DeclaredApart`](super::coverage::DeclaredApart):
@@ -477,6 +512,7 @@ impl CoverageRider {
                 rows: apart.rows,
                 contract_surface_rows: apart.contract_surface_rows,
             }),
+            asserted_call_edges: edges.iter().filter(|edge| seeds_asserted_root(edge)).count() as u64,
         }
     }
 }
@@ -492,6 +528,14 @@ pub enum AppWideVerdict {
     /// Dead in its own repo, **live** app-wide: reached from a cross-service
     /// provider endpoint the bridge matched. The promotion this view exists for.
     LiveViaCrossService,
+    /// Dead in its own repo, live app-wide **only** because a valid `[[links]]`
+    /// entry declares a call reaching it ([FR-WS-41]) — a claim, never a
+    /// measurement ([BR-75]), and so never reported as
+    /// [`LiveViaCrossService`](Self::LiveViaCrossService).
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    LiveViaAssertedLink,
     /// Dead in its own repo and still unreached across the union — dead app-wide,
     /// *up to the [`CoverageRider`]* riding on this claim.
     Dead,
@@ -536,9 +580,21 @@ pub struct MemberReachability {
     pub dead_per_repo: u64,
     /// Of those, the ones the union view promotes to live.
     pub live_via_cross_service: u64,
+    /// Asserted call endpoints ([`seeds_asserted_root`]) that resolved to a node
+    /// here and seeded the asserted walk. **Absent** at zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub asserted_roots: u64,
+    /// Asserted call endpoints naming a symbol this member's surface does not
+    /// carry — reported, never dropped. **Absent** at zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unresolved_asserted_roots: u64,
+    /// Of the per-repo dead, the ones only a declared link keeps live
+    /// ([`AppWideVerdict::LiveViaAssertedLink`]). **Absent** at zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub live_via_asserted_link: u64,
     /// Of those, the ones still dead app-wide. Always
-    /// `dead_per_repo - live_via_cross_service` — the monotonicity invariant, in
-    /// arithmetic.
+    /// `dead_per_repo - live_via_cross_service - live_via_asserted_link` — the
+    /// monotonicity invariant, in arithmetic.
     pub dead_app_wide: u64,
 }
 
@@ -567,6 +623,12 @@ pub struct AppWideReachability {
     pub skipped_members: Vec<String>,
     /// The promotions: dead per-repo, live across the union. Sorted.
     pub live_via_cross_service: Vec<ReachabilityClaim>,
+    /// The callables only a declared link keeps live
+    /// ([`AppWideVerdict::LiveViaAssertedLink`]), apart from the measured
+    /// promotions. Sorted; **absent** when empty, so a workspace without
+    /// `[[links]]` serializes as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub live_via_asserted_link: Vec<ReachabilityClaim>,
     /// The app-wide dead set — a strict subset of the union of the per-repo dead
     /// sets. Sorted.
     pub dead: Vec<ReachabilityClaim>,
@@ -644,6 +706,10 @@ pub struct BoundedReachability {
     /// interesting set, always carried (never suppressed). Restricted to the scoped
     /// member when a `--repo` bound is applied.
     pub live_via_cross_service: Vec<ReachabilityClaim>,
+    /// As [`AppWideReachability::live_via_asserted_link`], carried like the
+    /// promotions and restricted alike; absent when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub live_via_asserted_link: Vec<ReachabilityClaim>,
     /// The app-wide dead set, restricted to the scoped member when a `--repo` bound
     /// is applied. `None` — serialised `null` — when
     /// [`promotions_only`](ReachabilityScope::promotions_only) suppressed it, which
@@ -656,8 +722,10 @@ pub struct BoundedReachability {
 /// Compute the app-wide cross-service reachability union view over `registry`'s
 /// members and the bridge `edges` ([FR-WS-12], [ADR-56]).
 ///
-/// `edges` is the bridge's cross-service edge set (the caller passes the cached
-/// set, exactly as the [`query`](super::query) read-models do). A member whose
+/// `edges` is the evidence edge set followed by the valid links' asserted edges,
+/// each labelled by its intake ([`query::reach_edges`](super::query::reach_edges)):
+/// an invocation edge seeds a `live-via-cross-service` root, an asserted call a
+/// `live-via-asserted-link` one, and every other edge nothing. A member whose
 /// engine fails to start, or whose surface read fails, is **skipped** (degraded,
 /// not fatal, [ADR-53]) — and because a skipped member contributes neither nodes
 /// nor roots, degradation can only ever suppress a promotion, never manufacture a
@@ -676,18 +744,24 @@ where
     let coverage = cross_service_coverage(&answer);
     let surfaces = read_members(&answer, "reachability surface", |e| e.reachability_surface());
     let rider = CoverageRider::new(&coverage, edges, surfaces.len(), registry.members().len());
-    let roots = union_roots(edges);
+    let roots = union_roots(edges, |edge| edge.intake.seeds_reachability_root());
+    let asserted = union_roots(edges, seeds_asserted_root);
 
     let mut members = Vec::with_capacity(surfaces.len());
     let mut live_via_cross_service = Vec::new();
+    let mut live_via_asserted_link = Vec::new();
     let mut dead = Vec::new();
 
     for (member, surface) in &surfaces {
-        let seeds: &[&LogosSymbol] = roots.get(member.as_str()).map_or(&[], Vec::as_slice);
-        let (tally, claims) = member_view(member, surface, seeds, rider);
+        let seeds = Seeds {
+            measured: roots.get(member.as_str()).map_or(&[], Vec::as_slice),
+            asserted: asserted.get(member.as_str()).map_or(&[], Vec::as_slice),
+        };
+        let (tally, claims) = member_view(member, surface, &seeds, rider);
         for claim in claims {
             match claim.verdict {
                 AppWideVerdict::LiveViaCrossService => live_via_cross_service.push(claim),
+                AppWideVerdict::LiveViaAssertedLink => live_via_asserted_link.push(claim),
                 AppWideVerdict::Dead => dead.push(claim),
             }
         }
@@ -706,6 +780,7 @@ where
     members.sort_by(|a, b| a.member.cmp(&b.member));
     skipped_members.sort();
     live_via_cross_service.sort_by(claim_order);
+    live_via_asserted_link.sort_by(claim_order);
     dead.sort_by(claim_order);
 
     AppWideReachability {
@@ -715,6 +790,7 @@ where
         members,
         skipped_members,
         live_via_cross_service,
+        live_via_asserted_link,
         dead,
     }
 }
@@ -746,6 +822,11 @@ impl AppWideReachability {
             .into_iter()
             .filter(|c| in_scope(&c.member))
             .collect();
+        let live_via_asserted_link = self
+            .live_via_asserted_link
+            .into_iter()
+            .filter(|c| in_scope(&c.member))
+            .collect();
         // `None` (suppressed), not `Some(vec![])` (computed empty) — the whole point
         // of the promotions-only default is that the dead set was never emitted.
         let dead = (!scope.promotions_only)
@@ -758,6 +839,7 @@ impl AppWideReachability {
             members,
             skipped_members: self.skipped_members,
             live_via_cross_service,
+            live_via_asserted_link,
             dead,
             scope,
         }
@@ -765,11 +847,12 @@ impl AppWideReachability {
 }
 
 /// The extra live roots the bridge contributes, grouped by the member that owns
-/// them: the **provider** (`to`) endpoint of every **invocation** edge
-/// ([FR-WS-12], [CR-083]).
+/// them: the **provider** (`to`) endpoint of every edge `admits` admits — every
+/// **invocation** edge for the measured roots ([FR-WS-12], [CR-083]), every
+/// asserted call ([`seeds_asserted_root`]) for the asserted ones.
 ///
-/// Only invocation edges ([FR-WS-08]–[FR-WS-10]) seed roots — an actual call
-/// reaches its provider. A contract-surface edge (an OpenAPI operation
+/// Only invocation edges ([FR-WS-08]–[FR-WS-10]) seed measured roots — an actual
+/// call reaches its provider. A contract-surface edge (an OpenAPI operation
 /// *describing* an endpoint) is skipped: documentation is not reachability, and
 /// rooting it would mark a callable live merely because a spec file mentions it
 /// ([NFR-CC-04]). Today this is a no-op — the only contract-surface providers are
@@ -783,11 +866,11 @@ impl AppWideReachability {
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
-fn union_roots(edges: &[BridgeEdge]) -> HashMap<&str, Vec<&LogosSymbol>> {
+fn union_roots(edges: &[BridgeEdge], admits: impl Fn(&BridgeEdge) -> bool) -> HashMap<&str, Vec<&LogosSymbol>> {
     let mut roots: HashMap<&str, Vec<&LogosSymbol>> = HashMap::new();
     for edge in edges {
-        if !edge.intake.seeds_reachability_root() {
-            continue; // a contract-surface edge describes, it does not reach ([CR-083])
+        if !admits(edge) {
+            continue; // not this root kind: a contract-surface edge describes, it does not reach ([CR-083])
         }
         roots
             .entry(edge.to.member.as_str())
@@ -808,8 +891,17 @@ fn union_roots(edges: &[BridgeEdge]) -> HashMap<&str, Vec<&LogosSymbol>> {
     roots
 }
 
-/// One member's tally + claims: walk its adjacency from the bridge `seeds`, then
-/// verdict **only** the nodes its own graph already called dead.
+/// One member's two root sets: the provider endpoints of its inbound
+/// invocation edges, and of its inbound asserted calls.
+struct Seeds<'a> {
+    measured: &'a [&'a LogosSymbol],
+    asserted: &'a [&'a LogosSymbol],
+}
+
+/// One member's tally + claims: walk its adjacency from each root set, then
+/// verdict **only** the nodes its own graph already called dead — reached by
+/// the measured walk, `live-via-cross-service`; by the asserted walk alone,
+/// `live-via-asserted-link`; by neither, dead.
 ///
 /// The `is_dead != Some(true)` skip is the whole tri-state guarantee: a `None`
 /// ("not computed") node and a live node are both passed over silently, so
@@ -817,16 +909,20 @@ fn union_roots(edges: &[BridgeEdge]) -> HashMap<&str, Vec<&LogosSymbol>> {
 fn member_view(
     member: &str,
     surface: &ReachabilitySurface,
-    seeds: &[&LogosSymbol],
+    seeds: &Seeds<'_>,
     coverage: CoverageRider,
 ) -> (MemberReachability, Vec<ReachabilityClaim>) {
-    let walk = walk_union(surface, seeds);
+    let walk = walk_union(surface, seeds.measured);
+    let asserted = walk_union(surface, seeds.asserted);
     let mut tally = MemberReachability {
         member: member.to_string(),
         extra_roots: walk.roots_resolved,
         unresolved_roots: walk.roots_unresolved,
         dead_per_repo: 0,
         live_via_cross_service: 0,
+        asserted_roots: asserted.roots_resolved,
+        unresolved_asserted_roots: asserted.roots_unresolved,
+        live_via_asserted_link: 0,
         dead_app_wide: 0,
     };
     let mut claims = Vec::new();
@@ -836,9 +932,14 @@ fn member_view(
             continue; // live, or NULL — the union view has nothing to say.
         }
         tally.dead_per_repo += 1;
-        let verdict = if walk.reached.contains(&(index as u32)) {
+        let index = index as u32;
+        // The measurement first: a node both walks reach is measured live.
+        let verdict = if walk.reached.contains(&index) {
             tally.live_via_cross_service += 1;
             AppWideVerdict::LiveViaCrossService
+        } else if asserted.reached.contains(&index) {
+            tally.live_via_asserted_link += 1;
+            AppWideVerdict::LiveViaAssertedLink
         } else {
             tally.dead_app_wide += 1;
             AppWideVerdict::Dead

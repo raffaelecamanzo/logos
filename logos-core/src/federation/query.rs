@@ -18,9 +18,9 @@
 //! # Cross-service impact ([FR-WS-05])
 //! [`xservice_impact`] fans per-member [`Engine::impact`] across the
 //! [bridge](super::bridge) edges: the seed member's impact, plus — for every
-//! [`BridgeEdge`] the queried symbol is an endpoint of — the far member's
-//! impact of the opposite endpoint, tagged with the edge it was reached
-//! through. A member whose engine fails to start surfaces as a per-member error
+//! [`BridgeEdge`] whose near endpoint is the queried `(member, symbol)` pair
+//! ([BR-73]) — the far member's impact of the opposite endpoint, tagged with
+//! the edge it was reached through. A member whose engine fails to start surfaces as a per-member error
 //! rather than aborting the whole answer ([ADR-53]).
 //!
 //! [mcp-surface]: ../../../docs/specs/architecture/components/mcp-surface.md
@@ -28,6 +28,7 @@
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+//! [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -35,26 +36,29 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::model::NodeKind;
-use crate::models::{AffectedResult, CallersResult, ImpactResult, SearchResult, StatusInfo};
+use crate::models::{AffectedResult, CallersResult, ImpactResult, SearchResult, StatusInfo, SymbolRef};
 use crate::Engine;
 
-use super::bridge::{BridgeEdge, BridgeIntake, MemberContracts};
+use super::bridge::{BridgeEdge, BridgeEndpoint, BridgeIntake, MemberContracts};
 use crate::graph_store::BuildManifestRow;
 
 use super::build_deps::{self, BuildDependencyHeadline, MemberBuildFacts};
-use super::coverage::{cross_service_coverage, CrossServiceCoverage};
+use super::coverage::{cross_service_coverage, CrossServiceCoverage, ReferenceCoverage};
 use super::declared_contracts::DeclaredContractRelation;
 use super::external_join::BoundExternal;
+use super::links::{self, LinkStatus};
 use super::manifest::MemberKind;
 use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{AnswerScope, EngineRegistry, MemberReads, MemberScoped};
-use super::residue::{AnswerReach, EgressResidue, WorkspaceEgressResidue};
+use super::residue::{AnswerReach, EgressResidue, MemberResolved};
 use super::topics::{workspace_topics, MemberTopics};
+use super::Exclusion;
 use super::type_refs::{
     self, MemberTypeFacts, MemberTypeFactsRead, MemberTypeReferences, PairEvidence, TypeImporter, TypeNaming, TypeOwner, TypeRefForm,
     TypeReference, TypeReferenceHeadline, TypeReferenceIndex,
 };
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
+use super::Member;
 
 /// One member's outcome for a repo-qualified fan-out query ([FR-WS-03]).
 ///
@@ -297,15 +301,56 @@ pub fn xservice_search(
 pub struct XserviceCallers {
     /// The symbol text as given.
     pub query: String,
-    /// The `--repo` scope, if one was applied.
+    /// The `--repo` scope, if one was applied: the member whose symbol is meant
+    /// ([BR-73]).
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Set when no scope was applied and two or more members hold the queried
+    /// symbol ([BR-73]): it names them and `--repo` as the way to choose one, and
+    /// says the answer is grouped per member — each row names its provider
+    /// member and [`resolved_by_member`](Self::resolved_by_member) carries each
+    /// one's share. Absent otherwise, so a symbol one member holds serializes as
+    /// it did before.
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ambiguity_warning: Option<String>,
     /// Per-member intra-repo callers, repo-qualified.
     pub members: Vec<MemberResult<CallersResult>>,
     /// Cross-service callers: bridge edges whose provider endpoint is the
-    /// queried symbol — the consumer endpoint (`from`) is the cross-boundary
-    /// caller. Never fabricated (exactly-one, [NFR-RA-05]).
+    /// queried `(member, symbol)` pair — under a scope, that member's symbol
+    /// alone ([BR-73]) — and whose consumer endpoint (`from`), the
+    /// cross-boundary caller, lies in any member. Never fabricated (exactly-one,
+    /// [NFR-RA-05]).
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
     pub cross_service: Vec<BridgeEdge>,
+    /// The per-member breakdown of [`cross_service`](Self::cross_service) under
+    /// [`ambiguity_warning`](Self::ambiguity_warning): one entry per member
+    /// holding the symbol, in name order, with the rows whose provider endpoint
+    /// is its own — zero for a member that holds the symbol and provides
+    /// nothing. Absent exactly when the warning is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_by_member: Vec<MemberResolved>,
+    /// Cross-service callers a valid `[[links]]` entry **asserts** ([FR-WS-41],
+    /// [BR-75]): each asserted edge whose provider endpoint is the queried
+    /// `(member, symbol)` pair — matched exactly as
+    /// [`cross_service`](Self::cross_service) is, under the same scope — with
+    /// `intake: "asserted"` and the `reached` marker
+    /// [`ASSERTED_MARKER`](links::ASSERTED_MARKER).
+    ///
+    /// **Apart from** [`cross_service`](Self::cross_service) and never merged
+    /// with it: a declared link is a claim, so it is in neither the resolved
+    /// count nor [`resolved_by_member`](Self::resolved_by_member), nor the
+    /// residue line. Absent when no valid link names the symbol, so an answer
+    /// without `[[links]]` serializes as before.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_asserted_link: Vec<AssertedCaller>,
     /// Cross-member callers reached across a [`TypeReference`]: each importing
     /// declaration a bound reference names, with its file and line — **apart
     /// from** [`cross_service`](Self::cross_service) and never merged with it
@@ -316,6 +361,14 @@ pub struct XserviceCallers {
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub via_type_reference: Vec<TypeReferenceCaller>,
+    /// Type references reaching the symbol whose owner names no member of this
+    /// workspace, so no scope can claim or exclude them ([BR-73]): reported here,
+    /// under any scope, never dropped. Absent when every reference reaching the
+    /// symbol is attributed.
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub type_reference_unattributed: Vec<TypeReferenceCaller>,
     /// The members whose declared types the type-reference overlay could not
     /// read, each with its reason ([NFR-CC-04]): an importer there cannot be
     /// reached, so [`via_type_reference`](Self::via_type_reference) is stated
@@ -373,25 +426,36 @@ pub fn xservice_callers(
     limit: Option<usize>,
     repo: Option<&str>,
 ) -> XserviceCallers {
-    // The cross-service tier matches on the canonical symbol *string* alone
-    // (not member+symbol): a `LogosSymbol` is a database-portable identity
-    // and bridge edges are already exactly-one resolved cross-member, so a
-    // provider symbol identifies its consumers unambiguously.
-    let cross_service: Vec<BridgeEdge> = inputs
-        .edges
-        .iter()
-        .filter(|edge| edge.to.symbol.as_str() == symbol)
-        .cloned()
+    // The cross-service tier matches the queried `(member, symbol)` pair, never
+    // the symbol string alone ([BR-73]): a `LogosSymbol` is unique within one
+    // member's store only, so two members declaring the same repo-relative
+    // declaration hold byte-identical symbols. `repo` pins the provider side;
+    // the consumer (`from`) may lie in any member.
+    let cross_service: Vec<BridgeEdge> =
+        inputs.edges.iter().filter(|edge| is_queried(&edge.to, symbol, repo)).cloned().collect();
+    // The asserted tier, by the same `(member, symbol)` match ([FR-WS-41]).
+    let via_asserted_link = inputs
+        .asserted()
+        .filter(|edge| is_queried(&edge.to, symbol, repo))
+        .map(|edge| AssertedCaller {
+            reached: links::ASSERTED_MARKER,
+            edge: edge.clone(),
+        })
         .collect();
     let members = fan(registry, repo, |engine| engine.callers(symbol, limit));
     let mut member_reads = inputs.reads.clone();
     for member in &members {
         member.note_in(&mut member_reads);
     }
+    let holding = members
+        .iter()
+        .filter(|m| m.result.as_ref().is_some_and(|r| holds(r.resolved.as_ref(), symbol)))
+        .map(|m| m.member.as_str());
+    let near: Vec<&str> = cross_service.iter().map(|edge| edge.to.member.as_str()).collect();
+    let grouped = QueriedSide::group(symbol, repo, holding, &near);
     XserviceCallers {
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
-        members,
         // Read off the answer that was just built, never recounted from the
         // inputs: the residue's "no resolved cross-service callers" and the
         // `cross_service` list are then two renderings of one fact.
@@ -400,12 +464,110 @@ pub fn xservice_callers(
             AnswerReach {
                 resolved: cross_service.len(),
                 noun: "cross-service caller",
+                by_member: &grouped.by_member,
             },
         ),
+        ambiguity_warning: grouped.warning,
+        members,
         cross_service,
+        resolved_by_member: grouped.by_member,
+        via_asserted_link,
         via_type_reference: Vec::new(),
+        type_reference_unattributed: Vec::new(),
         type_reference_unread: BTreeMap::new(),
         member_reads,
+    }
+}
+
+/// One cross-service caller a valid `[[links]]` entry asserts ([FR-WS-41]): the
+/// asserted edge, flattened — so the row carries `intake: "asserted"` where an
+/// evidence row carries its own intake — beside the `reached` marker a human
+/// reads it by.
+///
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+#[derive(Debug, Serialize)]
+pub struct AssertedCaller {
+    /// Always [`ASSERTED_MARKER`](links::ASSERTED_MARKER).
+    pub reached: &'static str,
+    /// The asserted edge: the consumer endpoint (`from`) is the caller.
+    #[serde(flatten)]
+    pub edge: BridgeEdge,
+}
+
+/// One far-side impact reached across an asserted edge ([FR-WS-41]): the
+/// stitched impact — its `via` edge carrying `intake: "asserted"` — beside the
+/// `reached` marker.
+///
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+#[derive(Debug, Serialize)]
+pub struct AssertedImpact {
+    /// Always [`ASSERTED_MARKER`](links::ASSERTED_MARKER).
+    pub reached: &'static str,
+    /// The far member's impact, stitched as an evidence edge's is.
+    #[serde(flatten)]
+    pub impact: CrossServiceImpact,
+}
+
+/// Whether `endpoint` is the queried side of a bridge edge: the queried symbol
+/// in the scoped member, or in any member when unscoped ([BR-73]). The one
+/// match both reachability queries apply, as
+/// [`xservice_route_providers`] scopes its provider endpoints.
+///
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn is_queried(endpoint: &BridgeEndpoint, symbol: &str, repo: Option<&str>) -> bool {
+    endpoint.symbol.as_str() == symbol && repo.is_none_or(|member| endpoint.member == member)
+}
+
+/// Whether a member's own fan-out row resolved to exactly the queried symbol —
+/// the member holds it. A bare name resolving to some other node does not
+/// count: [BR-73] is about one symbol string held by several members.
+///
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn holds(resolved: Option<&SymbolRef>, symbol: &str) -> bool {
+    resolved.is_some_and(|node| node.symbol == symbol)
+}
+
+/// How an unscoped cross-service answer groups a symbol that two or more
+/// members hold ([BR-73]): each member's share of the resolved count and the
+/// notice naming them. Both empty under a scope, and when one member or none
+/// holds the symbol — the answer then serializes as it did before.
+///
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+struct QueriedSide {
+    by_member: Vec<MemberResolved>,
+    warning: Option<String>,
+}
+
+impl QueriedSide {
+    /// Group over the members `holding` the symbol — each one whose own store
+    /// resolves it, read off the fan-out the answer already made — and the
+    /// queried endpoint's member of every resolved row, `near`, which also
+    /// holds it.
+    fn group<'a>(symbol: &str, repo: Option<&str>, holding: impl Iterator<Item = &'a str>, near: &[&'a str]) -> Self {
+        let mut shares: BTreeMap<&str, usize> = BTreeMap::new();
+        if repo.is_none() {
+            shares.extend(holding.map(|member| (member, 0)));
+            for member in near {
+                *shares.entry(member).or_default() += 1;
+            }
+        }
+        if shares.len() < 2 {
+            return Self { by_member: Vec::new(), warning: None };
+        }
+        let names: Vec<&str> = shares.keys().copied().collect();
+        let warning = format!(
+            "{symbol:?} is held by {} members ({}); the answer is grouped per member, never pooled — \
+             pass --repo <member> (`repo` over MCP) to choose one",
+            names.len(),
+            names.join(", ")
+        );
+        Self {
+            by_member: shares
+                .into_iter()
+                .map(|(member, resolved)| MemberResolved { member: member.to_string(), resolved })
+                .collect(),
+            warning: Some(warning),
+        }
     }
 }
 
@@ -416,21 +578,24 @@ impl XserviceCallers {
     /// At class grain the importer **is** the caller — a reference binds the
     /// import of a type, not a call of one of its methods — as the bridge
     /// tier's consumer endpoint is, so no engine is opened. See
-    /// [`references_reaching`] for what the query matches. A member the overlay
-    /// could not read is named in `type_reference_unread`. Nothing else in the
-    /// answer moves: `cross_service` and the residue's resolved count are the
-    /// bridge's alone.
+    /// [`references_reaching`] for what the query matches and how the answer's
+    /// scope narrows it; a reference no member owns lands in
+    /// `type_reference_unattributed`. A member the overlay could not read is
+    /// named in `type_reference_unread`. Nothing else in the answer moves:
+    /// `cross_service` and the residue's resolved count are the bridge's alone.
     ///
     /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[must_use]
     pub fn with_type_references(mut self, registry: &EngineRegistry<Engine>, index: &TypeReferenceIndex) -> Self {
-        self.via_type_reference = references_reaching(registry, index, &self.query)
-            .map(|reference| TypeReferenceCaller {
-                reached: VIA_TYPE_REFERENCE,
-                via: reference.clone(),
-            })
-            .collect();
+        let reaching =
+            references_reaching(&registry.federation().members, &index.references, &self.query, self.scope.as_deref());
+        let caller = |reference: &TypeReference| TypeReferenceCaller {
+            reached: VIA_TYPE_REFERENCE,
+            via: reference.clone(),
+        };
+        self.via_type_reference = reaching.attributed.into_iter().map(caller).collect();
+        self.type_reference_unattributed = reaching.unattributed.into_iter().map(caller).collect();
         self.type_reference_unread = index.headline.members.unread_reasons.clone();
         self
     }
@@ -453,14 +618,40 @@ pub struct CrossServiceImpact {
 pub struct XserviceImpact {
     /// The symbol text as given.
     pub query: String,
-    /// The `--repo` scope, if one was applied.
+    /// The `--repo` scope, if one was applied: the member whose symbol is meant
+    /// ([BR-73]).
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// As [`XserviceCallers::ambiguity_warning`]: set when no scope was applied
+    /// and two or more members hold the queried symbol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ambiguity_warning: Option<String>,
     /// The seed impact, per member in scope, repo-qualified.
     pub seed: Vec<MemberResult<ImpactResult>>,
-    /// Far-side impacts reached by fanning across the bridge edges the queried
-    /// symbol is an endpoint of.
+    /// Far-side impacts reached by fanning across the bridge edges whose near
+    /// endpoint is the queried `(member, symbol)` pair — under a scope, that
+    /// member's symbol alone ([BR-73]); the far side lies in any member.
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
     pub cross_service: Vec<CrossServiceImpact>,
+    /// As [`XserviceCallers::resolved_by_member`]: each member's share of
+    /// [`cross_service`](Self::cross_service), counted on the near endpoint.
+    /// Absent exactly when [`ambiguity_warning`](Self::ambiguity_warning) is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_by_member: Vec<MemberResolved>,
+    /// Far-side impacts reached across an edge a valid `[[links]]` entry
+    /// **asserts** ([FR-WS-41], [BR-75]) — stitched exactly as
+    /// [`cross_service`](Self::cross_service) is, from each end that is the
+    /// queried pair, each with the `reached` marker. Apart from it, and counted
+    /// in no figure; see [`XserviceCallers::via_asserted_link`]. Absent when no
+    /// valid link names the symbol.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_asserted_link: Vec<AssertedImpact>,
     /// One entry per bound [`TypeReference`] reaching the symbol — per import
     /// row, so a file importing the type and a static member of it is reached
     /// twice — each with what depends on the importing file in its member —
@@ -473,6 +664,10 @@ pub struct XserviceImpact {
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub via_type_reference: Vec<TypeReferenceImpact>,
+    /// As [`XserviceCallers::type_reference_unattributed`], each entry with its
+    /// importer's reach as in [`via_type_reference`](Self::via_type_reference).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub type_reference_unattributed: Vec<TypeReferenceImpact>,
     /// The members whose declared types the type-reference overlay could not
     /// read, each with its reason ([NFR-CC-04]): an importer there cannot be
     /// reached, so [`via_type_reference`](Self::via_type_reference) is stated
@@ -506,13 +701,15 @@ pub struct XserviceImpact {
 /// Transitive impact of `symbol`, stitched across bridge edges ([FR-WS-05]).
 ///
 /// The seed is `symbol`'s impact in each member in scope; the cross-service tier
-/// follows every [`BridgeEdge`] the symbol is an endpoint of to the opposite
-/// endpoint's member and computes *its* impact — literally fanning per-member
-/// impact across the bridge. A far member whose engine fails to start is
+/// follows every [`BridgeEdge`] whose near endpoint is the queried
+/// `(member, symbol)` pair ([BR-73]) — `repo` pins the member — to the opposite
+/// endpoint's member, in any member, and computes *its* impact — literally
+/// fanning per-member impact across the bridge. A far member whose engine fails to start is
 /// skipped (degraded, not fatal, [ADR-53]) and named unread in
 /// [`member_reads`](XserviceImpact::member_reads) ([NFR-CC-04]).
 ///
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
 pub fn xservice_impact(
     registry: &EngineRegistry<Engine>,
     inputs: &ReachabilityInputs,
@@ -521,53 +718,108 @@ pub fn xservice_impact(
     repo: Option<&str>,
 ) -> XserviceImpact {
     let mut member_reads = inputs.reads.clone();
-    let cross_service: Vec<CrossServiceImpact> = inputs
-        .edges
-        .iter()
-        .filter_map(|edge| {
-            let far = if edge.from.symbol.as_str() == symbol {
-                &edge.to
-            } else if edge.to.symbol.as_str() == symbol {
-                &edge.from
-            } else {
-                return None;
-            };
-            // A far member that fails to start is skipped, not fatal ([ADR-53]).
-            let engine = match registry.engine_for(&far.member) {
-                Ok(engine) => engine,
-                Err(err) => {
-                    member_reads.note_unread(&far.member, format!("{err:#}"));
-                    return None;
-                }
-            };
-            member_reads.note_read(&far.member);
-            Some(CrossServiceImpact {
-                via: edge.clone(),
-                member: far.member.clone(),
-                impact: engine.impact(far.symbol.as_str(), depth),
-            })
+    let queried = Queried { symbol, repo, depth };
+    let stitched = queried.stitch(registry, inputs.edges.iter(), &mut member_reads);
+    // The near member of each stitched row, for the per-member breakdown.
+    let near: Vec<&str> = stitched.iter().map(|(here, _)| *here).collect();
+    let cross_service: Vec<CrossServiceImpact> = stitched.into_iter().map(|(_, impact)| impact).collect();
+    // The asserted tier, stitched by the same code ([FR-WS-41]) and counted in
+    // no share: a claim is not a resolved row.
+    let via_asserted_link = queried
+        .stitch(registry, inputs.asserted(), &mut member_reads)
+        .into_iter()
+        .map(|(_, impact)| AssertedImpact {
+            reached: links::ASSERTED_MARKER,
+            impact,
         })
         .collect();
     let seed = fan(registry, repo, |engine| engine.impact(symbol, depth));
     for member in &seed {
         member.note_in(&mut member_reads);
     }
+    let holding = seed
+        .iter()
+        .filter(|m| m.result.as_ref().is_some_and(|r| holds(r.resolved.as_ref(), symbol)))
+        .map(|m| m.member.as_str());
+    let grouped = QueriedSide::group(symbol, repo, holding, &near);
 
     XserviceImpact {
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
-        seed,
         unresolved_egress: inputs.residue.beside(
             repo,
             AnswerReach {
                 resolved: cross_service.len(),
                 noun: "cross-service impact",
+                by_member: &grouped.by_member,
             },
         ),
+        ambiguity_warning: grouped.warning,
+        seed,
         cross_service,
+        resolved_by_member: grouped.by_member,
+        via_asserted_link,
         via_type_reference: Vec::new(),
+        type_reference_unattributed: Vec::new(),
         type_reference_unread: BTreeMap::new(),
         member_reads,
+    }
+}
+
+/// The queried side of an `xservice impact` answer, for stitching edges across.
+struct Queried<'q> {
+    symbol: &'q str,
+    repo: Option<&'q str>,
+    depth: Option<usize>,
+}
+
+impl Queried<'_> {
+    /// One far-side impact per end of each of `edges` that is the queried
+    /// `(member, symbol)` pair ([BR-73]), with that end's member — the one
+    /// stitch both the evidence and the asserted tier take.
+    ///
+    /// Each end that is the queried pair is a near side of its own: an edge
+    /// between two members holding the symbol — a fork calling its original —
+    /// is stitched from both, so each holder's share is its own scoped answer.
+    /// Under a scope at most one end is the scoped member's. A far member that
+    /// fails to start is skipped, not fatal ([ADR-53]), and named unread in
+    /// `member_reads` ([NFR-CC-04]).
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    fn stitch<'e>(
+        &self,
+        registry: &EngineRegistry<Engine>,
+        edges: impl Iterator<Item = &'e BridgeEdge>,
+        member_reads: &mut MemberReads,
+    ) -> Vec<(&'e str, CrossServiceImpact)> {
+        edges
+            .flat_map(|edge| {
+                [(&edge.from, &edge.to), (&edge.to, &edge.from)]
+                    .into_iter()
+                    .filter(|(here, _)| is_queried(here, self.symbol, self.repo))
+                    .map(move |(here, far)| (edge, here, far))
+            })
+            .filter_map(|(edge, here, far)| {
+                let engine = match registry.engine_for(&far.member) {
+                    Ok(engine) => engine,
+                    Err(err) => {
+                        member_reads.note_unread(&far.member, format!("{err:#}"));
+                        return None;
+                    }
+                };
+                member_reads.note_read(&far.member);
+                Some((
+                    here.member.as_str(),
+                    CrossServiceImpact {
+                        via: edge.clone(),
+                        member: far.member.clone(),
+                        impact: engine.impact(far.symbol.as_str(), self.depth),
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -586,7 +838,9 @@ impl XserviceImpact {
     /// calls, imports and references from it. A reference binds the import of a
     /// type, not a call of one of its methods, so every importer of the type is
     /// reached ([CR-152] CRA-04). See [`references_reaching`] for what the
-    /// query matches. A member the overlay could not read is named in
+    /// query matches and how the answer's scope narrows it; a reference no
+    /// member owns lands in `type_reference_unattributed`, reached alike. A
+    /// member the overlay could not read is named in
     /// `type_reference_unread`; an importing member read when the overlay was
     /// built whose engine will not start now yields an entry carrying its
     /// error, never an abort ([ADR-53]). Nothing else in the answer moves.
@@ -611,36 +865,38 @@ impl XserviceImpact {
         // start is attempted — and logged, and counted — once, and its error
         // replayed on every entry reaching it, as an `AnswerScope` replays a
         // failed open within one walk ([ADR-53]).
-        let mut engines: BTreeMap<&str, Result<Arc<Engine>, String>> = BTreeMap::new();
+        let mut engines: BTreeMap<String, Result<Arc<Engine>, String>> = BTreeMap::new();
         // One closure per importing file: several rows of one file (an import
         // and a static-member import of one type) share it.
-        let mut closures: BTreeMap<(&str, &str), AffectedResult> = BTreeMap::new();
-        self.via_type_reference = references_reaching(registry, index, &self.query)
-            .map(|reference| {
-                let importer = &reference.importer;
-                let engine = engines
-                    .entry(importer.member.as_str())
-                    .or_insert_with(|| registry.engine_for(&importer.member).map_err(|err| format!("{err:#}")));
-                TypeReferenceImpact {
-                    reached: VIA_TYPE_REFERENCE,
-                    via: reference.clone(),
-                    reach: MemberResult::from_scoped(MemberScoped {
-                        member: importer.member.clone(),
-                        value: engine
-                            .as_ref()
-                            .map(|engine| {
-                                closures
-                                    .entry((importer.member.as_str(), importer.file.as_str()))
-                                    .or_insert_with(|| {
-                                        within(engine.affected(std::slice::from_ref(&importer.file), false))
-                                    })
-                                    .clone()
-                            })
-                            .map_err(|err| anyhow::anyhow!("{err}")),
-                    }),
-                }
-            })
-            .collect();
+        let mut closures: BTreeMap<(String, String), AffectedResult> = BTreeMap::new();
+        let reaching =
+            references_reaching(&registry.federation().members, &index.references, &self.query, self.scope.as_deref());
+        let mut reach = |reference: &TypeReference| {
+            let importer = &reference.importer;
+            let engine = engines
+                .entry(importer.member.clone())
+                .or_insert_with(|| registry.engine_for(&importer.member).map_err(|err| format!("{err:#}")));
+            TypeReferenceImpact {
+                reached: VIA_TYPE_REFERENCE,
+                via: reference.clone(),
+                reach: MemberResult::from_scoped(MemberScoped {
+                    member: importer.member.clone(),
+                    value: engine
+                        .as_ref()
+                        .map(|engine| {
+                            closures
+                                .entry((importer.member.clone(), importer.file.clone()))
+                                .or_insert_with(|| {
+                                    within(engine.affected(std::slice::from_ref(&importer.file), false))
+                                })
+                                .clone()
+                        })
+                        .map_err(|err| anyhow::anyhow!("{err}")),
+                }),
+            }
+        };
+        self.via_type_reference = reaching.attributed.into_iter().map(&mut reach).collect();
+        self.type_reference_unattributed = reaching.unattributed.into_iter().map(&mut reach).collect();
         self.type_reference_unread = index.headline.members.unread_reasons.clone();
         self
     }
@@ -686,24 +942,62 @@ pub struct TypeReferenceImpact {
     pub reach: MemberResult<AffectedResult>,
 }
 
-/// Every bound [`TypeReference`] reaching `symbol` ([FR-WS-35]).
+/// The bound [`TypeReference`]s reaching `symbol` ([FR-WS-35]), split by
+/// whether their owner is a member of `roster`.
+struct ReachingReferences<'a> {
+    /// Owned by a roster member — the scoped one under a scope — grouped by
+    /// owner member in roster order.
+    attributed: Vec<&'a TypeReference>,
+    /// Owned by no roster member: no scope can claim or exclude them, so they
+    /// are reported apart, under any scope, never dropped ([BR-73]).
+    ///
+    /// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    unattributed: Vec<&'a TypeReference>,
+}
+
+/// Every bound [`TypeReference`] reaching `symbol` ([FR-WS-35]), keyed on the
+/// owner's `(member, symbol)` pair ([BR-73]).
 ///
-/// `symbol` reaches a reference when it is the owner's node — the
-/// `references_to` entry, asked of every member — or the type's dotted name —
-/// the `importers` entry, which is how an Avro-declared type (no node in any
-/// store) is reached, and which a source type answers as well. The two never
-/// overlap: a `LogosSymbol` carries spaces and a dotted name none. Like the
-/// bridge tier, the match is on the symbol alone, never narrowed by a `repo`
-/// scope.
+/// `symbol` reaches a reference of `references` — the index's bound ones —
+/// when it is the owner's node — the node path, the owner pair
+/// [`references_to`](TypeReferenceIndex::references_to) answers — or the type's
+/// dotted name — the path [`importers`](TypeReferenceIndex::importers) answers,
+/// matched here in the same pass, which is how an
+/// Avro-declared type (no node in any store) is reached, and which a source
+/// type answers as well. The two never overlap: a `LogosSymbol` carries spaces
+/// and a dotted name none. A node symbol is unique within one member's store
+/// only, so two members declaring the same repo-relative type hold the same
+/// one: `repo` keeps the references whose **owner member** is the scope, on
+/// both paths, while the importer may lie in any member. Unscoped, every owner
+/// is kept, grouped by owner member in roster order. Every owner the index
+/// builds names the member whose declarations it read, Avro included, so the
+/// unattributed group is empty unless the index and `roster` disagree.
 ///
 /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+/// [BR-73]: ../../../docs/specs/software-spec.md#327-workspace-federation
 fn references_reaching<'a>(
-    registry: &'a EngineRegistry<Engine>,
-    index: &'a TypeReferenceIndex,
-    symbol: &'a str,
-) -> impl Iterator<Item = &'a TypeReference> + 'a {
-    let by_node = registry.federation().members.iter().flat_map(move |m| index.references_to(&m.name, symbol));
-    by_node.chain(index.importers(symbol))
+    roster: &[Member],
+    references: &'a [TypeReference],
+    symbol: &str,
+    repo: Option<&str>,
+) -> ReachingReferences<'a> {
+    let reaching = references.iter().filter(|r| r.owner.symbol.as_deref() == Some(symbol) || r.fqn == symbol);
+    let mut attributed: Vec<(usize, &TypeReference)> = Vec::new();
+    let mut unattributed = Vec::new();
+    for reference in reaching {
+        let owner = reference.owner.member.as_str();
+        match roster.iter().position(|member| member.name == owner) {
+            Some(at) if repo.is_none_or(|scope| scope == owner) => attributed.push((at, reference)),
+            Some(_) => {}
+            None => unattributed.push(reference),
+        }
+    }
+    // Stable: within one owner the index's own order is kept.
+    attributed.sort_by_key(|(at, _)| *at);
+    ReachingReferences {
+        attributed: attributed.into_iter().map(|(_, reference)| reference).collect(),
+        unattributed,
+    }
 }
 
 /// The `xservice type-refs` read-model ([FR-WS-05], [FR-WS-35]) — one per
@@ -1125,6 +1419,35 @@ pub struct WorkspaceStatus {
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_reference: Option<TypeReferenceHeadline>,
+    /// What the manifest's `[workspace] exclude` removed ([FR-WS-40]): the
+    /// declared globs, the directories they dropped, and every explicit member
+    /// they matched but did not drop (each with its warning, [NFR-CC-04]) — so
+    /// an exclusion is visible rather than silent.
+    ///
+    /// **Absent** when the manifest declares no `exclude`, so a workspace
+    /// without the key serializes exactly as before. Read off the
+    /// [`Federation`](super::Federation) the registry already holds; it costs no
+    /// walk.
+    ///
+    /// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusion: Option<Exclusion>,
+    /// Every declared `[[links]]` entry and what became of it ([FR-WS-41]): a
+    /// `valid` link with the one `asserted` edge it yields, an `invalid` one with
+    /// its reason (`unknown-member`, `member-degraded`, `no-match`, `ambiguous`
+    /// with bounded candidates, `same-member`), or a `redundant` one naming the
+    /// edge it duplicates — so a declared coupling is never silently ignored.
+    ///
+    /// **Absent** when the manifest declares no link, so a workspace without
+    /// `[[links]]` serializes exactly as before, and costs no walk. A link is a
+    /// claim, never evidence ([BR-75]): nothing here reaches
+    /// [`coverage`](Self::coverage) or any figure beside it.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<LinkStatus>,
 }
 
 /// The member-kind **candidate hint** on `workspace status` ([FR-WS-32]).
@@ -1167,9 +1490,13 @@ pub struct KindCandidates {
 /// it as a candidate. So no candidate is missed by reading the rows. Declared
 /// members' rows sit in `declared_apart` instead, and a declared member is no
 /// candidate either way.
-fn members_holding_api_documents(coverage: &CrossServiceCoverage) -> BTreeSet<&str> {
-    coverage
-        .references
+///
+/// Only a `contract-surface` row is a document: an `invocation` row is a call
+/// site, and an `asserted` one a declared claim that holds nothing ([BR-75]).
+///
+/// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn members_holding_api_documents(references: &[ReferenceCoverage]) -> BTreeSet<&str> {
+    references
         .iter()
         .filter(|row| row.intake == BridgeIntake::ContractSurface)
         .map(|row| row.from.member.as_str())
@@ -1268,16 +1595,25 @@ where
 /// ([`fan_status`]), so `WALKS_PER_STATUS` stays at 4 ([NFR-PE-10]) — see
 /// `tests/workspace_connection_budget.rs`.
 ///
+/// That figure is a workspace **without `[[links]]`**, the only shape the budget
+/// test measures. A manifest that declares links adds the evidence edges a link
+/// is judged against ([`links::workspace_links`]): two more all-member walks of
+/// the same answer, six in all, plus two lookups per link endpoint — its target,
+/// and the routes serving it — in the member it names ([FR-WS-41]).
+///
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+///
 /// # A broken member is attempted, and reported, once per answer
-/// The three statements below are **four** all-member fan-outs — `coverage`
-/// reads twice (the contract surface and the invocation references), which is
-/// why `WALKS_PER_STATUS` above is 4 and not 3. The first of them makes a
+/// The first three statements below are **four** all-member fan-outs —
+/// `coverage` reads twice (the contract surface and the invocation references),
+/// which is why `WALKS_PER_STATUS` above is 4 and not 3; the `links` statement
+/// after them walks only when the manifest declares a link. The first of them makes a
 /// member's *first* attempt; the other three used to **re**-attempt one whose
 /// engine had already failed to start, so a single unopenable member cost three
 /// wasted opens and emitted the same `WARN` three times, growing as `3 × N`.
 ///
-/// The four walks share one attempt and one announcement because they share one
-/// [`AnswerScope`], minted here and dropped when this function returns: the
+/// The four walks (six with `[[links]]`) share one attempt and one announcement
+/// because they share one [`AnswerScope`], minted here and dropped when this function returns: the
 /// freshness walk makes the real attempt and records the diagnostic on the
 /// member row's `error`, while the three coverage and topic reads replay the
 /// recorded failure without touching the store
@@ -1333,13 +1669,23 @@ where
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     let evidence =
         WarmEvidence::none().with_outcomes(&warm_state::read_outcomes(&registry.federation().root));
-    // One scope over all four walks below — the unit "once per answer" is
-    // measured in. It is dropped with this call, so the next one re-attempts.
+    // One scope over all four walks below (six when `[[links]]` are declared) —
+    // the unit "once per answer" is measured in. It is dropped with this call,
+    // so the next one re-attempts.
     let answer = registry.answer();
     let (mut freshness, build_facts) = fan_status(&answer);
     split_call_residue_across_members(&mut freshness);
     let coverage = cross_service_coverage(&answer);
     let topics = workspace_topics(&answer);
+    // Reads nothing when the manifest declares no link. Otherwise it computes the
+    // evidence edges a link must not duplicate over this same answer — two more
+    // all-member walks, plus the configuration reads of members whose call sites
+    // name a key — and makes two lookups per endpoint (its target, and the routes
+    // serving it), in the members the links name.
+    let links = links::workspace_links(&answer);
+    // The links are reported beside the headline, never inside it ([BR-75]):
+    // the tally, and a pointer on each residue row a valid link covers.
+    let coverage = coverage.with_links(&links);
 
     // Read the open-state ledger **last**, after every walk this read-model
     // makes. A member that opened for the freshness walk and then failed under
@@ -1350,7 +1696,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     let degraded_rollup = open_state::rollup(&opens);
     let kind_candidates = kind_candidates(
         &freshness,
-        &members_holding_api_documents(&coverage),
+        &members_holding_api_documents(&coverage.references),
         &registry.federation().member_kinds,
     );
     let federation = registry.federation();
@@ -1395,6 +1741,8 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         kind_candidates,
         build_dependency,
         type_reference,
+        exclusion: (!federation.exclusion.is_unset()).then(|| federation.exclusion.clone()),
+        links,
     }
 }
 
@@ -1486,39 +1834,68 @@ pub fn bridge_read(bridge: &super::bridge::ContractBridge, registry: &EngineRegi
     BridgeRead { edges, reads }
 }
 
-/// The inputs one **cross-service reachability** answer is built from — the edge
-/// set, the unresolved egress residue and the members read for them — resolved
-/// together ([`reachability_inputs`]).
-#[derive(Debug, Clone)]
-pub struct ReachabilityInputs {
-    /// The resolved cross-service bindings.
-    pub edges: Arc<Vec<BridgeEdge>>,
-    /// The workspace's unresolved egress, at the same generation as `edges`.
-    pub residue: Arc<WorkspaceEgressResidue>,
-    /// The members the read touched, and the ones it could not read.
-    pub reads: MemberReads,
-}
+/// The inputs one **cross-service reachability** answer is built from — the
+/// bridge's [`ReachabilityRead`](super::bridge::ReachabilityRead) under the name
+/// the query surface has always used ([`reachability_inputs`]): one struct, so a
+/// new input is added once.
+pub use super::bridge::ReachabilityRead as ReachabilityInputs;
 
 /// The inputs one **cross-service reachability** answer is built from — the edge
-/// set and the unresolved egress residue — resolved together, with the members
-/// read for them ([CR-125], [FR-WS-05], [NFR-PE-10]).
+/// set, the unresolved egress residue and the declared `[[links]]` judged against
+/// those edges — resolved together, with the members read for them ([CR-125],
+/// [FR-WS-05], [FR-WS-41], [NFR-PE-10]).
 ///
 /// The reachability twin of [`bridge_read`], and the entry point
-/// `callers`/`impact` use instead of it. Both values come from **one** walk at
-/// **one** member sync-stamp snapshot, so the answer and the residue printed
-/// beside it can never describe two different generations of the workspace
+/// `callers`/`impact` use instead of it. All three values come from **one** walk
+/// at **one** member sync-stamp snapshot, so the answer, its asserted rows and the
+/// residue printed beside it can never describe two different generations of the
+/// workspace
 /// ([`ContractBridge::reachability_read`](super::bridge::ContractBridge::reachability_read)
 /// carries the full reasoning).
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
 pub fn reachability_inputs(
     bridge: &super::bridge::ContractBridge,
     registry: &EngineRegistry<Engine>,
 ) -> ReachabilityInputs {
-    let (edges, residue, reads) = bridge.reachability_read(registry);
-    ReachabilityInputs { edges, residue, reads }
+    bridge.reachability_read(registry)
+}
+
+/// The edge set **app-wide reachability** seeds from ([FR-WS-12], [FR-WS-41]):
+/// the evidence edges, then the edges the valid `[[links]]` assert — each still
+/// labelled by its intake, so the view roots an invocation edge under
+/// `live-via-cross-service` and an asserted call under `live-via-asserted-link`
+/// and nothing else. Both read at one stamp snapshot. Without `[[links]]`, the
+/// evidence edges alone, as [`edges`] answers them.
+///
+/// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+pub fn reach_edges(bridge: &super::bridge::ContractBridge, registry: &EngineRegistry<Engine>) -> Vec<BridgeEdge> {
+    let (edges, links) = bridge.edges_and_links(registry);
+    let mut all = edges.as_ref().clone();
+    all.extend(links::asserted_edges(&links));
+    all
+}
+
+/// The **app-wide reachability** answer every surface serves ([FR-WS-12],
+/// [FR-WS-41]): the union view over [`reach_edges`], so the CLI, MCP and web
+/// renderings seed from one edge set and none of them chooses its own. Passing
+/// the evidence-only [`edges`] to
+/// [`app_wide_reachability`](super::reach::app_wide_reachability) instead would
+/// compile and silently drop every `live-via-asserted-link` claim — they are
+/// absent, not zero, without an asserted edge — which is why the surfaces call
+/// this and not the two halves.
+///
+/// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+pub fn workspace_reachability(
+    bridge: &super::bridge::ContractBridge,
+    registry: &EngineRegistry<Engine>,
+) -> super::reach::AppWideReachability {
+    super::reach::app_wide_reachability(registry, &reach_edges(bridge, registry))
 }
 
 #[cfg(test)]
@@ -1560,6 +1937,7 @@ mod tests {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         }
     }
 
@@ -1745,6 +2123,36 @@ mod tests {
         assert!(hint.summary.contains("never a classification"), "{}", hint.summary);
     }
 
+    /// Only a **contract-surface** row makes its member a holder of API
+    /// documents — never an `invocation` call site, and never an `asserted`
+    /// claim ([BR-75], [FR-WS-41]).
+    ///
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    #[test]
+    fn only_a_contract_surface_row_holds_api_documents_never_an_asserted_one() {
+        let row = |member: &str, intake: BridgeIntake| ReferenceCoverage {
+            relation: "route".to_string(),
+            from: BridgeEndpoint {
+                member: member.to_string(),
+                symbol: crate::model::LogosSymbol::parse(&format!("local {member}_op")).unwrap(),
+            },
+            bucket: crate::federation::CoverageState::Bound.bucket(),
+            state: crate::federation::CoverageState::Bound,
+            to: None,
+            intake,
+            candidates: None,
+            asserted_by: Vec::new(),
+            provenance: crate::resolve::binding::Provenance::Literal,
+        };
+        let references = [
+            row("docs", BridgeIntake::ContractSurface),
+            row("svc", BridgeIntake::Invocation),
+            row("claims", BridgeIntake::Asserted),
+        ];
+        assert_eq!(members_holding_api_documents(&references), BTreeSet::from(["docs"]));
+    }
+
     /// No qualifying member means no hint on the wire at all.
     #[test]
     fn no_candidate_is_no_hint() {
@@ -1833,6 +2241,7 @@ mod tests {
             declared_apart: None,
             declared_contracts: declared,
             bound_external: bound,
+            asserted_edges: None,
         }
     }
 
@@ -2417,5 +2826,161 @@ mod tests {
             "{row:#}"
         );
         assert_eq!(row["file"], "User.java", "the importer is flattened beside them: {row:#}");
+    }
+
+    // ── the queried side is a (member, symbol) pair (S-701, BR-73) ───────
+
+    /// The byte-identical symbol two members declare — the shape every Spring
+    /// archetype and every fork produces.
+    const SHARED: &str = "logos . . . src/main/kotlin/`Dto.kt`/Dto#";
+
+    fn roster(names: &[&str]) -> Vec<super::super::Member> {
+        names
+            .iter()
+            .map(|name| super::super::Member { name: (*name).to_string(), root: format!("/ws/{name}").into() })
+            .collect()
+    }
+
+    /// A bound reference from `importer` to the type `fqn` that `owner` declares
+    /// at node `node` (`None` for an Avro type).
+    fn reference(owner: &str, node: Option<&str>, fqn: &str, importer: &str) -> TypeReference {
+        TypeReference {
+            fqn: fqn.to_string(),
+            naming: TypeNaming::Exact,
+            form: TypeRefForm::Import,
+            importer: TypeImporter {
+                member: "app".to_string(),
+                file: importer.to_string(),
+                line: Some(3),
+                symbol: format!("file:{importer}"),
+            },
+            owner: TypeOwner {
+                member: owner.to_string(),
+                origin: if node.is_some() { type_refs::TypeOrigin::Source } else { type_refs::TypeOrigin::Avro },
+                declared_in: "src/main/kotlin/Dto.kt".to_string(),
+                symbol: node.map(str::to_string),
+                kind: "class".to_string(),
+            },
+            evidence: PairEvidence::Build { platform: false },
+        }
+    }
+
+    fn importers(references: &[&TypeReference]) -> Vec<String> {
+        references.iter().map(|r| format!("{}:{}", r.owner.member, r.importer.file)).collect()
+    }
+
+    /// An endpoint at a full `LogosSymbol`, as the bridge stores one.
+    fn at(member: &str, symbol: &str) -> BridgeEndpoint {
+        BridgeEndpoint { member: member.to_string(), symbol: crate::model::LogosSymbol::parse(symbol).unwrap() }
+    }
+
+    /// **The queried endpoint matches on the member and the symbol** ([BR-73]),
+    /// probed with each near miss: the same symbol in another member, and the
+    /// scoped member with another symbol.
+    #[test]
+    fn a_queried_endpoint_is_the_member_and_the_symbol_never_the_symbol_alone() {
+        let svc_b = at("svc-b", SHARED);
+        assert!(is_queried(&svc_b, SHARED, Some("svc-b")));
+        assert!(!is_queried(&svc_b, SHARED, Some("svc-a")), "the same symbol in another member is not the scoped one");
+        assert!(
+            !is_queried(&at("svc-a", "logos . . . src/main/kotlin/`Dto.kt`/Dtos#"), SHARED, Some("svc-a")),
+            "the scoped member's neighbouring symbol is not the queried one"
+        );
+        assert!(is_queried(&svc_b, SHARED, None), "unscoped, every member holding the symbol is queried");
+    }
+
+    /// **Unscoped over a symbol two members hold, the answer is grouped and
+    /// flagged** ([BR-73]): every holder with its share — zero for one that
+    /// holds the symbol and provides nothing — and a notice naming them and
+    /// `--repo`. A scope, or a single holder, adds nothing.
+    #[test]
+    fn an_unscoped_symbol_two_members_hold_is_grouped_per_member_and_flagged() {
+        let grouped = QueriedSide::group(SHARED, None, ["svc-a", "svc-b"].into_iter(), &["svc-b"]);
+        assert_eq!(
+            grouped.by_member,
+            [
+                MemberResolved { member: "svc-a".to_string(), resolved: 0 },
+                MemberResolved { member: "svc-b".to_string(), resolved: 1 },
+            ]
+        );
+        let warning = grouped.warning.expect("two holders are flagged");
+        assert!(
+            warning.contains("held by 2 members (svc-a, svc-b)") && warning.contains("--repo"),
+            "{warning}"
+        );
+
+        // A near endpoint is a holder too, though its fan-out row did not resolve.
+        let near_only = QueriedSide::group(SHARED, None, std::iter::empty(), &["svc-b", "svc-c", "svc-b"]);
+        assert_eq!(
+            near_only.by_member,
+            [
+                MemberResolved { member: "svc-b".to_string(), resolved: 2 },
+                MemberResolved { member: "svc-c".to_string(), resolved: 1 },
+            ]
+        );
+
+        for (label, quiet) in [
+            ("scoped", QueriedSide::group(SHARED, Some("svc-a"), ["svc-a", "svc-b"].into_iter(), &["svc-b"])),
+            ("one holder", QueriedSide::group(SHARED, None, ["svc-b"].into_iter(), &["svc-b", "svc-b"])),
+            ("no holder", QueriedSide::group(SHARED, None, std::iter::empty(), &[])),
+        ] {
+            assert!(quiet.by_member.is_empty() && quiet.warning.is_none(), "{label} adds nothing");
+        }
+    }
+
+    /// **Type references key on the owner member on the node path**
+    /// ([BR-73]): scoped, only the scope's own; unscoped, both, grouped by owner
+    /// member in **roster** order (here `svc-b` before `svc-a`, against the
+    /// index's name order).
+    #[test]
+    fn a_type_reference_on_the_node_path_is_scoped_to_its_owner_member() {
+        let refs = [
+            reference("svc-a", Some(SHARED), "com.acme.a.Dto", "UsesA.java"),
+            reference("svc-b", Some(SHARED), "com.acme.b.Dto", "UsesB.java"),
+        ];
+        let roster = roster(&["svc-b", "svc-a", "app"]);
+        for (scope, want) in [(Some("svc-a"), vec!["svc-a:UsesA.java"]), (Some("svc-b"), vec!["svc-b:UsesB.java"])] {
+            let reaching = references_reaching(&roster, &refs, SHARED, scope);
+            assert_eq!(importers(&reaching.attributed), want, "{scope:?}");
+            assert!(reaching.unattributed.is_empty());
+        }
+        let unscoped = references_reaching(&roster, &refs, SHARED, None);
+        assert_eq!(importers(&unscoped.attributed), ["svc-b:UsesB.java", "svc-a:UsesA.java"]);
+    }
+
+    /// **The dotted-name path takes the scope too** ([BR-73]): an Avro type has
+    /// no node, and is reached by its name, filtered on its declaring member.
+    #[test]
+    fn a_type_reference_on_the_dotted_name_path_is_scoped_to_its_owner_member() {
+        let refs = [reference("models", None, "com.acme.events.Evt", "App.java")];
+        let roster = roster(&["models", "svc-a", "app"]);
+        let evt = "com.acme.events.Evt";
+        assert_eq!(importers(&references_reaching(&roster, &refs, evt, Some("models")).attributed), ["models:App.java"]);
+        assert!(references_reaching(&roster, &refs, evt, Some("svc-a")).attributed.is_empty());
+        assert_eq!(importers(&references_reaching(&roster, &refs, evt, None).attributed), ["models:App.java"]);
+    }
+
+    /// **A reference whose owner is no workspace member is reported apart,
+    /// never dropped** ([CR-221] CRA-02): under any scope and none, on both
+    /// paths. The index builder names a roster member on every owner it makes,
+    /// so this is the case of an index and a roster that disagree.
+    ///
+    /// [CR-221]: ../../../docs/requests/CR-221-cross-service-answers-match-member-and-symbol.md
+    #[test]
+    fn a_type_reference_with_no_attributable_owner_lands_in_the_unattributed_group() {
+        let refs = [
+            reference("svc-a", Some(SHARED), "com.acme.a.Dto", "UsesA.java"),
+            reference("gone", Some(SHARED), "com.acme.g.Dto", "UsesG.java"),
+            reference("gone", None, "com.acme.events.Gone", "Gone.java"),
+        ];
+        let roster = roster(&["svc-a", "app"]);
+        for scope in [Some("svc-a"), Some("svc-b"), None] {
+            let node = references_reaching(&roster, &refs, SHARED, scope);
+            assert_eq!(importers(&node.unattributed), ["gone:UsesG.java"], "node path, {scope:?}");
+            let dotted = references_reaching(&roster, &refs, "com.acme.events.Gone", scope);
+            assert_eq!(importers(&dotted.unattributed), ["gone:Gone.java"], "dotted path, {scope:?}");
+            assert!(dotted.attributed.is_empty());
+        }
+        assert_eq!(importers(&references_reaching(&roster, &refs, SHARED, Some("svc-a")).attributed), ["svc-a:UsesA.java"]);
     }
 }
