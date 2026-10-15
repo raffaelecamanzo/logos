@@ -476,6 +476,36 @@ mod tests {
         );
     }
 
+    /// The broker arm emits **evidence only** ([BR-75], [FR-WS-41]): every edge
+    /// it fans out is a captured publish meeting a captured subscribe, intake
+    /// `invocation`. A declared `publishes` link is never a broker candidate —
+    /// `federation::links` builds its `asserted` edge apart — yet it files under
+    /// the same `broker-topic` class, so the two differ only in what the intake
+    /// says.
+    ///
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    #[test]
+    fn every_broker_edge_is_evidence_under_the_class_a_publishes_link_files_under() {
+        let edges = broker_edges(
+            [
+                pubc("orders", "api", "local emit"),
+                subc("orders", "billing", "local on_order"),
+                subc("orders", "audit", "local record"),
+            ],
+            &literal_only(),
+        );
+        assert_eq!(edges.len(), 2, "one publish fans out to both subscribers: {edges:?}");
+        for edge in &edges {
+            assert_eq!(edge.intake, BridgeIntake::Invocation, "{edge:?}");
+            assert!(edge.intake.is_evidence());
+            assert_eq!(
+                edge.relation,
+                crate::federation::manifest::LinkRelation::Publishes.namespace().relation()
+            );
+        }
+    }
+
     /// The `#`-guard rides the **resolved** value ([FR-WS-10] acceptance 2).
     ///
     /// Every pre-[S-410] schema-guard fixture uses literal operands, so nothing

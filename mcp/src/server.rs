@@ -1,8 +1,10 @@
 //! The rmcp `ServerHandler` — the `logos:*` tools, each a thin delegator
 //! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02). The single-root backing exposes the
-//! 25-tool `single_tool_router` roster; the federated workspace backing composes
-//! the `xservice_*`/`workspace_*` cross-service tools on top, leaving every
-//! single-root tool byte-identical (FR-WS-05, S-248). The active extensions'
+//! `single_tool_router` roster; the federated workspace backing composes the
+//! `xservice_*`/`workspace_*` cross-service tools on top, leaving every
+//! single-root tool's definition identical under both (FR-WS-05, S-248). The
+//! read-only single-root tools take an optional `repo` selecting the member they
+//! answer for under a workspace (FR-WS-42, S-710). The active extensions'
 //! tools join either roster through the extension host — the `wiki` extension's
 //! five `wiki_*` tools among them since S-644 (FR-DS-04).
 //!
@@ -17,7 +19,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use logos_core::federation::{
     self, query, workspace_governance, Backing, BuildDependencies, ContractBridge, EngineRegistry,
-    TypeReferences,
+    MemberSelectionError, TypeReferences,
 };
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
 use logos_ext::mcp::{InvalidParams, McpTool};
@@ -39,11 +41,15 @@ pub const INSTRUCTIONS: &str = include_str!("instructions.md");
 /// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
 /// read-model over the member registry); no business logic lives here (FR-MC-02).
 ///
-/// [`new`](Self::new) is the single-root server (one [`Engine`], the 25-tool
+/// [`new`](Self::new) is the single-root server (one [`Engine`], the
 /// `single_tool_router`); [`federated`](Self::federated) composes the
 /// `xservice_*` tools on top and runs the shared tools against the default
-/// member. The single-root roster carries no `repo` dimension, so its
-/// `tools/list` is byte-identical whether or not federation exists (FR-WS-05).
+/// member, or the member a read-only tool's `repo` names ([FR-WS-42]). The
+/// shared tools' definitions are the same under both, so their `tools/list`
+/// entries are identical whether or not federation exists (FR-WS-05); a `repo`
+/// under the single-root server is refused, and its payloads are unchanged.
+///
+/// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
 ///
 /// Both compose the active extensions' tools from the [`ExtensionHost`] onto
 /// the roster ([FR-DS-04], [ADR-74]), as dynamic routes; the public host has
@@ -70,16 +76,10 @@ pub struct LogosMcp {
 impl LogosMcp {
     /// Wrap a started (long-lived) [`Engine`] — one per worktree root
     /// (ADR-04, ADR-15, FR-WT-04) — serving the core roster plus `host`'s
-    /// active extension tools. Under the public host the single-root roster is
-    /// byte-for-byte today's (FR-WS-05).
+    /// active extension tools. The shared tools' definitions are the ones the
+    /// federated roster carries (FR-WS-05).
     pub fn new(engine: impl Into<Arc<Engine>>, host: &ExtensionHost) -> Self {
-        Self {
-            backing: Arc::new(Backing::Single(engine.into())),
-            bridge: Arc::new(ContractBridge::new()),
-            build_deps: Arc::new(BuildDependencies::new()),
-            type_refs: Arc::new(TypeReferences::new()),
-            tool_router: Self::with_extensions(Self::single_tool_router(), host),
-        }
+        Self::over(Arc::new(Backing::Single(engine.into())), host)
     }
 
     /// Wrap a workspace member [`EngineRegistry`] — the federated backing
@@ -88,15 +88,29 @@ impl LogosMcp {
     /// tools. Only constructed when a manifest is present, so single-root never
     /// pays for the extra roster.
     pub fn federated(registry: EngineRegistry<Engine>, host: &ExtensionHost) -> Self {
+        Self::over(Arc::new(Backing::Federated(Box::new(registry))), host)
+    }
+
+    /// Serve an already-resolved serve `backing` ([ADR-52]) with the roster its
+    /// kind calls for — [`new`](Self::new)'s under [`Backing::Single`],
+    /// [`federated`](Self::federated)'s under [`Backing::Federated`] — so the
+    /// `serve` loop hands the MCP surface the workspace it discovered rather
+    /// than only its default member's engine ([FR-WS-42]).
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+    pub fn over(backing: Arc<Backing<Engine>>, host: &ExtensionHost) -> Self {
+        let core = if backing.is_federated() {
+            Self::single_tool_router() + Self::xservice_tool_router()
+        } else {
+            Self::single_tool_router()
+        };
         Self {
-            backing: Arc::new(Backing::Federated(Box::new(registry))),
+            backing,
             bridge: Arc::new(ContractBridge::new()),
             build_deps: Arc::new(BuildDependencies::new()),
             type_refs: Arc::new(TypeReferences::new()),
-            tool_router: Self::with_extensions(
-                Self::single_tool_router() + Self::xservice_tool_router(),
-                host,
-            ),
+            tool_router: Self::with_extensions(core, host),
         }
     }
 
@@ -127,20 +141,27 @@ impl LogosMcp {
     }
 
     /// One extension tool as a dynamic route: its own `tools/list` definition,
-    /// answered against the default engine through [`run_result`](Self::run_result)
-    /// — the bridge every core tool uses, so its result, its failures and its log
-    /// line are indistinguishable from a core tool's ([FR-DS-04]).
+    /// answered through [`run_result`](Self::run_result) — the bridge every core
+    /// tool uses, so its result, its failures and its log line are
+    /// indistinguishable from a core tool's ([FR-DS-04]). A [read-only] tool
+    /// answers for the member its `repo` names, as a core read-only tool does
+    /// ([FR-WS-42]); any other acts on the default member.
     ///
+    /// [read-only]: McpTool::read_only
     /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
+    /// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
     fn extension_route(tool: McpTool) -> ToolRoute<Self> {
         let attr = tool.tool().clone();
         ToolRoute::new_dyn(attr, move |context: ToolCallContext<'_, Self>| {
             let tool = tool.clone();
-            let arguments = context.arguments.unwrap_or_default();
+            let mut arguments = context.arguments.unwrap_or_default();
             let service = context.service;
             Box::pin(async move {
+                let repo = tool
+                    .take_repo(&mut arguments)
+                    .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
                 let name = tool.name().to_string();
-                service.run_result(&name, move |engine| tool.call(engine, arguments)).await
+                service.run_result(&name, repo, move |engine| tool.call(engine, arguments)).await
             })
         })
     }
@@ -173,12 +194,17 @@ impl LogosMcp {
     /// through [`run_result`](Self::run_result) instead; when the typed
     /// `CoreError` lands (S-026), its `severity()` maps to an MCP error
     /// there.
-    async fn run<T, F>(&self, tool: &'static str, call: F) -> Result<CallToolResult, ErrorData>
+    async fn run<T, F>(
+        &self,
+        tool: &'static str,
+        repo: Option<String>,
+        call: F,
+    ) -> Result<CallToolResult, ErrorData>
     where
         T: serde::Serialize + Send + 'static,
         F: FnOnce(&Engine) -> T + Send + 'static,
     {
-        self.run_result(tool, move |engine| Ok(call(engine))).await
+        self.run_result(tool, repo, move |engine| Ok(call(engine))).await
     }
 
     /// The fallible body behind [`run`](Self::run), used directly by the
@@ -188,9 +214,17 @@ impl LogosMcp {
     /// alive (FR-MC-06, NFR-RA-12). Degraded conditions never reach the
     /// error path — they ride inside the read-model (`INCOMPLETE` freshness
     /// line + warnings, NFR-RA-11).
+    ///
+    /// `repo` selects the member the call answers for ([`Backing::engine_for`],
+    /// [FR-WS-42]): `None` is the default member, and every write or gate tool
+    /// passes `None`. Under a workspace the answer carries `member`; under the
+    /// single-root backing it is serialised exactly as before.
+    ///
+    /// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
     async fn run_result<T, F>(
         &self,
         tool: &str,
+        repo: Option<String>,
         call: F,
     ) -> Result<CallToolResult, ErrorData>
     where
@@ -199,8 +233,8 @@ impl LogosMcp {
     {
         let backing = Arc::clone(&self.backing);
         self.run_blocking(tool, move || {
-            let engine = backing.default_engine()?;
-            call(&engine)
+            let selected = backing.engine_for(repo.as_deref())?;
+            Ok(selected.answer(call(&selected.engine)?))
         })
         .await
     }
@@ -259,9 +293,11 @@ impl LogosMcp {
     /// The shared submit-and-await bridge (ADR-03): run one blocking job, emit
     /// the per-call telemetry event, and map the outcome to the tool result with
     /// the ADR-14 severity tags — the error mapping lives here once, for the
-    /// per-engine, `xservice_*` and extension tools. Only an extension tool can
-    /// report the caller's mistake ([`InvalidParams`]); it maps to
-    /// `invalid_params`, as a core tool's argument mismatch does.
+    /// per-engine, `xservice_*` and extension tools. The caller's mistake — an
+    /// extension tool's [`InvalidParams`], or a `repo` naming no member or given
+    /// without a workspace ([`MemberSelectionError`]) — maps to `invalid_params`,
+    /// as a core tool's argument mismatch does; a degraded member is a tool
+    /// failure carrying its reason.
     async fn run_blocking<T, F>(
         &self,
         tool: &str,
@@ -297,6 +333,10 @@ impl LogosMcp {
             .map_err(|err| {
                 if let Some(InvalidParams(message)) = err.downcast_ref::<InvalidParams>() {
                     return ErrorData::invalid_params(message.clone(), None);
+                }
+                let selection = err.downcast_ref::<MemberSelectionError>();
+                if let Some(mistake) = selection.filter(|e| e.is_caller_mistake()) {
+                    return ErrorData::invalid_params(mistake.to_string(), None);
                 }
                 ErrorData::internal_error(
                     format!("logos:{tool} failed: {err:#}"),
@@ -356,6 +396,8 @@ pub struct SearchParams {
     pub kind: Option<String>,
     /// Maximum number of hits (default 20).
     pub limit: Option<usize>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -367,6 +409,8 @@ pub struct ContextParams {
     pub max_nodes: Option<usize>,
     /// Include source code in the bundle (default false).
     pub include_code: Option<bool>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -376,6 +420,8 @@ pub struct ExploreParams {
     pub query: String,
     /// Cap on file groups returned (default 10).
     pub max_files: Option<usize>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -385,6 +431,8 @@ pub struct NodeParams {
     pub symbol: String,
     /// Include the node's source code (default false).
     pub include_code: Option<bool>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -394,6 +442,8 @@ pub struct EdgeParams {
     pub symbol: String,
     /// Maximum results (default 50).
     pub limit: Option<usize>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -403,6 +453,8 @@ pub struct ImpactParams {
     pub symbol: String,
     /// Traversal depth bound (default 3).
     pub depth: Option<usize>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -413,6 +465,8 @@ pub struct ImpactIntersectionParams {
     pub items: Vec<String>,
     /// Traversal depth bound for every impact set (default 3).
     pub depth: Option<usize>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -422,6 +476,8 @@ pub struct PrecedentParams {
     pub target: String,
     /// Maximum number of precedents (default 20, capped at 100).
     pub limit: Option<usize>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -434,6 +490,8 @@ pub struct BranchOverlapParams {
     pub base: Option<String>,
     /// A stated merge result to check the refs' work against.
     pub merge: Option<String>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 // ── Quality tool parameter schemas (S-020, FR-GV / FR-RC wire contracts) ────
@@ -444,6 +502,11 @@ pub struct ReconcileParams {
     /// Skip the pre-evaluation reconcile for tight inner loops; the
     /// freshness line marks the result assumed-fresh (FR-RC-04).
     pub no_reconcile: Option<bool>,
+    /// Captured so it can be refused, never served: this tool acts on the
+    /// default member only (FR-WS-42). Absent from the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub repo: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -451,6 +514,8 @@ pub struct ReconcileParams {
 pub struct EvolutionParams {
     /// Snapshot window size (default 30, FR-GV-06).
     pub limit: Option<u32>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -460,6 +525,8 @@ pub struct DsmParams {
     pub granularity: Option<String>,
     /// Skip the pre-evaluation reconcile (FR-RC-04).
     pub no_reconcile: Option<bool>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -474,6 +541,18 @@ pub struct HotspotsParams {
     /// Drop whole test files (`is_test`-only) from the candidate set before
     /// ranking (default false — whole-repo board unchanged, CR-076).
     pub production_scope: Option<bool>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
+}
+
+// The parameter of a read-only tool that takes nothing else (FR-WS-42). A plain
+// comment, not a doc comment: schemars would serve a doc comment as the schema's
+// description.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RepoParams {
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -483,13 +562,47 @@ pub struct CoverageIngestParams {
     pub report: String,
     /// Force the report format ("lcov" or "cobertura"); default auto-detects.
     pub format: Option<String>,
+    /// Captured so it can be refused, never served: this tool acts on the
+    /// default member only (FR-WS-42). Absent from the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub repo: Option<serde_json::Value>,
+}
+
+// The parameter of a write or gate tool that takes nothing else (FR-WS-42): only
+// the captured `repo` it refuses. A plain comment: schemars would serve a doc
+// comment as the schema's description.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DefaultMemberParams {
+    /// Captured so it can be refused, never served: this tool acts on the
+    /// default member only (FR-WS-42). Absent from the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub repo: Option<serde_json::Value>,
+}
+
+/// Refuse a `repo` given to a tool that acts on the default member only, so a
+/// caller who named another member is never answered — or gated — for the
+/// default one instead (FR-WS-42).
+fn default_member_only(tool: &str, repo: Option<serde_json::Value>) -> Result<(), ErrorData> {
+    match repo {
+        None => Ok(()),
+        Some(_) => Err(ErrorData::invalid_params(
+            format!("logos:{tool} acts on the default member only: it takes no `repo`"),
+            None,
+        )),
+    }
 }
 
 // ── The 25 single-root core tools (FR-MC-01) ────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
-// this roster is used alone, byte-for-byte as today (FR-WS-05 acceptance).
+// this roster is used alone (FR-WS-05). The read-only tools take `repo`
+// (FR-WS-42); the write and gate tools — `scan`, `rescan`, `check_rules`,
+// `doctor`, `verify`, `session_start`, `session_end`, `coverage_ingest`,
+// `coverage_refresh` — pass `None` and act on the default member.
 
 #[tool_router(router = single_tool_router)]
 impl LogosMcp {
@@ -503,7 +616,7 @@ impl LogosMcp {
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let kind = parse_kind(p.kind.as_deref())?;
-        self.run("search", move |e| e.search(&p.query, kind, p.limit))
+        self.run("search", p.repo.clone(), move |e| e.search(&p.query, kind, p.limit))
             .await
     }
 
@@ -514,7 +627,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("context", move |e| {
+        self.run("context", p.repo.clone(), move |e| {
             e.context(&p.task, p.max_nodes, p.include_code.unwrap_or(false))
         })
         .await
@@ -527,7 +640,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ExploreParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("explore", move |e| e.explore(&p.query, p.max_files))
+        self.run("explore", p.repo.clone(), move |e| e.explore(&p.query, p.max_files))
             .await
     }
 
@@ -538,7 +651,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<NodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("node", move |e| {
+        self.run("node", p.repo.clone(), move |e| {
             e.node(&p.symbol, p.include_code.unwrap_or(false))
         })
         .await
@@ -549,7 +662,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<EdgeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("callers", move |e| e.callers(&p.symbol, p.limit))
+        self.run("callers", p.repo.clone(), move |e| e.callers(&p.symbol, p.limit))
             .await
     }
 
@@ -558,7 +671,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<EdgeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("callees", move |e| e.callees(&p.symbol, p.limit))
+        self.run("callees", p.repo.clone(), move |e| e.callees(&p.symbol, p.limit))
             .await
     }
 
@@ -569,7 +682,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ImpactParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("impact", move |e| e.impact(&p.symbol, p.depth))
+        self.run("impact", p.repo.clone(), move |e| e.impact(&p.symbol, p.depth))
             .await
     }
 
@@ -580,7 +693,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ImpactIntersectionParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("impact_intersection", move |e| {
+        self.run("impact_intersection", p.repo.clone(), move |e| {
             e.impact_intersection(&p.items, p.depth)
         })
         .await
@@ -593,7 +706,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<PrecedentParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("precedent", move |e| e.precedent(&p.target, p.limit))
+        self.run("precedent", p.repo.clone(), move |e| e.precedent(&p.target, p.limit))
             .await
     }
 
@@ -604,7 +717,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<BranchOverlapParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("branch_overlap", move |e| {
+        self.run("branch_overlap", p.repo.clone(), move |e| {
             e.branch_overlap(&p.refs, p.base.as_deref(), p.merge.as_deref())
         })
         .await
@@ -613,8 +726,8 @@ impl LogosMcp {
     #[tool(
         description = "INDEX health: file/node/edge counts, store size, freshness of the index vs the working tree (FR-NV-07). For ARCHITECTURE health use the health tool."
     )]
-    async fn status(&self) -> Result<CallToolResult, ErrorData> {
-        self.run("status", |e| e.status()).await
+    async fn status(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
+        self.run("status", p.repo, |e| e.status()).await
     }
 
     // — Quality (9): wired to the governance engine (S-020, FR-MC-01). Each
@@ -624,30 +737,33 @@ impl LogosMcp {
     //   NFR-RA-12). —
 
     #[tool(
-        description = "Full architecture-quality scan, reconcile-then-score (ADR-11): the 0-10000 signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled."
+        description = "Full architecture-quality scan, reconcile-then-score (ADR-11): the 0-10000 signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn scan(
         &self,
         Parameters(p): Parameters<ReconcileParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        default_member_only("scan", p.repo)?;
         let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("scan", move |e| e.scan(reconcile)).await
+        self.run_result("scan", None, move |e| e.scan(reconcile)).await
     }
 
-    #[tool(description = "Re-scan with the same parameters as the last scan (ADR-11).")]
-    async fn rescan(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("rescan", |e| e.rescan()).await
+    #[tool(description = "Re-scan with the same parameters as the last scan (ADR-11). Under a workspace it acts on the default member only: it takes no `repo`.")]
+    async fn rescan(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("rescan", p.repo)?;
+        self.run_result("rescan", None, |e| e.rescan()).await
     }
 
     #[tool(
-        description = "Architecture-rules compliance report against rules.toml (FR-GV-02): constraints, layer ordering (unassigned files exempt), and boundary checks."
+        description = "Architecture-rules compliance report against rules.toml (FR-GV-02): constraints, layer ordering (unassigned files exempt), and boundary checks. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn check_rules(
         &self,
         Parameters(p): Parameters<ReconcileParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        default_member_only("check_rules", p.repo)?;
         let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("check_rules", move |e| e.check_rules(None, reconcile))
+        self.run_result("check_rules", None, move |e| e.check_rules(None, reconcile))
             .await
     }
 
@@ -658,7 +774,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<EvolutionParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_result("evolution", move |e| e.evolution(p.limit))
+        self.run_result("evolution", p.repo.clone(), move |e| e.evolution(p.limit))
             .await
     }
 
@@ -668,7 +784,7 @@ impl LogosMcp {
     async fn dsm(&self, Parameters(p): Parameters<DsmParams>) -> Result<CallToolResult, ErrorData> {
         let granularity = parse_granularity(p.granularity.as_deref())?;
         let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("dsm", move |e| e.dsm(granularity, reconcile))
+        self.run_result("dsm", p.repo.clone(), move |e| e.dsm(granularity, reconcile))
             .await
     }
 
@@ -686,7 +802,7 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let untested = p.untested.unwrap_or(false);
         let production_scope = p.production_scope.unwrap_or(false);
-        self.run_result("hotspots", move |e| {
+        self.run_result("hotspots", p.repo.clone(), move |e| {
             e.hotspots(p.limit, untested, production_scope)
         })
         .await
@@ -698,13 +814,14 @@ impl LogosMcp {
     //   moves the gate (BR-28). —
 
     #[tool(
-        description = "Ingest an LCOV/Cobertura coverage report into the evidence store (FR-CV-01): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary."
+        description = "Ingest an LCOV/Cobertura coverage report into the evidence store (FR-CV-01): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn coverage_ingest(
         &self,
-        Parameters(p): Parameters<CoverageIngestParams>,
+        Parameters(mut p): Parameters<CoverageIngestParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_result("coverage_ingest", move |e| {
+        default_member_only("coverage_ingest", p.repo.take())?;
+        self.run_result("coverage_ingest", None, move |e| {
             e.coverage_ingest(std::path::Path::new(&p.report), p.format.as_deref())
         })
         .await
@@ -713,59 +830,68 @@ impl LogosMcp {
     #[tool(
         description = "Coverage status (FR-CV-05/06): per-file freshness (fresh value / stale label / n-a, hash-based against the ingest anchor), the overall freshness fraction, snapshot provenance, and an artifact-vs-HEAD staleness prompt when the coverage lags the current commit (FR-CV-10). Raw numbers only, no grading (BR-28). With no coverage ingested, reports n/a + a notice."
     )]
-    async fn coverage_status(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("coverage_status", |e| e.coverage_status())
+    async fn coverage_status(
+        &self,
+        Parameters(p): Parameters<RepoParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_result("coverage_status", p.repo, |e| e.coverage_status())
             .await
     }
 
     #[tool(
-        description = "Coverage refresh (FR-CV-10): explicitly run the configured [coverage_ingest].refresh_cmd as a subprocess (the ONLY place Logos ever spawns a coverage command, never on the serve/watcher path, ADR-38), then ingest the artifact it produced. Errors loud if no refresh_cmd is configured, the command fails, or it produced no recognizable artifact. The NON-GATED coverage tier (BR-28)."
+        description = "Coverage refresh (FR-CV-10): explicitly run the configured [coverage_ingest].refresh_cmd as a subprocess (the ONLY place Logos ever spawns a coverage command, never on the serve/watcher path, ADR-38), then ingest the artifact it produced. Errors loud if no refresh_cmd is configured, the command fails, or it produced no recognizable artifact. The NON-GATED coverage tier (BR-28). Under a workspace it acts on the default member only: it takes no `repo`."
     )]
-    async fn coverage_refresh(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("coverage_refresh", |e| e.coverage_refresh())
+    async fn coverage_refresh(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("coverage_refresh", p.repo)?;
+        self.run_result("coverage_refresh", None, |e| e.coverage_refresh())
             .await
     }
 
     #[tool(
         description = "ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift, graph counts. For INDEX freshness use the status tool."
     )]
-    async fn health(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("health", |e| e.health(true)).await
+    async fn health(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
+        self.run_result("health", p.repo, |e| e.health(true)).await
     }
 
     #[tool(
-        description = "Fast graph structural-integrity check (FR-GV-18/FR-GV-20, NFR-RA-13): asserts one node per symbol_id and zero orphan rows (dangling file/edge/shingle), and flags every indexed file the current admission rules (gitignore, nested-.git boundary, ignored_dirs, globs) would reject — in a handful of indexed queries plus O(files) matcher work, no reindex. `ok:false` with named faults and a capped `unadmitted_sample` on drift — the always-on guard that also hard-fails session_end/check_rules. For a deep reindex-diff see verify."
+        description = "Fast graph structural-integrity check (FR-GV-18/FR-GV-20, NFR-RA-13): asserts one node per symbol_id and zero orphan rows (dangling file/edge/shingle), and flags every indexed file the current admission rules (gitignore, nested-.git boundary, ignored_dirs, globs) would reject — in a handful of indexed queries plus O(files) matcher work, no reindex. `ok:false` with named faults and a capped `unadmitted_sample` on drift — the always-on guard that also hard-fails session_end/check_rules. For a deep reindex-diff see verify. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
-    async fn doctor(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("doctor", |e| e.doctor()).await
+    async fn doctor(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("doctor", p.repo)?;
+        self.run_result("doctor", None, |e| e.doctor()).await
     }
 
     #[tool(
-        description = "Deep graph consistency check (FR-GV-19, NFR-RA-06): reindexes the project into a throwaway shadow store via the always-purge index path, then diffs node/edge/file counts and symbol sets against the live graph. Reports `ok:false` with live-vs-reindex deltas and a capped sample of leaked (live-only) / orphaned (reindex-only) symbols, and embeds the fast structural + admission check (FR-GV-20). Catches Channel-B orphans (files the live store retains but a fresh index drops) that doctor cannot. On-demand only — a full reindex is seconds-to-minutes; the live store is read-only and the shadow store is torn down on completion."
+        description = "Deep graph consistency check (FR-GV-19, NFR-RA-06): reindexes the project into a throwaway shadow store via the always-purge index path, then diffs node/edge/file counts and symbol sets against the live graph. Reports `ok:false` with live-vs-reindex deltas and a capped sample of leaked (live-only) / orphaned (reindex-only) symbols, and embeds the fast structural + admission check (FR-GV-20). Catches Channel-B orphans (files the live store retains but a fresh index drops) that doctor cannot. On-demand only — a full reindex is seconds-to-minutes; the live store is read-only and the shadow store is torn down on completion. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
-    async fn verify(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("verify", |e| e.verify()).await
+    async fn verify(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("verify", p.repo)?;
+        self.run_result("verify", None, |e| e.verify()).await
     }
 
     #[tool(
-        description = "Begin a quality session (FR-GV-04): records the quality baseline before edits — call this BEFORE making changes."
+        description = "Begin a quality session (FR-GV-04): records the quality baseline before edits — call this BEFORE making changes. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
-    async fn session_start(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("session_start", |e| e.session_start())
+    async fn session_start(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("session_start", p.repo)?;
+        self.run_result("session_start", None, |e| e.session_start())
             .await
     }
 
     #[tool(
-        description = "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon."
+        description = "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
-    async fn session_end(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_result("session_end", |e| e.session_end()).await
+    async fn session_end(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("session_end", p.repo)?;
+        self.run_result("session_end", None, |e| e.session_end()).await
     }
 }
 
 // ── xservice cross-service tool parameter schemas (FR-WS-05 wire contracts) ──
-// Each carries the optional `repo` member filter; the shared navigation tools
-// deliberately do NOT (their single-root schema stays byte-identical).
+// Each carries the optional `repo` member filter, which scopes a fan-out; a
+// shared read-only tool's `repo` instead selects the one member that answers
+// (FR-WS-42).
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -788,7 +914,7 @@ pub struct XserviceCallersParams {
     pub symbol: String,
     /// Maximum intra-repo callers per member (default 50).
     pub limit: Option<usize>,
-    /// Scope the intra-repo fan-out to one workspace member.
+    /// The member whose symbol is meant: scopes the intra-repo fan-out, the residue and each cross-service edge's provider end; the callers stay in any member.
     pub repo: Option<String>,
 }
 
@@ -799,7 +925,7 @@ pub struct XserviceImpactParams {
     pub symbol: String,
     /// Traversal depth bound per member (default 3).
     pub depth: Option<usize>,
-    /// Scope the seed impact to one workspace member.
+    /// The member whose symbol is meant: scopes the seed impact, the residue and each stitched edge's near end; the far side stays in any member.
     pub repo: Option<String>,
 }
 
@@ -845,7 +971,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member. `member_reads` names the members this answer read — the bridge's and the intra-repo fan-out's (`read`) — and every member it needed and could not read, with the reason (`unread`, absent when none); the type-reference overlay states its own in `type_reference_unread`. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. APART FROM `cross_service`, never merged with it: `via_type_reference` lists the importers an ADVISORY TYPE REFERENCE reaches (FR-WS-35, BR-60) when the symbol is a type's node or its dotted name (an Avro-declared type has only the name) — each entry carries `reached: \"via type reference\"` and `via`, the reference (`fqn`, `importer` member, file, line and declaration, `owner`, `evidence`), whose importer IS the caller at class grain: an import of a type, not a call of one of its methods. It is NOT a coupling, never a bridge edge, and never counted in `unresolved_egress`; the key is absent when no bound type reference names the symbol. `type_reference_unread` names, with its reason, every member whose declared types the overlay could NOT read: an importer there cannot be reached, so an absent section beside it is NOT \"nothing imports this\"; it is absent when every member was read. Advisory only, never a gate input."
+        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member. `member_reads` names the members this answer read — the bridge's and the intra-repo fan-out's (`read`) — and every member it needed and could not read, with the reason (`unread`, absent when none); the type-reference overlay states its own in `type_reference_unread`. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` names WHICH MEMBER'S SYMBOL is meant (BR-73): it scopes the per-member fan-out, the residue (that member's egress) and the PROVIDER side of `cross_service` to that member, while the callers stay in any member; under a `repo` scope the `summary` names both populations — the resolved count as that member's symbol reached from any member, the residue as the member's own. A symbol is unique within one member only: without `repo`, a symbol two or more members hold returns every `cross_service` row labelled with its provider member (`to.member`), `resolved_by_member` (each holding member's share of the resolved count) and `ambiguity_warning` naming the members — never one pooled figure; pass `repo` to choose one. Both fields are absent when one member holds the symbol. APART FROM `cross_service`, never merged with it: `via_type_reference` lists the importers an ADVISORY TYPE REFERENCE reaches (FR-WS-35, BR-60) when the symbol is a type's node or its dotted name (an Avro-declared type has only the name) — each entry carries `reached: \"via type reference\"` and `via`, the reference (`fqn`, `importer` member, file, line and declaration, `owner`, `evidence`), whose importer IS the caller at class grain: an import of a type, not a call of one of its methods. It is NOT a coupling, never a bridge edge, and never counted in `unresolved_egress`; the key is absent when no bound type reference names the symbol. Under `repo` only references whose `owner` member is that member are listed, the importer in any member; unscoped they are grouped by owner member. A reference whose owner is no member of this workspace is never dropped: it is listed apart in `type_reference_unattributed`, under any scope. `type_reference_unread` names, with its reason, every member whose declared types the overlay could NOT read: an importer there cannot be reached, so an absent section beside it is NOT \"nothing imports this\"; it is absent when every member was read. ALSO APART, never merged and never counted: `via_asserted_link` lists the edges a valid `[[links]]` entry ASSERTS (FR-WS-41, BR-75) whose provider endpoint is the queried (member, symbol) pair, matched and scoped exactly as `cross_service` is — each row the edge itself with `intake: \"asserted\"` beside `reached: \"(asserted)\"`. A declared claim, never evidence: it is in neither `cross_service`, `resolved_by_member` nor `unresolved_egress`, and the key is absent when no valid link names the symbol. Advisory only, never a gate input."
     )]
     async fn xservice_callers(
         &self,
@@ -861,7 +987,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge the symbol is an endpoint of, all repo-qualified. `repo` scopes the seed to one member. `member_reads` names the members this answer read — the bridge's, the seed's and each far member's (`read`) — and every member it needed and could not read, with the reason (`unread`, absent when none): a far member that will not start is skipped in `cross_service` and named there. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. APART FROM `cross_service`, never merged with it: `via_type_reference` carries each importer's impact reached through an ADVISORY TYPE REFERENCE (FR-WS-35, BR-60) when the symbol is a type's node or its dotted name (an Avro-declared type has only the name) — one entry per bound reference (per import row, so a file importing the type and a static member of it appears twice), every importer of the type reached since a reference is an import, not a call — each entry carrying `reached: \"via type reference\"`, `via` (the reference: `fqn`, `importer` member, file, line and declaration, `owner`, `evidence`), `member`, and as `result` the importing member's affected-file closure of the importing file (`changed` is that file, `affected` every file depending on it directly or transitively, within `depth` hops like the rest of the answer), or its `error` when that member will not open. It is NOT a coupling, never a bridge edge, and never counted in `unresolved_egress`; the key is absent when no bound type reference names the symbol. `type_reference_unread` names, with its reason, every member whose declared types the overlay could NOT read: an importer there cannot be reached, so an absent section beside it is NOT \"nothing imports this\"; it is absent when every member was read. Advisory only, never a gate input."
+        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge whose near endpoint is the queried (member, symbol) pair, all repo-qualified. `repo` scopes the seed to one member. `member_reads` names the members this answer read — the bridge's, the seed's and each far member's (`read`) — and every member it needed and could not read, with the reason (`unread`, absent when none): a far member that will not start is skipped in `cross_service` and named there. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` names WHICH MEMBER'S SYMBOL is meant (BR-73): it scopes the seed, the residue (that member's egress) and the NEAR endpoint of every stitched bridge edge to that member, while the far side stays in any member; under a `repo` scope the `summary` names both populations — the resolved count as that member's symbol reached from any member, the residue as the member's own. A symbol is unique within one member only: without `repo`, a symbol two or more members hold returns every `cross_service` row with its edge (`via`, both endpoints' members), `resolved_by_member` (each holding member's share of the resolved count, on the near endpoint) and `ambiguity_warning` naming the members — never one pooled figure; pass `repo` to choose one. Both fields are absent when one member holds the symbol. APART FROM `cross_service`, never merged with it: `via_type_reference` carries each importer's impact reached through an ADVISORY TYPE REFERENCE (FR-WS-35, BR-60) when the symbol is a type's node or its dotted name (an Avro-declared type has only the name) — one entry per bound reference (per import row, so a file importing the type and a static member of it appears twice), every importer of the type reached since a reference is an import, not a call — each entry carrying `reached: \"via type reference\"`, `via` (the reference: `fqn`, `importer` member, file, line and declaration, `owner`, `evidence`), `member`, and as `result` the importing member's affected-file closure of the importing file (`changed` is that file, `affected` every file depending on it directly or transitively, within `depth` hops like the rest of the answer), or its `error` when that member will not open. It is NOT a coupling, never a bridge edge, and never counted in `unresolved_egress`; the key is absent when no bound type reference names the symbol. Under `repo` only references whose `owner` member is that member are listed, the importer in any member; unscoped they are grouped by owner member. A reference whose owner is no member of this workspace is never dropped: it is listed apart in `type_reference_unattributed`, under any scope. `type_reference_unread` names, with its reason, every member whose declared types the overlay could NOT read: an importer there cannot be reached, so an absent section beside it is NOT \"nothing imports this\"; it is absent when every member was read. ALSO APART, never merged and never counted: `via_asserted_link` carries the far member's impact stitched across each edge a valid `[[links]]` entry ASSERTS (FR-WS-41, BR-75), from each end that is the queried pair, exactly as `cross_service` is stitched — each entry `reached: \"(asserted)\"`, `via` (the edge, `intake: \"asserted\"`), `member` and `impact`. A declared claim, never evidence: it is in neither `cross_service`, `resolved_by_member` nor `unresolved_egress`, and the key is absent when no valid link names the symbol. Advisory only, never a gate input."
     )]
     async fn xservice_impact(
         &self,
@@ -919,7 +1045,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Workspace status (FR-WS-05): each member's index freshness and warm state, the workspace warm roll-up, plus the 3-state (bound/ambiguous/unbound-with-reasons) cross-service coverage summary. Each member row carries `warm_state`: `warm` (its graph holds at least one indexed file), `deferred` (no index yet and none attempted — honest and NON-alarming, it indexes lazily on first query, FR-IX-07), or `degraded` (attempted and FAILED, with the reason). `warming` is in the vocabulary but is never reported without a live signal from the warm supervisor, and the roll-up then OMITS the `warming` key entirely rather than sending 0 — an absent `warming` means not-knowable, never none (FR-WS-15, NFR-CC-04). Each row ALSO carries `open_state` on a SEPARATE axis (FR-WS-16): `opened` (its store was opened — a member later evicted to stay inside the workspace connection budget still reads `opened`, because eviction reclaims a success), `not-attempted` (nothing needed this member, so nothing was opened — not a failure), or `degraded` (opening was attempted and FAILED, carrying `degraded_reason` and, when the diagnostic identifies one, `degraded_cause` — `host-resource-limit` means the store is intact and the process ran out of file descriptors, so a re-index is NOT the remedy). `warm_state` is about index presence and `open_state` about store openability: different questions, never merge them. The `degraded_rollup` names every unopenable member and its `covers_all_members: false` marks the warm roll-up, the coverage summary and the topic inventory as computed over fewer than all members. THE HEADLINE IS `coverage.resolved_cross_service_edges` — cross-service edges resolved from a captured `invocation` (a caller→callee HTTP client call, a producer→consumer broker publish, a gRPC stub call) — and it is NEVER read without `coverage.egress_resolution` beside it, the rate at which captured egress sites resolve at all (BR-51). Read `coverage.resolved_edges_summary` rather than recomposing the two: both halves are counted over ONE population by ONE walk since S-403, and before it they were filtered differently and the sentence contradicted itself (CR-127). The headline counts what the coverage tier RESOLVED, which is not the same as what the bridge DREW, and the two are never folded together: a fan-out publish resolves once and draws one edge per subscriber, while an ambiguous or refused composition resolves nothing the bridge could draw. Until S-420 the HTTP arm added a third difference — a target composed from committed configuration resolved here and seeded no reachability root, because the bridge keyed a consumer on its raw ledger target — and on the reference estate that gap was the whole difference: 15 resolved against 0 drawn (2026-09-13). Both arms now key on the committed value, and on the same estate re-measured 2026-09-18 the two read 51 and 51. The drawn count still rides on `workspace_reachability` under its own name, `coverage.bridge_invocation_edges`. `coverage.resolved_edges_summary` carries both in one line, and `coverage.egress_resolution_measured` is that rate's explicit denominator. `egress_resolution` is ABSENT when no egress site was captured, never a fabricated 1.0 — an absent rate with `egress_resolution_measured: 0` means NOTHING OUTBOUND WAS CAPTURED, which is a different statement from `0.0` (captured and none resolved). The edge count counts EDGES, not sites: one broker publish binds every cross-member subscriber and the bridge emits one edge per subscriber, so it is NOT `egress_resolution`'s numerator. `coverage.spec_conformance_ratio` is `bound / (bound+ambiguous+unbound)` — the RETIRED `bound_ratio`'s formula under the name of what it measures: how far this workspace's DECLARATIONS line up with its controllers. It is dominated by contract-surface intake and is NEVER a measure of cross-service coupling; read `resolved_cross_service_edges` for that. It is likewise ABSENT when nothing was measured (bound+ambiguous+unbound = 0), never a fabricated 1.0, and never bare: `coverage.spec_conformance_measured` is its denominator and `coverage.spec_conformance_summary` the composed line (CR-111). `bound_ratio` IS NO LONGER SENT (CR-120) — a reader of it gets nothing, deliberately, rather than a renamed figure. No warm state affects the CLI exit code; an unopenable member makes `logos workspace status` exit 1 (FR-WS-16) — MCP calls report it in the payload instead. The coverage tier is advisory only, never a gate input. Each row in `coverage.references` NAMES THE OTHER END (CR-118): a bound row carries `to` (the provider's member+symbol — the same pair `xservice route-providers` reports for it); an ambiguous row carries `candidates`, the providers it tied between. Read `candidates.disposition`, never the row's bucket: `tied-between` means NONE of them is bound (no edge; naming a candidate is not binding to it), `bound-to` means ALL of them are — the broker fan-out, where one publish reaches every cross-member subscriber, and SINCE S-420 also an exactly-one `route` row whose committed overlays compose its target several ways, each composition binding its own sole provider; in both cases there is no single `to`, so do NOT read a bound `route` row as always carrying one. The set is capped at 8 with `total` and `omitted` disclosing any truncation. Both fields are OPTIONAL and absent when there is nothing to name — an older store has neither. EVERY row also carries `intake` (`contract-surface` for a declared endpoint, `invocation` for a captured call site), in every state — bound, ambiguous and unbound alike — and it is NOT optional (S-377/CR-120). Do not read its presence as \"this row bound something\": that is `bucket`/`state`. `coverage.by_intake` reports the same four classification counters split by it — `by_intake.contract_surface` and `by_intake.invocation`, each with `bound`/`ambiguous`/`unbound`/`no_provider_in_workspace` — and the two populations SUM to the four top-level counters, so the split can never report less than the headline beside it. READ THE SPLIT before drawing any conclusion from `bound`: it counts two different things as one. On the 84-member reference estate the split is 81 `contract-surface` and 45 `invocation` bound rows (2026-09-18; it was 81 and 15 on 2026-09-13, before the broker arm admitted committed values), so a bare `bound: 126` says nothing about whether ANY outbound call site resolves — and it read 81 and 0 for as long as none did (CR-120, NFR-CC-04). No floor is asserted on any of these figures. A high `ambiguous` count is usually NOT a matching defect: where several members legitimately serve one template (the aggregator pattern), the exactly-one rule is refusing correctly and no path-normalisation or method precedence can resolve it — that ambiguity is call-site-gated, not match-gated (FR-CG-09). A member the manifest declares `kind = \"documentation\"` or `\"mock\"` (FR-WS-32) has its contract-surface rows moved OUT of these counts and `spec_conformance_ratio` into `coverage.declared_apart`, whose `summary` states them over their denominator — read it beside the headline. `kind_candidates` lists undeclared members holding API documents and no runnable source: a hint, never a classification; their rows stay in the headline. Both keys are absent when there is nothing to report. `build_dependency`, present when any member holds a Maven/Gradle manifest (or a member's build facts could not be read, or are not yet extracted — a store upgraded across migration 22 until its first full re-read; each such member is named in `members.unread` with its reason in `members.unread_reasons`, never counted as a member with no manifests), states `build_dependency_pairs` by kind beside its `references` denominator and the `members` read: a BUILD dependency, NOT a runtime coupling (BR-58) — it is apart from every figure above and none of them counts it; `xservice_build_deps` lists its rows. `type_reference`, present when any member is Java, Kotlin or Avro (or a member's declared types could not be read, or are not yet extracted — named in `members.unread` with `members.unread_reasons`), states `type_reference_pairs` — directed member pairs bound by an unresolved import or type use of a type EXACTLY ONE other member declares (main-tree source or an Avro schema), admitted only where the build relation relates the pair (`build_pairs`) or the importer references a colliding artifact the owner produces (`collision_backed_pairs`, each listed with its `artifacts`) — beside its denominator `rows` (`considered`, split `imports`/`type_uses`, filed into exactly one of `bound`, `type_only`, `pair_unread`, `ambiguous_owner`, `self_owned`, `unqualified` (a bare type use naming no package, never looked up — NOT a claim that no member declares it), `no_owner`) and the `members` read. `type_only` lists the matched pairs the build relation does not relate (never bound) and `ambiguous_owner` the types several members declare, owners named (never bound). AN ADVISORY TYPE REFERENCE, NOT A COUPLING (BR-60): it is apart from `coverage` and `build_dependency`, never a bridge edge, and none of their figures counts it. `coverage.declared_contracts`, present when a member holds a vendored spec, is the DECLARED-CONTRACT relation: `headline.declared_contract_pairs` (split `to_member` by document identity and `to_external`) beside its denominator `headline.documents` (every spec document read, by bucket), each contract naming its `document` and `target`, and the named-external registry. `coverage.bound_external` states `headline.bound_external` beside `headline.no_provider_rows`, the invocation no-provider REST rows it was judged from, with every refusal counted. BOTH ARE DECLARED, NOT OBSERVED (BR-57): read them beside the invocation and contract-surface headlines, never inside — no figure above counts either, a bound-external row stays `no-provider-in-workspace`, and a tie a declared contract resolves stays ambiguous."
+        description = "Workspace status (FR-WS-05): each member's index freshness and warm state, the workspace warm roll-up, plus the 3-state (bound/ambiguous/unbound-with-reasons) cross-service coverage summary. Each member row carries `warm_state`: `warm` (its graph holds at least one indexed file), `deferred` (no index yet and none attempted — honest and NON-alarming, it indexes lazily on first query, FR-IX-07), or `degraded` (attempted and FAILED, with the reason). `warming` is in the vocabulary but is never reported without a live signal from the warm supervisor, and the roll-up then OMITS the `warming` key entirely rather than sending 0 — an absent `warming` means not-knowable, never none (FR-WS-15, NFR-CC-04). Each row ALSO carries `open_state` on a SEPARATE axis (FR-WS-16): `opened` (its store was opened — a member later evicted to stay inside the workspace connection budget still reads `opened`, because eviction reclaims a success), `not-attempted` (nothing needed this member, so nothing was opened — not a failure), or `degraded` (opening was attempted and FAILED, carrying `degraded_reason` and, when the diagnostic identifies one, `degraded_cause` — `host-resource-limit` means the store is intact and the process ran out of file descriptors, so a re-index is NOT the remedy). `warm_state` is about index presence and `open_state` about store openability: different questions, never merge them. The `degraded_rollup` names every unopenable member and its `covers_all_members: false` marks the warm roll-up, the coverage summary and the topic inventory as computed over fewer than all members. THE HEADLINE IS `coverage.resolved_cross_service_edges` — cross-service edges resolved from a captured `invocation` (a caller→callee HTTP client call, a producer→consumer broker publish, a gRPC stub call) — and it is NEVER read without `coverage.egress_resolution` beside it, the rate at which captured egress sites resolve at all (BR-51). Read `coverage.resolved_edges_summary` rather than recomposing the two: both halves are counted over ONE population by ONE walk since S-403, and before it they were filtered differently and the sentence contradicted itself (CR-127). The headline counts what the coverage tier RESOLVED, which is not the same as what the bridge DREW, and the two are never folded together: a fan-out publish resolves once and draws one edge per subscriber, while an ambiguous or refused composition resolves nothing the bridge could draw. Until S-420 the HTTP arm added a third difference — a target composed from committed configuration resolved here and seeded no reachability root, because the bridge keyed a consumer on its raw ledger target — and on the reference estate that gap was the whole difference: 15 resolved against 0 drawn (2026-09-13). Both arms now key on the committed value, and on the same estate re-measured 2026-09-18 the two read 51 and 51. The drawn count still rides on `workspace_reachability` under its own name, `coverage.bridge_invocation_edges`. `coverage.resolved_edges_summary` carries both in one line, and `coverage.egress_resolution_measured` is that rate's explicit denominator. `egress_resolution` is ABSENT when no egress site was captured, never a fabricated 1.0 — an absent rate with `egress_resolution_measured: 0` means NOTHING OUTBOUND WAS CAPTURED, which is a different statement from `0.0` (captured and none resolved). The edge count counts EDGES, not sites: one broker publish binds every cross-member subscriber and the bridge emits one edge per subscriber, so it is NOT `egress_resolution`'s numerator. `coverage.spec_conformance_ratio` is `bound / (bound+ambiguous+unbound)` — the RETIRED `bound_ratio`'s formula under the name of what it measures: how far this workspace's DECLARATIONS line up with its controllers. It is dominated by contract-surface intake and is NEVER a measure of cross-service coupling; read `resolved_cross_service_edges` for that. It is likewise ABSENT when nothing was measured (bound+ambiguous+unbound = 0), never a fabricated 1.0, and never bare: `coverage.spec_conformance_measured` is its denominator and `coverage.spec_conformance_summary` the composed line (CR-111). `bound_ratio` IS NO LONGER SENT (CR-120) — a reader of it gets nothing, deliberately, rather than a renamed figure. No warm state affects the CLI exit code; an unopenable member makes `logos workspace status` exit 1 (FR-WS-16) — MCP calls report it in the payload instead. The coverage tier is advisory only, never a gate input. Each row in `coverage.references` NAMES THE OTHER END (CR-118): a bound row carries `to` (the provider's member+symbol — the same pair `xservice route-providers` reports for it); an ambiguous row carries `candidates`, the providers it tied between. Read `candidates.disposition`, never the row's bucket: `tied-between` means NONE of them is bound (no edge; naming a candidate is not binding to it), `bound-to` means ALL of them are — the broker fan-out, where one publish reaches every cross-member subscriber, and SINCE S-420 also an exactly-one `route` row whose committed overlays compose its target several ways, each composition binding its own sole provider; in both cases there is no single `to`, so do NOT read a bound `route` row as always carrying one. The set is capped at 8 with `total` and `omitted` disclosing any truncation. Both fields are OPTIONAL and absent when there is nothing to name — an older store has neither. EVERY row also carries `intake` (`contract-surface` for a declared endpoint, `invocation` for a captured call site), in every state — bound, ambiguous and unbound alike — and it is NOT optional (S-377/CR-120). Do not read its presence as \"this row bound something\": that is `bucket`/`state`. `coverage.by_intake` reports the same four classification counters split by it — `by_intake.contract_surface` and `by_intake.invocation`, each with `bound`/`ambiguous`/`unbound`/`no_provider_in_workspace` — and the two populations SUM to the four top-level counters, so the split can never report less than the headline beside it. READ THE SPLIT before drawing any conclusion from `bound`: it counts two different things as one. On the 84-member reference estate the split is 81 `contract-surface` and 45 `invocation` bound rows (2026-09-18; it was 81 and 15 on 2026-09-13, before the broker arm admitted committed values), so a bare `bound: 126` says nothing about whether ANY outbound call site resolves — and it read 81 and 0 for as long as none did (CR-120, NFR-CC-04). No floor is asserted on any of these figures. A high `ambiguous` count is usually NOT a matching defect: where several members legitimately serve one template (the aggregator pattern), the exactly-one rule is refusing correctly and no path-normalisation or method precedence can resolve it — that ambiguity is call-site-gated, not match-gated (FR-CG-09). A member the manifest declares `kind = \"documentation\"` or `\"mock\"` (FR-WS-32) has its contract-surface rows moved OUT of these counts and `spec_conformance_ratio` into `coverage.declared_apart`, whose `summary` states them over their denominator — read it beside the headline. `kind_candidates` lists undeclared members holding API documents and no runnable source: a hint, never a classification; their rows stay in the headline. Both keys are absent when there is nothing to report. `build_dependency`, present when any member holds a Maven/Gradle manifest (or a member's build facts could not be read, or are not yet extracted — a store upgraded across migration 22 until its first full re-read; each such member is named in `members.unread` with its reason in `members.unread_reasons`, never counted as a member with no manifests), states `build_dependency_pairs` by kind beside its `references` denominator and the `members` read: a BUILD dependency, NOT a runtime coupling (BR-58) — it is apart from every figure above and none of them counts it; `xservice_build_deps` lists its rows. `type_reference`, present when any member is Java, Kotlin or Avro (or a member's declared types could not be read, or are not yet extracted — named in `members.unread` with `members.unread_reasons`), states `type_reference_pairs` — directed member pairs bound by an unresolved import or type use of a type EXACTLY ONE other member declares (main-tree source or an Avro schema), admitted only where the build relation relates the pair (`build_pairs`) or the importer references a colliding artifact the owner produces (`collision_backed_pairs`, each listed with its `artifacts`) — beside its denominator `rows` (`considered`, split `imports`/`type_uses`, filed into exactly one of `bound`, `type_only`, `pair_unread`, `ambiguous_owner`, `self_owned`, `unqualified` (a bare type use naming no package, never looked up — NOT a claim that no member declares it), `no_owner`) and the `members` read. `type_only` lists the matched pairs the build relation does not relate (never bound) and `ambiguous_owner` the types several members declare, owners named (never bound). AN ADVISORY TYPE REFERENCE, NOT A COUPLING (BR-60): it is apart from `coverage` and `build_dependency`, never a bridge edge, and none of their figures counts it. `coverage.declared_contracts`, present when a member holds a vendored spec, is the DECLARED-CONTRACT relation: `headline.declared_contract_pairs` (split `to_member` by document identity and `to_external`) beside its denominator `headline.documents` (every spec document read, by bucket), each contract naming its `document` and `target`, and the named-external registry. `coverage.bound_external` states `headline.bound_external` beside `headline.no_provider_rows`, the invocation no-provider REST rows it was judged from, with every refusal counted. BOTH ARE DECLARED, NOT OBSERVED (BR-57): read them beside the invocation and contract-surface headlines, never inside — no figure above counts either, a bound-external row stays `no-provider-in-workspace`, and a tie a declared contract resolves stays ambiguous. Declared `[[links]]` (FR-WS-41): `links` lists every entry with its verdict — `valid` (with its `asserted` edge), `invalid` (with its `reason`) or `redundant` (naming the edge it `duplicates`; a route and the handler it serves are one endpoint) — and `coverage.asserted_edges` counts them BESIDE the headline (`valid`, `invalid`, `invalid_by_reason`, `redundant`, `summary`); a residue row a valid link starts from keeps its state and reason and gains `asserted_by`, the link as written. A LINK IS A CLAIM, NOT EVIDENCE (BR-75): no figure above counts it. All of it is absent without `[[links]]`."
     )]
     async fn workspace_status(&self) -> Result<CallToolResult, ErrorData> {
         self.run_xservice("workspace_status", |reg, _bridge| {
@@ -929,7 +1055,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "App-wide cross-service dead code (FR-WS-12): reachability over the union of every member's call graph plus the bridge's cross-service edges as extra live roots. Reports callables their own repo calls dead that a cross-service call keeps alive, and the ones still dead app-wide. Additive and monotone toward live — a missing invocation edge never marks anything dead. ADVISORY ONLY: never a gate input, and it never alters a repo's own dead-code verdict. Every claim carries a coverage rider stating how much of the invocation graph bound. ITS HEADLINE IS `coverage.resolved_cross_service_edges` — the edges resolved from a captured invocation; `0` says NO call site in the workspace resolved. A `live-via-cross-service` promotion rests on `coverage.bridge_invocation_edges` BESIDE it, NOT on the headline: that is the count of invocation edges the bridge actually drew and therefore the roots this view was seeded from, and the two need not agree — one fan-out publish resolves once and draws one edge per subscriber, and an ambiguous composition resolves nothing drawable. Until S-420 they also differed wherever an HTTP target was composed from committed configuration, because the coverage tier resolved the placeholder and the bridge did not: on the reference estate the headline read 15 against a seeded count of 0 (2026-09-13), so a reader who took the headline for the view's basis over-read it (CR-127). Both arms now key on the committed value; re-measured on the same estate 2026-09-18 the two read 51 and 51 (CR-133). Read the seeded count anyway — the reason they can diverge is unchanged. It rides with `coverage.egress_resolution` (ABSENT when no egress site was captured, never a fabricated 1.0) and `coverage.egress_resolution_measured`, its denominator (BR-51). `coverage.spec_conformance_ratio` is the retired `bound_ratio`'s formula renamed (CR-120): dominated by declared-contract matches, NOT a coupling measure, likewise ABSENT when nothing was measured, and never bare — read it beside `coverage.spec_conformance_measured` (the denominator) and `coverage.no_provider_in_workspace` (the excluded count), because a correct-looking ratio can describe a negligible fraction of the evidence (CR-111). The rider deliberately does NOT carry `by_intake`: that split is on `workspace_status`'s coverage summary. `coverage.members_read` counts the REACHABILITY walk's reads, which can differ from the coverage summary's. `skipped_members` names the members the view could not read; a skipped member suppresses promotions but never causes a demotion. `repo` scopes the view to one member. By default the payload is bounded to only the cross-service promotions (the usually-tiny interesting set) and states `promotions_only`; pass `all: true` for the full per-repo-dead set. Every applied bound is stated in the response, so a bounded reply is never the complete dead-set (NFR-CC-04)."
+        description = "App-wide cross-service dead code (FR-WS-12): reachability over the union of every member's call graph plus the bridge's cross-service edges as extra live roots. Reports callables their own repo calls dead that a cross-service call keeps alive, and the ones still dead app-wide. Additive and monotone toward live — a missing invocation edge never marks anything dead. ADVISORY ONLY: never a gate input, and it never alters a repo's own dead-code verdict. Every claim carries a coverage rider stating how much of the invocation graph bound. ITS HEADLINE IS `coverage.resolved_cross_service_edges` — the edges resolved from a captured invocation; `0` says NO call site in the workspace resolved. A `live-via-cross-service` promotion rests on `coverage.bridge_invocation_edges` BESIDE it, NOT on the headline: that is the count of invocation edges the bridge actually drew and therefore the roots this view was seeded from, and the two need not agree — one fan-out publish resolves once and draws one edge per subscriber, and an ambiguous composition resolves nothing drawable. Until S-420 they also differed wherever an HTTP target was composed from committed configuration, because the coverage tier resolved the placeholder and the bridge did not: on the reference estate the headline read 15 against a seeded count of 0 (2026-09-13), so a reader who took the headline for the view's basis over-read it (CR-127). Both arms now key on the committed value; re-measured on the same estate 2026-09-18 the two read 51 and 51 (CR-133). Read the seeded count anyway — the reason they can diverge is unchanged. It rides with `coverage.egress_resolution` (ABSENT when no egress site was captured, never a fabricated 1.0) and `coverage.egress_resolution_measured`, its denominator (BR-51). `coverage.spec_conformance_ratio` is the retired `bound_ratio`'s formula renamed (CR-120): dominated by declared-contract matches, NOT a coupling measure, likewise ABSENT when nothing was measured, and never bare — read it beside `coverage.spec_conformance_measured` (the denominator) and `coverage.no_provider_in_workspace` (the excluded count), because a correct-looking ratio can describe a negligible fraction of the evidence (CR-111). The rider deliberately does NOT carry `by_intake`: that split is on `workspace_status`'s coverage summary. `coverage.members_read` counts the REACHABILITY walk's reads, which can differ from the coverage summary's. `skipped_members` names the members the view could not read; a skipped member suppresses promotions but never causes a demotion. `repo` scopes the view to one member. By default the payload is bounded to only the cross-service promotions (the usually-tiny interesting set) and states `promotions_only`; pass `all: true` for the full per-repo-dead set. Every applied bound is stated in the response, so a bounded reply is never the complete dead-set (NFR-CC-04). A valid `[[links]]` entry declaring a call (`http_call`, `grpc_call`) also roots its target, APART (FR-WS-41, BR-75): what only it reaches is listed in `live_via_asserted_link` with verdict `live-via-asserted-link` — a claim, never `live-via-cross-service`, which wins when both reach a callable — carried like the promotions; each member counts `asserted_roots` and `live_via_asserted_link` (then `dead_app_wide = dead_per_repo - live_via_cross_service - live_via_asserted_link`) and the rider `asserted_call_edges`, all absent at zero and outside every evidence figure. A `publishes` link roots nothing."
     )]
     async fn workspace_reachability(
         &self,
@@ -937,7 +1063,7 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let scope = federation::ReachabilityScope::new(p.repo, p.all.unwrap_or(false));
         self.run_xservice("workspace_reachability", move |reg, bridge| {
-            federation::app_wide_reachability(reg, &query::edges(bridge, reg)).bound(scope)
+            query::workspace_reachability(bridge, reg).bound(scope)
         })
         .await
     }

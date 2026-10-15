@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use logos_core::federation::{EngineRegistry, Federation, Member, RegistryMode};
+use logos_core::federation::{EngineRegistry, Federation, Link, Member, RegistryMode};
 use logos_core::Engine;
 use mcp::LogosMcp;
 use rmcp::{
@@ -64,15 +64,21 @@ pub fn member(name: &str, root: &Path) -> Member {
 /// [`RegistryMode::Lazy`] starts no engine, so a caller that only reads the tool
 /// roster needs no member repo at all — pass an empty `members`.
 pub fn registry(name: &str, root: &Path, members: Vec<Member>) -> EngineRegistry<Engine> {
+    registry_with_links(name, root, members, Vec::new())
+}
+
+/// [`registry`], with the manifest's `[[links]]` declared.
+pub fn registry_with_links(name: &str, root: &Path, members: Vec<Member>, links: Vec<Link>) -> EngineRegistry<Engine> {
     let federation = Federation {
         name: name.to_string(),
         root: root.to_path_buf(),
         members,
         default: None,
-        links: Vec::new(),
+        links,
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy)
 }

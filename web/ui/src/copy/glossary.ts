@@ -192,6 +192,13 @@ export const GLOSSARY = {
       "Callables that nothing reaches in any service of the workspace: the candidates for deletion.",
     pattern: /\bunused across the workspace\b/i,
   },
+  // A column-header gloss outside the vocabulary rule (S-709), as the S-616
+  // headers are: "declared link" is ordinary English in prose.
+  keptByDeclaredLink: {
+    label: "kept by a declared link (asserted)",
+    definition:
+      "Of the callables this repository never reaches on its own, the ones only a link declared in the workspace manifest keeps in use — a claim someone wrote down, not a call found in code.",
+  },
   // ── The service map (S-614, CR-203 §3.2 D item 9) ─────────────────────────
   // Domain-driven-design jargon in the cross-context hint: enforced, so no
   // service-map sentence uses it unexplained.

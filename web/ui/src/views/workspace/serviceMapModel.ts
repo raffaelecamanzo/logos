@@ -42,6 +42,7 @@ import type {
   MemberWarmStateLabel,
   NamedExternal,
   ValueProvenance,
+  WorkspaceLink,
   WorkspaceStatus,
   XserviceBuildDeps,
 } from "../../api/types.ts";
@@ -907,5 +908,78 @@ export function declaredLayer(
     })),
     links,
     externals,
+  };
+}
+
+// ── The asserted layer (S-709, CR-224, FR-WS-41, BR-75) ──────────────────────
+// A valid `[[links]]` entry ASSERTS a coupling the bridge could not measure. It
+// is a claim, never evidence: like the build and declared layers it is a
+// separate projection with its own edge class — dashed, its own hue, its own
+// legend row — never folded into `buildServiceMap`'s links, never a binding in
+// the table, and never counted in a node's degree.
+
+/** The canvas edge type every asserted link is drawn in. Dashed, in a hue no
+ *  measured arm uses, so the stroke and the colour both say "declared". */
+export const ASSERTED_EDGE_TYPE = "asserted-link";
+
+/** One member pair joined by asserted links: every valid link from one member
+ *  to another, collapsed to a single line. */
+export interface AssertedLink {
+  /** The declaring consumer member. */
+  from: string;
+  /** The member the links assert a call or publish into. */
+  to: string;
+  /** The relation classes the links fall in (`route`, `grpc-call`,
+   *  `broker-topic`), distinct and sorted. */
+  relations: string[];
+  /** The links behind the line, as written in the manifest, in payload order. */
+  declared: WorkspaceLink[];
+}
+
+/** The asserted layer the service map draws. */
+export interface AssertedLayer {
+  /** One `asserted-link` canvas edge per member pair. */
+  edges: CanvasEdge[];
+  /** The drawn pairs, sorted by (from, to) — the accessible twin. */
+  links: AssertedLink[];
+}
+
+/**
+ * Project the status payload's `links` rows onto the map: one dashed line per
+ * member pair a VALID link joins.
+ *
+ * `null` when no valid link exists — no `links` key, or only invalid and
+ * redundant ones (a redundant link repeats a binding already drawn, so it adds
+ * no line) — and the map then renders exactly as it did before. Read from the
+ * server's own verdicts: nothing here re-validates a link. A link whose end is
+ * not a roster service is dropped, as an unknown binding is (NFR-RA-05).
+ */
+export function assertedLayer(
+  links: readonly WorkspaceLink[] | undefined,
+  members: readonly ServiceMember[],
+): AssertedLayer | null {
+  const roster = new Set(members.map((m) => m.name));
+  const byPair = new Map<string, AssertedLink>();
+  for (const link of links ?? []) {
+    if (link.status !== "valid") continue;
+    const from = link.edge.from.member;
+    const to = link.edge.to.member;
+    const relation = link.edge.relation;
+    if (!roster.has(from) || !roster.has(to)) continue;
+    const key = `${from}\u0000${to}`;
+    let pair = byPair.get(key);
+    if (!pair) {
+      pair = { from, to, relations: [], declared: [] };
+      byPair.set(key, pair);
+    }
+    if (!pair.relations.includes(relation)) pair.relations.push(relation);
+    pair.declared.push(link);
+  }
+  if (byPair.size === 0) return null;
+  const pairs = [...byPair.values()].sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+  for (const pair of pairs) pair.relations.sort();
+  return {
+    edges: pairs.map((p) => ({ source: serviceId(p.from), target: serviceId(p.to), edge_type: ASSERTED_EDGE_TYPE })),
+    links: pairs,
   };
 }

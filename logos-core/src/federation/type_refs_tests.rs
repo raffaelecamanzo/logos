@@ -51,6 +51,7 @@ fn fed(names: &[&str], kinds: &[(&str, MemberKind)]) -> Federation {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: kinds.iter().map(|(m, k)| ((*m).to_string(), *k)).collect(),
+        exclusion: Default::default(),
     }
 }
 

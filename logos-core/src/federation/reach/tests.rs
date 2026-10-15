@@ -109,6 +109,7 @@ fn registry(names: &[&str]) -> EngineRegistry<FakeEngine> {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     EngineRegistry::new(federation, RegistryMode::Lazy)
 }
@@ -197,62 +198,137 @@ fn a_handler_reachable_only_via_a_cross_service_call_is_live() {
     );
 }
 
-/// CR-083 / FR-WS-12: `union_roots` seeds live roots from **invocation** edges
-/// only. Table-driven over *every* `BridgeIntake` kind: an invocation edge to a
-/// dead callable promotes it (and its transitive callees), while a
-/// contract-surface edge to the **same** provider promotes nothing — the per-repo
-/// dead set is left exactly as it was.
+/// CR-083 / FR-WS-12 / FR-WS-41: which edge seeds which root, table-driven over
+/// *every* `BridgeIntake` kind and every relation class. An invocation edge to a
+/// dead callable promotes it and its transitive callees to
+/// `live-via-cross-service`; an asserted (`[[links]]`) **call** — the `route` or
+/// `grpc-call` class — promotes the same nodes to `live-via-asserted-link` and
+/// never to the measured verdict; an asserted `publishes` (`broker-topic`) and
+/// a contract-surface edge promote nothing — the per-repo dead set is left
+/// exactly as it was.
 ///
-/// The `match intake { … }` is exhaustive with no wildcard: a new intake variant
-/// fails to compile here until its expected seeding behaviour is stated, so the
+/// The `match` is exhaustive with no wildcard: a new intake variant fails to
+/// compile here until its expected seeding behaviour is stated, so the
 /// "enumerate every intake kind" guarantee cannot silently rot ([CR-083] §7).
 #[test]
-fn only_invocation_intake_edges_seed_live_roots() {
+fn each_intake_and_relation_seeds_only_its_own_verdict() {
     // Every `BridgeIntake` variant must appear in this array AND in the match
     // below: the wildcard-free `match` fails to compile until a new variant is
     // classified, and that forced edit is the reminder to add it here too so its
     // seeding behaviour is actually driven through `app_wide_reachability`.
-    for intake in [BridgeIntake::Invocation, BridgeIntake::ContractSurface] {
-        let seeds_root = match intake {
-            BridgeIntake::Invocation => true,
-            BridgeIntake::ContractSurface => false,
-        };
+    for intake in [BridgeIntake::Invocation, BridgeIntake::ContractSurface, BridgeIntake::Asserted] {
+        for relation in ["route", "grpc-call", "broker-topic"] {
+            let promotes = match intake {
+                BridgeIntake::Invocation => Some(AppWideVerdict::LiveViaCrossService),
+                BridgeIntake::ContractSurface => None,
+                // A declared link is a claim, never evidence ([BR-75]): a call
+                // seeds its own verdict, and a publish reaches no callable.
+                BridgeIntake::Asserted => match relation {
+                    "route" | "grpc-call" => Some(AppWideVerdict::LiveViaAssertedLink),
+                    _ => None,
+                },
+            };
 
-        reset();
-        set_surface("orders", orders_surface());
-        let view = app_wide_reachability(
-            &registry(&["orders"]),
-            &[edge_with_intake("orders", "local on_order", intake)],
-        );
+            reset();
+            set_surface("orders", orders_surface());
+            let mut edge = edge_with_intake("orders", "local on_order", intake);
+            edge.relation = relation.to_string();
+            let view = app_wide_reachability(&registry(&["orders"]), &[edge]);
+            let tally = &view.members[0];
+            let case = format!("{intake:?} over `{relation}`");
 
-        if seeds_root {
+            match promotes {
+                Some(AppWideVerdict::LiveViaCrossService) => {
+                    assert_eq!(names(&view.live_via_cross_service), ["on_order", "render"], "{case}");
+                    assert!(view.live_via_asserted_link.is_empty(), "{case}");
+                    assert_eq!((tally.extra_roots, tally.asserted_roots), (1, 0), "{case}");
+                }
+                Some(AppWideVerdict::LiveViaAssertedLink) => {
+                    assert!(
+                        view.live_via_cross_service.is_empty(),
+                        "{case}: a declared call must never read as a measured one"
+                    );
+                    assert_eq!(names(&view.live_via_asserted_link), ["on_order", "render"], "{case}");
+                    assert!(
+                        view.live_via_asserted_link
+                            .iter()
+                            .all(|claim| claim.verdict == AppWideVerdict::LiveViaAssertedLink),
+                        "{case}"
+                    );
+                    assert_eq!((tally.extra_roots, tally.asserted_roots), (0, 1), "{case}");
+                    assert_eq!(tally.live_via_asserted_link, 2, "{case}");
+                    assert_eq!(view.coverage.asserted_call_edges, 1, "{case}");
+                    assert_eq!(view.coverage.bridge_invocation_edges, 0, "{case}");
+                }
+                Some(AppWideVerdict::Dead) => unreachable!("no edge promotes to dead"),
+                None => {
+                    assert!(view.live_via_cross_service.is_empty(), "{case}: promotes NOTHING");
+                    assert!(view.live_via_asserted_link.is_empty(), "{case}: promotes NOTHING");
+                    assert_eq!((tally.extra_roots, tally.asserted_roots), (0, 0), "{case}: no root");
+                }
+            }
+            let expected_dead: &[&str] = if promotes.is_some() { &["orphan"] } else { &["on_order", "orphan", "render"] };
+            assert_eq!(names(&view.dead), expected_dead, "{case}: only what no root reaches stays dead");
             assert_eq!(
-                names(&view.live_via_cross_service),
-                ["on_order", "render"],
-                "{intake:?} is an invocation edge — its provider AND its transitive \
-                 callees must be promoted"
+                tally.dead_app_wide,
+                tally.dead_per_repo - tally.live_via_cross_service - tally.live_via_asserted_link,
+                "{case}: the monotonicity invariant, in arithmetic"
             );
-            assert_eq!(
-                names(&view.dead),
-                ["orphan"],
-                "{intake:?}: only the callable no root reaches stays dead"
-            );
-            assert_eq!(view.members[0].extra_roots, 1, "{intake:?}: one seeded root");
-        } else {
-            assert!(
-                view.live_via_cross_service.is_empty(),
-                "{intake:?} is a contract-surface edge — it must promote NOTHING \
-                 (documented is not reached)"
-            );
-            assert_eq!(
-                names(&view.dead),
-                ["on_order", "orphan", "render"],
-                "{intake:?}: the per-repo dead set is unchanged — no root was seeded"
-            );
-            assert_eq!(
-                view.members[0].extra_roots, 0,
-                "{intake:?}: a contract-surface edge seeds no root"
-            );
+        }
+    }
+}
+
+/// **A node both walks reach is measured live** ([FR-WS-41], [BR-75]): with an
+/// invocation edge into `render` and an asserted call into `on_order` (which
+/// calls `render`), `render` is `live-via-cross-service` — the measurement is
+/// the stronger statement — and only `on_order`, which nothing measured
+/// reaches, is `live-via-asserted-link`.
+///
+/// [FR-WS-41]: ../../../../docs/specs/requirements/FR-WS-41.md
+/// [BR-75]: ../../../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn a_node_both_walks_reach_is_measured_live() {
+    reset();
+    set_surface("orders", orders_surface());
+    let mut asserted = edge_with_intake("orders", "local on_order", BridgeIntake::Asserted);
+    asserted.relation = "route".to_string();
+    let view = app_wide_reachability(
+        &registry(&["orders"]),
+        &[edge_to("orders", "local render"), asserted],
+    );
+    assert_eq!(names(&view.live_via_cross_service), ["render"]);
+    assert_eq!(names(&view.live_via_asserted_link), ["on_order"]);
+    assert_eq!(names(&view.dead), ["orphan"]);
+    let tally = &view.members[0];
+    assert_eq!(
+        (tally.live_via_cross_service, tally.live_via_asserted_link, tally.dead_app_wide),
+        (1, 1, 1)
+    );
+
+    // The bounded projection carries the asserted claims like the promotions,
+    // and a `--repo` scope filters them alike.
+    let scoped = view.clone().bound(ReachabilityScope::new(Some("orders".to_string()), false));
+    assert_eq!(names(&scoped.live_via_asserted_link), ["on_order"]);
+    let elsewhere = view.bound(ReachabilityScope::new(Some("billing".to_string()), false));
+    assert!(elsewhere.live_via_asserted_link.is_empty());
+}
+
+/// **Without an asserted edge the view serializes as before** ([FR-WS-41]):
+/// no `live_via_asserted_link` list, no asserted tally field, no
+/// `asserted_call_edges` on the rider — absent, never zero, so a workspace
+/// without `[[links]]` answers byte for byte what it answered before them.
+///
+/// [FR-WS-41]: ../../../../docs/specs/requirements/FR-WS-41.md
+#[test]
+fn a_view_without_asserted_edges_carries_no_asserted_key() {
+    reset();
+    set_surface("orders", orders_surface());
+    let view = app_wide_reachability(&registry(&["orders"]), &[edge_to("orders", "local on_order")]);
+    let full = serde_json::to_string(&view).unwrap();
+    let bounded = serde_json::to_string(&view.bound(ReachabilityScope::new(None, true))).unwrap();
+    for text in [full, bounded] {
+        for key in ["live_via_asserted_link", "asserted_roots", "unresolved_asserted_roots", "asserted_call_edges"] {
+            assert!(!text.contains(key), "`{key}` must be absent without an asserted edge: {text}");
         }
     }
 }
@@ -886,6 +962,7 @@ fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
         declared_apart: None,
         declared_contracts: None,
         bound_external: None,
+        asserted_edges: None,
     };
 
     // Two invocation edges and one contract-surface edge: the seeded-edge figure
@@ -1157,4 +1234,24 @@ fn bound_repo_scopes_every_bucket_to_one_member() {
         !names(&dead).contains(&"unused"),
         "billing's dead `unused` is filtered out by the scope, not counted"
     );
+}
+
+/// **An asserted call naming a symbol the surface does not carry is counted,
+/// never dropped** ([FR-WS-41], [NFR-RA-05]): it promotes nothing, and the member
+/// reports it as an unresolved asserted root — the measured roots' own rule.
+///
+/// [FR-WS-41]: ../../../../docs/specs/requirements/FR-WS-41.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn an_asserted_call_to_an_unknown_symbol_is_an_unresolved_asserted_root() {
+    reset();
+    set_surface("orders", orders_surface());
+    let mut asserted = edge_with_intake("orders", "local gone", BridgeIntake::Asserted);
+    asserted.relation = "route".to_string();
+    let view = app_wide_reachability(&registry(&["orders"]), &[asserted]);
+    let tally = &view.members[0];
+    assert_eq!((tally.asserted_roots, tally.unresolved_asserted_roots), (0, 1));
+    assert!(view.live_via_asserted_link.is_empty());
+    let wire = serde_json::to_value(tally).unwrap();
+    assert_eq!(wire["unresolved_asserted_roots"], 1, "{wire}");
 }

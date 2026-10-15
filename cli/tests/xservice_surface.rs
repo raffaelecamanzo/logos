@@ -1957,13 +1957,16 @@ fn repo_scopes_the_residue_to_the_named_members_egress() {
     assert_eq!(residue["scope"], "api", "the residue names the scope it covers: {residue}");
     assert_eq!(residue["members_in_scope"], 1);
     assert_eq!(residue["unresolved_sites"], 1, "api owns the unresolved site: {residue}");
-    // `--repo` narrows the residue but NOT the cross-service tier, so the line
-    // says which population each of its halves covers ([NFR-CC-04]).
+    // `--repo` narrows the residue to the member's own egress and the
+    // cross-service tier to the member's symbol, whose callers may lie in any
+    // member, so the line says which population each of its halves covers
+    // ([NFR-CC-04], [BR-73]).
     assert_eq!(
         residue["summary"].as_str(),
         Some(
-            "no resolved cross-service callers workspace-wide; 1 of 1 captured \
-             outbound site in api did not resolve across 1 member (base-url-runtime 1)"
+            "no resolved cross-service callers of api's symbol, from any member; \
+             1 of 1 captured outbound site in api did not resolve across 1 member \
+             (base-url-runtime 1)"
         ),
         "the scoped line names both populations: {residue}"
     );
@@ -2197,4 +2200,67 @@ fn the_http_twins_added_no_workspace_subcommand() {
         ["status", "reachability", "check", "help"],
         "the workspace group grew or lost a subcommand (NFR-MA-02):\n{text}"
     );
+}
+
+/// `web`'s runtime-composed call, which the bridge cannot bind.
+const LINKED_WEB_LIB: &str = "use reqwest::Client;\n\npub async fn fetch_cart(client: Client, url: String) {\n    \
+                              let _ = client.get(url).await;\n}\n";
+
+/// `api`'s private cart handler, the target of the declared link.
+const LINKED_API_LIB: &str = "async fn get_cart() {\n    load_cart();\n}\n\nfn load_cart() {}\n";
+
+/// **`xservice callers` and `impact` mark an asserted row on both renderings, and
+/// `workspace reachability` keeps the link's target live under its own verdict**
+/// (S-709, [FR-WS-41], [BR-75]): the `--json` payload carries the asserted edge
+/// under `via_asserted_link` with `intake: "asserted"`, and the human rendering
+/// shows the `(asserted)` marker beside it — a declared coupling never reads as
+/// a measured one.
+///
+/// [FR-WS-41]: ../../docs/specs/requirements/FR-WS-41.md
+/// [BR-75]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn xservice_callers_and_impact_mark_an_asserted_link_in_json_and_human_output() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    for (member, source) in [("web", LINKED_WEB_LIB), ("api", LINKED_API_LIB)] {
+        let dir = root.join(member);
+        init_repo(&dir);
+        write(&dir, "src/lib.rs", source);
+        assert!(logos(&dir, &["index"]).status.success(), "index {member}");
+    }
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\n\n[[links]]\nrelation = \"http_call\"\n\
+         from = \"web::fetch_cart\"\nto = \"api::get_cart\"\n",
+    )
+    .unwrap();
+    let get_cart = "logos . . . src/`lib.rs`/get_cart().";
+    let fetch_cart = "logos . . . src/`lib.rs`/fetch_cart().";
+
+    let callers = logos_json(root, &["xservice", "callers", get_cart]);
+    let row = &callers["via_asserted_link"][0];
+    assert_eq!(row["intake"], "asserted", "{callers}");
+    assert_eq!(row["from"]["symbol"], fetch_cart);
+    assert_eq!(callers["cross_service"], serde_json::json!([]), "never in the measured tier");
+    let impact = logos_json(root, &["xservice", "impact", fetch_cart]);
+    assert_eq!(impact["via_asserted_link"][0]["via"]["intake"], "asserted", "{impact}");
+
+    for (verb, symbol) in [("callers", get_cart), ("impact", fetch_cart)] {
+        let out = logos(root, &["xservice", verb, symbol]);
+        assert!(out.status.success(), "{verb}: {}", String::from_utf8_lossy(&out.stderr));
+        let human = String::from_utf8(out.stdout).unwrap();
+        assert!(human.contains("\"reached\": \"(asserted)\""), "{verb} human output marks the row: {human}");
+    }
+
+    // `workspace reachability` seeds the declared call too, under its own
+    // verdict, never the measured one.
+    let reach = logos_json(root, &["workspace", "reachability"]);
+    let kept: Vec<&str> = reach["live_via_asserted_link"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the asserted promotions: {reach}"))
+        .iter()
+        .map(|claim| claim["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(kept, ["get_cart", "load_cart"], "{reach}");
+    assert_eq!(reach["live_via_cross_service"], serde_json::json!([]));
 }

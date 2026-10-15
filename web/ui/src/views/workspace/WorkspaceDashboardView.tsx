@@ -65,8 +65,11 @@ import {
 } from "../../copy/workspaceDashboard.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { resolutionStatement } from "../dashboard/dashboardModel.ts";
+import { EdgeRow } from "../graph/Legend.tsx";
 import { buildCoverageDashboard } from "./coverageModel.ts";
 import { CoveragePanel } from "./CoverageBoards.tsx";
+import { ASSERTED_EDGE_TYPE } from "./serviceMapModel.ts";
+import graphStyles from "../graph/GraphView.module.css";
 import styles from "./Workspace.module.css";
 
 /** What a cell says when the figure behind it was never read (FR-EH-04,
@@ -172,6 +175,9 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
   const { reachability: model } = answer;
   const rider = model.coverage;
   const promotions = model.live_via_cross_service;
+  // S-709: what only a declared `[[links]]` call keeps live — a claim, stated
+  // apart from the measured promotions and never added to their count.
+  const asserted = model.live_via_asserted_link ?? [];
   // The shortfall predicate, derived from the two counts the rider carries.
   // This rider has NO `covers_all_members` flag (unlike the coverage summary and
   // the degraded roll-up), so reading one would be reading `undefined` — falsy —
@@ -211,6 +217,21 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
           rowKey={(c) => `${c.member}:${c.symbol}`}
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
         />
+      )}
+      {asserted.length > 0 && (
+        <>
+          <p>{DASHBOARD_TEXT.keptByLinks(asserted.length, rider.asserted_call_edges ?? 0)}</p>
+          <ul className={graphStyles.legendList} aria-label="Legend">
+            <EdgeRow type={ASSERTED_EDGE_TYPE} label={DASHBOARD_TEXT.assertedLegend} />
+          </ul>
+          <DataTable
+            caption="Callables kept in use only by a declared link (asserted)"
+            columns={PROMOTION_COLUMNS}
+            rows={asserted}
+            rowKey={(c) => `${c.member}:${c.symbol}`}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+        </>
       )}
       {/* The applied bounds, stated. `dead: null` is SUPPRESSED, deliberately
           distinct from `[]` ("computed, and genuinely empty") — so it is rendered
@@ -320,7 +341,7 @@ function tallyCell(row: RosterRow, pick: (t: MemberReachability) => number) {
  *  plain words, each naming a precise figure the gloss defines. Each header is a
  *  string glossed through the column's `gloss` slot, which renders the term beside
  *  the sort button rather than inside it (CR-208). */
-const rosterColumns = (): Column<RosterRow>[] => [
+const rosterColumns = (withAsserted: boolean): Column<RosterRow>[] => [
   { key: "member", header: "Member", mono: true, cell: (r) => r.member, sortValue: (r) => r.member },
   {
     key: "state",
@@ -373,6 +394,23 @@ const rosterColumns = (): Column<RosterRow>[] => [
     cell: (r) => tallyCell(r, (t) => t.live_via_cross_service),
     sortValue: (r) => r.tally?.live_via_cross_service ?? -1,
   },
+  // S-709: what only a declared `[[links]]` call keeps live, so the row still
+  // adds up (dead_app_wide = dead_per_repo − both promotions) and the claim is
+  // labelled. Only when some member has one: a workspace without links renders
+  // the roster as before.
+  ...(withAsserted
+    ? [
+        {
+          key: "keptByLink",
+          header: `…of which ${GLOSSARY.keptByDeclaredLink.label}`,
+          gloss: "keptByDeclaredLink" as const,
+          glossText: GLOSSARY.keptByDeclaredLink.label,
+          numeric: true,
+          cell: (r: RosterRow) => tallyCell(r, (t) => t.live_via_asserted_link ?? 0),
+          sortValue: (r: RosterRow) => r.tally?.live_via_asserted_link ?? -1,
+        },
+      ]
+    : []),
   {
     key: "deadAppWide",
     header: GLOSSARY.unusedAcrossWorkspace.label,
@@ -404,7 +442,7 @@ function MemberRoster({
     >
       <DataTable
         caption="Each member's own coupling figures — never rolled up"
-        columns={rosterColumns()}
+        columns={rosterColumns(rows.some((r) => (r.tally?.live_via_asserted_link ?? 0) > 0))}
         rows={rows}
         rowKey={(r) => r.member}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}

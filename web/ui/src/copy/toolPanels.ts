@@ -74,6 +74,11 @@ export const TOOL_PANELS = {
     what: "Whether any other service reaches the symbol you traced, through a resolved binding.",
     reason: "Part of the Cross-service impact answer (hidden from the web UI): it states the empty answer in place of a centred empty state.",
   },
+  impactAmbiguity: {
+    name: "Members holding the traced symbol",
+    what: "Which services hold the symbol you traced, and how many resolved bindings reach each one's copy of it.",
+    reason: "Part of the Cross-service impact answer (hidden from the web UI): the server's own notice and per-member counts, shown only when two or more services hold the symbol.",
+  },
   impactResult: {
     name: "Cross-service impact result",
     what: "The callers that reach the symbol you traced, in one service.",

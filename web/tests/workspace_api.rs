@@ -661,6 +661,139 @@ async fn workspace_impact_exposes_seed_and_cross_service_tiers() {
     assert_eq!(v["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{body}");
 }
 
+/// `svc-b`'s client: a static call binding `api`'s `/users/{id}` route.
+const FORK_CLIENT_WIRED: &str = "use reqwest::Client;\n\npub async fn fetch_user(client: Client) {\n    \
+                                 let _ = client.get(\"/users/{id}\").await;\n}\n";
+
+/// `svc-a`'s fork of it: the same file and function — the same symbol — calling
+/// nothing.
+const FORK_CLIENT_IDLE: &str = "use reqwest::Client;\n\npub async fn fetch_user(client: Client) {}\n";
+
+/// The symbol both forks hold.
+const FORK_SYMBOL: &str = "logos . . . src/`client.rs`/fetch_user().";
+
+/// **A symbol two members hold is grouped per member on the web read-model too**
+/// (S-701, [BR-73]): `/api/v1/workspace/{impact,callers}` serialize the one
+/// read-model, so the unscoped answer carries `resolved_by_member` — `svc-a`'s
+/// idle fork at zero — and the `ambiguity_warning`; `repo=svc-a` stitches
+/// nothing through `svc-b`'s edge and carries neither.
+///
+/// [BR-73]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[tokio::test]
+async fn workspace_reachability_groups_a_symbol_two_members_hold_per_member() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("api"), "src/main.rs", AXUM_MAIN);
+    init_repo(&root.join("svc-a"), "src/client.rs", FORK_CLIENT_IDLE);
+    init_repo(&root.join("svc-b"), "src/client.rs", FORK_CLIENT_WIRED);
+    for member in ["api", "svc-a", "svc-b"] {
+        Engine::start(root.join(member)).expect("member engine").index();
+    }
+    std::fs::write(root.join("logos.workspace.toml"), "[workspace]\nname = \"forks\"\nmembers = [\"api\", \"svc-a\", \"svc-b\"]\n")
+        .unwrap();
+    let router = ws_router(&tmp);
+    let answer = |path: String| {
+        let router = router.clone();
+        async move {
+            let (status, body, _h) = body_string(router.oneshot(get(&path)).await.unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    let symbol = form_field("symbol", FORK_SYMBOL);
+
+    let impact = answer(format!("/api/v1/workspace/impact?{symbol}")).await;
+    assert_eq!(impact["cross_service"].as_array().map(Vec::len), Some(1), "{impact:#}");
+    assert_eq!(impact["cross_service"][0]["via"]["from"]["member"], "svc-b", "the row names its member");
+    assert_eq!(
+        impact["resolved_by_member"],
+        serde_json::json!([{"member": "svc-a", "resolved": 0}, {"member": "svc-b", "resolved": 1}]),
+        "{impact:#}"
+    );
+    let warning = impact["ambiguity_warning"].as_str().expect("the notice");
+    assert!(warning.contains("svc-a, svc-b") && warning.contains("--repo"), "{warning}");
+
+    let callers = answer(format!("/api/v1/workspace/callers?{symbol}")).await;
+    assert_eq!(
+        callers["resolved_by_member"],
+        serde_json::json!([{"member": "svc-a", "resolved": 0}, {"member": "svc-b", "resolved": 0}]),
+        "a consumer symbol provides nothing in either fork: {callers:#}"
+    );
+    assert!(callers["ambiguity_warning"].is_string(), "{callers:#}");
+
+    let scoped = answer(format!("/api/v1/workspace/impact?{symbol}&repo=svc-a")).await;
+    assert_eq!(scoped["cross_service"], serde_json::json!([]), "svc-b's edge is not svc-a's: {scoped:#}");
+    assert!(scoped.get("resolved_by_member").is_none() && scoped.get("ambiguity_warning").is_none(), "{scoped:#}");
+}
+
+/// `web`'s client for the linked fixture: a call whose URL is composed at
+/// runtime, so the bridge binds nothing — the coupling a `[[links]]` entry
+/// declares.
+const LINKED_WEB: &str = "use reqwest::Client;\n\npub async fn fetch_cart(client: Client, url: String) {\n    \
+                          let _ = client.get(url).await;\n}\n";
+
+/// `api`'s private cart handler, calling a private helper: both uncalled in
+/// their own repo, so both dead per repo.
+const LINKED_API: &str = "async fn get_cart() {\n    load_cart();\n}\n\nfn load_cart() {}\n";
+
+/// **The web read-models carry an asserted link, labelled** (S-709,
+/// [FR-WS-41], [BR-75]): `/api/v1/workspace/callers` and `/impact` list it under
+/// `via_asserted_link` with `intake: "asserted"` and `reached: "(asserted)"`,
+/// apart from `cross_service`; `/reachability` keeps the target and its callee
+/// `live-via-asserted-link`; `/status` counts it beside the headline.
+///
+/// [FR-WS-41]: ../../docs/specs/requirements/FR-WS-41.md
+/// [BR-75]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[tokio::test]
+async fn the_workspace_api_carries_an_asserted_link_labelled() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("api"), "src/lib.rs", LINKED_API);
+    init_repo(&root.join("web"), "src/lib.rs", LINKED_WEB);
+    for member in ["api", "web"] {
+        Engine::start(root.join(member)).expect("member engine").index();
+    }
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\n\n[[links]]\nrelation = \"http_call\"\n\
+         from = \"web::fetch_cart\"\nto = \"api::get_cart\"\n",
+    )
+    .unwrap();
+    let router = ws_router(&tmp);
+    let answer = |path: String| {
+        let router = router.clone();
+        async move {
+            let (status, body, _h) = body_string(router.oneshot(get(&path)).await.unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        }
+    };
+
+    let callers = answer(format!("/api/v1/workspace/callers?{}", form_field("symbol", "logos . . . src/`lib.rs`/get_cart()."))).await;
+    let rows = callers["via_asserted_link"].as_array().expect("the asserted tier");
+    assert_eq!(rows.len(), 1, "{callers:#}");
+    assert_eq!((rows[0]["intake"].as_str(), rows[0]["reached"].as_str()), (Some("asserted"), Some("(asserted)")));
+    assert_eq!(rows[0]["from"]["member"], "web");
+    assert_eq!(callers["cross_service"], serde_json::json!([]), "never in the measured tier");
+
+    let impact = answer(format!("/api/v1/workspace/impact?{}", form_field("symbol", "logos . . . src/`lib.rs`/fetch_cart()."))).await;
+    let far = impact["via_asserted_link"].as_array().expect("stitched across the link");
+    assert_eq!((far[0]["member"].as_str(), far[0]["via"]["intake"].as_str()), (Some("api"), Some("asserted")), "{impact:#}");
+
+    let reach = answer("/api/v1/workspace/reachability".to_string()).await;
+    let asserted: Vec<&str> = reach["reachability"]["live_via_asserted_link"]
+        .as_array()
+        .expect("the asserted promotions")
+        .iter()
+        .map(|claim| claim["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(asserted, ["get_cart", "load_cart"], "{reach:#}");
+    assert_eq!(reach["reachability"]["live_via_cross_service"], serde_json::json!([]));
+
+    let status = answer("/api/v1/workspace/status".to_string()).await;
+    assert_eq!(status["coverage"]["asserted_edges"]["valid"], 1, "{status:#}");
+}
+
 /// Each parametrised workspace handler rejects a missing/empty required query
 /// param with `400` before any fan-out (mirrors the single-root `search`/`node`
 /// contract) — the error branch the happy-path loop never exercises.

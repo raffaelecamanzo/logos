@@ -35,6 +35,7 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
   DASHBOARD_TEXT: {
     keepThem: [[0, false], [0, true], [1, false], [1, true], [7, false], [7, true]],
     keepThemBasis: [[1, 3, 3, false], [9, 2, 3, true]],
+    keptByLinks: [[1, 1], [2, 1], [3, 2]],
     skipped: [[["web"]], [["api", "web"]]],
     deadCount: [[1], [5]],
     membersRead: [[3, 3], [2, 3]],
@@ -54,6 +55,7 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     evidenceShown: [[0, 1], [1, 1], [2, 5]],
     declaredFigure: [[0, 0, 0], [1, 1, 1], [3, 4, 2], [1, 1, null]],
     hintFigure: [[1], [2]],
+    assertedFigure: [[1, 1], [2, 3]],
   },
 };
 

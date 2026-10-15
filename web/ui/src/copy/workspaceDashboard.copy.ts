@@ -38,6 +38,12 @@ export const DASHBOARD_TEXT = {
   /** An empty answer is only as good as the calls it was found from. */
   keepThemNone:
     "This rests on the resolved calls above: read their coverage before taking it as an all-clear.",
+  /** The asserted promotions' lead (S-709): kept in use only by a declared
+   *  `[[links]]` call — a claim, stated apart from the measured promotions. */
+  keptByLinks: (n: number, links: number) =>
+    `${n} ${plural(n, "more callable is", "more callables are")} unused in ${plural(n, "its", "their")} own service and kept in use only by a declared link (${links} asserted call ${plural(links, "link", "links")}) — asserted, not measured.`,
+  /** The legend row for the asserted promotions. */
+  assertedLegend: "Asserted — declared in the workspace manifest's [[links]], never observed in code",
   /** Members the reachability answer could not read. */
   skipped: (members: readonly string[]) =>
     `${members.length} ${plural(members.length, "member", "members")} could not be read, so ${plural(members.length, "it contributes", "they contribute")} no callables to this answer:`,

@@ -62,7 +62,7 @@ use serde::Serialize;
 
 use logos_core::config::{self as core_config, ConfigReadModel, TierSaveOutcome};
 use logos_core::federation::{
-    app_wide_reachability, open_state, query as fed_query, workspace_governance,
+    open_state, query as fed_query, workspace_governance,
     workspace_statistics, xservice_build_deps, Backing, BoundedReachability, BuildDependencies,
     ContractBridge, DegradedRollup, EngineRegistry, Federation, ReachabilityScope,
     WorkspaceGovernance, WorkspaceStatistics,
@@ -1470,7 +1470,9 @@ pub(crate) struct WorkspaceGovernanceAnswer {
 /// of `logos workspace reachability`.
 ///
 /// # Bounded by default, and it says so ([S-294], [CR-084], [NFR-CC-04])
-/// Without `?all` the payload carries only the cross-service **promotions** and
+/// Without `?all` the payload carries only the **promotions** — the measured
+/// cross-service ones, and apart from them the `live-via-asserted-link` ones a
+/// valid `[[links]]` call keeps live — and
 /// `reachability.dead` is `null` — *suppressed*, which is deliberately distinct
 /// from `[]` ("computed, and genuinely empty"). Every applied bound is echoed in
 /// `reachability.scope`, so a bounded reply can never be read as the complete dead
@@ -1508,9 +1510,8 @@ pub(crate) async fn workspace_reachability(
         "api_v1_workspace_reachability",
         Surface::Web,
         move |registry, bridge| {
-            let edges = fed_query::edges(bridge, registry);
             let reachability =
-                app_wide_reachability(registry, &edges).bound(ReachabilityScope::new(repo, all));
+                fed_query::workspace_reachability(bridge, registry).bound(ReachabilityScope::new(repo, all));
             WorkspaceReachabilityAnswer {
                 reachability,
                 completeness: AnswerCompleteness::after_reading(registry),

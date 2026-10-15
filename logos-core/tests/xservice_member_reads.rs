@@ -89,6 +89,7 @@ fn five_members(root: &Path) -> EngineRegistry<Engine> {
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     let tight = WorkspaceBudget::from_limits(64, 1);
     assert_eq!(tight.max_resident_members(), 2, "the fixture's residency ceiling");

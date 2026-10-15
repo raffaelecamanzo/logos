@@ -94,3 +94,30 @@ pub const SINGLE_ROOT: usize =
 /// How many tools the federated backing registers — the single-root roster
 /// plus the cross-service family.
 pub const FEDERATED: usize = SINGLE_ROOT + XSERVICE_TOOLS.len();
+
+/// The single-root tools that take an optional `repo` selecting the workspace
+/// member they answer for (S-710, [FR-WS-42], [CR-225]): every read-only one.
+/// Each persists nothing a member's agent did not ask for ([CR-225] CRA-02,
+/// confirmed per tool in S-710). Every other single-root tool writes or gates,
+/// takes no `repo`, and acts on the default member.
+///
+/// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+/// [CR-225]: ../../../docs/requests/CR-225-per-member-single-root-tools.md
+pub const MEMBER_SELECTABLE_TOOLS: &[&str] = &[
+    "search",
+    "context",
+    "explore",
+    "node",
+    "callers",
+    "callees",
+    "impact",
+    "impact_intersection",
+    "precedent",
+    "branch_overlap",
+    "status",
+    "health",
+    "hotspots",
+    "dsm",
+    "evolution",
+    "coverage_status",
+];

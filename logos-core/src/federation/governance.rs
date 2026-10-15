@@ -337,7 +337,12 @@ fn unknown_member_refs(federation: &Federation, governance: &Governance) -> Vec<
 ///
 /// `edges` is the [bridge](super::bridge)'s matched edge set. Rules quantify over
 /// exactly these — a reference that never bound is not evidence and cannot
-/// trigger a rule ([NFR-RA-05]).
+/// trigger a rule ([NFR-RA-05]). Nor can an **asserted** edge (a `[[links]]`
+/// claim, [BR-75]): only edges whose intake
+/// [`is_evidence`](super::bridge::BridgeIntake::is_evidence) are checked or
+/// counted in `bindings_checked`, so a caller may pass a set holding both.
+///
+/// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
 ///
 /// # Errors
 /// A rule that could never fire fails loud rather than silently matching nothing
@@ -363,8 +368,12 @@ pub fn workspace_governance(
 
     let compiled = CompiledWorkspaceRules::compile(&federation.governance)?;
 
-    let mut violations = check_boundaries(&compiled, edges);
-    violations.extend(check_no_cross_service_callers(&compiled, edges));
+    // A policy breach is a measured coupling; a declared one is a claim
+    // ([BR-75]). The filter sits here, once, so the two checks and the count
+    // read one set.
+    let edges: Vec<&BridgeEdge> = edges.iter().filter(|edge| edge.intake.is_evidence()).collect();
+    let mut violations = check_boundaries(&compiled, &edges);
+    violations.extend(check_no_cross_service_callers(&compiled, &edges));
 
     Ok(Some(WorkspaceGovernance {
         workspace: federation.name.clone(),
@@ -383,7 +392,7 @@ pub fn workspace_governance(
 /// member is exempt, exactly as the per-repo layer check exempts a file no
 /// `[[layers]]` glob claims. Silence about an unclassifiable service is honest;
 /// guessing its layer would not be ([NFR-RA-05]).
-fn check_boundaries(compiled: &CompiledWorkspaceRules<'_>, edges: &[BridgeEdge]) -> Vec<WorkspaceViolation> {
+fn check_boundaries(compiled: &CompiledWorkspaceRules<'_>, edges: &[&BridgeEdge]) -> Vec<WorkspaceViolation> {
     let mut violations = Vec::new();
     // One violation per (rule, binding) — two arms coupling the same endpoints
     // (say a route match and a gRPC match) would otherwise double-report the same
@@ -452,7 +461,7 @@ fn boundary_violation(
 /// once rather than twice.
 fn check_no_cross_service_callers(
     compiled: &CompiledWorkspaceRules<'_>,
-    edges: &[BridgeEdge],
+    edges: &[&BridgeEdge],
 ) -> Vec<WorkspaceViolation> {
     let mut violations = Vec::new();
     let mut seen: BTreeSet<(usize, &BridgeEndpoint, &BridgeEndpoint)> = BTreeSet::new();
@@ -573,6 +582,7 @@ mod tests {
             governance,
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         }
     }
 
@@ -615,6 +625,48 @@ mod tests {
         // The honesty rider: the report states what it quantified over.
         assert_eq!(report.rules_checked, 1);
         assert_eq!(report.bindings_checked, 1);
+    }
+
+    /// **An asserted edge is not evidence** ([BR-75], [FR-WS-41]): a declared
+    /// `[[links]]` edge that crosses the forbidden boundary, or calls a symbol no
+    /// cross-service caller may reach, raises no violation and is not counted in
+    /// `bindings_checked` — beside an evidence edge of the same shape, which does
+    /// both.
+    ///
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    #[test]
+    fn an_asserted_edge_triggers_no_rule_and_is_not_a_binding_checked() {
+        let governance = Governance {
+            no_cross_service_callers: vec![NoCrossServiceCallers {
+                symbol: "*LegacyOrders*".to_string(),
+                member: None,
+                reason: None,
+            }],
+            ..layered(None)
+        };
+        let asserted = |mut edge: BridgeEdge| {
+            edge.intake = crate::federation::bridge::BridgeIntake::Asserted;
+            edge
+        };
+        let declared = [
+            asserted(edge("web", "fetchOrder", "api", "getOrder")),
+            asserted(edge("jobs", "sync", "orders", "LegacyOrdersApi")),
+        ];
+        let report = run(governance.clone(), &declared).expect("a report");
+        assert!(report.passed(), "{:?}", report.violations);
+        assert_eq!(report.bindings_checked, 0);
+
+        // The same shapes as evidence breach both rules — so the silence above is
+        // the intake, not the fixture.
+        let measured = [
+            edge("web", "fetchOrder", "api", "getOrder"),
+            edge("jobs", "sync", "orders", "LegacyOrdersApi"),
+        ];
+        let both: Vec<BridgeEdge> = declared.iter().chain(&measured).cloned().collect();
+        let report = run(governance, &both).expect("a report");
+        assert_eq!(report.violations.len(), 2, "{:?}", report.violations);
+        assert_eq!(report.bindings_checked, 2);
     }
 
     /// The boundary is **directional**: `core`→`edge` is not the declared rule,

@@ -13,7 +13,10 @@
 //! lives once in the [`Output::query`]/[`Output::try_query`]/
 //! [`Output::report_gate`]/[`Output::report_check`] chokepoints (the CLI twin
 //! of the MCP adapter's `run`/`run_result` delegators), so the arms below are
-//! mostly zero-`?` one-liners. An extension's subcommands are not routed here:
+//! mostly zero-`?` one-liners. The twins of the read-only MCP tools — the commands
+//! that take `--repo` — use the selecting variants ([`Output::query_for`],
+//! [`Output::try_query_for`], [`Output::report_gate_for`]), which choose the member
+//! the answer is for (`Backing::one_shot`) before the one `Engine` call. An extension's subcommands are not routed here:
 //! the library's composed command dispatches them (S-644).
 
 use std::path::Path;
@@ -93,39 +96,41 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             load_config_from_root(root)?;
             out.report_gate(root, |e| Ok(e.sync(&paths)), |r| !r.failed)
         }
-        Commands::Status => out.query(root, |e| e.status()),
-        Commands::Search { query, kind, limit } => out.query(root, |e| e.search(&query, kind, limit)),
+        Commands::Status { member } => out.query_for(root, &member, |e| e.status()),
+        Commands::Search { query, kind, limit, member } => out.query_for(root, &member, |e| e.search(&query, kind, limit)),
         Commands::Query {
             symbol,
             kind,
             callers,
             callees,
             limit,
+            member,
         } => {
             // The façade picks ONE Engine call per invocation (FR-CL-05).
             if callers {
-                out.query(root, |e| e.callers(&symbol, limit))
+                out.query_for(root, &member, |e| e.callers(&symbol, limit))
             } else if callees {
-                out.query(root, |e| e.callees(&symbol, limit))
+                out.query_for(root, &member, |e| e.callees(&symbol, limit))
             } else {
-                out.query(root, |e| e.search(&symbol, kind, limit))
+                out.query_for(root, &member, |e| e.search(&symbol, kind, limit))
             }
         }
         Commands::Context {
             task,
             max_nodes,
             no_code,
-        } => out.query(root, |e| e.context(&task.join(" "), max_nodes, !no_code)),
-        Commands::Explore { query, max_files } => out.query(root, |e| e.explore(&query, max_files)),
-        Commands::Node { symbol, code } => out.query(root, |e| e.node(&symbol, code)),
-        Commands::Callers { symbol, limit } => out.query(root, |e| e.callers(&symbol, limit)),
-        Commands::Callees { symbol, limit } => out.query(root, |e| e.callees(&symbol, limit)),
-        Commands::Impact { symbol, depth } => out.query(root, |e| e.impact(&symbol, depth)),
-        Commands::ImpactIntersection { items, depth } => {
-            out.query(root, |e| e.impact_intersection(&items, depth))
+            member,
+        } => out.query_for(root, &member, |e| e.context(&task.join(" "), max_nodes, !no_code)),
+        Commands::Explore { query, max_files, member } => out.query_for(root, &member, |e| e.explore(&query, max_files)),
+        Commands::Node { symbol, code, member } => out.query_for(root, &member, |e| e.node(&symbol, code)),
+        Commands::Callers { symbol, limit, member } => out.query_for(root, &member, |e| e.callers(&symbol, limit)),
+        Commands::Callees { symbol, limit, member } => out.query_for(root, &member, |e| e.callees(&symbol, limit)),
+        Commands::Impact { symbol, depth, member } => out.query_for(root, &member, |e| e.impact(&symbol, depth)),
+        Commands::ImpactIntersection { items, depth, member } => {
+            out.query_for(root, &member, |e| e.impact_intersection(&items, depth))
         }
-        Commands::Precedent { target, limit } => out.query(root, |e| e.precedent(&target, limit)),
-        Commands::BranchOverlap { refs, base, merge } => out.query(root, |e| {
+        Commands::Precedent { target, limit, member } => out.query_for(root, &member, |e| e.precedent(&target, limit)),
+        Commands::BranchOverlap { refs, base, merge, member } => out.query_for(root, &member, |e| {
             e.branch_overlap(&refs, base.as_deref(), merge.as_deref())
         }),
         Commands::Implements { doc } => out.query(root, |e| e.implements(&doc)),
@@ -178,8 +183,8 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // ADR-14) rides the same exit code rather than printing `"ok": false`
         // at exit 0. The read-model is still returned in full: diagnosing the
         // desync is what `health` is FOR, so the fault is reported, not raised.
-        Commands::Health { no_reconcile } => {
-            out.report_gate(root, |e| e.health(!no_reconcile), |r| r.ok)
+        Commands::Health { no_reconcile, member } => {
+            out.report_gate_for(root, &member, |e| e.health(!no_reconcile), |r| r.ok)
         }
         // CR-052 / FR-GV-18/19/20: structural-integrity guards — a corrupted or
         // drifted graph is a failure a human or CI must see, not a silent read.
@@ -191,11 +196,12 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // `gate` does, so a CLI-directed agent can detect a failing gate.
         Commands::SessionStart => out.try_query(root, |e| e.session_start()),
         Commands::SessionEnd => out.report_gate(root, |e| e.session_end(), |r| r.passed),
-        Commands::Evolution { limit } => out.try_query(root, |e| e.evolution(limit)),
+        Commands::Evolution { limit, member } => out.try_query_for(root, &member, |e| e.evolution(limit)),
         Commands::Dsm {
             granularity,
             no_reconcile,
-        } => out.try_query(root, |e| e.dsm(granularity, !no_reconcile)),
+            member,
+        } => out.try_query_for(root, &member, |e| e.dsm(granularity, !no_reconcile)),
         Commands::DocGaps { limit, no_reconcile } => {
             out.try_query(root, |e| e.doc_gaps(limit, !no_reconcile))
         }
@@ -203,14 +209,15 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             limit,
             untested,
             production_scope,
-        } => out.try_query(root, |e| e.hotspots(limit, untested, production_scope)),
+            member,
+        } => out.try_query_for(root, &member, |e| e.hotspots(limit, untested, production_scope)),
         // The coverage evidence tier (CR-007): each sub-subcommand is one `Engine`
         // call shared with its MCP twin.
         Commands::Coverage { command } => match command {
             CoverageCommands::Ingest { report, format } => {
                 out.try_query(root, |e| e.coverage_ingest(&report, format.as_deref()))
             }
-            CoverageCommands::Status => out.try_query(root, |e| e.coverage_status()),
+            CoverageCommands::Status { member } => out.try_query_for(root, &member, |e| e.coverage_status()),
             CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
         },
         // The session-start quality-report hook (S-638): a core command, not a

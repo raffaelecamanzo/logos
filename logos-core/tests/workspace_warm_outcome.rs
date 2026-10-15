@@ -91,6 +91,7 @@ fn status_from_a_cold_start(root: &Path, members: &[Member]) -> WorkspaceStatus 
         governance: Default::default(),
         warm_concurrency: None,
         member_kinds: Default::default(),
+        exclusion: Default::default(),
     };
     workspace_status(&EngineRegistry::new(federation, RegistryMode::Lazy))
 }

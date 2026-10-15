@@ -1062,6 +1062,7 @@ mod tests {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: kinds.iter().map(|(m, k)| ((*m).to_string(), *k)).collect(),
+            exclusion: Default::default(),
         }
     }
 
@@ -1852,7 +1853,7 @@ mod tests {
             RegistryMode::Lazy,
         );
         let coverage = cross_service_coverage(&registry.answer());
-        let (edges, residue, _) = ContractBridge::new().reachability_read(&registry);
+        let crate::federation::bridge::ReachabilityRead { edges, residue, .. } = ContractBridge::new().reachability_read(&registry);
         [
             serde_json::to_string(&coverage).unwrap(),
             serde_json::to_string(&*edges).unwrap(),

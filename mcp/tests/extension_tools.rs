@@ -126,6 +126,7 @@ fn the_federated_server_composes_extension_tools_too() {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         };
         names(&LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy), host))
     };
@@ -236,5 +237,9 @@ fn a_second_extension_cannot_replace_an_earlier_ones_tool() {
     let listed: Vec<Tool> =
         server.list_tools().into_iter().filter(|t| t.name == "ext_dup_tool").collect();
     assert_eq!(listed.len(), 1, "one entry");
-    assert_eq!(listed[0].description.as_deref(), Some("first"), "the earlier extension's");
+    assert_eq!(
+        listed[0].description.as_deref(),
+        Some(format!("first {}", logos_ext::mcp::DEFAULT_MEMBER_DESCRIPTION).as_str()),
+        "the earlier extension's"
+    );
 }

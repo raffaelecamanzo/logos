@@ -6,6 +6,7 @@ import type {
   BridgeEdge,
   BuildDependencyHeadline,
   CrossServiceCoverage,
+  WorkspaceLink,
   XserviceBuildDeps,
 } from "../../api/types.ts";
 import statesStyles from "../../components/States.module.css";
@@ -19,6 +20,7 @@ import {
 } from "../../copy/coverage.copy.ts";
 import { expectToolPanel, expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import {
+  assertedLinks,
   bindingEvidence,
   crossContextHint,
   crossServiceBindings,
@@ -42,7 +44,8 @@ import {
   stubApi,
 } from "../../workspace/testFixtures.ts";
 import { EDGE_COLOR } from "../graph/graphModel.ts";
-import { DECLARED_EDGE_TYPE } from "./serviceMapModel.ts";
+import { armLabel } from "./coverageModel.ts";
+import { ASSERTED_EDGE_TYPE, DECLARED_EDGE_TYPE, serviceId } from "./serviceMapModel.ts";
 import { WorkspaceView } from "./WorkspaceView.tsx";
 
 // The service map mounts the real ECharts canvas, which needs a layout engine jsdom
@@ -1151,6 +1154,37 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     // S-617: each result table is the registered tool panel of the impact answer.
     const far = screen.getByRole("heading", { name: /web — reached across a HTTP \(OpenAPI ↔ route\) binding/ });
     expectToolPanel(far.closest("section")!, "impactResult");
+  });
+
+  it("renders one panel per edge when the traced consumer calls two routes of one member, with no key collision", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => errors.mockRestore());
+    const reach = (route: string, handler: string) => ({
+      via: { ...BINDING, to: { member: "web", symbol: route } },
+      member: "web",
+      impact: {
+        query: "get_user",
+        resolved: { symbol: route, name: route, kind: "route", file: "m.rs", line: 3 },
+        depth: 2,
+        upstream_label: "Callers",
+        upstream: [{ symbol: handler, name: handler, kind: "function", file: "m.rs", line: 4, distance: 1 }],
+        downstream_label: "Calls",
+        downstream: [],
+        docs_label: "Docs",
+        docs: [],
+        suggestions: [],
+        warnings: [],
+      },
+    });
+    stubApi({
+      impact: { ...IMPACT_DEGRADED, cross_service: [reach("route-a", "users"), reach("route-b", "carts")] },
+    });
+    mount();
+    await traceSymbol();
+    expect(await screen.findByRole("cell", { name: "users" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "carts" })).toBeInTheDocument();
+    const duplicateKey = errors.mock.calls.some((call) => String(call[0]).includes("same key"));
+    expect(duplicateKey, "React saw a duplicate key").toBe(false);
   });
 
   // ── S-326 / FR-WS-05 / FR-WS-16 / NFR-CC-04 ───────────────────────────────
@@ -2446,3 +2480,230 @@ describe("WorkspaceView — the service map's widgets explain themselves, in one
   });
 });
 
+
+// ── S-709: asserted links on the service map and the impact answer ───────────
+
+describe("WorkspaceView — asserted links (S-709, FR-WS-41, BR-75)", () => {
+  const assertedEdge: BridgeEdge = {
+    relation: "route",
+    from: { member: "web", symbol: "local fetch_cart" },
+    to: { member: "api", symbol: "local get_cart" },
+    intake: "asserted",
+    from_value: { provenance: "literal" },
+    to_value: { provenance: "literal" },
+  };
+  const LINKS: WorkspaceLink[] = [
+    { relation: "http_call", from: "web::fetch_cart", to: "api::get_cart", status: "valid", edge: assertedEdge },
+    {
+      relation: "http_call",
+      from: "web::fetch_user",
+      to: "api::get_user",
+      status: "redundant",
+      duplicates: { ...BINDING, intake: "invocation" },
+    },
+    {
+      relation: "http_call",
+      from: "web::fetch_cart",
+      to: "api::gone",
+      status: "invalid",
+      reason: "no-match",
+      endpoint: "to",
+      detail: "no match",
+    },
+  ];
+  const TALLY_SUMMARY =
+    "1 asserted edge from 3 declared links (1 invalid: no-match 1; 1 redundant); declared, never counted as evidence";
+  const LINKED_COVERAGE: CrossServiceCoverage = {
+    ...EMPTY_COVERAGE,
+    asserted_edges: { valid: 1, invalid: 1, invalid_by_reason: { "no-match": 1 }, redundant: 1, summary: TALLY_SUMMARY },
+  };
+  const legend = () => screen.getByText("Legend").closest("details")!;
+  const headings = () =>
+    [...legend().querySelectorAll("span")].filter((el) => el.className.includes("legendHeading")).map((el) => el.textContent);
+  const canvasEdges = () => JSON.parse(screen.getByTestId("canvas").getAttribute("data-loaded-set")!).edges as string[];
+
+  it("draws each valid link as one dashed asserted-link line, with its own legend entry and the server's tally", async () => {
+    stubApi({ providers: [BINDING], coverage: LINKED_COVERAGE, links: LINKS });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    // One asserted line — the redundant and invalid links add none — beside the
+    // measured binding, which is untouched.
+    expect(canvasEdges().filter((e) => e.endsWith(`:${ASSERTED_EDGE_TYPE}`))).toEqual([
+      `${serviceId("web")}->${serviceId("api")}:${ASSERTED_EDGE_TYPE}`,
+    ]);
+    expect(headings()).toEqual(["Cross-service bindings", "Asserted links"]);
+    const row = within(legend()).getByText(SERVICE_MAP_TEXT.assertedLegend).closest("li")!;
+    const line = row.querySelector("line")!;
+    expect(line.getAttribute("stroke-dasharray"), "the swatch is dashed").toBe("6 4");
+    expect(line.getAttribute("stroke")).toBe(EDGE_COLOR[ASSERTED_EDGE_TYPE]);
+    expect(legend().textContent).toContain(TALLY_SUMMARY);
+  });
+
+  it("lists the layer in its own widget, each declared link marked (asserted), never as a binding", async () => {
+    stubApi({ providers: [BINDING], coverage: LINKED_COVERAGE, links: LINKS });
+    mount();
+    const card = (await screen.findByRole("heading", { name: "Asserted links" })).closest("section")!;
+    expectWidgetCopy(card, assertedLinks);
+    expect(within(card).getByText(SERVICE_MAP_TEXT.assertedFigure(1, 1))).toBeInTheDocument();
+    const table = within(card).getByRole("table", { name: /accessible twin of the dashed asserted layer/ });
+    expect(within(table).getByText(/web::fetch_cart → api::get_cart/).textContent).toContain("(asserted)");
+    // The bindings table still has the one measured binding only.
+    const bindings = screen.getByRole("table", { name: /accessible twin of the service map/ });
+    expect(within(bindings).getAllByRole("row")).toHaveLength(2);
+  });
+
+  it("counts the declared links behind a line, and names each kind it carries", async () => {
+    const grpc: WorkspaceLink = {
+      relation: "grpc_call",
+      from: "web::fetch_cart",
+      to: "api::cart_rpc",
+      status: "valid",
+      edge: { ...assertedEdge, relation: "grpc-call", to: { member: "api", symbol: "local cart_rpc" } },
+    };
+    stubApi({ providers: [BINDING], coverage: LINKED_COVERAGE, links: [LINKS[0], grpc] });
+    mount();
+    const card = (await screen.findByRole("heading", { name: "Asserted links" })).closest("section")!;
+    // One member pair, two declared links behind it.
+    expect(within(card).getByText(SERVICE_MAP_TEXT.assertedFigure(1, 2))).toBeInTheDocument();
+    const table = within(card).getByRole("table");
+    const row = within(table).getByRole("cell", { name: "web" }).closest("tr")!;
+    const kind = [...row.querySelectorAll("td")][2].textContent ?? "";
+    expect(kind).toContain(armLabel("grpc-call"));
+    expect(kind).toContain(armLabel("route"));
+  });
+
+  it("draws no asserted layer, legend entry or widget without a valid link", async () => {
+    for (const links of [undefined, LINKS.slice(1)]) {
+      cleanup();
+      stubApi({ providers: [BINDING], links });
+      mount();
+      await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+      expect(canvasEdges().some((e) => e.endsWith(`:${ASSERTED_EDGE_TYPE}`))).toBe(false);
+      expect(headings()).toEqual(["Cross-service bindings"]);
+      expect(screen.queryByRole("heading", { name: "Asserted links" })).toBeNull();
+    }
+  });
+
+  describe("the cross-service impact answer", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = removeHiddenWidgetEntry("cross-service-impact");
+    });
+    afterEach(() => restore());
+
+    const seed = (member: string) => ({
+      member,
+      result: {
+        query: "s",
+        resolved: { symbol: "s", name: "get_cart", kind: "function", file: "a.rs", line: 1 },
+        depth: 2,
+        upstream_label: "Callers",
+        upstream: [],
+        downstream_label: "Calls",
+        downstream: [],
+        docs_label: "Docs",
+        docs: [],
+        suggestions: [],
+        warnings: [],
+      },
+    });
+    const WARNING =
+      '"s" is held by 2 members (api, fork); the answer is grouped per member, never pooled — pass --repo <member> (`repo` over MCP) to choose one';
+    const IMPACT = {
+      query: "s",
+      ambiguity_warning: WARNING,
+      seed: [seed("api"), seed("fork")],
+      cross_service: [],
+      resolved_by_member: [
+        { member: "api", resolved: 0 },
+        { member: "fork", resolved: 1 },
+      ],
+      via_asserted_link: [
+        {
+          reached: "(asserted)",
+          via: assertedEdge,
+          member: "web",
+          impact: {
+            ...seed("web").result,
+            upstream: [{ symbol: "c", name: "checkout", kind: "function", file: "c.rs", line: 4, distance: 1 }],
+          },
+        },
+      ],
+    };
+
+    async function trace() {
+      await userEvent.click(await screen.findByRole("tab", { name: /cross-service impact/i }));
+      await userEvent.type(screen.getByLabelText(/symbol/i), "s");
+      await userEvent.click(screen.getByRole("button", { name: /trace impact/i }));
+    }
+
+    it("renders the server's ambiguity notice and per-member breakdown verbatim (S-701)", async () => {
+      stubApi({ impact: IMPACT });
+      mount();
+      await trace();
+      expect(await screen.findByText(WARNING)).toBeInTheDocument();
+      expectToolPanel(screen.getByText(WARNING).closest("section")!, "impactAmbiguity");
+      const shares = screen.getByRole("list", { name: "Resolved per member" });
+      expect(within(shares).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+        "api: 0 resolved",
+        "fork: 1 resolved",
+      ]);
+    });
+
+    it("renders a far side reached across an asserted link apart, marked (asserted)", async () => {
+      stubApi({ impact: IMPACT });
+      mount();
+      await trace();
+      const title = await screen.findByRole("heading", {
+        name: /web — reached from api across an asserted .* link \(asserted\)/,
+      });
+      expect(title).toBeInTheDocument();
+      expect(screen.getByRole("cell", { name: "checkout" })).toBeInTheDocument();
+    });
+
+    it("tells apart two asserted rows from members holding one symbol, with no key collision (S-701)", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      onTestFinished(() => errors.mockRestore());
+      const [row] = IMPACT.via_asserted_link;
+      const forked = { ...row, via: { ...row.via, to: { ...row.via.to, member: "fork" } } };
+      stubApi({ impact: { ...IMPACT, via_asserted_link: [row, forked] } });
+      mount();
+      await trace();
+      await screen.findByRole("heading", { name: /reached from api across/ });
+      const titles = screen
+        .getAllByRole("heading", { name: /reached from .* across an asserted/ })
+        .map((h) => h.textContent);
+      expect(titles).toHaveLength(2);
+      expect(new Set(titles).size, "two holders, two titles").toBe(2);
+      const duplicateKey = errors.mock.calls.some((call) => String(call[0]).includes("same key"));
+      expect(duplicateKey, "React saw a duplicate key").toBe(false);
+    });
+
+    it("tells apart the two rows one link gives when both its ends hold the symbol, with no key collision", async () => {
+      // A fork linked to its original: the edge is stitched from each end
+      // (S-701), so the answer carries the same `via` twice, once per far member.
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      onTestFinished(() => errors.mockRestore());
+      const [row] = IMPACT.via_asserted_link;
+      const bothEnds = { ...row.via, from: { member: "fork", symbol: "s" }, to: { member: "api", symbol: "s" } };
+      const fromFork = { ...row, via: bothEnds, member: "api" };
+      const fromApi = { ...row, via: bothEnds, member: "fork" };
+      stubApi({ impact: { ...IMPACT, via_asserted_link: [fromFork, fromApi] } });
+      mount();
+      await trace();
+      await screen.findByRole("heading", { name: /api — reached from fork across/ });
+      expect(screen.getByRole("heading", { name: /fork — reached from api across/ })).toBeInTheDocument();
+      const duplicateKey = errors.mock.calls.some((call) => String(call[0]).includes("same key"));
+      expect(duplicateKey, "React saw a duplicate key").toBe(false);
+    });
+
+    it("shows neither without them, so a single-holder answer renders as before", async () => {
+      stubApi({ impact: { query: "s", seed: [seed("api")], cross_service: [] } });
+      mount();
+      await trace();
+      await screen.findByText(/no cross-service impact/i);
+      expect(screen.queryByRole("list", { name: "Resolved per member" })).toBeNull();
+      expect(screen.queryByText(/\(asserted\)/)).toBeNull();
+    });
+  });
+});

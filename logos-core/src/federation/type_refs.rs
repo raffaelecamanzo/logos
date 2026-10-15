@@ -499,8 +499,10 @@ impl TypeReferenceIndex {
         self.references.iter().filter(move |r| r.fqn == fqn)
     }
 
-    /// Every bound reference whose owner is `symbol` in `member` — the
-    /// stitching entry for a cross-member `callers`/`impact` on a type.
+    /// Every bound reference whose owner is `symbol` in `member`. The
+    /// cross-member `callers`/`impact` stitch matches the same owner pair, and
+    /// the dotted name [`importers`](Self::importers) answers, in one pass over
+    /// [`references`](Self::references) (`federation::query`).
     pub fn references_to<'a>(
         &'a self,
         member: &'a str,

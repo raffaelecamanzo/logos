@@ -24,6 +24,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -45,6 +52,13 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -75,6 +89,13 @@
             "null"
           ]
         },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "symbol": {
           "description": "Symbol whose direct callers/callees to list.",
           "type": "string"
@@ -89,7 +110,7 @@
     "name": "callers"
   },
   {
-    "description": "Architecture-rules compliance report against rules.toml (FR-GV-02): constraints, layer ordering (unassigned files exempt), and boundary checks.",
+    "description": "Architecture-rules compliance report against rules.toml (FR-GV-02): constraints, layer ordering (unassigned files exempt), and boundary checks. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -127,6 +148,13 @@
             "null"
           ]
         },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "task": {
           "description": "Natural-language task description to build the context bundle for.",
           "type": "string"
@@ -141,7 +169,7 @@
     "name": "context"
   },
   {
-    "description": "Ingest an LCOV/Cobertura coverage report into the evidence store (FR-CV-01): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary.",
+    "description": "Ingest an LCOV/Cobertura coverage report into the evidence store (FR-CV-01): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -166,9 +194,10 @@
     "name": "coverage_ingest"
   },
   {
-    "description": "Coverage refresh (FR-CV-10): explicitly run the configured [coverage_ingest].refresh_cmd as a subprocess (the ONLY place Logos ever spawns a coverage command, never on the serve/watcher path, ADR-38), then ingest the artifact it produced. Errors loud if no refresh_cmd is configured, the command fails, or it produced no recognizable artifact. The NON-GATED coverage tier (BR-28).",
+    "description": "Coverage refresh (FR-CV-10): explicitly run the configured [coverage_ingest].refresh_cmd as a subprocess (the ONLY place Logos ever spawns a coverage command, never on the serve/watcher path, ADR-38), then ingest the artifact it produced. Errors loud if no refresh_cmd is configured, the command fails, or it produced no recognizable artifact. The NON-GATED coverage tier (BR-28). Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DefaultMemberParams",
       "type": "object"
     },
     "name": "coverage_refresh"
@@ -176,15 +205,26 @@
   {
     "description": "Coverage status (FR-CV-05/06): per-file freshness (fresh value / stale label / n-a, hash-based against the ingest anchor), the overall freshness fraction, snapshot provenance, and an artifact-vs-HEAD staleness prompt when the coverage lags the current commit (FR-CV-10). Raw numbers only, no grading (BR-28). With no coverage ingested, reports n/a + a notice.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RepoParams",
       "type": "object"
     },
     "name": "coverage_status"
   },
   {
-    "description": "Fast graph structural-integrity check (FR-GV-18/FR-GV-20, NFR-RA-13): asserts one node per symbol_id and zero orphan rows (dangling file/edge/shingle), and flags every indexed file the current admission rules (gitignore, nested-.git boundary, ignored_dirs, globs) would reject — in a handful of indexed queries plus O(files) matcher work, no reindex. `ok:false` with named faults and a capped `unadmitted_sample` on drift — the always-on guard that also hard-fails session_end/check_rules. For a deep reindex-diff see verify.",
+    "description": "Fast graph structural-integrity check (FR-GV-18/FR-GV-20, NFR-RA-13): asserts one node per symbol_id and zero orphan rows (dangling file/edge/shingle), and flags every indexed file the current admission rules (gitignore, nested-.git boundary, ignored_dirs, globs) would reject — in a handful of indexed queries plus O(files) matcher work, no reindex. `ok:false` with named faults and a capped `unadmitted_sample` on drift — the always-on guard that also hard-fails session_end/check_rules. For a deep reindex-diff see verify. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DefaultMemberParams",
       "type": "object"
     },
     "name": "doctor"
@@ -207,6 +247,13 @@
             "boolean",
             "null"
           ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "DsmParams",
@@ -225,6 +272,13 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
             "null"
           ]
         }
@@ -251,6 +305,13 @@
         "query": {
           "description": "Symbol or text to explore around.",
           "type": "string"
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -264,7 +325,17 @@
   {
     "description": "ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift, graph counts. For INDEX freshness use the status tool.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RepoParams",
       "type": "object"
     },
     "name": "health"
@@ -287,6 +358,13 @@
           "description": "Drop whole test files (`is_test`-only) from the candidate set before\nranking (default false — whole-repo board unchanged, CR-076).",
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -314,6 +392,13 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -350,6 +435,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -369,6 +461,13 @@
           "description": "Include the node's source code (default false).",
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -399,6 +498,13 @@
             "null"
           ]
         },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "target": {
           "description": "Symbol or project-relative file whose structural precedents to find.",
           "type": "string"
@@ -413,15 +519,16 @@
     "name": "precedent"
   },
   {
-    "description": "Re-scan with the same parameters as the last scan (ADR-11).",
+    "description": "Re-scan with the same parameters as the last scan (ADR-11). Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DefaultMemberParams",
       "type": "object"
     },
     "name": "rescan"
   },
   {
-    "description": "Full architecture-quality scan, reconcile-then-score (ADR-11): the 0-10000 signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled.",
+    "description": "Full architecture-quality scan, reconcile-then-score (ADR-11): the 0-10000 signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -462,6 +569,13 @@
         "query": {
           "description": "FTS5 search query (symbol name or free text).",
           "type": "string"
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -473,17 +587,19 @@
     "name": "search"
   },
   {
-    "description": "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon.",
+    "description": "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DefaultMemberParams",
       "type": "object"
     },
     "name": "session_end"
   },
   {
-    "description": "Begin a quality session (FR-GV-04): records the quality baseline before edits — call this BEFORE making changes.",
+    "description": "Begin a quality session (FR-GV-04): records the quality baseline before edits — call this BEFORE making changes. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DefaultMemberParams",
       "type": "object"
     },
     "name": "session_start"
@@ -491,15 +607,26 @@
   {
     "description": "INDEX health: file/node/edge counts, store size, freshness of the index vs the working tree (FR-NV-07). For ARCHITECTURE health use the health tool.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RepoParams",
       "type": "object"
     },
     "name": "status"
   },
   {
-    "description": "Deep graph consistency check (FR-GV-19, NFR-RA-06): reindexes the project into a throwaway shadow store via the always-purge index path, then diffs node/edge/file counts and symbol sets against the live graph. Reports `ok:false` with live-vs-reindex deltas and a capped sample of leaked (live-only) / orphaned (reindex-only) symbols, and embeds the fast structural + admission check (FR-GV-20). Catches Channel-B orphans (files the live store retains but a fresh index drops) that doctor cannot. On-demand only — a full reindex is seconds-to-minutes; the live store is read-only and the shadow store is torn down on completion.",
+    "description": "Deep graph consistency check (FR-GV-19, NFR-RA-06): reindexes the project into a throwaway shadow store via the always-purge index path, then diffs node/edge/file counts and symbol sets against the live graph. Reports `ok:false` with live-vs-reindex deltas and a capped sample of leaked (live-only) / orphaned (reindex-only) symbols, and embeds the fast structural + admission check (FR-GV-20). Catches Channel-B orphans (files the live store retains but a fresh index drops) that doctor cannot. On-demand only — a full reindex is seconds-to-minutes; the live store is read-only and the shadow store is torn down on completion. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DefaultMemberParams",
       "type": "object"
     },
     "name": "verify"

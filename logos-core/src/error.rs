@@ -258,14 +258,28 @@ impl From<ConfigError> for CoreError {
 // ── Surface mapping: the one place a Severity becomes an exit code / tag ─────
 
 /// Project an error caught at a surface boundary onto its CLI exit code
-/// ([ADR-14]): a typed [`CoreError`] or [`ConfigError`] reports its own code; an
-/// untyped `anyhow` error is an unclassified internal fault → exit 3.
+/// ([ADR-14]): a typed [`CoreError`] or [`ConfigError`] reports its own code; a
+/// member selection the caller got wrong ([`MemberSelectionError`], [FR-WS-42])
+/// is a usage fault → exit 2; an untyped `anyhow` error is an unclassified
+/// internal fault → exit 3.
 ///
 /// Both surfaces call this rather than re-deciding the mapping, so the
 /// fail-loud boundary stays auditable in one place.
 ///
 /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+/// [FR-WS-42]: ../../../docs/specs/requirements/FR-WS-42.md
+/// [`MemberSelectionError`]: crate::federation::MemberSelectionError
 pub fn exit_code(err: &anyhow::Error) -> i32 {
+    // A `repo` naming no member, or given with no workspace, is the caller's
+    // mistake — a usage fault (2), as the MCP surface answers `invalid_params`
+    // (FR-WS-42). A degraded member is the member's state: it falls through to
+    // whatever its own start failure classifies as.
+    if err
+        .downcast_ref::<crate::federation::MemberSelectionError>()
+        .is_some_and(crate::federation::MemberSelectionError::is_caller_mistake)
+    {
+        return CoreError::EXIT_USAGE;
+    }
     if let Some(core) = err.downcast_ref::<CoreError>() {
         return core.exit_code();
     }
@@ -443,6 +457,23 @@ mod tests {
         let degraded: anyhow::Error = CoreError::PartialResolution { unresolved: 1 }.into();
         assert_eq!(exit_code(&degraded), 0);
         assert_eq!(classify(&degraded), Severity::Degraded);
+    }
+
+    /// A `repo` the caller got wrong is a usage fault (2); a member that will not
+    /// start is not the caller's mistake, so its own failure classifies it — here
+    /// an untyped one, internal (3). Both keep the selection error downcastable.
+    #[test]
+    fn a_member_selection_error_maps_by_whose_mistake_it_is() {
+        use crate::federation::MemberSelectionError as Selection;
+        let unknown: anyhow::Error =
+            Selection::UnknownMember { requested: "x".into(), members: vec!["a".into()] }.into();
+        let no_workspace: anyhow::Error = Selection::NoWorkspace { requested: "x".into() }.into();
+        assert_eq!((exit_code(&unknown), exit_code(&no_workspace)), (2, 2));
+
+        let degraded = anyhow::anyhow!("not a database")
+            .context(Selection::Degraded { member: "a".into(), reason: "not a database".into() });
+        assert_eq!(exit_code(&degraded), 3);
+        assert!(degraded.downcast_ref::<Selection>().is_some());
     }
 
     /// The MCP severity tag is the stable lowercase string both surfaces share.

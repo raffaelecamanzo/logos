@@ -538,7 +538,8 @@ For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **25 `logos:*` tools**, all live:
+The host then sees **25 `logos:*` tools**, all live (34 when the server starts in a
+workspace: the nine `xservice_*`/`workspace_*` tools join them):
 
 | Navigation (11) | Quality & Governance (10) | Evidence tiers (4) |
 |---|---|---|
@@ -573,6 +574,34 @@ Server behavior guarantees:
   processes to clean up.
 - **Honest telemetry** — agent calls are stamped `surface: "mcp"` in
   `logos stats`, CLI calls `surface: "cli"`, one record per call.
+
+### Asking about one workspace member (`repo`)
+
+When the server starts at a [workspace](commands.md#init--i---hooks---workspace---yes---exclude-glob)
+(a `logos.workspace.toml` found up-tree), its read-only tools answer for **one member**, chosen
+by an optional `repo` argument — the member's name. Without it the **default member**
+answers: `[workspace] default`, else the first member. Every answer under a workspace carries
+`member`, the default member's included, so a reader never has to infer which repository
+answered; in a single-root server the payload has no `member` and is exactly what it was.
+
+| Takes `repo` (and the CLI twin takes `--repo`) | Cannot target another member |
+|---|---|
+| `search`, `context`, `explore`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `status`, `health`, `hotspots`, `dsm`, `evolution`, `coverage_status` | `scan`, `rescan`, `check_rules`, `verify`, `doctor`, `session_start`, `session_end`, `coverage_ingest`, `coverage_refresh` — they write or gate, act on the default member, say so in their description, and refuse a `repo` |
+
+The `xservice_*` tools keep their own `repo`: for `xservice_callers`/`xservice_impact` it
+names which member's symbol is meant, for the others it scopes the fan-out; a name that is no
+member is reported inside the answer, not refused. A `repo` that names no member is refused with the list of members; a
+member whose store will not open, with the reason; a `repo` on a single-root server, with
+"no workspace is loaded". `health` and `dsm` freshen the member's index before scoring and
+`hotspots` caches mined git history in it; none of the listed tools writes a gate, baseline,
+snapshot, rule verdict or coverage evidence.
+
+The CLI asks the same question the same way — `logos node beta_only --repo svc-b` — and is
+refused in the same words, with one difference: a member that was never indexed is indexed by
+the server on first selection (as the default member always was), while the CLI refuses it
+and writes nothing; see
+[commands.md](commands.md#answering-for-one-workspace-member---repo) for the flag, the exit codes,
+and how a command run at the workspace root, or inside a member, chooses its member.
 
 ### Try it without a host
 

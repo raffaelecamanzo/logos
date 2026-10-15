@@ -7,8 +7,9 @@
 //! ([ADR-52]). This module owns the schema ([`Manifest`]) and the parse
 //! ([`parse`]); the up-tree location + member resolution live in the parent
 //! [`super`] module. It also owns the manifest's two writers, which differ in
-//! what they may change: [`upsert`] rewrites **only** `members` for
-//! `logos init --workspace` ([FR-WS-02]), and [`save_document`] replaces the
+//! what they may change: [`upsert`] rewrites `members` — and, only when
+//! `--exclude` is given, adds to `exclude` ([`upsert_with_exclude`],
+//! [FR-WS-40]) — for `logos init --workspace` ([FR-WS-02]), and [`save_document`] replaces the
 //! **whole** document for the workspace Config editor ([FR-UI-38]) — validated
 //! first, written verbatim, and refused when the file moved since it was read.
 //!
@@ -37,6 +38,7 @@
 //! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+//! [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
 //! [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
@@ -73,10 +75,12 @@ pub struct Manifest {
     /// autodiscover toggle.
     pub workspace: WorkspaceSection,
     /// User-asserted cross-service edges (`[[links]]`), carried through verbatim
-    /// for the contract bridge to consume ([FR-WS-04]); labelled `asserted`,
-    /// never fabricated. Empty when the manifest declares none.
+    /// for [`super::links`] to resolve into `asserted` bridge edges ([FR-WS-04],
+    /// [FR-WS-41]); labelled `asserted`, never fabricated. Empty when the
+    /// manifest declares none.
     ///
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 
@@ -144,11 +148,19 @@ impl Manifest {
     /// floors a zero, so a value left unvalidated here would be silently
     /// clamped rather than corrected by whoever wrote it.
     ///
+    /// The `[workspace] exclude` globs are checked here too ([`ExcludeSet::compile`]):
+    /// a glob that does not compile is [`ConfigError::InvalidValue`] under
+    /// [`EXCLUDE_KEY`] ([FR-WS-40]).
+    ///
+    /// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
     /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
     /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
     /// [NFR-UX-02]: ../../../docs/specs/requirements/NFR-UX-02.md
     /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
     fn validate(&self) -> Result<(), ConfigError> {
+        // The exclusion globs first: they are the only range check that can
+        // fail on a manifest which declares no `[workspace.warm]` at all.
+        ExcludeSet::compile(&self.workspace.exclude)?;
         let Some(k) = self.warm_concurrency() else {
             return Ok(());
         };
@@ -337,6 +349,21 @@ pub struct WorkspaceSection {
     /// absent ⇒ rely solely on [`autodiscover`](Self::autodiscover).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
+    /// The optional `[workspace] exclude` glob list ([FR-WS-40]): directories
+    /// whose **member name** (the workspace-relative path) matches a glob are
+    /// dropped from autodiscovery and from `logos init --workspace`'s
+    /// candidates, so an exclusion outlives the command that made it. An
+    /// explicit [`members`](Self::members) entry always wins — it is kept and
+    /// warned about by [`super::discover`], never silently overridden.
+    ///
+    /// Validated at [`parse`] (a malformed glob is [`ConfigError::InvalidValue`]
+    /// naming [`EXCLUDE_KEY`], exit 2). Absent ⇒ empty, and skipped on write
+    /// then, so a manifest without the key round-trips byte-identically through
+    /// [`upsert`].
+    ///
+    /// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
     /// The optional default member (`[workspace] default`) — a member path as
     /// written in [`members`](Self::members) (or an autodiscovered directory
     /// name). Carried through; validated against the resolved set by
@@ -558,28 +585,154 @@ fn default_true() -> bool {
     true
 }
 
+/// The key a malformed `[workspace] exclude` glob is reported under
+/// ([`ConfigError::InvalidValue`]) — one spelling for the parse error, the
+/// docs and the tests ([FR-WS-40]).
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+pub const EXCLUDE_KEY: &str = "workspace.exclude";
+
+/// A compiled `[workspace] exclude` list ([FR-WS-40]) — the matcher autodiscovery
+/// ([`super::discover`]) uses, and the one place that can say *which* glob matched.
+///
+/// Compiled with the crate's single glob compiler, the same one `--exclude`
+/// always used: `*` crosses `/`, and a pattern that escapes the workspace
+/// (`..`, an absolute path) is refused. Matched against the **member name**.
+/// `logos init --workspace`'s candidates
+/// ([`super::enable::candidates_for_approval`]) share the compiler and the
+/// semantics, not this type: a malformed `--exclude` flag is the flag's own
+/// [`ConfigError::BadGlob`], not an error that names a manifest key.
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+#[derive(Debug, Clone)]
+pub struct ExcludeSet {
+    globs: Vec<String>,
+    set: globset::GlobSet,
+}
+
+impl ExcludeSet {
+    /// Compile `globs`, in the order given.
+    ///
+    /// # Errors
+    /// [`ConfigError::InvalidValue`] under [`EXCLUDE_KEY`] naming the offending
+    /// glob — the key is what a reader of a failed command needs, and the bare
+    /// [`ConfigError::BadGlob`] carries only the pattern ([FR-CF-01], exit 2).
+    ///
+    /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
+    pub fn compile(globs: &[String]) -> Result<Self, ConfigError> {
+        let set = crate::config::globs::compile(globs).map_err(|e| ConfigError::InvalidValue {
+            key: EXCLUDE_KEY.to_string(),
+            message: match e {
+                ConfigError::BadGlob { pattern, source } => {
+                    format!("{pattern:?} is not a valid glob: {source}")
+                }
+                ConfigError::EscapingPattern { pattern } => format!(
+                    "{pattern:?} escapes the workspace: '..' components and absolute paths \
+                     are not allowed"
+                ),
+                other => other.to_string(),
+            },
+        })?;
+        Ok(Self {
+            globs: globs.to_vec(),
+            set,
+        })
+    }
+
+    /// Whether the list declares no glob (nothing can match).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.globs.is_empty()
+    }
+
+    /// The first glob, in declaration order, that matches the member `name`.
+    #[must_use]
+    pub fn first_match(&self, name: &str) -> Option<&str> {
+        self.set
+            .matches(name)
+            .first()
+            .map(|&i| self.globs[i].as_str())
+    }
+}
+
 /// A user-asserted cross-service edge (`[[links]]`) — the escape hatch for
 /// couplings the static bridge cannot see (dynamic URLs, computed topics),
 /// declared explicitly and labelled `asserted`, **never** fabricated
-/// ([FR-WS-04], [ADR-52]).
+/// ([FR-WS-04], [FR-WS-41], [ADR-52]).
 ///
-/// Endpoints are free-form portable identifiers (a member-qualified symbol or
-/// portable key); this foundation module parses and carries them, and the
-/// contract bridge ([FR-WS-04]) interprets them. Kept minimal and stable so the
-/// bridge story can grow the interpretation without a manifest-schema churn.
+/// This module parses the entry and holds its `relation` to the closed
+/// vocabulary ([`LinkRelation`]); [`super::links`] resolves the two endpoints
+/// and validates the link into an `asserted` bridge edge or a stated reason it
+/// is not one ([FR-WS-41]).
 ///
 /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Link {
-    /// The asserted relation kind (e.g. `"http_call"`, `"grpc_call"`,
-    /// `"publishes"`).
-    pub relation: String,
-    /// The producing/consuming endpoint the edge starts at.
+    /// The asserted relation kind — `"http_call"`, `"grpc_call"` or
+    /// `"publishes"`; any other value fails the parse (exit 2).
+    pub relation: LinkRelation,
+    /// The endpoint the edge starts at, `<member>::<target>` — the caller or
+    /// publisher.
     pub from: String,
-    /// The endpoint the edge points to.
+    /// The endpoint the edge points to, `<member>::<target>` — the callee or
+    /// subscriber.
     pub to: String,
+}
+
+/// The closed `[[links]] relation` vocabulary ([FR-WS-41]).
+///
+/// An enum rather than a validated string so the vocabulary is enforced where
+/// the manifest is read: an unknown value is a [`ConfigError::Parse`] naming the
+/// three legal spellings and the line (exit 2), on every command, exactly like a
+/// typo'd key. Serialized as written, so [`upsert`] and [`save_document`]
+/// round-trip a link unchanged.
+///
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkRelation {
+    /// An HTTP call — filed under the bridge's `route` relation class.
+    HttpCall,
+    /// A gRPC stub call — filed under the bridge's `grpc-call` relation class.
+    GrpcCall,
+    /// A broker publish — filed under the bridge's `broker-topic` relation class.
+    Publishes,
+}
+
+impl LinkRelation {
+    /// The bridge namespace an asserted edge of this relation is filed under —
+    /// the one an evidence edge of the same kind of coupling carries, so a
+    /// declared and a measured HTTP call speak one relation class.
+    #[must_use]
+    pub const fn namespace(self) -> crate::model::BridgeNamespace {
+        use crate::model::BridgeNamespace;
+        match self {
+            LinkRelation::HttpCall => BridgeNamespace::Http,
+            LinkRelation::GrpcCall => BridgeNamespace::Grpc,
+            LinkRelation::Publishes => BridgeNamespace::BrokerTopic,
+        }
+    }
+
+    /// `true` for a declared **call** — `http_call`, `grpc_call` — whose target a
+    /// caller reaches, and `false` for `publishes`, which reaches a topic and no
+    /// callable ([FR-WS-12]). Only a call seeds a `live-via-asserted-link` root.
+    /// A wildcard-free `match`, so a new relation states its answer here.
+    ///
+    /// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+    #[must_use]
+    pub const fn is_call(self) -> bool {
+        match self {
+            LinkRelation::HttpCall | LinkRelation::GrpcCall => true,
+            LinkRelation::Publishes => false,
+        }
+    }
+
+    /// Every relation, in declaration order — for a reader mapping an asserted
+    /// edge's relation class back to the relation it was declared under.
+    pub const ALL: [LinkRelation; 3] = [LinkRelation::HttpCall, LinkRelation::GrpcCall, LinkRelation::Publishes];
 }
 
 /// Parse a `logos.workspace.toml` at `path` ([FR-WS-01]).
@@ -623,12 +776,13 @@ fn parse_text(text: &str, path: &Path) -> Result<Manifest, ConfigError> {
 /// Create or incrementally update the manifest at `root` from the approved
 /// member-name set (`logos init --workspace`, [FR-WS-02]): a fresh manifest is
 /// created with `name` and `members`; an existing one keeps its `name`,
-/// `default`, `autodiscover`, `warm`, per-member `[workspace.member.<name>]`
+/// `default`, `autodiscover`, `exclude`, `warm`, per-member `[workspace.member.<name>]`
 /// declarations, `links`, and `governance` untouched and
-/// only has `members` upserted (sorted, de-duplicated). A result byte-identical to what's already
-/// on disk reports [`InitAction::Unchanged`] without writing — the
-/// write-if-different extension of [FR-IN-01]'s write-if-absent posture,
-/// applied to the one field this command owns.
+/// only has `members` upserted (sorted, de-duplicated). `exclude` is carried
+/// verbatim: this is [`upsert_with_exclude`] with no new globs. A result
+/// byte-identical to what's already on disk reports [`InitAction::Unchanged`]
+/// without writing — the write-if-different extension of [FR-IN-01]'s
+/// write-if-absent posture, applied to the field this command owns.
 ///
 /// # Errors
 /// [`ConfigError::Io`]/[`ConfigError::Parse`]/[`ConfigError::InvalidValue`]
@@ -643,6 +797,32 @@ fn parse_text(text: &str, path: &Path) -> Result<Manifest, ConfigError> {
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
 pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, ConfigError> {
+    upsert_with_exclude(root, name, members, &[])
+}
+
+/// [`upsert`], additionally persisting the `--exclude` globs of a
+/// `logos init --workspace` run into `[workspace] exclude` ([FR-WS-40]).
+///
+/// `add_exclude` is **additive**: every glob is merged into the manifest's
+/// existing list (sorted, de-duplicated) and none is ever removed — an
+/// exclusion that a later run could silently un-make is the failure this key
+/// exists to end. When every glob is already present the existing list is
+/// carried **verbatim** (order included), exactly as `autodiscover` is, so a
+/// re-run that adds nothing is [`InitAction::Unchanged`] and a manifest without
+/// the key stays without it.
+///
+/// A glob that does not compile is refused before anything is written
+/// ([`ExcludeSet::compile`], exit 2), so this can never write a manifest its
+/// own [`parse`] would reject.
+///
+/// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+pub fn upsert_with_exclude(
+    root: &Path,
+    name: &str,
+    members: &[String],
+    add_exclude: &[String],
+) -> Result<InitStep, ConfigError> {
+    ExcludeSet::compile(add_exclude)?;
     let path = root.join(MANIFEST_FILENAME);
     let mut members = members.to_vec();
     members.sort();
@@ -660,6 +840,10 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
                 .as_ref()
                 .map_or_else(|| name.to_string(), |m| m.workspace.name.clone()),
             members,
+            exclude: merge_exclude(
+                existing.as_ref().map_or(&[][..], |m| &m.workspace.exclude),
+                add_exclude,
+            ),
             default: existing.as_ref().and_then(|m| m.workspace.default.clone()),
             autodiscover: existing.as_ref().and_then(|m| m.workspace.autodiscover.clone()),
             // Operator-authored tuning this command does not own, carried
@@ -723,6 +907,19 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
         },
         detail: String::new(),
     })
+}
+
+/// The `exclude` list [`upsert_with_exclude`] writes: `existing` untouched when
+/// `add` brings nothing new, else the sorted, de-duplicated union. Never drops
+/// an entry of `existing`.
+fn merge_exclude(existing: &[String], add: &[String]) -> Vec<String> {
+    if add.iter().all(|g| existing.contains(g)) {
+        return existing.to_vec();
+    }
+    let mut merged: Vec<String> = existing.iter().chain(add).cloned().collect();
+    merged.sort();
+    merged.dedup();
+    merged
 }
 
 // ── The whole-manifest write path (S-430, FR-UI-38) ────────────────────────
@@ -835,7 +1032,7 @@ pub fn read_document(root: &Path) -> Result<ManifestDocument, ConfigError> {
 
 /// Replace the whole manifest at `root` with `candidate` — the write path the
 /// workspace Config editor saves through ([FR-UI-38]), **beside** [`upsert`],
-/// which owns only `members`.
+/// which owns `members` (and the additive `--exclude` globs).
 ///
 /// `loaded_fingerprint` is the [`ManifestDocument::fingerprint`] the editor
 /// loaded. In order, and each step decides before the next one runs:
@@ -1015,9 +1212,56 @@ mod tests {
         assert_eq!(m.workspace.default.as_deref(), Some("api"));
         assert!(m.workspace.autodiscover.expect("present").enabled);
         assert_eq!(m.links.len(), 1);
-        assert_eq!(m.links[0].relation, "http_call");
+        assert_eq!(m.links[0].relation, LinkRelation::HttpCall);
         assert_eq!(m.links[0].from, "web::fetchCart");
         assert_eq!(m.links[0].to, "api::get_cart");
+    }
+
+    /// Each legal `relation` parses to its variant, maps to the relation class an
+    /// evidence edge of that coupling carries, and serializes back as written —
+    /// so `upsert` round-trips a link unchanged ([FR-WS-41]).
+    #[test]
+    fn each_link_relation_parses_maps_and_round_trips() {
+        for (token, relation, class) in [
+            ("http_call", LinkRelation::HttpCall, "route"),
+            ("grpc_call", LinkRelation::GrpcCall, "grpc-call"),
+            ("publishes", LinkRelation::Publishes, "broker-topic"),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let body = format!(
+                "[workspace]\nname = \"a\"\n\n[[links]]\nrelation = \"{token}\"\n\
+                 from = \"web::a\"\nto = \"api::b\"\n"
+            );
+            let m = parse(&write_manifest(&tmp, &body)).expect("a legal relation parses");
+            assert_eq!(m.links[0].relation, relation, "{token}");
+            assert_eq!(relation.namespace().relation(), class, "{token}");
+            let written = toml::to_string(&m).expect("serializes");
+            assert!(
+                written.contains(&format!("relation = \"{token}\"")),
+                "{token} is written back as declared: {written}"
+            );
+        }
+    }
+
+    /// A `relation` outside the vocabulary fails the parse (exit 2), and the
+    /// message names the three legal values — including a near miss one
+    /// character from `http_call` ([FR-WS-41]).
+    #[test]
+    fn a_link_relation_outside_the_vocabulary_is_a_parse_error() {
+        for bad in ["http-call", "calls", "HTTP_CALL", ""] {
+            let tmp = TempDir::new().unwrap();
+            let body = format!(
+                "[workspace]\nname = \"a\"\n\n[[links]]\nrelation = \"{bad}\"\n\
+                 from = \"web::a\"\nto = \"api::b\"\n"
+            );
+            let err = parse(&write_manifest(&tmp, &body)).expect_err("an unknown relation fails loud");
+            assert!(matches!(err, ConfigError::Parse { .. }), "{bad:?}: {err}");
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+            let message = err.to_string();
+            for legal in ["http_call", "grpc_call", "publishes"] {
+                assert!(message.contains(legal), "{bad:?}: the error names `{legal}`: {message}");
+            }
+        }
     }
 
     /// The minimal manifest is just a name: members/default/autodiscover/links
@@ -1119,7 +1363,7 @@ mod tests {
         assert!(m.links.is_empty());
     }
 
-    /// An existing manifest keeps its name/default/autodiscover/links
+    /// An existing manifest keeps its name/default/autodiscover/exclude/links
     /// untouched; only `members` is upserted.
     #[test]
     fn upsert_preserves_hand_written_sections_on_an_existing_manifest() {
@@ -1167,6 +1411,169 @@ mod tests {
 
         let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
         assert_eq!(m.workspace.members, ["api"], "web was pruned");
+    }
+
+    // ── `[workspace] exclude` (S-707, FR-WS-40) ───────────────────────────
+
+    /// The parse table for the key: each row is a manifest body and what
+    /// `parse` makes of it — valid lists, an absent key, and malformed globs
+    /// that must name the key (exit 2). The near misses sit one character from
+    /// valid: an unclosed class `[a`, an unclosed alternation `{a`, and a glob
+    /// that merely contains a bracket pair.
+    #[test]
+    fn exclude_parse_table_valid_absent_and_malformed() {
+        // (body, expected) — Ok(globs) or Err(offending glob).
+        let rows: &[(&str, Result<&[&str], &str>)] = &[
+            ("[workspace]\nname = \"a\"\n", Ok(&[])),
+            ("[workspace]\nname = \"a\"\nexclude = []\n", Ok(&[])),
+            ("[workspace]\nname = \"a\"\nexclude = [\"*-fork\"]\n", Ok(&["*-fork"])),
+            (
+                "[workspace]\nname = \"a\"\nexclude = [\"svc-fork\", \"legacy-*\", \"[ab]-x\"]\n",
+                Ok(&["svc-fork", "legacy-*", "[ab]-x"]),
+            ),
+            ("[workspace]\nname = \"a\"\nexclude = [\"[a\"]\n", Err("[a")),
+            ("[workspace]\nname = \"a\"\nexclude = [\"ok\", \"{a\"]\n", Err("{a")),
+            ("[workspace]\nname = \"a\"\nexclude = [\"../outside\"]\n", Err("../outside")),
+            ("[workspace]\nname = \"a\"\nexclude = [\"/abs\"]\n", Err("/abs")),
+        ];
+        for (body, expected) in rows {
+            let tmp = TempDir::new().unwrap();
+            let path = write_manifest(&tmp, body);
+            match (parse(&path), expected) {
+                (Ok(m), Ok(globs)) => assert_eq!(m.workspace.exclude, *globs, "{body}"),
+                (Err(err), Err(glob)) => {
+                    assert_eq!(err.exit_code(), 2, "{body}");
+                    match &err {
+                        ConfigError::InvalidValue { key, message } => {
+                            assert_eq!(key, EXCLUDE_KEY, "{body}");
+                            assert!(message.contains(glob), "names the glob {glob:?}: {message}");
+                        }
+                        other => panic!("expected InvalidValue naming the key, got {other:?}"),
+                    }
+                    assert!(err.to_string().contains("workspace.exclude"), "{err}");
+                }
+                (got, want) => panic!("{body}: parsed {got:?}, wanted {want:?}"),
+            }
+        }
+    }
+
+    /// A non-array `exclude` is a type error from serde, still exit 2 and still
+    /// naming the key — the editor's save path must refuse it the same way.
+    #[test]
+    fn exclude_of_the_wrong_type_is_a_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, "[workspace]\nname = \"a\"\nexclude = \"svc-fork\"\n");
+        let err = parse(&path).expect_err("a string is not a glob list");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("exclude"), "{err}");
+    }
+
+    /// The matcher is the `--exclude` engine matched against the member name:
+    /// `*` crosses `/`, and the first matching glob in declaration order is the
+    /// one reported. Near misses must not match.
+    #[test]
+    fn exclude_set_matches_member_names_with_the_flag_engine() {
+        let set = ExcludeSet::compile(&["*-fork".to_string(), "legacy/**".to_string()]).unwrap();
+        assert_eq!(set.first_match("svc-fork"), Some("*-fork"));
+        assert_eq!(set.first_match("services/svc-fork"), Some("*-fork"), "* crosses /");
+        assert_eq!(set.first_match("legacy/billing"), Some("legacy/**"));
+        assert_eq!(set.first_match("svc-forked"), None, "a suffix glob is not a prefix match");
+        assert_eq!(set.first_match("fork"), None);
+        assert_eq!(set.first_match("legacy"), None, "`legacy/**` needs a child");
+        assert!(ExcludeSet::compile(&[]).unwrap().is_empty());
+    }
+
+    /// A manifest without `exclude` round-trips byte-identically through
+    /// `upsert`: the key is never written, and a re-run is `Unchanged`.
+    #[test]
+    fn a_manifest_without_exclude_round_trips_byte_identically_through_upsert() {
+        let tmp = TempDir::new().unwrap();
+        upsert(tmp.path(), "shop", &["api".into(), "web".into()]).unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(!before.contains("exclude"), "an absent key is never written:\n{before}");
+
+        let step = upsert(tmp.path(), "shop", &["api".into(), "web".into()]).unwrap();
+        assert_eq!(step.action, InitAction::Unchanged);
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        // The explicit empty `add` of the new entry point is the same thing.
+        let step = upsert_with_exclude(tmp.path(), "shop", &["api".into(), "web".into()], &[]).unwrap();
+        assert_eq!(step.action, InitAction::Unchanged);
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// An existing `exclude` survives an `upsert` that adds none — verbatim, in
+    /// the order the operator wrote it — and a second run is `Unchanged`.
+    #[test]
+    fn upsert_carries_an_existing_exclude_across_verbatim() {
+        let tmp = TempDir::new().unwrap();
+        // Written in upsert's own canonical shape so the second run is a no-op.
+        let seeded = toml::to_string_pretty(&Manifest {
+            workspace: WorkspaceSection {
+                name: "shop".into(),
+                members: vec!["api".into()],
+                exclude: vec!["zeta-*".into(), "*-fork".into()],
+                default: None,
+                autodiscover: None,
+                warm: None,
+                member: BTreeMap::new(),
+            },
+            links: Vec::new(),
+            governance: Governance::default(),
+        })
+        .unwrap();
+        write_manifest(&tmp, &seeded);
+
+        let step = upsert(tmp.path(), "shop", &["api".into()]).unwrap();
+        assert_eq!(step.action, InitAction::Unchanged, "no write, no reorder");
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(m.workspace.exclude, ["zeta-*", "*-fork"], "operator order kept");
+
+        // A member change rewrites the file but still carries the list.
+        upsert(tmp.path(), "shop", &["api".into(), "web".into()]).unwrap();
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(m.workspace.exclude, ["zeta-*", "*-fork"]);
+    }
+
+    /// `--exclude` globs are added sorted and de-duplicated, and no existing
+    /// glob is ever removed by a later run.
+    #[test]
+    fn upsert_with_exclude_adds_sorted_deduplicated_and_never_removes() {
+        let tmp = TempDir::new().unwrap();
+        let step = upsert_with_exclude(
+            tmp.path(),
+            "shop",
+            &["api".into()],
+            &["svc-fork".into(), "legacy-*".into(), "svc-fork".into()],
+        )
+        .unwrap();
+        assert_eq!(step.action, InitAction::Created);
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        assert_eq!(parse(&path).unwrap().workspace.exclude, ["legacy-*", "svc-fork"]);
+
+        // A later run adds one more; the earlier two stay.
+        upsert_with_exclude(tmp.path(), "shop", &["api".into()], &["a-*".into()]).unwrap();
+        assert_eq!(parse(&path).unwrap().workspace.exclude, ["a-*", "legacy-*", "svc-fork"]);
+
+        // A run that repeats a known glob changes nothing; one with no flag
+        // removes nothing.
+        let step = upsert_with_exclude(tmp.path(), "shop", &["api".into()], &["svc-fork".into()]).unwrap();
+        assert_eq!(step.action, InitAction::Unchanged);
+        upsert(tmp.path(), "shop", &["api".into()]).unwrap();
+        assert_eq!(parse(&path).unwrap().workspace.exclude, ["a-*", "legacy-*", "svc-fork"]);
+    }
+
+    /// A malformed `--exclude` glob is refused before anything is written, so
+    /// `upsert` can never produce a manifest its own `parse` rejects.
+    #[test]
+    fn upsert_with_exclude_refuses_a_malformed_glob_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let err = upsert_with_exclude(tmp.path(), "shop", &["api".into()], &["[a".into()])
+            .expect_err("malformed");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("workspace.exclude"), "{err}");
+        assert!(!tmp.path().join(MANIFEST_FILENAME).exists(), "nothing written");
     }
 
     // ── the `[governance]` workspace rule family (S-258, FR-WS-13) ────────

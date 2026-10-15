@@ -555,12 +555,31 @@ fn adapter_lines() -> usize {
 /// | | **−3** |
 ///
 /// [FR-DS-05]: ../../docs/specs/requirements/FR-DS-05.md
+///
+/// **S-711 936→996** for `--repo` on the CLI twins of the read-only MCP tools
+/// ([FR-WS-42], [CR-225]): measured 933→994 (+61: `lib.rs` +57, `dispatch.rs` +4),
+/// 2 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `federation` import (1), `MemberArg`, the one `--repo` definition (5), and its `#[command(flatten)] member` field on the 17 commands that take it (15 added lines: `status` and `coverage status` become struct variants in place) | **+21** |
+/// | `lib.rs`: `Output::query_for` (10) / `try_query_for` (10) / `report_gate_for` (13), the selecting twins of the three chokepoints, and `member_engine` (3) | **+36** |
+/// | `dispatch.rs`: each twin's arm binds `member` and calls the `_for` chokepoint (one arm gains lines for the longer pattern) | **+4** |
+/// | | **+61** |
+///
+/// Routing, not logic: the selection and its errors are `Backing::one_shot` and
+/// `Backing::engine_for` in `logos_core::federation` — the same function the MCP
+/// `repo` parameter runs — and the exit code is `logos_core::error::exit_code`'s.
+/// What is left here is the flag, and the choice of chokepoint per command.
+///
+/// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
+/// [CR-225]: ../../docs/requests/CR-225-per-member-single-root-tools.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 936,
-        "cli adapter exceeds the 936 production-LOC budget (NFR-MA-02): \
+        lines <= 996,
+        "cli adapter exceeds the 996 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

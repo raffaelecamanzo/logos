@@ -266,6 +266,28 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | the module doc: the core roster is 25, and the extensions' tools join it through the host | **+2** |
 /// | | **−83** |
 ///
+/// **S-710/[CR-225] 1023→1151** for the read-only tools' `repo` ([FR-WS-42]):
+/// measured 1020→1148 (+128), 3 lines of headroom. No selection logic entered the
+/// surface — the member choice, its error contract and the `member` stamp are
+/// `logos_core::federation::Backing::engine_for` / `MemberAnswer`; what grew is
+/// wire schema, the one call that hands the core the `repo`, and their docs.
+/// The rows are attributed by hand; the total is the measurement.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `repo` on twelve read-only parameter structs (doc + field) | **+24** |
+/// | the new `RepoParams` for `status`/`health`/`coverage_status`, and those three taking it | **+11** |
+/// | `LogosMcp::over` (the backing-kind constructor; `new`/`federated` now delegate to it) and its doc | **+13** |
+/// | `run`/`run_result` take `repo`, `run_result` selects and stamps, and its doc | **+12** |
+/// | `run_blocking` maps a caller's selection mistake to `invalid_params`, and its doc | **+5** |
+/// | `extension_route` takes a read-only tool's `repo`, and its doc | **+7** |
+/// | module, struct and router comments naming the read-only/default-member split | **+7** |
+/// | `lib.rs`: `serve_stdio_on` serves the discovered backing, its doc and imports | **+6** |
+/// | review fix: the nine write/gate tools refuse a `repo` (`DefaultMemberParams`, the captured field on `ReconcileParams`/`CoverageIngestParams`, `default_member_only`, one call per tool) | **+43** |
+/// | | **+128** |
+///
+/// [CR-225]: ../../docs/requests/CR-225-per-member-single-root-tools.md
+/// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
 /// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
 /// [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
 /// [CR-152]: ../../docs/requests/CR-152-cross-member-type-references-overlay.md
@@ -281,8 +303,8 @@ fn mcp_surface_line_budget() {
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1023,
-        "mcp adapter exceeds the 1023 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1151,
+        "mcp adapter exceeds the 1151 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

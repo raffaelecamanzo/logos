@@ -77,7 +77,7 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
     // has `root == "."`, whose `file_name()` is `None` — canonicalising
     // resolves it to the real directory name. This name is written verbatim
     // into a fresh manifest and preserved on every re-run
-    // (`federation::manifest::upsert`), so getting it right here matters once.
+    // (`federation::manifest::upsert_with_exclude`), so getting it right here matters once.
     let default_name = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.clone())
@@ -91,13 +91,14 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
     // resolved the member set. `None` on a first run is correct rather than a
     // gap — a manifest that does not exist yet declares no override, and the
     // one this command writes never invents the table.
-    let (name, already, declared_k) = match existing {
-        Some(f) => (f.name, f.members, f.warm_concurrency),
-        None => (default_name, Vec::new(), None),
+    let (name, already, declared_k, persisted_exclude) = match existing {
+        Some(f) => (f.name, f.members, f.warm_concurrency, f.exclusion.globs),
+        None => (default_name, Vec::new(), None, Vec::new()),
     };
-    let already_names: Vec<String> = already.iter().map(|m| m.name.clone()).collect();
-
-    let proposed = enable::candidates_for_approval(&workspace_root, &already_names, exclude)?;
+    // The manifest's persisted `[workspace] exclude` is honoured whether or not
+    // this run repeats `--exclude` (FR-WS-40): a scripted `init --workspace
+    // --yes` must not bring an excluded directory back, nor pin one.
+    let (already, proposed) = enable::plan_members(&workspace_root, already, &persisted_exclude, exclude)?;
     let approved_new = gate(&proposed, yes, |m| {
         ask(
             &format!(
@@ -145,7 +146,7 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
         return Ok(0);
     }
 
-    let mut report = enable::enable(&workspace_root, &name, &members)?;
+    let mut report = enable::enable(&workspace_root, &name, &members, exclude)?;
     // ONE call with the whole delta — never a per-member loop, which is the
     // exact shape this story replaced. Injected (like `gate`'s `approve`) so a
     // test can assert the call count and the slice it received. Its return

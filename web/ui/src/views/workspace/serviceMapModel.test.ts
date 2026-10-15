@@ -7,12 +7,16 @@ import type {
   ConfigValueRefusal,
   MemberTopics,
   ValueProvenance,
+  WorkspaceLink,
   WorkspaceStatus,
   XserviceBuildDeps,
 } from "../../api/types.ts";
+import { degreeMap, edgeStyle, EDGE_COLOR } from "../graph/graphModel.ts";
 import { BOUND_EXTERNAL, DECLARED_CONTRACTS } from "../../workspace/testFixtures.ts";
 import { ARM_LABEL } from "./coverageModel.ts";
 import {
+  ASSERTED_EDGE_TYPE,
+  assertedLayer,
   BUILD_EDGE_TYPE,
   buildLayer,
   buildServiceMap,
@@ -1137,5 +1141,78 @@ describe("groupEvidence (S-614, FR-UI-42, NFR-CC-04)", () => {
       ["a.second", 2],
     ]);
     expect(groupEvidence([])).toEqual([]);
+  });
+});
+
+// ── The asserted layer (S-709, FR-WS-41, BR-75) ──────────────────────────────
+
+describe("assertedLayer (S-709)", () => {
+  const edge = (from: string, to: string, relation = "route"): BridgeEdge => ({
+    relation,
+    from: { member: from, symbol: `local ${from}_call` },
+    to: { member: to, symbol: `local ${to}_handler` },
+    intake: "asserted",
+    from_value: { provenance: "literal" },
+    to_value: { provenance: "literal" },
+  });
+  const valid = (from: string, to: string, relation = "route"): WorkspaceLink => ({
+    relation: "http_call",
+    from: `${from}::${from}_call`,
+    to: `${to}::${to}_handler`,
+    status: "valid",
+    edge: edge(from, to, relation),
+  });
+  const roster = [member("api"), member("web"), member("billing")];
+
+  it("is null without a valid link, so the map renders as before", () => {
+    expect(assertedLayer(undefined, roster)).toBeNull();
+    expect(assertedLayer([], roster)).toBeNull();
+    const redundant: WorkspaceLink = {
+      relation: "http_call",
+      from: "web::web_call",
+      to: "api::api_handler",
+      status: "redundant",
+      duplicates: { ...edge("web", "api"), intake: "invocation" },
+    };
+    const invalid: WorkspaceLink = {
+      relation: "http_call",
+      from: "web::web_call",
+      to: "api::gone",
+      status: "invalid",
+      reason: "no-match",
+      endpoint: "to",
+      detail: "no match",
+    };
+    expect(assertedLayer([redundant, invalid], roster)).toBeNull();
+  });
+
+  it("draws one dashed asserted-link edge per member pair, in its own hue", () => {
+    const layer = assertedLayer(
+      [valid("web", "api"), valid("web", "api", "grpc-call"), valid("billing", "api")],
+      roster,
+    )!;
+    expect(layer.edges).toEqual([
+      { source: serviceId("billing"), target: serviceId("api"), edge_type: ASSERTED_EDGE_TYPE },
+      { source: serviceId("web"), target: serviceId("api"), edge_type: ASSERTED_EDGE_TYPE },
+    ]);
+    expect(layer.links.map((l) => [l.from, l.to, l.relations, l.declared.length])).toEqual([
+      ["billing", "api", ["route"], 1],
+      ["web", "api", ["grpc-call", "route"], 2],
+    ]);
+    expect(edgeStyle(ASSERTED_EDGE_TYPE)).toBe("dashed");
+    // A hue no measured arm and no other layer uses.
+    const others = Object.entries(EDGE_COLOR).filter(([type]) => type !== ASSERTED_EDGE_TYPE);
+    expect(others.map(([, hue]) => hue)).not.toContain(EDGE_COLOR[ASSERTED_EDGE_TYPE]);
+  });
+
+  it("drops a link whose end is not a roster service, as an unknown binding is", () => {
+    expect(assertedLayer([valid("web", "ghost")], roster)).toBeNull();
+    expect(assertedLayer([valid("ghost", "api")], roster), "a non-roster consumer end too").toBeNull();
+  });
+
+  it("is never counted in a node's coupling degree: a claim is not a coupling", () => {
+    const layer = assertedLayer([valid("web", "api")], roster)!;
+    const visible = new Set([serviceId("web"), serviceId("api")]);
+    expect(degreeMap({ nodes: {}, edges: layer.edges }, visible)).toEqual({});
   });
 });

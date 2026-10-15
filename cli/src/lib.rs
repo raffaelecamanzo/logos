@@ -26,6 +26,7 @@ use anyhow::Result;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use logos_core::{
     error::{self, CoreError},
+    federation::{Backing, SelectedEngine},
     governance::DsmGranularity,
     init::{InitContribution, InitOptions},
     model::NodeKind,
@@ -72,6 +73,23 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+/// `--repo`, the CLI twin of the MCP `repo` parameter ([FR-WS-42], [CR-225]).
+///
+/// Flattened into exactly the commands whose MCP twins take `repo` — the
+/// read-only single-member reads; the write and gate commands act on the
+/// repository they run in and never carry it. One definition, so the flag, its
+/// help and its error contract read the same on every command.
+///
+/// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
+/// [CR-225]: ../../docs/requests/CR-225-per-member-single-root-tools.md
+#[derive(clap::Args, Clone, Default)]
+pub(crate) struct MemberArg {
+    /// Answer for this workspace member (the answer then carries `member`). Under
+    /// a workspace root the default member answers without it.
+    #[arg(long, value_name = "MEMBER")]
+    repo: Option<String>,
 }
 
 // ── Subcommands (FR-CL-01) ─────────────────────────────────────────────────
@@ -131,7 +149,7 @@ pub(crate) enum Commands {
         paths: Vec<PathBuf>,
     },
     /// Show the current index and sync health.
-    Status,
+    Status { #[command(flatten)] member: MemberArg },
     /// Full-text search over the code graph.
     Search {
         /// Search query string.
@@ -142,6 +160,7 @@ pub(crate) enum Commands {
         /// Maximum number of results (default 20).
         #[arg(long)]
         limit: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Query a symbol — a façade over search/callers/callees (FR-CL-05).
     Query {
@@ -159,6 +178,7 @@ pub(crate) enum Commands {
         /// Maximum number of results.
         #[arg(long)]
         limit: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Deterministic context bundle for a task (the token-saving tool).
     Context {
@@ -171,6 +191,7 @@ pub(crate) enum Commands {
         /// Omit declaration source from the bundle.
         #[arg(long)]
         no_code: bool,
+        #[command(flatten)] member: MemberArg,
     },
     /// Explore a symbol's neighbourhood, source grouped by file.
     Explore {
@@ -179,6 +200,7 @@ pub(crate) enum Commands {
         /// Cap the file groups returned (default 10).
         #[arg(long)]
         max_files: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Full info for one symbol: metadata, edges, optional code.
     Node {
@@ -187,6 +209,7 @@ pub(crate) enum Commands {
         /// Include the declaration source.
         #[arg(long)]
         code: bool,
+        #[command(flatten)] member: MemberArg,
     },
     /// Direct callers of a symbol.
     Callers {
@@ -195,6 +218,7 @@ pub(crate) enum Commands {
         /// Maximum number of results (default 50).
         #[arg(long)]
         limit: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Direct callees of a symbol.
     Callees {
@@ -203,6 +227,7 @@ pub(crate) enum Commands {
         /// Maximum number of results (default 50).
         #[arg(long)]
         limit: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Transitive impact of changing a symbol, both directions labeled.
     Impact {
@@ -211,6 +236,7 @@ pub(crate) enum Commands {
         /// Traversal depth bound (default 3).
         #[arg(long)]
         depth: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Which planned work items collide, and on what (FR-NV-11): given work
     /// items each naming the symbols it intends to change, the pairs whose
@@ -226,6 +252,7 @@ pub(crate) enum Commands {
         /// Traversal depth bound for every impact set (default 3).
         #[arg(long)]
         depth: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Structurally analogous code — the sibling that already does this
     /// (FR-NV-12): nodes sharing a supertype, a registration, or a call shape
@@ -237,6 +264,7 @@ pub(crate) enum Commands {
         /// Maximum number of precedents (default 20, capped at 100).
         #[arg(long)]
         limit: Option<usize>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Which git refs collide, and what a merge did not carry (FR-NV-13):
     /// given the refs about to be merged, the symbols more than one of them
@@ -254,6 +282,7 @@ pub(crate) enum Commands {
         /// A stated merge result to check the refs' work against.
         #[arg(long)]
         merge: Option<String>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Files affected by a changed set — whole reverse-transitive closure.
     Affected {
@@ -337,6 +366,7 @@ pub(crate) enum Commands {
         /// Skip the pre-evaluation reconcile (FR-RC-04).
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
+        #[command(flatten)] member: MemberArg,
     },
     /// Begin a quality session (FR-GV-04): record the baseline BEFORE edits —
     /// the CLI half of the session gate the MCP instructions call mandatory.
@@ -358,6 +388,7 @@ pub(crate) enum Commands {
         /// Snapshot window size (default 30).
         #[arg(long)]
         limit: Option<u32>,
+        #[command(flatten)] member: MemberArg,
     },
     /// Dependency structure matrix (module rollup by default).
     Dsm {
@@ -368,6 +399,7 @@ pub(crate) enum Commands {
         /// Skip the pre-evaluation reconcile (FR-RC-04).
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
+        #[command(flatten)] member: MemberArg,
     },
     /// Undocumented exported functions (static doc-gap analysis, FR-GV-14).
     #[command(name = "doc-gaps", alias = "doc_gaps")]
@@ -393,6 +425,7 @@ pub(crate) enum Commands {
         /// ranking (CR-076); default off — the whole-repo board is unchanged.
         #[arg(long)]
         production_scope: bool,
+        #[command(flatten)] member: MemberArg,
     },
     /// Coverage evidence tier: ingest external reports and read freshness-checked
     /// status (the non-gated coverage tier — never moves the gate, BR-28).
@@ -471,7 +504,7 @@ pub(crate) enum CoverageCommands {
         format: Option<String>,
     },
     /// Per-file coverage freshness + the overall fraction (FR-CV-05/06).
-    Status,
+    Status { #[command(flatten)] member: MemberArg },
     /// Run the configured `[coverage_ingest].refresh_cmd` and ingest its output
     /// (FR-CV-10). The lone explicit coverage subprocess — never on the serve
     /// path (ADR-38). Errors if no `refresh_cmd` is configured.
@@ -740,6 +773,16 @@ pub(crate) fn engine(root: &Path, bootstrap: bool) -> Result<Engine> {
     }
 }
 
+/// The engine a `--repo`-taking command answers from: [`Backing::one_shot`],
+/// with [`engine`]'s index guard for the repository it runs in — the selection
+/// path and the errors of the MCP `repo` parameter ([FR-WS-42], [CR-225]).
+///
+/// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
+/// [CR-225]: ../../docs/requests/CR-225-per-member-single-root-tools.md
+fn member_engine(root: &Path, member: &MemberArg) -> Result<SelectedEngine<Engine>> {
+    Backing::one_shot(root, member.repo.as_deref(), logos_ext::cli::require_index, || engine(root, false))
+}
+
 /// Resolve which init steps run (S-023, FR-IN-02/03, FR-IN-07) — pure surface
 /// UX, the step logic itself lives in the core. `-i` enables the
 /// host-integration steps, prompting per step on a TTY; non-TTY takes the safe
@@ -832,6 +875,48 @@ impl Output {
     ) -> Result<i32> {
         self.print(&f(&engine(root, false)?)?)?;
         Ok(0)
+    }
+
+    /// [`Output::query`] for a command whose MCP twin takes `repo`: the engine is
+    /// the one [`member_engine`] selects, and under a workspace the answer carries
+    /// the `member` it came from — a payload with none is serialised as before.
+    pub(crate) fn query_for<T: serde::Serialize>(
+        &self,
+        root: &Path,
+        member: &MemberArg,
+        f: impl FnOnce(&Engine) -> T,
+    ) -> Result<i32> {
+        let selected = member_engine(root, member)?;
+        self.print(&selected.answer(f(&selected.engine)))?;
+        Ok(0)
+    }
+
+    /// [`Output::try_query`] for a command whose MCP twin takes `repo`.
+    pub(crate) fn try_query_for<T: serde::Serialize>(
+        &self,
+        root: &Path,
+        member: &MemberArg,
+        f: impl FnOnce(&Engine) -> Result<T>,
+    ) -> Result<i32> {
+        let selected = member_engine(root, member)?;
+        self.print(&selected.answer(f(&selected.engine)?))?;
+        Ok(0)
+    }
+
+    /// [`Output::report_gate`] for `health`, the one verdict command whose MCP twin
+    /// takes `repo`: the exit code follows the selected member's verdict.
+    pub(crate) fn report_gate_for<T: serde::Serialize>(
+        &self,
+        root: &Path,
+        member: &MemberArg,
+        f: impl FnOnce(&Engine) -> Result<T>,
+        passed: impl FnOnce(&T) -> bool,
+    ) -> Result<i32> {
+        let selected = member_engine(root, member)?;
+        let report = f(&selected.engine)?;
+        let ok = passed(&report);
+        self.print(&selected.answer(report))?;
+        Ok(violation_code(ok))
     }
 
     /// Chokepoint for the governance verdict commands (`check`/`gate`/`doctor`/
@@ -1296,6 +1381,7 @@ mod surface_parity {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         };
         LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy), &composition::host())
             .list_tools()
@@ -1478,6 +1564,57 @@ mod surface_parity {
                  --json (FR-CL-02)"
             );
         }
+    }
+
+    /// A tool takes `repo` exactly when its CLI twin takes `--repo` ([FR-WS-42]):
+    /// a human and an agent ask the same per-member question the same way.
+    ///
+    /// Read off the real router and the real clap tree, over every twin in
+    /// [`MCP_SURFACE`] — not off the two hand-kept lists the MCP and CLI suites
+    /// each pin (`MEMBER_SELECTABLE_TOOLS`, `TWINS`), which agree only by
+    /// convention. Moving a tool to the default-member set on one surface alone
+    /// (dropping `repo` from its schema and re-recording the snapshot) fails here.
+    ///
+    /// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
+    #[test]
+    fn a_tool_takes_repo_exactly_when_its_cli_twin_takes_repo() {
+        let federation = Federation {
+            name: "w".to_string(),
+            root: "/ws".into(),
+            members: Vec::new(),
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: Default::default(),
+            exclusion: Default::default(),
+        };
+        let takes_repo: BTreeMap<String, bool> =
+            LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy), &composition::host())
+                .list_tools()
+                .iter()
+                .map(|tool| (tool.name.to_string(), tool.input_schema.get("properties").and_then(|p| p.get("repo")).is_some()))
+                .collect();
+        let mut root = shipped_command();
+        root.build();
+
+        let mut mismatched = Vec::new();
+        for (tool, reach) in MCP_SURFACE {
+            let Twin(path) = reach else { continue };
+            let mut cmd = &root;
+            for segment in path.split(' ') {
+                cmd = cmd
+                    .find_subcommand(segment)
+                    .unwrap_or_else(|| panic!("`logos {path}` resolves ({segment} missing)"));
+            }
+            let cli = cmd.get_arguments().any(|arg| arg.get_long() == Some("repo"));
+            let mcp = takes_repo[*tool];
+            if cli != mcp {
+                mismatched.push(format!("{tool} (repo: {mcp}) / logos {path} (--repo: {cli})"));
+            }
+        }
+        assert!(mismatched.is_empty(), "repo and --repo disagree: {mismatched:?}");
+        assert!(takes_repo["node"], "the relation is not vacuous: `node` takes `repo`");
     }
 
     /// The managed `CLAUDE.md` block's CLI-twin sentence names exactly the

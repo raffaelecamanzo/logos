@@ -274,6 +274,7 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
         match row.intake {
             BridgeIntake::ContractSurface => by_row.0 += 1,
             BridgeIntake::Invocation => by_row.1 += 1,
+            BridgeIntake::Asserted => panic!("a coverage row is never asserted: {row:?}"),
         }
     }
     let cs_total = cs.bound + cs.ambiguous + cs.unbound + cs.no_provider_in_workspace;

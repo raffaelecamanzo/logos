@@ -200,6 +200,7 @@ export function status(
   topics: MemberTopics[] = NO_TOPICS,
   degradedRollup?: WorkspaceStatus["degraded_rollup"],
   buildDependency?: BuildDependencyHeadline,
+  links?: WorkspaceStatus["links"],
 ): WorkspaceStatus {
   return {
     workspace: "shop",
@@ -235,6 +236,8 @@ export function status(
     // (S-463), and a fixture carrying it by default would let a view that cannot
     // cope with its absence pass.
     ...(buildDependency ? { build_dependency: buildDependency } : {}),
+    // Likewise only when given: the server omits `links` without `[[links]]`.
+    ...(links ? { links } : {}),
   };
 }
 
@@ -260,6 +263,9 @@ export interface StubOptions {
   /** Answer `workspace/build-deps` with this HTTP status instead of `buildDeps`
    *  (a failed read), or `"pending"` to never answer it (a read in flight). */
   buildDepsStatus?: number | "pending";
+  /** The status payload's `[[links]]` rows (S-709); absent by default, as over
+   *  a manifest declaring no link. */
+  links?: WorkspaceStatus["links"];
 }
 
 /**
@@ -278,6 +284,7 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
     buildDependency,
     buildDeps,
     buildDepsStatus,
+    links,
   } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -291,7 +298,7 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
         return json(ROSTER, probeStatus === 200, probeStatus);
       }
       if (url.startsWith("/api/v1/workspace/status"))
-        return json(status(coverage, topics, degradedRollup, buildDependency));
+        return json(status(coverage, topics, degradedRollup, buildDependency, links));
       if (url.startsWith("/api/v1/workspace/route-providers")) return json({ providers });
       if (url.startsWith("/api/v1/workspace/build-deps")) {
         if (buildDepsStatus === "pending") return new Promise<Response>(() => {});

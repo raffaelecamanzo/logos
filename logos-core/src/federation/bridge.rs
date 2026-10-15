@@ -90,6 +90,7 @@ use crate::resolve::route_template::route_key;
 pub(super) use crate::model::BridgeRole as Role;
 
 use super::registry::{AnswerScope, EngineRegistry, MemberEngine, MemberReads};
+use super::links::LinkStatus;
 use super::residue::{egress_residue, WorkspaceEgressResidue};
 
 /// One cross-service endpoint: the portable `(member, symbol)` identity of a
@@ -145,6 +146,14 @@ pub enum BridgeIntake {
     /// Drawn on the service map and carried by the contract bridge, but never a
     /// reachability live root ([CR-083]).
     ContractSurface,
+    /// A user-asserted edge — one valid `[[links]]` entry ([FR-WS-41]). A
+    /// **claim, not evidence** ([BR-75]): built by [`super::links`] outside the
+    /// exactly-one matcher, never counted in a figure defined over evidence, and
+    /// never a reachability root under the evidence verdict.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    Asserted,
 }
 
 impl BridgeIntake {
@@ -153,6 +162,25 @@ impl BridgeIntake {
     /// ([FR-WS-12], [CR-083]).
     pub fn seeds_reachability_root(self) -> bool {
         matches!(self, BridgeIntake::Invocation)
+    }
+
+    /// `true` for the intakes the bridge **measured** — an invocation or a
+    /// contract-surface match — and `false` for an [`Asserted`](Self::Asserted)
+    /// claim ([BR-75], [FR-WS-41]).
+    ///
+    /// The predicate every consumer that switches on intake asks before counting
+    /// an edge or a row as evidence. A wildcard-free `match` on purpose: a new
+    /// intake does not compile until it is classified here, so no variant can
+    /// default into the evidence figures unexamined.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[must_use]
+    pub const fn is_evidence(self) -> bool {
+        match self {
+            BridgeIntake::Invocation | BridgeIntake::ContractSurface => true,
+            BridgeIntake::Asserted => false,
+        }
     }
 }
 
@@ -486,6 +514,54 @@ pub trait MemberContracts {
     fn type_facts(&self) -> Result<Option<super::type_refs::MemberTypeFacts>> {
         Ok(Some(super::type_refs::MemberTypeFacts::default()))
     }
+
+    /// Resolve a `[[links]]` endpoint's `target` through this member's own
+    /// navigation lookup — the canonical symbols it names ([FR-WS-41]).
+    ///
+    /// The rule the navigation tools resolve by, without their tie-break and
+    /// restricted to nodes that can be a link endpoint
+    /// ([`super::links::is_link_endpoint`]): an exact canonical-symbol hit is that
+    /// one symbol; otherwise every node whose name is `target`. Every match is
+    /// returned, so the caller can hold the link to exactly one and list the rest
+    /// when it is not. Empty when nothing matches.
+    ///
+    /// The default is **empty** — a lightweight test double resolves nothing,
+    /// which reads as `no-match`, never as a guess.
+    ///
+    /// # Errors
+    /// Propagates a read failure, which the caller reports as the member being
+    /// degraded rather than as a target that does not exist ([ADR-53]).
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    fn resolve_target(&self, target: &str) -> Result<Vec<LogosSymbol>> {
+        let _ = target;
+        Ok(Vec::new())
+    }
+
+    /// The nodes that are **one endpoint** with `symbol` because a route serves
+    /// through them: the handler(s) a `Route` node `symbol` routes to, or the
+    /// `Route` node(s) routing to a handler `symbol` — each read off this
+    /// member's `RoutesTo` edges, the dispatch pass's self-loop marker excluded
+    /// ([FR-WS-41]). `symbol` itself is not listed. Empty when `symbol` names no
+    /// node, or neither serves nor is served.
+    ///
+    /// The store half of `[[links]]` redundancy: a measured HTTP edge ends at the
+    /// route, and a link naming the handler behind it duplicates that edge.
+    ///
+    /// The default is **empty** — a test double states no route, so redundancy
+    /// stays node-for-node unless the double says otherwise.
+    ///
+    /// # Errors
+    /// Propagates a read failure, which the caller reports as the member being
+    /// degraded ([ADR-53]).
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    fn route_counterparts(&self, symbol: &LogosSymbol) -> Result<Vec<LogosSymbol>> {
+        let _ = symbol;
+        Ok(Vec::new())
+    }
 }
 
 impl MemberContracts for crate::Engine {
@@ -601,6 +677,64 @@ impl MemberContracts for crate::Engine {
                     out.insert(key, defs);
                 }
             }
+            Ok(out)
+        })
+    }
+
+    fn resolve_target(&self, target: &str) -> Result<Vec<LogosSymbol>> {
+        let runtime = self.runtime().context(
+            "resolving a link endpoint requires a long-lived engine (Engine::start) \
+             with a read-only pool",
+        )?;
+        let target = target.to_string();
+        let endpoint = |row: &NodeRow| super::links::is_link_endpoint(row.kind);
+        runtime.submit_read(move |store| {
+            if let Some(row) = store.node_by_symbol(&target)? {
+                return Ok(endpoint(&row).then_some(row.symbol).into_iter().collect());
+            }
+            Ok(store
+                .nodes_by_name(&target)?
+                .into_iter()
+                .filter(endpoint)
+                .map(|row| row.symbol)
+                .collect())
+        })
+    }
+
+    fn route_counterparts(&self, symbol: &LogosSymbol) -> Result<Vec<LogosSymbol>> {
+        let runtime = self.runtime().context(
+            "reading a link endpoint's route requires a long-lived engine (Engine::start) \
+             with a read-only pool",
+        )?;
+        let symbol = symbol.as_str().to_string();
+        runtime.submit_read(move |store| {
+            let Some(node) = store.node_by_symbol(&symbol)? else {
+                return Ok(Vec::new());
+            };
+            let mut out = Vec::new();
+            // A route's handlers, out of it; a handler's routes, into it. The
+            // dispatch pass's self-`RoutesTo` marker joins a node to itself and
+            // is no counterpart.
+            if node.kind == NodeKind::Route {
+                out.extend(
+                    store
+                        .neighbours_out(node.id)?
+                        .into_iter()
+                        .filter(|(kind, handler)| *kind == EdgeKind::RoutesTo && handler.id != node.id)
+                        .map(|(_, handler)| handler.symbol),
+                );
+            }
+            out.extend(
+                store
+                    .neighbours_in(node.id)?
+                    .into_iter()
+                    .filter(|(kind, route)| {
+                        *kind == EdgeKind::RoutesTo && route.kind == NodeKind::Route && route.id != node.id
+                    })
+                    .map(|(_, route)| route.symbol),
+            );
+            out.sort();
+            out.dedup();
             Ok(out)
         })
     }
@@ -1430,26 +1564,39 @@ where
 /// ([FR-WS-04], [ADR-52]).
 ///
 /// Holds the derived read-models keyed on member sync-stamps — the edge set
-/// ([`edges`](Self::edges)) and the unresolved egress residue
-/// ([`residue`](Self::residue), [CR-125]); the member set it reads is supplied
+/// ([`edges`](Self::edges)), the unresolved egress residue ([CR-125]) and the
+/// declared `[[links]]` judged against those edges ([FR-WS-41]); the member set it reads is supplied
 /// per call as an [`EngineRegistry`], so one bridge tracks one workspace's
 /// registry. Shareable behind an [`Arc`]: each interior cache is a [`Mutex`], so
 /// the serve surface and concurrent callers see one bridge.
 ///
-/// The two caches are **separate slots**, so an `xservice search` or
-/// `route-providers` call pays only for the edges and never for a residue it
-/// will not render ([NFR-PE-01]). They are nonetheless filled through **one**
-/// entry point on the reachability path ([`reachability_read`](Self::reachability_read)),
-/// keyed on one stamp snapshot, because two independent snapshots can straddle a
-/// member re-sync and make the answer contradict its own residue.
+/// The caches are **three separate slots**, so an `xservice search` or
+/// `route-providers` call pays only for the edges and never for a residue or a
+/// link judgement it will not render ([NFR-PE-01]). They are nonetheless filled
+/// through single-snapshot entry points — [`reachability_read`](Self::reachability_read)
+/// (all three) and [`edges_and_links`](Self::edges_and_links) (edges and links) —
+/// each keyed on one stamp snapshot, because two independent snapshots can
+/// straddle a member re-sync and make the answer contradict its own residue.
 ///
-/// # A deliberate upward dependency, recorded rather than incurred silently
+/// The link slot holds the declared `[[links]]` judged against the cached
+/// evidence edges ([FR-WS-41]) — what `callers`, `impact` and app-wide
+/// reachability read their asserted edges from. A member re-sync advances its
+/// stamp and misses it, so a renamed link target is re-judged on the next
+/// answer. A workspace declaring no link fills it with nothing and reads
+/// nothing for it.
+///
+/// # Deliberate upward dependencies, recorded rather than incurred silently
 /// Holding the residue slot means this module names [`WorkspaceEgressResidue`],
-/// a read-model defined above it — the first edge from the bridge back up into
-/// the derived modules. It is taken knowingly: the alternative is a second cache
-/// owner beside the bridge, and then nothing could key the two read-models on
-/// one snapshot, which is the guarantee above. The `super::residue` import is
-/// the whole of the coupling; no derived logic lives here.
+/// a read-model defined above it; the link slot names [`LinkStatus`] the same
+/// way. Both are taken knowingly: the alternative is a second cache owner beside
+/// the bridge, and then nothing could key the read-models on one snapshot, which
+/// is the guarantee above. Each slot names its read-model's type and delegates
+/// the computation to it — [`egress_residue`], `links::links_over` — so no
+/// derived logic lives here. (They are not the bridge's only references up into
+/// its siblings: the reachability surface, topics and type facts are read by
+/// path too.)
+///
+/// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
@@ -1459,6 +1606,7 @@ where
 pub struct ContractBridge {
     edge_cache: StampCache<EdgeSnapshot>,
     residue_cache: StampCache<WorkspaceEgressResidue>,
+    link_cache: StampCache<Vec<LinkStatus>>,
 }
 
 /// The cached edge set, with the members it was computed **without**.
@@ -1605,9 +1753,12 @@ impl ContractBridge {
     /// resolved against a **single** stamp snapshot, and the members read to
     /// answer it ([CR-125], [FR-WS-05], [NFR-CC-04]).
     ///
-    /// Returns the edge set the answer is built from and the unresolved egress
-    /// residue reported beside it. Both are projections of the members this call
-    /// walked, so the answer and its residue cannot drift apart.
+    /// Returns the edge set the answer is built from, the unresolved egress
+    /// residue reported beside it, and the declared `[[links]]` judged against
+    /// that edge set ([FR-WS-41]) — `callers` and `impact` read their asserted
+    /// rows from them; empty, at no read, without `[[links]]`. All three are
+    /// projections of the members this call walked, so the answer, its asserted
+    /// rows and its residue cannot drift apart.
     ///
     /// # Why one entry point and not two calls ([FR-WS-16] AC5, [NFR-CC-04])
     /// Calling [`edges`](Self::edges) and a separate residue accessor in sequence
@@ -1625,18 +1776,16 @@ impl ContractBridge {
     ///   coverage the edges were actually computed over, so a partial answer can
     ///   read as complete ([NFR-CC-04]).
     ///
-    /// One `answer()` and one [`current_stamps`] fixes both: the two slots are
-    /// keyed on the **same** vector, so they hit together, miss together, and a
-    /// miss recomputes both from one walk of one generation.
+    /// One `answer()` and one [`current_stamps`] fixes both: the slots are keyed
+    /// on the **same** vector, so they hit together, miss together, and a miss
+    /// recomputes them from one walk of one generation.
     ///
     /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn reachability_read<E>(
-        &self,
-        registry: &EngineRegistry<E>,
-    ) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>, MemberReads)
+    pub fn reachability_read<E>(&self, registry: &EngineRegistry<E>) -> ReachabilityRead
     where
         E: MemberEngine + MemberContracts,
     {
@@ -1645,8 +1794,41 @@ impl ContractBridge {
         let snapshot = self.edge_snapshot(&answer, stamps.clone());
         let residue = self
             .residue_cache
-            .get_or_compute(stamps, || egress_residue(&answer));
-        (Arc::clone(&snapshot.edges), residue, reads_over(&answer, &snapshot))
+            .get_or_compute(stamps.clone(), || egress_residue(&answer));
+        let links = self.link_slot(&answer, stamps, &snapshot);
+        ReachabilityRead {
+            edges: Arc::clone(&snapshot.edges),
+            residue,
+            links,
+            reads: reads_over(&answer, &snapshot),
+        }
+    }
+
+    /// The evidence edge set and the declared `[[links]]` judged against it,
+    /// at one stamp snapshot ([FR-WS-12], [FR-WS-41]) — what app-wide
+    /// reachability seeds its two kinds of root from. No residue is read.
+    ///
+    /// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    pub fn edges_and_links<E>(&self, registry: &EngineRegistry<E>) -> (Arc<Vec<BridgeEdge>>, Arc<Vec<LinkStatus>>)
+    where
+        E: MemberEngine + MemberContracts,
+    {
+        let answer = registry.answer();
+        let stamps = current_stamps(&answer);
+        let snapshot = self.edge_snapshot(&answer, stamps.clone());
+        let links = self.link_slot(&answer, stamps, &snapshot);
+        (Arc::clone(&snapshot.edges), links)
+    }
+
+    /// The link slot at `stamps`, judging the declared links against
+    /// `snapshot`'s evidence edges over `answer` on a miss.
+    fn link_slot<E>(&self, answer: &AnswerScope<'_, E>, stamps: Stamps, snapshot: &EdgeSnapshot) -> Arc<Vec<LinkStatus>>
+    where
+        E: MemberEngine + MemberContracts,
+    {
+        self.link_cache
+            .get_or_compute(stamps, || super::links::links_over(answer, &snapshot.edges))
     }
 
     /// The edge slot at `stamps`, computing it over `answer` on a miss.
@@ -1661,6 +1843,31 @@ impl ContractBridge {
                 unread: answer.reads().unread,
             }
         })
+    }
+}
+
+/// One cross-service reachability read ([`ContractBridge::reachability_read`]):
+/// every derived read-model the answer and its residue are built from, at one
+/// member sync-stamp snapshot, and the members read for them.
+#[derive(Debug, Clone)]
+pub struct ReachabilityRead {
+    /// The resolved cross-service bindings — evidence only.
+    pub edges: Arc<Vec<BridgeEdge>>,
+    /// The workspace's unresolved egress.
+    pub residue: Arc<WorkspaceEgressResidue>,
+    /// Every declared `[[links]]` entry and its verdict; empty without links.
+    pub links: Arc<Vec<LinkStatus>>,
+    /// The members the read touched, and the ones it could not read.
+    pub reads: MemberReads,
+}
+
+impl ReachabilityRead {
+    /// The edges the valid links assert, in manifest order ([FR-WS-41]) —
+    /// never mixed into [`edges`](Self::edges).
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    pub(super) fn asserted(&self) -> impl Iterator<Item = &BridgeEdge> {
+        self.links.iter().filter_map(LinkStatus::asserted_edge)
     }
 }
 
@@ -1765,8 +1972,9 @@ where
 /// member whose store will not open fails identically for every subject, and
 /// `workspace status` reaches **this helper** three times (`coverage` twice,
 /// `topics` once — its fourth walk, the freshness read, does not come through
-/// here), so the shipped code emitted one broken member's diagnostic three
-/// times over. The start arm therefore asks
+/// here; five times when the manifest declares `[[links]]`, whose evidence
+/// edges read twice more), so the shipped code emitted one broken member's
+/// diagnostic three times over. The start arm therefore asks
 /// [`AnswerScope::announce_open_failure`] whether the operator has been told
 /// yet *in this answer*, and stays quiet when they have ([FR-WS-16],
 /// [NFR-CC-04]). Nothing is
@@ -1813,7 +2021,7 @@ where
 /// Read every member's contract surface through its read pool, index providers
 /// on portable keys, split providers from consumers by role, and hand the two
 /// indexes to the namespace-generic [`match_indexed`] matcher.
-fn compute_edges<E>(answer: &AnswerScope<'_, E>) -> Vec<BridgeEdge>
+pub(super) fn compute_edges<E>(answer: &AnswerScope<'_, E>) -> Vec<BridgeEdge>
 where
     E: MemberEngine + MemberContracts,
 {
@@ -2425,7 +2633,7 @@ mod tests {
 
         // `web` re-indexes the instant this answer starts reading surfaces.
         RESYNC_ON_FIRST_READ.with(|c| c.set(true));
-        let (edges, residue, _) = bridge.reachability_read(&reg);
+        let ReachabilityRead { edges, residue, .. } = bridge.reachability_read(&reg);
 
         assert_eq!(
             bridge.edge_cache.cached_stamps(),
@@ -2472,7 +2680,7 @@ mod tests {
         let reg = registry(&["api", "web"]);
         let bridge = ContractBridge::new();
 
-        let (edges_a, residue_a, _) = bridge.reachability_read(&reg);
+        let ReachabilityRead { edges: edges_a, residue: residue_a, .. } = bridge.reachability_read(&reg);
         let reads = surface_reads();
         assert!(reads >= 2, "the first call reads each member");
         assert_eq!(
@@ -2481,7 +2689,7 @@ mod tests {
             "guard the guard: a residue that is empty proves nothing about caching"
         );
 
-        let (edges_b, residue_b, _) = bridge.reachability_read(&reg);
+        let ReachabilityRead { edges: edges_b, residue: residue_b, .. } = bridge.reachability_read(&reg);
         assert_eq!(
             surface_reads(),
             reads,
@@ -2496,7 +2704,7 @@ mod tests {
 
         // A stamp advance invalidates BOTH, together.
         bump_stamp("web");
-        let (edges_c, residue_c, _) = bridge.reachability_read(&reg);
+        let ReachabilityRead { edges: edges_c, residue: residue_c, .. } = bridge.reachability_read(&reg);
         assert!(surface_reads() > reads, "the advance forces a recompute");
         assert!(!Arc::ptr_eq(&edges_a, &edges_c));
         assert!(!Arc::ptr_eq(&residue_a, &residue_c));
@@ -2523,13 +2731,13 @@ mod tests {
         let reg = registry(&["api", "unreadable"]);
         let bridge = ContractBridge::new();
 
-        let (_edges, residue, _) = bridge.reachability_read(&reg);
+        let ReachabilityRead { residue, .. } = bridge.reachability_read(&reg);
         assert!(
             !residue.covers_all_members,
             "one member's surface could not be read: {residue:?}"
         );
         let rendered = residue
-            .beside(None, crate::federation::residue::AnswerReach { resolved: 0, noun: "cross-service caller" })
+            .beside(None, crate::federation::residue::AnswerReach { resolved: 0, noun: "cross-service caller", by_member: &[] })
             .expect("the api call is unresolved, so there is a residue");
         assert!(
             rendered
@@ -2545,7 +2753,7 @@ mod tests {
         set_consumers("api", vec![http_call("", "local api_call")]);
         set_member("web", 1, Vec::new());
         let reg = registry(&["api", "web"]);
-        let (_edges, residue, _) = ContractBridge::new().reachability_read(&reg);
+        let ReachabilityRead { residue, .. } = ContractBridge::new().reachability_read(&reg);
         assert!(residue.covers_all_members, "both members read: {residue:?}");
     }
 
@@ -2949,6 +3157,7 @@ mod tests {
             governance: Default::default(),
             warm_concurrency: None,
             member_kinds: Default::default(),
+            exclusion: Default::default(),
         }
     }
 
@@ -4686,6 +4895,30 @@ mod tests {
                 edges[0].intake, expected,
                 "{label}: the edge must carry the {expected:?} intake discriminator"
             );
+        }
+    }
+
+    /// **Every intake states what it is** ([FR-WS-41], [BR-75]): whether it is
+    /// evidence, whether it seeds a `live-via-cross-service` root, and its wire
+    /// token. The `match` is wildcard-free and `ALL` fixed-length, so a new
+    /// variant fails to compile here until all three are stated — the table half
+    /// of the compile-time guard [`BridgeIntake::is_evidence`] is.
+    ///
+    /// [FR-WS-41]: ../../../docs/specs/requirements/FR-WS-41.md
+    /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn every_intake_states_whether_it_is_evidence_seeds_a_root_and_its_token() {
+        const ALL: [BridgeIntake; 3] =
+            [BridgeIntake::Invocation, BridgeIntake::ContractSurface, BridgeIntake::Asserted];
+        for intake in ALL {
+            let (evidence, seeds_root, token) = match intake {
+                BridgeIntake::Invocation => (true, true, "invocation"),
+                BridgeIntake::ContractSurface => (true, false, "contract-surface"),
+                BridgeIntake::Asserted => (false, false, "asserted"),
+            };
+            assert_eq!(intake.is_evidence(), evidence, "{intake:?}");
+            assert_eq!(intake.seeds_reachability_root(), seeds_root, "{intake:?}");
+            assert_eq!(serde_json::to_value(intake).unwrap(), token, "{intake:?}");
         }
     }
 
