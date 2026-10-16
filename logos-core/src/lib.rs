@@ -143,6 +143,10 @@ pub mod resolve;
 /// in-process concurrency layer the long-lived [`Engine`] owns (ADR-02, ADR-03,
 /// ADR-04).
 pub mod runtime;
+/// The security orchestrator (S-665, ADR-80): the built-in registry of nine
+/// scanners, detection without network access, and blocking scans to SARIF
+/// through fixed argv templates no repository can change (FR-SC-05, NFR-SE-08).
+pub mod security;
 pub mod sqlite;
 /// The debounced filesystem watcher (S-022): `notify` + `notify-debouncer-full`
 /// hosted under `serve --mcp`, coalescing edit storms into one batched

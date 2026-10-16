@@ -286,6 +286,38 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | review fix: the nine write/gate tools refuse a `repo` (`DefaultMemberParams`, the captured field on `ReconcileParams`/`CoverageIngestParams`, `default_member_only`, one call per tool) | **+43** |
 /// | | **+128** |
 ///
+/// **S-667/[CR-217] 1151→1229** for the four security twins ([FR-SC-06],
+/// [FR-SC-08]): measured 1146→1226 (+80), 3 lines of headroom. Delegation only:
+/// each tool is an attribute, a signature and ONE `Engine` call. The consent
+/// check, the per-scanner outcomes, the masking of a failed scanner's output,
+/// the classification, the labelling and the filter semantics all live in
+/// `logos_core::security`; the surface parses nothing but the filter tokens,
+/// through the core's own `FindingsFilter::parse`, as the CLI does.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `SecurityScanParams` / `SecurityIngestParams` (the `consent` / `report` field and the captured, refused `repo`) | **+22** |
+/// | `SecurityFindingsParams` (six filter tokens and `repo`, each a doc line and a field) | **+18** |
+/// | the tier comment and the `security_scan` / `security_ingest` / `security_status` tools | **+24** |
+/// | the `security_findings` tool: the `FindingsFilter::parse` call (one argument per line), its `invalid_params` mapping and the one delegation | **+15** |
+/// | the router comment: 25→29 tools, two more write tools named | **+1** |
+/// | | **+80** |
+///
+/// **Sprint 105 review 1229→1234**: network consent is the user's to give
+/// ([FR-SC-07]), so `security_scan` refuses a `consent` argument instead of
+/// recording it. Measured 1226→1231 (+5), 3 lines of headroom. The consent
+/// check itself stays in `logos_core::security`.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `SecurityScanParams.consent` captured and skipped from the schema (`serde(default)`, `schemars(skip)`) | **+2** |
+/// | `security_scan` refuses it with `invalid_params` naming the CLI command | **+3** |
+/// | | **+5** |
+///
+/// [FR-SC-07]: ../../docs/specs/requirements/FR-SC-07.md
+/// [CR-217]: ../../docs/requests/CR-217-security-findings-in-graph-context.md
+/// [FR-SC-06]: ../../docs/specs/requirements/FR-SC-06.md
+/// [FR-SC-08]: ../../docs/specs/requirements/FR-SC-08.md
 /// [CR-225]: ../../docs/requests/CR-225-per-member-single-root-tools.md
 /// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
 /// [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
@@ -303,8 +335,8 @@ fn mcp_surface_line_budget() {
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1151,
-        "mcp adapter exceeds the 1151 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1234,
+        "mcp adapter exceeds the 1234 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

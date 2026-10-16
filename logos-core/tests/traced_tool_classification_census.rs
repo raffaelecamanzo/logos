@@ -99,10 +99,14 @@
 //!
 //! # The denominator
 //!
-//! **2026-10-10 — 61 registered tools enumerated, 4 classified, 57 excluded
+//! **2026-10-16 — 67 registered tools enumerated, 4 classified, 63 excluded
 //! with a reason**, pinned by
 //! [`the_census_reports_its_denominator`], which prints the three counts. It was
-//! 75/4/71 on 2026-09-26; S-644 moved the wiki's fourteen tools out of the core
+//! 61/4/57 on 2026-10-10; S-667 registered the security tier's six tools
+//! (`security_scan`, `security_ingest`, `security_ingest_auto`,
+//! `security_status`, `security_findings` and the watcher's
+//! `watch_security_ingest`), none classified and each excluded under the
+//! reason its class already carries. It was 75/4/71 on 2026-09-26; S-644 moved the wiki's fourteen tools out of the core
 //! registry to the `wiki` extension's `ExtensionTool`s (none was classified, all
 //! fourteen were excluded), so the core registry this census reads is 14 smaller.
 //!
@@ -126,7 +130,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 /// The date the figures in this module's header were taken.
-const AUDITED_ON: &str = "2026-10-10";
+const AUDITED_ON: &str = "2026-10-16";
 
 /// The registry file, and the production tree the classification is read
 /// from, both relative to `logos-core` (`env!("CARGO_MANIFEST_DIR")`).
@@ -214,6 +218,8 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("QualityReadout", REASON_QUALITY_GATE),
     ("LanguageComposition", REASON_QUALITY_GATE),
     ("CoverageStatus", REASON_QUALITY_GATE),
+    ("SecurityStatus", REASON_QUALITY_GATE),
+    ("SecurityFindings", REASON_QUALITY_GATE),
     // ── Session gate ─────────────────────────────────────────────────────────
     ("SessionStart", REASON_SESSION_GATE),
     ("SessionEnd", REASON_SESSION_GATE),
@@ -230,12 +236,17 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("Persist", REASON_ENGINE_INTERNAL),
     ("WatchSync", REASON_ENGINE_INTERNAL),
     ("WatchCoverageIngest", REASON_ENGINE_INTERNAL),
+    ("WatchSecurityIngest", REASON_ENGINE_INTERNAL),
     ("WorktreeSeed", REASON_ENGINE_INTERNAL),
     ("NavProloguePurge", REASON_ENGINE_INTERNAL),
     // ── Engine-internal: coverage ingestion ─────────────────────────────────
     ("CoverageIngest", REASON_ENGINE_INTERNAL),
     ("CoverageIngestAuto", REASON_ENGINE_INTERNAL),
     ("CoverageRefresh", REASON_ENGINE_INTERNAL),
+    // ── Engine-internal: security scan and ingestion ────────────────────────
+    ("SecurityIngest", REASON_ENGINE_INTERNAL),
+    ("SecurityIngestAuto", REASON_ENGINE_INTERNAL),
+    ("SecurityScan", REASON_ENGINE_INTERNAL),
     // ── Engine-internal: the quality-report hook install ────────────────────
     ("WikiQualityReportHookEmit", REASON_ENGINE_INTERNAL),
     // ── Engine-internal: the project's own policy store ─────────────────────
@@ -632,8 +643,8 @@ fn the_census_reports_its_denominator() {
     );
     assert_eq!(
         (enumerated, classified_count, excluded_count),
-        (61, 4, 57),
-        "traced-tool classification census as of {AUDITED_ON}: expected 61 enumerated tools, \
-         4 classified via traced_with, 57 excluded with a reason"
+        (67, 4, 63),
+        "traced-tool classification census as of {AUDITED_ON}: expected 67 enumerated tools, \
+         4 classified via traced_with, 63 excluded with a reason"
     );
 }

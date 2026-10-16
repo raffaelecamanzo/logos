@@ -5419,6 +5419,40 @@ impl BatchWriter<'_> {
         Ok(inserted > 0)
     }
 
+    /// [`insert_edge_with_payload_if_absent`](Self::insert_edge_with_payload_if_absent)
+    /// for an edge computed off a snapshot: `Ok(None)` when an endpoint node no
+    /// longer exists, instead of an error.
+    ///
+    /// The resolution pass binds against a read snapshot and commits in a later
+    /// write; a write serialized between the two (a config apply's purge, a
+    /// watcher sync) can delete an endpoint. Its foreign-key failure is
+    /// statement-level, so the enclosing transaction carries on and the caller
+    /// leaves the reference for the next pass to re-bind (ADR-02).
+    ///
+    /// # Errors
+    /// Returns an error on any other failure.
+    pub fn insert_edge_with_payload_if_live(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        kind: EdgeKind,
+        payload: Option<&str>,
+    ) -> Result<Option<bool>> {
+        match self.conn.execute(
+            "INSERT INTO edges (source, target, kind, payload) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(source, target, kind) DO NOTHING",
+            rusqlite::params![source.get(), target.get(), kind.as_i32(), payload],
+        ) {
+            Ok(inserted) => Ok(Some(inserted > 0)),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e).context("inserting edge with payload if live"),
+        }
+    }
+
     // ── Annotation primitives (S-014, [FR-AN-01..04]) ────────────────────────
 
     /// Clear every derived policy node and derived edge, returning

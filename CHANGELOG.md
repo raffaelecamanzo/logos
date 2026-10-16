@@ -13,6 +13,114 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-10-16
+
+### Added
+
+- **`logos security scan|ingest|status|findings`, with MCP twins.** The security
+  evidence tier gets its commands and the matching `security_scan`,
+  `security_ingest`, `security_status` and `security_findings` tools, each over
+  one engine method, so both surfaces return the same payload. `scan` runs every
+  installed, enabled scanner, writes its SARIF to `.logos/security/` and ingests
+  it as it finishes; each registered scanner gets one outcome (`ran`,
+  `not_installed`, `disabled`, `requires_build`, `not_applicable` or `failed`),
+  and one failing never stops the others. A failed scanner's whole output goes to
+  `.logos/security/<scanner>.failed.log`; the payload carries its exit code, the
+  log path and the last lines with anything that looks like a secret masked.
+  The first scan in a project needs `--consent`, because a scanner may reach the
+  network to refresh its rules or database: without it the command exits 2
+  naming the flag and the scanners, and nothing starts. Consent is the user's to
+  give on the command line: MCP `security_scan` never records it, refuses a
+  `consent` argument, and until it is given fails naming the CLI command. Consent
+  is recorded per project in `security-consent.toml` in the user-level config
+  directory, never in the repository; a scanner installed or enabled later is
+  asked for alone. `status` gives each scanner exactly one state — not
+  installed, disabled, never run, stale (and why) or fresh with its unsuppressed
+  finding count — plus the consent state, so never run and fresh with 0
+  findings are always distinct. `findings` lists the stored findings with their
+  OWASP Top 10 categories and suppressions, filtered by severity, scanner,
+  category, path and suppression (filters intersect), and states what it was
+  drawn from so an empty list never reads as clean. A running watcher ingests a
+  SARIF report written into `.logos/security/` and never starts a scanner.
+  Documented in `docs/howto/commands.md` and `docs/howto/configuration.md`.
+- **Security findings are stored as anchored evidence.** The evidence store
+  (`.logos/history.db`) gains security findings beside coverage, through a
+  forward-only migration, read and written through `logos security ingest`
+  and its twins (above). A SARIF 2.1.0 report from any tool is parsed and
+  validated in full before anything is written. A malformed, truncated or
+  non-SARIF report changes nothing, and the error names the defect: the JSON
+  position, or the SARIF path of the missing or wrong field, without quoting
+  any value from the report. A run that did not
+  complete (a failed invocation, or no `results` at all) is rejected too, so it
+  never replaces real findings with an empty scan. A result of kind `pass` or
+  `notApplicable` is not a finding. Each snapshot is
+  anchored to HEAD and to the scanner's name and version. A rescan at the same
+  HEAD replaces only that scanner's snapshot. Re-ingesting a byte-identical
+  report at the same HEAD is a no-op reported `already_ingested`, unless a
+  newer HEAD's snapshot has since become current, in which case the report is
+  written again and becomes current. Each finding is
+  keyed by a fingerprint: a hash of its rule, its path and the report's own
+  fingerprint when it carries one, otherwise its location; no report value is
+  stored. Report paths bind to indexed files
+  through the binder coverage already uses (longest unique suffix). An ambiguous
+  path is listed unmatched with its candidate count, never guessed. A result
+  with no location is kept and listed as unbound. Freshness is decided per file
+  by content hash at read time, so a file edited after ingest reads `stale`. No
+  source snippet, code flow or rule text is ever read from the report. The
+  message of a secret-class finding is replaced before the write by a fixed text
+  naming only the rule and location. Secret-class covers Gitleaks, Trivy secret
+  scanning, rules tagged or named as secrets, and hard-coded-credential CWEs.
+  Every other message is stored with anything shaped like a secret masked.
+  Committed SARIF fixtures cover all nine registered scanners.
+- **Findings are classified by OWASP Top 10, 2025 and 2021.** A compiled-in,
+  versioned table maps CWE identifiers to the categories of each edition, 2025
+  being the default, and names the registered scanners that can detect each
+  category. A finding is classified from the CWE tags of its rule, so a CWE-89
+  finding is Injection in both editions. A finding with no CWE tag is
+  `unclassified`, as is one whose CWEs the edition does not list, and the two
+  are told apart. Classification is computed on read from the stored findings,
+  so switching edition re-classifies them without a re-ingest. A category that
+  no enabled scanner with a stored report can detect reports `not covered`,
+  never a count of zero; a count appears only where such a scanner can see the
+  category. `logos security findings` (above) shows the classification.
+- **Logos can find and run the security scanners you have installed.** A
+  built-in registry covers Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec,
+  Checkov, CodeQL and OWASP Dependency-Check. Logos detects each scanner
+  (installed with its version, not installed, or disabled) by running only its
+  version command, and `logos security scan` (above) runs them to SARIF under
+  `.logos/security/`. One scanner failing never
+  stops the others. Every command line is fixed in Logos and started without a
+  shell. `PATH` is reduced to its absolute entries outside the project, both to
+  find a scanner and for the scanner's own process, and everything a scanner
+  started is killed when it exits. A repository's
+  `.logos/config.toml` may only switch scanners on or off
+  (`[security_scan.<scanner>] enabled`); any other key there fails the load
+  with exit 2 before anything runs. A scanner's binary path and extra flags are
+  read only from a new **user-level config file** (`$LOGOS_CONFIG_HOME`, else
+  `$XDG_CONFIG_HOME/logos`, else `~/.config/logos`, file `config.toml`). CodeQL
+  runs only with `--build-mode=none` and only on JavaScript/TypeScript, Python
+  and Ruby, merging every language's runs into one `codeql.sarif`; every other
+  language is reported "requires a build — ingest a CI report" and nothing is
+  started for it. `.logos/security/` joins the managed
+  `.logos/.gitignore`.
+  A repository's scanner config cannot make a scanner run code: Checkov is not
+  started while `.checkov.yaml` is at the root, Trivy reads an empty config Logos
+  writes, Dependency-Check's package-manager analyzers are off, and gosec runs
+  with `GOTOOLCHAIN=local`.
+- **Security findings can be suppressed from a committed file, with a reason and
+  an expiry.** `.logos/security-ignore.toml` lists `[[ignore]]` entries keyed by a
+  finding's fingerprint, each with a required `reason` and an optional `expires`
+  date. `logos security findings` and `status` (above) label findings against
+  it as of today. A file that does not parse, an entry with no `reason` or a blank one, a
+  fingerprint that is not 64 lowercase hex characters, an `expires` that is not a
+  calendar date, a repeated fingerprint and an unknown key are all rejected with
+  exit 2 naming the line. An absent file means no suppression. An entry
+  suppresses through its `expires` date inclusive; from the next day it no longer
+  suppresses and the finding comes back labelled as having an expired entry. A
+  suppressed finding is still listed, with its reason. An entry whose fingerprint
+  matches no finding is reported as orphaned. The serialised file is sorted by
+  fingerprint, so a file in that spelling reads and writes back byte for byte.
+
 ## [1.18.0] — 2026-10-15
 
 ### Added

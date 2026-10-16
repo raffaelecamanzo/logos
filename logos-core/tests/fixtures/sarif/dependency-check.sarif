@@ -1,0 +1,127 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "dependency-check",
+          "version": "10.0.4",
+          "informationUri": "https://jeremylong.github.io/DependencyCheck/",
+          "rules": [
+            {
+              "id": "CVE-2021-44228",
+              "shortDescription": {
+                "text": "Critical severity - CVE-2021-44228 Improper Input Validation vulnerability in pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+              },
+              "fullDescription": {
+                "text": "Apache Log4j2 2.0-beta9 through 2.15.0 (excluding security releases 2.12.2, 2.12.3, and 2.3.1) JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints."
+              },
+              "help": {
+                "text": "",
+                "markdown": ""
+              },
+              "properties": {
+                "cvssv3_baseScore": 10.0,
+                "cvssv3_attackVector": "NETWORK",
+                "cvssv3_attackComplexity": "LOW",
+                "cvssv3_privilegesRequired": "NONE",
+                "cvssv3_userInteraction": "NONE",
+                "cvssv3_scope": "CHANGED",
+                "cvssv3_confidentialityImpact": "HIGH",
+                "cvssv3_integrityImpact": "HIGH",
+                "cvssv3_availabilityImpact": "HIGH",
+                "cvssv3_baseSeverity": "CRITICAL",
+                "cvssv3_exploitabilityScore": "3.9",
+                "cvssv3_impactScore": "6.0",
+                "cvssv3_version": "3.1"
+              }
+            },
+            {
+              "id": "CVE-2021-45046",
+              "shortDescription": {
+                "text": "Critical severity - CVE-2021-45046 Deserialization of Untrusted Data vulnerability in pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+              },
+              "fullDescription": {
+                "text": "It was found that the fix to address CVE-2021-44228 in Apache Log4j 2.15.0 was incomplete in certain non-default configurations."
+              },
+              "help": {
+                "text": "",
+                "markdown": ""
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.0,
+                "cvssv3_attackVector": "NETWORK",
+                "cvssv3_baseSeverity": "CRITICAL",
+                "cvssv3_version": "3.1"
+              }
+            }
+          ],
+          "properties": {
+            "disclaimer": "Dependency-Check is an open source tool performing a best effort analysis of 3rd party dependencies; false positives and false negatives may exist in the analysis performed by the tool. Use of the tool and the reporting provided constitutes acceptance for use in an AS IS condition, and there are NO WARRANTIES, implied or otherwise, with regard to the analysis or its use. Any use of the tool and the reporting provided is at the user's risk. In no event shall the copyright holder or OWASP be held liable for any damages whatsoever arising out of or in connection with the use of this tool, the analysis performed, or the resulting report."
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "description": {
+            "text": "log4j-core-2.14.1.jar"
+          },
+          "location": {
+            "uri": "file:///home/ci/project/lib/log4j-core-2.14.1.jar"
+          }
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "CVE-2021-44228",
+          "level": "error",
+          "message": {
+            "text": "Critical severity - CVE-2021-44228 Improper Input Validation vulnerability in pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///home/ci/project/lib/log4j-core-2.14.1.jar"
+                }
+              },
+              "logicalLocations": [
+                {
+                  "fullyQualifiedName": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+                }
+              ]
+            }
+          ],
+          "partialFingerprints": {
+            "vulnerabilityHash": "b4ec5f2e3a7cd1f0e98c36b2a1d4e7f9"
+          }
+        },
+        {
+          "ruleId": "CVE-2021-45046",
+          "level": "error",
+          "message": {
+            "text": "Critical severity - CVE-2021-45046 Deserialization of Untrusted Data vulnerability in pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///home/ci/project/lib/log4j-core-2.14.1.jar"
+                }
+              },
+              "logicalLocations": [
+                {
+                  "fullyQualifiedName": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+                }
+              ]
+            }
+          ],
+          "partialFingerprints": {
+            "vulnerabilityHash": "0c9e2a7d4f1b38e5a6d2c9f0b7e14a83"
+          }
+        }
+      ]
+    }
+  ]
+}

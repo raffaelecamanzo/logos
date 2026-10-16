@@ -433,6 +433,12 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: CoverageCommands,
     },
+    /// Security evidence tier: run the installed scanners, ingest SARIF, read
+    /// per-scanner status and the classified findings (FR-SC-06..08).
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommands,
+    },
     /// Install the Claude Code session-start quality-report hook (FR-IN-07,
     /// ADR-49): a marker-tagged hook script plus a non-clobbering merge into
     /// the shared `.claude/settings.json` that surfaces a non-blocking
@@ -509,6 +515,51 @@ pub(crate) enum CoverageCommands {
     /// (FR-CV-10). The lone explicit coverage subprocess — never on the serve
     /// path (ADR-38). Errors if no `refresh_cmd` is configured.
     Refresh,
+}
+
+/// `security` sub-subcommands (FR-SC-01, FR-SC-06..08): each one `Engine` call
+/// shared with its MCP twin.
+#[derive(Subcommand)]
+pub(crate) enum SecurityCommands {
+    /// Run every installed, enabled scanner and ingest its SARIF (FR-SC-06).
+    /// The first scan in a project needs `--consent` (FR-SC-07).
+    Scan {
+        /// Record consent for the scanners not yet named in this project's
+        /// consent, which may reach the network to refresh rules or databases.
+        #[arg(long)]
+        consent: bool,
+    },
+    /// Ingest a SARIF 2.1.0 report from any tool into the evidence store (FR-SC-01).
+    Ingest {
+        /// Path to the SARIF report.
+        report: PathBuf,
+    },
+    /// Each scanner's state — not installed, disabled, never run, stale or
+    /// fresh — and the consent state (FR-SC-08).
+    Status { #[command(flatten)] member: MemberArg },
+    /// The stored findings with OWASP categories and suppressions; the filters
+    /// intersect (FR-SC-08).
+    Findings {
+        /// Least severity listed: critical, high, medium, low or info.
+        #[arg(long)]
+        severity: Option<String>,
+        /// A scanner, by registry name or SARIF driver name.
+        #[arg(long)]
+        scanner: Option<String>,
+        /// An OWASP category, by id (A05:2025) or number (A05).
+        #[arg(long)]
+        category: Option<String>,
+        /// A project-relative file, or a directory holding it.
+        #[arg(long)]
+        path: Option<String>,
+        /// Only `active` or only `suppressed` findings.
+        #[arg(long)]
+        suppression: Option<String>,
+        /// The OWASP edition: 2025 (default) or 2021.
+        #[arg(long)]
+        edition: Option<String>,
+        #[command(flatten)] member: MemberArg,
+    },
 }
 
 /// The arguments of the session-start quality-report hook install (`logos hook`,
@@ -648,11 +699,11 @@ impl Composed {
 /// clap lists subcommands in the order they were added, so a composed extension's
 /// would trail the integration and serving commands after `serve`. They are listed
 /// instead in one fixed slot, in registration order: after the core's evidence
-/// tiers (`hotspots`, `coverage`) and before the integration commands (`hook`,
+/// tiers (`hotspots`, `coverage`, `security`) and before the integration commands (`hook`,
 /// `xservice`, `workspace`, …) — where `wiki` stood while it was a core command
 /// (S-644). The slot is the core's, like the Config view's extension panel slot
 /// (S-643): an extension says what it adds, not where the core lists it.
-const EXTENSION_SLOT_AFTER: &str = "coverage";
+const EXTENSION_SLOT_AFTER: &str = "security";
 
 /// `command` with `extensions` listed in the [`EXTENSION_SLOT_AFTER`] slot of its
 /// help, and every core subcommand after the slot moved down to make room.
@@ -1201,6 +1252,11 @@ mod surface_parity {
         ("coverage_ingest", Twin("coverage ingest")),
         ("coverage_status", Twin("coverage status")),
         ("coverage_refresh", Twin("coverage refresh")),
+        // Security evidence tier (S-667).
+        ("security_scan", Twin("security scan")),
+        ("security_ingest", Twin("security ingest")),
+        ("security_status", Twin("security status")),
+        ("security_findings", Twin("security findings")),
         // Cross-service family — registered only by the federated backing.
         ("xservice_route_providers", Twin("xservice route-providers")),
         ("xservice_callers", Twin("xservice callers")),

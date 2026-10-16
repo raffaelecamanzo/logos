@@ -1,0 +1,188 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Checkov",
+          "version": "3.2.255",
+          "informationUri": "https://checkov.io",
+          "rules": [
+            {
+              "id": "CKV_AWS_20",
+              "name": "S3 Bucket has an ACL defined which allows public READ access.",
+              "shortDescription": {
+                "text": "S3 Bucket has an ACL defined which allows public READ access."
+              },
+              "fullDescription": {
+                "text": "S3 Bucket has an ACL defined which allows public READ access."
+              },
+              "help": {
+                "text": "S3 Bucket has an ACL defined which allows public READ access.\nResource: aws_s3_bucket.data"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/ckv_aws_20"
+            },
+            {
+              "id": "CKV_DOCKER_2",
+              "name": "Ensure that HEALTHCHECK instructions have been added to container images",
+              "shortDescription": {
+                "text": "Ensure that HEALTHCHECK instructions have been added to container images"
+              },
+              "fullDescription": {
+                "text": "Ensure that HEALTHCHECK instructions have been added to container images"
+              },
+              "help": {
+                "text": "Ensure that HEALTHCHECK instructions have been added to container images\nResource: Dockerfile."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/ckv_docker_2"
+            },
+            {
+              "id": "CKV_DOCKER_3",
+              "name": "Ensure that a user for the container has been created",
+              "shortDescription": {
+                "text": "Ensure that a user for the container has been created"
+              },
+              "fullDescription": {
+                "text": "Ensure that a user for the container has been created"
+              },
+              "help": {
+                "text": "Ensure that a user for the container has been created\nResource: Dockerfile."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/ckv_docker_3"
+            },
+            {
+              "id": "CKV_SECRET_2",
+              "name": "AWS Access Key",
+              "shortDescription": {
+                "text": "AWS Access Key"
+              },
+              "fullDescription": {
+                "text": "AWS Access Key"
+              },
+              "help": {
+                "text": "AWS Access Key\nResource: 7e2d9c1b5a3f8e6d4c2b0a9f8e7d6c5b4a3f2e1d"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/ckv_secret_2"
+            }
+          ],
+          "organization": "bridgecrew"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CKV_AWS_20",
+          "ruleIndex": 0,
+          "level": "error",
+          "attachments": [],
+          "message": {
+            "text": "S3 Bucket has an ACL defined which allows public READ access."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "infra/main.tf"
+                },
+                "region": {
+                  "startLine": 1,
+                  "endLine": 4,
+                  "snippet": {
+                    "text": "resource \"aws_s3_bucket\" \"data\" {\n  bucket = \"fixture-data\"\n  acl    = \"public-read\"\n}\n"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CKV_DOCKER_2",
+          "ruleIndex": 1,
+          "level": "error",
+          "attachments": [],
+          "message": {
+            "text": "Ensure that HEALTHCHECK instructions have been added to container images"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile"
+                },
+                "region": {
+                  "startLine": 1,
+                  "endLine": 4,
+                  "snippet": {
+                    "text": "FROM ubuntu:latest\nRUN apt-get update\nCOPY . /app\nCMD [\"python\",\"/app/main.py\"]\n"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CKV_DOCKER_3",
+          "ruleIndex": 2,
+          "level": "error",
+          "attachments": [],
+          "message": {
+            "text": "Ensure that a user for the container has been created"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile"
+                },
+                "region": {
+                  "startLine": 1,
+                  "endLine": 4,
+                  "snippet": {
+                    "text": "FROM ubuntu:latest\nRUN apt-get update\nCOPY . /app\nCMD [\"python\",\"/app/main.py\"]\n"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CKV_SECRET_2",
+          "ruleIndex": 3,
+          "level": "error",
+          "attachments": [],
+          "message": {
+            "text": "AWS Access Key"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "infra/main.tf"
+                },
+                "region": {
+                  "startLine": 9,
+                  "endLine": 9,
+                  "snippet": {
+                    "text": "9 access_key = \"AKIA****************\"\n"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

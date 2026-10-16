@@ -94,8 +94,8 @@ advisory** — they never move the quality signal and the quality gate never rea
 
 1. [Installation](installation.md) — building the `logos` binary, the default and slim builds, feature flags, verification
 2. [Configuration](configuration.md) — `.logos/`, `config.toml`, `rules.toml`, logging, query overrides
-3. [Usage](usage.md) — indexing workflow, navigation, agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
-4. [Commands](commands.md) — the full 38-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots`, the `logos coverage …` family and `logos hook --emit`, the session-start quality-report hook)
+3. [Usage](usage.md) — indexing workflow, navigation, evidence tiers (hotspots, coverage, security findings), agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
+4. [Commands](commands.md) — the full 39-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots`, the `logos coverage …` and `logos security …` families and `logos hook --emit`, the session-start quality-report hook)
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)
@@ -156,7 +156,7 @@ automatically.
   fresh shadow reindex. See [commands.md](commands.md#doctor).
 - **Deterministic** — same tree in, same graph and same metrics out,
   bit-for-bit.
-- **Evidence tiers never move the gate** — `hotspots` and `coverage` live in a
+- **Evidence tiers never move the gate** — `hotspots`, `coverage` and `security` findings live in a
   separate `.logos/history.db` the gate never opens, so the 0–10000 signal is
   byte-identical before and after they run, and after `history.db` is deleted.
 - **The graph self-corrects on config change** — narrowing admission (an added

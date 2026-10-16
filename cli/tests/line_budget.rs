@@ -574,12 +574,30 @@ fn adapter_lines() -> usize {
 ///
 /// [FR-WS-42]: ../../docs/specs/requirements/FR-WS-42.md
 /// [CR-225]: ../../docs/requests/CR-225-per-member-single-root-tools.md
+///
+/// **S-667 996→1039** for the `security` group, the CLI twins of the four
+/// security tools ([FR-SC-06], [FR-SC-08]): measured 996→1037 (+41: `lib.rs`
+/// +30, `dispatch.rs` +11), 2 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Security` variant of `Commands` | **+4** |
+/// | `lib.rs`: `SecurityCommands` — `scan --consent` (4), `ingest <REPORT>` (3), `status` with `--repo` (1), `findings` with its six filter flags and `--repo` (15), the derive, header and close (3) | **+26** |
+/// | `dispatch.rs`: the `security` arm — three one-line delegations, and `findings` turning its six tokens into the core's `FindingsFilter` before its one delegation | **+11** |
+/// | | **+41** |
+///
+/// Routing, not logic: the filter tokens are parsed by
+/// `logos_core::security::FindingsFilter::parse`, the function the MCP tool
+/// calls, and the consent check, the scan and the payloads are the core's.
+///
+/// [FR-SC-06]: ../../docs/specs/requirements/FR-SC-06.md
+/// [FR-SC-08]: ../../docs/specs/requirements/FR-SC-08.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 996,
-        "cli adapter exceeds the 996 production-LOC budget (NFR-MA-02): \
+        lines <= 1039,
+        "cli adapter exceeds the 1039 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

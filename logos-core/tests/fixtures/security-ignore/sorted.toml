@@ -1,0 +1,13 @@
+[[ignore]]
+fingerprint = "0a7c3e51d9b84f26a1c05e8d7b3f9246e1d08a5c7b2f4963d8e0a1b5c7f92e43"
+reason = "test fixture under app/, never deployed"
+expires = 2026-12-31
+
+[[ignore]]
+fingerprint = "6b1f9d04a2c85e37b9d1f06a4c8e2b75d3a9f0c1e6b84a27d5c3f8e90a1b7d62"
+reason = "accepted until the \"v2\" rewrite; tracked in the backlog\\ticket 42"
+
+[[ignore]]
+fingerprint = "f3d5a8c1e07b4926d1a3f58c0e9b7d24a6c1e5f83b0d9472e8a5c3f1b6d07e94"
+reason = "vendored dependency pinned by the upstream"
+expires = 2027-06-30

@@ -266,6 +266,12 @@ registered_tools! {
     CoverageIngestAuto => "coverage_ingest_auto",
     CoverageRefresh => "coverage_refresh",
     CoverageStatus => "coverage_status",
+    /// The security evidence tier (FR-SC-01, FR-SC-06..08, S-667).
+    SecurityIngest => "security_ingest",
+    SecurityIngestAuto => "security_ingest_auto",
+    SecurityScan => "security_scan",
+    SecurityStatus => "security_status",
+    SecurityFindings => "security_findings",
 
     // ── Session gate (FR-SG-*) ──────────────────────────────────────────────
     SessionStart => "session_start",
@@ -288,6 +294,8 @@ registered_tools! {
     WatchSync => "watch_sync",
     /// The watcher's automatic coverage-artifact ingest (same override).
     WatchCoverageIngest => "watch_coverage_ingest",
+    /// The watcher's automatic SARIF ingest (same override, S-667).
+    WatchSecurityIngest => "watch_security_ingest",
     WorktreeSeed => "worktree_seed",
     NavProloguePurge => "nav_prologue_purge",
 
@@ -393,6 +401,11 @@ impl Tool {
             | Tool::CoverageIngestAuto
             | Tool::CoverageRefresh
             | Tool::CoverageStatus
+            | Tool::SecurityIngest
+            | Tool::SecurityIngestAuto
+            | Tool::SecurityScan
+            | Tool::SecurityStatus
+            | Tool::SecurityFindings
             // Session gate.
             | Tool::SessionStart
             | Tool::SessionEnd
@@ -409,6 +422,7 @@ impl Tool {
             | Tool::Persist
             | Tool::WatchSync
             | Tool::WatchCoverageIngest
+            | Tool::WatchSecurityIngest
             | Tool::WorktreeSeed
             | Tool::NavProloguePurge
             // The quality-report hook install — a command the user ran.
@@ -485,8 +499,11 @@ impl Tool {
             | Tool::LanguageComposition
             // `coverage_status` reports the coverage verdict *over the code*;
             // its three ingest/refresh siblings mutate the graph from an
-            // artifact and are engine-internal.
-            | Tool::CoverageStatus => ToolClass::QualityGate,
+            // artifact and are engine-internal. The security tier splits the
+            // same way: its two reads are verdicts, its scan and ingests write.
+            | Tool::CoverageStatus
+            | Tool::SecurityStatus
+            | Tool::SecurityFindings => ToolClass::QualityGate,
 
             // ── Session gate ────────────────────────────────────────────────
             Tool::SessionStart | Tool::SessionEnd => ToolClass::SessionGate,
@@ -506,12 +523,17 @@ impl Tool {
             | Tool::Persist
             | Tool::WatchSync
             | Tool::WatchCoverageIngest
+            | Tool::WatchSecurityIngest
             | Tool::WorktreeSeed
             | Tool::NavProloguePurge
             // Coverage ingestion: folds an external artifact into the graph.
             | Tool::CoverageIngest
             | Tool::CoverageIngestAuto
             | Tool::CoverageRefresh
+            // Security ingestion and the scan that produces what it ingests.
+            | Tool::SecurityIngest
+            | Tool::SecurityIngestAuto
+            | Tool::SecurityScan
             // The quality-report hook install writes Logos's own integration files.
             | Tool::WikiQualityReportHookEmit
             // Mutations of the project's own policy store.
