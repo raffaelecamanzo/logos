@@ -98,6 +98,8 @@ fn listed_calls(repo: &str) -> Vec<(&'static str, Value)> {
         ("dsm", json!({})),
         ("evolution", json!({})),
         ("coverage_status", json!({})),
+        ("security_status", json!({})),
+        ("security_findings", json!({})),
     ];
     base.into_iter()
         .map(|(tool, mut args)| {
@@ -204,7 +206,11 @@ async fn every_write_and_gate_tool_refuses_repo_rather_than_acting_on_the_defaul
         .list_tools()
         .into_iter()
         .map(|t| t.name.to_string())
-        .filter(|name| roster::QUALITY_TOOLS.contains(&name.as_str()) || roster::COVERAGE_TOOLS.contains(&name.as_str()))
+        .filter(|name| {
+            [roster::QUALITY_TOOLS, roster::COVERAGE_TOOLS, roster::SECURITY_TOOLS]
+                .iter()
+                .any(|group| group.contains(&name.as_str()))
+        })
         .filter(|name| !roster::MEMBER_SELECTABLE_TOOLS.contains(&name.as_str()))
         .collect();
     assert_eq!(write_tools.len(), roster::SINGLE_ROOT - roster::MEMBER_SELECTABLE_TOOLS.len(), "{write_tools:?}");
@@ -213,6 +219,9 @@ async fn every_write_and_gate_tool_refuses_repo_rather_than_acting_on_the_defaul
         let mut args = json!({"repo": "svc-b"});
         if tool == "coverage_ingest" {
             args["report"] = json!("lcov.info");
+        }
+        if tool == "security_ingest" {
+            args["report"] = json!("report.sarif");
         }
         let (code, message) = refusal(&client, tool, args).await;
         assert_eq!(code, ErrorCode::INVALID_PARAMS, "{tool}: {message}");

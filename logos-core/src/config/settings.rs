@@ -363,6 +363,19 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Project::is_empty")]
     pub project: Project,
 
+    /// Which registered security scanners may run (`[security_scan]`,
+    /// [FR-SC-05], [NFR-SE-08], [ADR-80]). Enable/disable **only**: a command,
+    /// binary-path or flag key here fails the load (exit 2) before anything is
+    /// spawned, because this file travels with every clone. Those overrides are
+    /// read from the user-level config alone ([`UserConfig`](super::UserConfig)).
+    /// Elided from the serialised read-model while no scanner is listed.
+    ///
+    /// [FR-SC-05]: ../../../../docs/specs/requirements/FR-SC-05.md
+    /// [NFR-SE-08]: ../../../../docs/specs/requirements/NFR-SE-08.md
+    /// [ADR-80]: ../../../../docs/specs/architecture/decisions/ADR-80.md
+    #[serde(default, skip_serializing_if = "SecurityScan::is_empty")]
+    pub security_scan: SecurityScan,
+
     /// Agentic-chat policy + the orchestrator budget tree (`[chat]`, S-169,
     /// [FR-CF-06], [ADR-40], [ADR-41]). Optional; an absent table behaves as
     /// all-defaults (OpenRouter `base_url`, the documented budget-tree defaults).
@@ -856,6 +869,91 @@ impl EffectiveCoverageIngest {
     }
 }
 
+/// The registered security scanners' names, in registry order ([FR-SC-05]):
+/// the only keys `[security_scan]` accepts, at repository and at user level.
+/// The [security orchestrator](crate::security)'s registry holds one entry per
+/// name, in this order (a test pins the two together).
+///
+/// [FR-SC-05]: ../../../../docs/specs/requirements/FR-SC-05.md
+pub const SECURITY_SCANNERS: [&str; 9] = [
+    "semgrep",
+    "trivy",
+    "gitleaks",
+    "osv-scanner",
+    "bandit",
+    "gosec",
+    "checkov",
+    "codeql",
+    "dependency-check",
+];
+
+/// Reject a `[security_scan.<name>]` table naming no registered scanner. Shared
+/// by the repository and the user-level tables, so both name the same set.
+pub(super) fn validate_scanner_names<'a>(
+    table: &str,
+    names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), super::error::ConfigError> {
+    match names
+        .into_iter()
+        .find(|name| !SECURITY_SCANNERS.contains(&name.as_str()))
+    {
+        Some(name) => Err(super::error::ConfigError::InvalidValue {
+            key: format!("{table}.{name}"),
+            message: format!(
+                "{name:?} is not a registered scanner (expected one of: {})",
+                SECURITY_SCANNERS.join(", ")
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The repository's `[security_scan]` table: one `[security_scan.<scanner>]`
+/// sub-table per scanner it mentions ([NFR-SE-08]).
+///
+/// Every registered scanner is enabled unless its table says `enabled = false`.
+/// A scanner table accepts `enabled` and nothing else (`deny_unknown_fields` on
+/// [`ScannerToggle`]); a bare key directly under `[security_scan]` is not a
+/// table and fails to parse; a scanner name outside [`SECURITY_SCANNERS`] fails
+/// [`Config::validate`]. All three fail the load (exit 2), and the orchestrator
+/// loads the config before it spawns anything.
+///
+/// [NFR-SE-08]: ../../../../docs/specs/requirements/NFR-SE-08.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecurityScan(pub BTreeMap<String, ScannerToggle>);
+
+/// One `[security_scan.<scanner>]` table in the repository config: the switch,
+/// and nothing a repository could use to choose what runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScannerToggle {
+    /// Whether the scanner may run (default `true`).
+    #[serde(default = "default_scanner_enabled")]
+    pub enabled: bool,
+}
+
+fn default_scanner_enabled() -> bool {
+    true
+}
+
+impl SecurityScan {
+    /// No scanner mentioned — the table serialises to nothing, so a config
+    /// without `[security_scan]` keeps its read-model unchanged.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether `scanner` may run: enabled unless its table disables it.
+    pub fn is_enabled(&self, scanner: &str) -> bool {
+        self.0.get(scanner).is_none_or(|t| t.enabled)
+    }
+
+    fn validate(&self) -> Result<(), super::error::ConfigError> {
+        validate_scanner_names("security_scan", self.0.keys())
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -871,6 +969,7 @@ impl Default for Config {
             config_artifacts: ConfigArtifacts::default(),
             coverage_ingest: CoverageIngest::default(),
             project: Project::default(),
+            security_scan: SecurityScan::default(),
             chat: ChatConfig::default(),
             wiki: WikiConfig::default(),
         }
@@ -1034,6 +1133,8 @@ impl Config {
         self.resolution.validate()?;
         // [FR-CF-10]: a present `[project] id` must be a coordinate.
         self.project.validate()?;
+        // [NFR-SE-08]: `[security_scan.<name>]` names a registered scanner.
+        self.security_scan.validate()?;
         // The format token, if set, must be a recognized parser name — a typo
         // fails loud at load rather than silently disabling auto-ingest.
         if let Some(format) = &self.coverage_ingest.format {

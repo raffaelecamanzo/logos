@@ -534,6 +534,31 @@ metric/cycle/DSM scope byte-identical. `coverage_refresh` has an MCP twin. See
 `[history]`/`[coverage]` tuning tables in
 [configuration.md](configuration.md#history--coverage--the-evidence-tiers).
 
+### Security findings
+
+A third advisory tier stores security findings in the same `history.db`, each
+anchored to HEAD, the scanner and the file it names. Like coverage, it never moves
+the quality signal.
+
+```bash
+logos security scan --consent        # first scan here: record network consent, run installed scanners
+logos security ingest ci/out.sarif   # or fold in any SARIF 2.1.0 report from CI
+logos security status                # one state per scanner: never_run / fresh / stale / ...
+logos security findings --severity high --suppression active
+```
+
+Logos runs only scanners you have already installed (Semgrep, Trivy, Gitleaks,
+OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check), with commands
+fixed in Logos: a repository can only switch one off. Consent to the network
+access a scanner may need is yours, given once per project on the command line;
+an agent using the MCP tools is told to ask you for it. A running `serve` watcher
+auto-ingests a `.sarif` file written into `.logos/security/` and never starts a
+scanner. Findings are grouped by OWASP Top 10 (2025, or `--edition 2021`), and
+accepted risk lives in the committed
+[`.logos/security-ignore.toml`](configuration.md#logossecurity-ignoretoml--suppressions).
+No source snippet is stored, and anything shaped like a secret is masked before
+it is written. Full reference: [commands.md](commands.md#security-findings).
+
 ## Setting up the MCP server (AI agents)
 
 `logos serve --mcp` speaks the Model Context Protocol over **stdio**. The

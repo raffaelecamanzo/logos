@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "CodeQL",
+          "organization": "GitHub",
+          "semanticVersion": "2.19.3",
+          "notifications": [
+            {
+              "id": "py/diagnostics/successfully-extracted-files",
+              "name": "py/diagnostics/successfully-extracted-files",
+              "shortDescription": {
+                "text": "Extracted files"
+              },
+              "fullDescription": {
+                "text": "Lists all files in the source code directory that were extracted."
+              },
+              "defaultConfiguration": {
+                "enabled": true
+              },
+              "properties": {
+                "tags": [
+                  "successfully-extracted-files"
+                ],
+                "description": "Lists all files in the source code directory that were extracted.",
+                "id": "py/diagnostics/successfully-extracted-files",
+                "kind": "diagnostic",
+                "name": "Extracted files"
+              }
+            }
+          ],
+          "rules": []
+        },
+        "extensions": [
+          {
+            "name": "codeql/python-queries",
+            "semanticVersion": "1.3.2+8e1f5d4a2c3b",
+            "notifications": [],
+            "rules": [
+              {
+                "id": "py/sql-injection",
+                "name": "py/sql-injection",
+                "shortDescription": {
+                  "text": "SQL query built from user-controlled sources"
+                },
+                "fullDescription": {
+                  "text": "Building a SQL query from user-controlled sources is vulnerable to insertion of malicious SQL code by the user."
+                },
+                "defaultConfiguration": {
+                  "enabled": true,
+                  "level": "error"
+                },
+                "help": {
+                  "text": "# SQL query built from user-controlled sources\nIf a database query (such as a SQL or NoSQL query) is built from user-provided data without sufficient sanitization, a user may be able to run malicious database queries.\n",
+                  "markdown": "# SQL query built from user-controlled sources\nIf a database query (such as a SQL or NoSQL query) is built from user-provided data without sufficient sanitization, a user may be able to run malicious database queries.\n"
+                },
+                "properties": {
+                  "tags": [
+                    "security",
+                    "external/cwe/cwe-089"
+                  ],
+                  "description": "Building a SQL query from user-controlled sources is vulnerable to insertion of\n              malicious SQL code by the user.",
+                  "id": "py/sql-injection",
+                  "kind": "path-problem",
+                  "name": "SQL query built from user-controlled sources",
+                  "precision": "high",
+                  "problem.severity": "error",
+                  "security-severity": "8.8"
+                }
+              },
+              {
+                "id": "py/clear-text-logging-sensitive-data",
+                "name": "py/clear-text-logging-sensitive-data",
+                "shortDescription": {
+                  "text": "Clear-text logging of sensitive information"
+                },
+                "fullDescription": {
+                  "text": "Logging sensitive information without encryption or hashing can expose it to an attacker."
+                },
+                "defaultConfiguration": {
+                  "enabled": true,
+                  "level": "error"
+                },
+                "help": {
+                  "text": "# Clear-text logging of sensitive information\n",
+                  "markdown": "# Clear-text logging of sensitive information\n"
+                },
+                "properties": {
+                  "tags": [
+                    "security",
+                    "external/cwe/cwe-312",
+                    "external/cwe/cwe-359",
+                    "external/cwe/cwe-532"
+                  ],
+                  "description": "Logging sensitive information without encryption or hashing can\n              expose it to an attacker.",
+                  "id": "py/clear-text-logging-sensitive-data",
+                  "kind": "path-problem",
+                  "name": "Clear-text logging of sensitive information",
+                  "precision": "high",
+                  "problem.severity": "error",
+                  "security-severity": "7.5"
+                }
+              }
+            ],
+            "locations": [
+              {
+                "uri": "file:///home/runner/.codeql/packages/codeql/python-queries/1.3.2/",
+                "description": {
+                  "text": "The QL pack root directory."
+                }
+              },
+              {
+                "uri": "file:///home/runner/.codeql/packages/codeql/python-queries/1.3.2/qlpack.yml",
+                "description": {
+                  "text": "The QL pack definition file."
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "invocations": [
+        {
+          "toolExecutionNotifications": [],
+          "executionSuccessful": true
+        }
+      ],
+      "artifacts": [
+        {
+          "location": {
+            "uri": "app/db.py",
+            "uriBaseId": "%SRCROOT%",
+            "index": 0
+          }
+        },
+        {
+          "location": {
+            "uri": "app/views.py",
+            "uriBaseId": "%SRCROOT%",
+            "index": 1
+          }
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "py/sql-injection",
+          "rule": {
+            "id": "py/sql-injection",
+            "index": 0,
+            "toolComponent": {
+              "index": 0
+            }
+          },
+          "message": {
+            "text": "This SQL query depends on a [user-provided value](1)."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/db.py",
+                  "uriBaseId": "%SRCROOT%",
+                  "index": 0
+                },
+                "region": {
+                  "startLine": 12,
+                  "startColumn": 20,
+                  "endColumn": 64
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "5b3a9c0e7d2f1a48:1",
+            "primaryLocationStartColumnFingerprint": "15"
+          },
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "app/views.py",
+                            "uriBaseId": "%SRCROOT%",
+                            "index": 1
+                          },
+                          "region": {
+                            "startLine": 8,
+                            "startColumn": 15,
+                            "endColumn": 22
+                          }
+                        },
+                        "message": {
+                          "text": "ControlFlowNode for request"
+                        }
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "app/db.py",
+                            "uriBaseId": "%SRCROOT%",
+                            "index": 0
+                          },
+                          "region": {
+                            "startLine": 12,
+                            "startColumn": 20,
+                            "endColumn": 64
+                          }
+                        },
+                        "message": {
+                          "text": "ControlFlowNode for BinaryExpr"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "relatedLocations": [
+            {
+              "id": 1,
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/views.py",
+                  "uriBaseId": "%SRCROOT%",
+                  "index": 1
+                },
+                "region": {
+                  "startLine": 8,
+                  "startColumn": 15,
+                  "endColumn": 22
+                }
+              },
+              "message": {
+                "text": "user-provided value"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "py/clear-text-logging-sensitive-data",
+          "rule": {
+            "id": "py/clear-text-logging-sensitive-data",
+            "index": 1,
+            "toolComponent": {
+              "index": 0
+            }
+          },
+          "message": {
+            "text": "This expression logs [sensitive data (password)](1) as clear text."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/views.py",
+                  "uriBaseId": "%SRCROOT%",
+                  "index": 1
+                },
+                "region": {
+                  "startLine": 21,
+                  "startColumn": 18,
+                  "endColumn": 41
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e1d7f30a92bc4415:1",
+            "primaryLocationStartColumnFingerprint": "13"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/views.py",
+                  "uriBaseId": "%SRCROOT%",
+                  "index": 1
+                },
+                "region": {
+                  "startLine": 19,
+                  "startColumn": 16,
+                  "endColumn": 24
+                }
+              },
+              "message": {
+                "text": "sensitive data (password)"
+              }
+            }
+          ]
+        }
+      ],
+      "columnKind": "unicodeCodePoints",
+      "properties": {
+        "semmle.formatSpecifier": "sarif-latest"
+      }
+    }
+  ]
+}

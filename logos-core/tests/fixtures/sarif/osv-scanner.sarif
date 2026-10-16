@@ -1,0 +1,123 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/google/osv-scanner",
+          "name": "osv-scanner",
+          "rules": [
+            {
+              "id": "PYSEC-2018-28",
+              "name": "PYSEC-2018-28",
+              "shortDescription": {
+                "text": "PYSEC-2018-28: Requests sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect"
+              },
+              "fullDescription": {
+                "text": "Requests sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect"
+              },
+              "deprecatedIds": [
+                "PYSEC-2018-28"
+              ],
+              "help": {
+                "text": "**Your dependency is vulnerable to [PYSEC-2018-28](https://osv.dev/vulnerability/PYSEC-2018-28)** (Also published as: CVE-2018-18074, GHSA-x84v-xcm2-53pg).",
+                "markdown": "**Your dependency is vulnerable to [PYSEC-2018-28](https://osv.dev/vulnerability/PYSEC-2018-28)** (Also published as: CVE-2018-18074, GHSA-x84v-xcm2-53pg)."
+              }
+            },
+            {
+              "id": "GHSA-9wx4-h78v-vm56",
+              "name": "GHSA-9wx4-h78v-vm56",
+              "shortDescription": {
+                "text": "GHSA-9wx4-h78v-vm56: Requests `Session` object does not verify requests after making first request with verify=False"
+              },
+              "fullDescription": {
+                "text": "Requests `Session` object does not verify requests after making first request with verify=False"
+              },
+              "deprecatedIds": [
+                "GHSA-9wx4-h78v-vm56"
+              ],
+              "help": {
+                "text": "**Your dependency is vulnerable to [GHSA-9wx4-h78v-vm56](https://osv.dev/vulnerability/GHSA-9wx4-h78v-vm56)** (Also published as: CVE-2024-35195).",
+                "markdown": "**Your dependency is vulnerable to [GHSA-9wx4-h78v-vm56](https://osv.dev/vulnerability/GHSA-9wx4-h78v-vm56)** (Also published as: CVE-2024-35195)."
+              }
+            },
+            {
+              "id": "PYSEC-2019-13",
+              "name": "PYSEC-2019-13",
+              "shortDescription": {
+                "text": "PYSEC-2019-13: Django SQL injection possibility in key and index lookups for JSONField/HStoreField"
+              },
+              "fullDescription": {
+                "text": "Django SQL injection possibility in key and index lookups for JSONField/HStoreField"
+              },
+              "deprecatedIds": [
+                "PYSEC-2019-13"
+              ],
+              "help": {
+                "text": "**Your dependency is vulnerable to [PYSEC-2019-13](https://osv.dev/vulnerability/PYSEC-2019-13)** (Also published as: CVE-2019-14234, GHSA-6r97-cj55-9hrq).",
+                "markdown": "**Your dependency is vulnerable to [PYSEC-2019-13](https://osv.dev/vulnerability/PYSEC-2019-13)** (Also published as: CVE-2019-14234, GHSA-6r97-cj55-9hrq)."
+              }
+            }
+          ],
+          "version": "1.9.1"
+        }
+      },
+      "artifacts": [
+        {
+          "location": {
+            "uri": "file:///home/ci/project/requirements.txt"
+          },
+          "length": -1
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "PYSEC-2018-28",
+          "message": {
+            "text": "Package 'requests@2.19.0' is vulnerable to 'PYSEC-2018-28' (also known as 'CVE-2018-18074', 'GHSA-x84v-xcm2-53pg')."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///home/ci/project/requirements.txt"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "GHSA-9wx4-h78v-vm56",
+          "message": {
+            "text": "Package 'requests@2.19.0' is vulnerable to 'GHSA-9wx4-h78v-vm56' (also known as 'CVE-2024-35195')."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///home/ci/project/requirements.txt"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "PYSEC-2019-13",
+          "message": {
+            "text": "Package 'django@2.2.0' is vulnerable to 'PYSEC-2019-13' (also known as 'CVE-2019-14234', 'GHSA-6r97-cj55-9hrq')."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///home/ci/project/requirements.txt"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

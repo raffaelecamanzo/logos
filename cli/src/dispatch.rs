@@ -22,10 +22,10 @@
 use std::path::Path;
 
 use anyhow::Result;
-use logos_core::{config::load_config_from_root, Engine};
+use logos_core::{config::load_config_from_root, security::FindingsFilter, Engine};
 use logos_ext::ExtensionHost;
 
-use crate::{engine, init_options, Commands, CoverageCommands, Output};
+use crate::{engine, init_options, Commands, CoverageCommands, Output, SecurityCommands};
 
 /// Route one parsed command to exactly one `Engine` call. Simple reads go
 /// through the [`Output`] chokepoints; `gate`/`doctor`/`verify` project a
@@ -219,6 +219,18 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             }
             CoverageCommands::Status { member } => out.try_query_for(root, &member, |e| e.coverage_status()),
             CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
+        },
+        // The security evidence tier (S-667): the same one-call-per-twin shape.
+        Commands::Security { command } => match command {
+            SecurityCommands::Scan { consent } => out.try_query(root, |e| e.security_scan(consent)),
+            SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
+            SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
+            SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, member } => {
+                let tokens = [severity, scanner, category, path, suppression, edition];
+                let [severity, scanner, category, path, suppression, edition] = tokens.each_ref().map(Option::as_deref);
+                let filter = FindingsFilter::parse(severity, scanner, category, path, suppression, edition)?;
+                out.try_query_for(root, &member, |e| e.security_findings(&filter))
+            }
         },
         // The session-start quality-report hook (S-638): a core command, not a
         // wiki one.

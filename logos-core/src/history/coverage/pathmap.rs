@@ -19,11 +19,34 @@
 //! Unmatched entries are surfaced in the ingest summary ([FR-CV-01]) — counted,
 //! never silently dropped.
 //!
+//! # One binder for every evidence kind ([FR-SC-02], [ADR-79])
+//! Security findings bind their SARIF paths with this same mapper rather than a
+//! second spelling of the rule. [`PathMapper::bind`] is the general answer — it
+//! says *why* a path did not bind (no candidate, or how many candidates tied),
+//! which the security ingest reports as "unmatched with its candidates count";
+//! [`PathMapper::map`] is the coverage view of it, the bound path or nothing.
+//!
 //! [FR-CV-03]: ../../../../docs/specs/requirements/FR-CV-03.md
 //! [FR-CV-09]: ../../../../docs/specs/requirements/FR-CV-09.md
 //! [FR-CV-01]: ../../../../docs/specs/requirements/FR-CV-01.md
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 //! [ADR-23]: ../../../../docs/specs/architecture/decisions/ADR-23.md
+//! [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
+//! [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
+
+/// How one report path bound — the general answer [`PathMapper::bind`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Binding<'a> {
+    /// Exactly one indexed file binds.
+    Bound(&'a str),
+    /// No indexed file shares a complete suffix with the report path.
+    Unmatched,
+    /// `candidates` (two or more) indexed files tie — never guessed between.
+    Ambiguous {
+        /// How many indexed files the report path is a complete suffix of.
+        candidates: usize,
+    },
+}
 
 /// Maps report paths to indexed files for one ingest. Built once per ingest with
 /// the indexed-file set and the effective strip prefixes; reused for every report
@@ -78,10 +101,21 @@ impl<'a> PathMapper<'a> {
     ///    a component-suffix of an indexed path. Exactly one such → bind; two or
     ///    more (an ambiguous basename like `util.rs`) → unmatched, never guessed.
     pub(crate) fn map(&self, report_path: &str) -> Option<&'a str> {
+        match self.bind(report_path) {
+            Binding::Bound(path) => Some(path),
+            Binding::Unmatched | Binding::Ambiguous { .. } => None,
+        }
+    }
+
+    /// Bind one report path, saying why when it does not: the rule [`map`] applies,
+    /// with the tie count kept instead of collapsed to "nothing".
+    ///
+    /// [`map`]: Self::map
+    pub(crate) fn bind(&self, report_path: &str) -> Binding<'a> {
         let normalized = self.strip(&normalize(report_path));
         let target = components(&normalized);
         if target.is_empty() {
-            return None;
+            return Binding::Unmatched;
         }
 
         // 1. Longest indexed path that is a complete suffix of the report path.
@@ -94,21 +128,22 @@ impl<'a> PathMapper<'a> {
             }
         }
         if let Some(p) = primary {
-            return Some(p.original);
+            return Binding::Bound(p.original);
         }
 
         // 2. Fallback: the report path is a complete suffix of an indexed path.
-        //    A unique candidate binds; any ambiguity is unmatched.
-        let mut found: Option<&'a str> = None;
-        for idx in &self.indexed {
-            if is_suffix(&target, &idx.components) {
-                if found.is_some() {
-                    return None; // ambiguous — never guess
-                }
-                found = Some(idx.original);
-            }
+        //    A unique candidate binds; any ambiguity is unmatched, never guessed.
+        let mut candidates = self
+            .indexed
+            .iter()
+            .filter(|idx| is_suffix(&target, &idx.components));
+        match (candidates.next(), candidates.count()) {
+            (None, _) => Binding::Unmatched,
+            (Some(only), 0) => Binding::Bound(only.original),
+            (Some(_), others) => Binding::Ambiguous {
+                candidates: others + 1,
+            },
         }
-        found
     }
 
     /// Strip the longest configured prefix that `normalized` starts with — but
@@ -257,5 +292,37 @@ mod tests {
         let idx = indexed();
         let m = PathMapper::new(&idx, &[]);
         assert_eq!(m.map("/etc/passwd"), None);
+    }
+
+    /// `bind` keeps the reason `map` collapses: an ambiguous basename reports how
+    /// many indexed files tied ([FR-SC-02] "unmatched with its candidates count"),
+    /// a path sharing nothing reports no candidate, and a bound path is the same
+    /// one `map` returns.
+    #[test]
+    fn bind_reports_the_tie_count_map_collapses() {
+        let idx = indexed();
+        let m = PathMapper::new(&idx, &[]);
+        // A bare basename is a complete suffix of both `src/util.rs` and
+        // `tests/util.rs`: a real tie.
+        assert_eq!(m.bind("util.rs"), Binding::Ambiguous { candidates: 2 });
+        // A directory no indexed file has is no candidate at all — `map` reads
+        // `None` here for that reason, not for a tie.
+        assert_eq!(m.bind("/somewhere/util.rs"), Binding::Unmatched);
+        assert_eq!(m.bind("/etc/passwd"), Binding::Unmatched);
+        assert_eq!(m.bind(""), Binding::Unmatched, "an empty path has nothing to bind");
+        assert_eq!(
+            m.bind("/home/ci/build/project/src/util.rs"),
+            Binding::Bound("src/util.rs")
+        );
+        // Three same-suffix files tie three ways, not "two or more".
+        let three = vec![
+            "a/mod.py".to_string(),
+            "b/mod.py".to_string(),
+            "c/mod.py".to_string(),
+        ];
+        assert_eq!(
+            PathMapper::new(&three, &[]).bind("mod.py"),
+            Binding::Ambiguous { candidates: 3 }
+        );
     }
 }

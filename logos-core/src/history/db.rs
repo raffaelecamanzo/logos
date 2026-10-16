@@ -26,6 +26,8 @@
 //!
 //! Migration 2 ([S-047]) adds `commits.subject` and the append-only
 //! `temporal_snapshots` series ([FR-GH-09]) on this same independent track.
+//! Migration 3 ([S-049]) adds the coverage tables; migration 4 ([S-663]) adds the
+//! security-finding tables ([ADR-79]) — the evidence store stays one file.
 //!
 //! Migrations follow the same forward-only `user_version` discipline as
 //! [`crate::graph_store::migrate`] and [`crate::observability::db`] — one
@@ -39,6 +41,9 @@
 //! [ADR-13]: ../../../docs/specs/architecture/decisions/ADR-13.md
 //! [ADR-22]: ../../../docs/specs/architecture/decisions/ADR-22.md
 //! [S-046]: ../../../docs/planning/journal.md#s-046-history-store-and-incremental-git-miner
+//! [S-049]: ../../../docs/planning/journal.md#s-049-coverage-store-parsers-and-ingest-pipeline
+//! [S-663]: ../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
+//! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 
 use std::path::Path;
 
@@ -50,8 +55,9 @@ use super::miner::{CommitFact, FileChange};
 /// Forward-only migration ledger for `history.db` — dense, 1-based, strictly
 /// increasing (mirrors `graph_store::schema::MIGRATIONS` and
 /// `observability::db::MIGRATIONS`). [S-047] appends migration 2 (the commit
-/// subject + the temporal snapshot series); [S-049] appends migration 3+ for the
-/// coverage tables on this same track. Migration 1 is **never** edited.
+/// subject + the temporal snapshot series); [S-049] appends migration 3 for the
+/// coverage tables and [S-663] migration 4 for the security findings, on this
+/// same track. A shipped migration is **never** edited.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -191,6 +197,69 @@ const MIGRATIONS: &[(i64, &str)] = &[
              PRIMARY KEY (file_id, line_no)
          ) STRICT, WITHOUT ROWID;",
     ),
+    // ── Migration 4 (S-663, CR-217, ADR-79): the security half of the evidence
+    // store, beside coverage on the same forward-only track. history-engine stays
+    // the sole writer; `logos.db` is untouched and never ATTACH-ed, so security
+    // evidence survives a full `index` exactly as coverage does (FR-SC-02).
+    //
+    // No column holds a source snippet, region text, code-flow excerpt or rule
+    // description (BR-67, FR-SC-03): the parser never reads them, and a
+    // secret-class finding's `message` is the fixed redacted text by the time it
+    // reaches this schema.
+    (
+        4,
+        // One snapshot per (ingest-time HEAD, scanner) (FR-SC-02). A same-HEAD,
+        // same-scanner ingest replaces that scanner's snapshot; a new HEAD opens a
+        // new one and prior snapshots are kept as provenance. `scanner_version` is
+        // recorded so two developers' verdicts are diagnosable (ADR-79).
+        // `report_hash` makes a byte-identical re-ingest a no-op (FR-SC-01).
+        "CREATE TABLE security_snapshots (
+             id              INTEGER PRIMARY KEY,
+             head_sha        TEXT    NOT NULL,  -- ingest-time HEAD (provenance anchor)
+             scanner_name    TEXT    NOT NULL,  -- SARIF tool.driver.name
+             scanner_version TEXT    NOT NULL,  -- driver semanticVersion | version | 'unknown'
+             report_hash     TEXT    NOT NULL,  -- blake3 of the report file bytes
+             format          TEXT    NOT NULL,  -- 'sarif' (detected)
+             created_at      INTEGER NOT NULL,  -- unixepoch() at ingest (provenance only)
+             UNIQUE (head_sha, scanner_name)
+         ) STRICT;
+
+         -- One row per repo file a snapshot's findings bound to, anchored by the
+         -- file's content hash at ingest. Freshness is decided per file at read
+         -- time against this anchor (FR-CV-05 reapplied): fresh or stale.
+         CREATE TABLE security_files (
+             snapshot_id  INTEGER NOT NULL REFERENCES security_snapshots(id) ON DELETE CASCADE,
+             path         TEXT    NOT NULL,  -- repo-relative indexed path
+             content_hash TEXT    NOT NULL,  -- blake3 of file content at ingest (anchor)
+             PRIMARY KEY (snapshot_id, path)
+         ) STRICT, WITHOUT ROWID;
+
+         -- One row per finding, keyed by fingerprint within its snapshot
+         -- (FR-SC-02). `binding` says how the report path bound: 'bound' (to
+         -- `path`), 'unmatched' (no indexed file), 'ambiguous' (several tied —
+         -- never guessed), 'unbound' (no physical location). Only a bound finding
+         -- has a `path`; the report's own spelling is kept in `report_path`.
+         -- `cwes` is the sorted, comma-separated CWE list ('' when none).
+         CREATE TABLE security_findings (
+             snapshot_id  INTEGER NOT NULL REFERENCES security_snapshots(id) ON DELETE CASCADE,
+             fingerprint  TEXT    NOT NULL,
+             rule_id      TEXT    NOT NULL,
+             severity     TEXT    NOT NULL CHECK (severity IN ('critical','high','medium','low','info')),
+             cwes         TEXT    NOT NULL,
+             message      TEXT    NOT NULL,  -- the rule message, or the fixed redacted text
+             redacted     INTEGER NOT NULL CHECK (redacted IN (0, 1)),
+             binding      TEXT    NOT NULL CHECK (binding IN ('bound','unmatched','ambiguous','unbound')),
+             report_path  TEXT,              -- the path as the report named it; NULL when unbound
+             path         TEXT,              -- bound repo-relative path; NULL unless binding = 'bound'
+             start_line   INTEGER,
+             start_column INTEGER,
+             end_line     INTEGER,
+             end_column   INTEGER,
+             PRIMARY KEY (snapshot_id, fingerprint),
+             CHECK ((binding = 'bound') = (path IS NOT NULL))
+         ) STRICT, WITHOUT ROWID;
+         CREATE INDEX security_findings_path ON security_findings (path);",
+    ),
 ];
 
 /// Open (creating if absent) and migrate `history.db` at `path`.
@@ -231,6 +300,13 @@ fn apply_pragma_contract(conn: &Connection) -> Result<()> {
 /// gate, so it can be read before migration 1 creates `schema_versions`, and a
 /// rolled-back migration reverts the version pointer with the schema.
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
+    apply_migrations_through(conn, i64::MAX)
+}
+
+/// Apply every embedded migration newer than the store's `user_version` and no
+/// newer than `target`. Production always passes `i64::MAX`; a test passes an
+/// older version to build the pre-change schema a migration must upgrade.
+fn apply_migrations_through(conn: &mut Connection, target: i64) -> Result<()> {
     // Read without a lock first: every request opens the store, and an up-to-date
     // one must not queue behind a writer just to learn it has nothing to do.
     let current: i64 = conn
@@ -238,7 +314,7 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
         .context("reading history user_version")?;
 
     for &(version, sql) in MIGRATIONS {
-        if version <= current {
+        if version <= current || version > target {
             continue;
         }
         // A pending step takes the write lock BEFORE re-reading the version, so two
@@ -603,6 +679,20 @@ pub(crate) fn persist_temporal_snapshot(
     )
     .context("appending a temporal snapshot")?;
     Ok(())
+}
+
+/// Open the store at `path` migrated only as far as `version` — the pre-change
+/// schema an upgrade test starts from. Test-only.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened or a migration fails.
+#[cfg(test)]
+pub(crate) fn open_at_version(path: &Path, version: i64) -> Result<Connection> {
+    let mut conn = Connection::open(path)
+        .with_context(|| format!("opening history store at {}", path.display()))?;
+    apply_pragma_contract(&conn)?;
+    apply_migrations_through(&mut conn, version)?;
+    Ok(conn)
 }
 
 /// A migrated in-memory `history.db` — the unit-test seam (mirrors

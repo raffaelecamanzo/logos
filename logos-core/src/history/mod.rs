@@ -6,7 +6,8 @@
 //! the incremental, HEAD-anchored `git log --numstat -M -z` miner ([miner]) that
 //! populates it. [S-047] adds the per-file temporal metrics ([temporal]) and the
 //! append-only snapshot series on the same track; the hotspot surface ([S-048])
-//! and the coverage tables ([S-049]) ride it in later iterations.
+//! and the coverage tables ([S-049]) ride it in later iterations; the security
+//! findings ([S-663]) ride it beside coverage.
 //!
 //! # The non-dependency that defines the tier
 //! Mining is **lazy**: [`mine`] is reached only from a temporal-surface read
@@ -25,11 +26,13 @@
 //! [S-047]: ../../../docs/planning/journal.md#s-047-temporal-metrics-co-change-and-defect-heuristic
 //! [S-048]: ../../../docs/planning/journal.md#s-048-hotspot-ranking-and-temporal-reporting-surfaces
 //! [S-049]: ../../../docs/planning/journal.md#s-049-coverage-store-parsers-and-ingest-pipeline
+//! [S-663]: ../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
 
 pub mod coverage;
 mod db;
 mod hotspot;
 mod miner;
+pub mod security;
 mod temporal;
 
 #[cfg(test)]
@@ -50,7 +53,12 @@ pub use hotspot::{
     HotspotReport, COVERAGE_BASIS, DEFECT_LABEL, FIRST_MINE_NOTICE, STATIC_BASIS,
     STATIC_FALLBACK_LABEL, TIER_LABEL,
 };
+pub(crate) use miner::head_sha;
 pub use miner::{DegradedReason, MineOutcome};
+pub use security::{
+    FindingBinding, ScannerIngest, ScannerSnapshot, SecurityFinding, SecurityFormat,
+    SecurityIngestSummary, SecurityView, Severity, UnmatchedPath,
+};
 pub use temporal::{FileTemporal, TemporalReport};
 
 /// `history.db` lives beside `logos.db` and `telemetry.db` under the resolved

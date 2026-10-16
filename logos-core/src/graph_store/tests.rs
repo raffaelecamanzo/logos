@@ -1453,6 +1453,34 @@ fn insert_edge_if_absent_dedups_and_reports() {
 }
 
 #[test]
+fn insert_edge_if_live_skips_a_deleted_endpoint_and_keeps_the_transaction() {
+    // A resolution pass binds off a snapshot; a write committed since can
+    // delete an endpoint (HF-5). That insert reports `None`, and the rest of
+    // the same transaction still commits.
+    let mut store = mem();
+    let a = seed(&store, 1, "a", NodeKind::Function);
+    let b = seed(&store, 2, "b", NodeKind::Function);
+    let gone = seed(&store, 3, "gone", NodeKind::Function);
+    store
+        .conn
+        .execute("DELETE FROM nodes WHERE id = ?1", [gone.get()])
+        .unwrap();
+
+    let (dangling, live, duplicate) = store
+        .write_batch(|w| {
+            let dangling = w.insert_edge_with_payload_if_live(a, gone, EdgeKind::Calls, None)?;
+            let live = w.insert_edge_with_payload_if_live(a, b, EdgeKind::Calls, None)?;
+            let duplicate = w.insert_edge_with_payload_if_live(a, b, EdgeKind::Calls, None)?;
+            Ok((dangling, live, duplicate))
+        })
+        .unwrap();
+    assert_eq!(dangling, None, "a deleted endpoint is reported, not an error");
+    assert_eq!(live, Some(true), "the live edge is created in the same transaction");
+    assert_eq!(duplicate, Some(false), "the duplicate stays a quiet no-op");
+    assert_eq!(store.all_edges().unwrap().len(), 1);
+}
+
+#[test]
 fn ledger_rejects_out_of_range_form_at_the_check_constraint() {
     // The typed API cannot express an invalid form; raw SQL proves the CHECK
     // is the on-disk backstop (defence in depth, FR-DB-01 pattern).

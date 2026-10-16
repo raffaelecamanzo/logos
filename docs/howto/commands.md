@@ -1,6 +1,6 @@
 # Command Reference
 
-All subcommands of the `logos` binary (38 top-level commands in the default
+All subcommands of the `logos` binary (39 top-level commands in the default
 build, including the Sprint-55 `xservice` and `workspace` federation groups).
 Every command accepts
 the global flags `--project <PATH>`, `--json`, and `--quiet`; see
@@ -51,6 +51,10 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`hotspots`](#hotspots) | ✅ | Churn × complexity ranking — the non-gated temporal tier |
 | [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura report into the evidence store |
 | [`coverage status`](#coverage-status) | ✅ | Per-file coverage freshness + the overall fraction |
+| [`security scan`](#security-scan---consent) | ✅ | Run the installed, enabled scanners and ingest their SARIF — the first scan needs `--consent` |
+| [`security ingest`](#security-ingest-report) | ✅ | Ingest a SARIF 2.1.0 report from any tool into the evidence store |
+| [`security status`](#security-status) | ✅ | Each scanner's state — not installed, disabled, never run, stale or fresh — and the consent state |
+| [`security findings`](#security-findings) | ✅ | Stored findings with their OWASP categories and suppressions, filtered |
 
 ---
 
@@ -72,7 +76,8 @@ logos callers helper_beta_only --repo svc-b --json
 [`impact`](#impact), [`impact-intersection`](#impact-intersection),
 [`precedent`](#precedent), [`branch-overlap`](#branch-overlap),
 [`health`](#health), [`hotspots`](#hotspots), [`dsm`](#dsm---granularity-g),
-[`evolution`](#evolution) and [`coverage status`](#coverage-status). `health` keeps its
+[`evolution`](#evolution), [`coverage status`](#coverage-status),
+[`security status`](#security-status) and [`security findings`](#security-findings). `health` keeps its
 exit code, projected from the member it answered for. The `xservice` and
 `workspace` groups already took `--repo` with a meaning of their own: it scopes their
 fan-out and, for [`xservice callers` and `impact`](#xservice-workspace-federation-queries),
@@ -84,9 +89,10 @@ spelling before reading an empty answer as "nothing".
 **Which commands cannot target another member.** The write and gate commands act on
 the repository they run in, and refuse `--repo` as an unknown argument (exit 2):
 `index`, `sync`, `scan`, `check`, `gate`, `verify`, `doctor`, `session-start`,
-`session-end`, `coverage ingest`, `coverage refresh`, `quality-report` and `hook`. Their
+`session-end`, `coverage ingest`, `coverage refresh`, `security scan`, `security ingest`,
+`quality-report` and `hook`. Their
 MCP twins — `scan`, `rescan`, `check_rules`, `verify`, `doctor`, `session_start`,
-`session_end`, `coverage_ingest`, `coverage_refresh` — take no `repo` either, and say they act on
+`session_end`, `coverage_ingest`, `coverage_refresh`, `security_scan`, `security_ingest` — take no `repo` either, and say they act on
 the default member. `affected`, `implements`, `referencing-docs`, `doc-gaps`,
 `stats` and `languages` have no MCP twin that takes `repo`, so they answer for the
 repository they run in.
@@ -3183,3 +3189,134 @@ data** (it reads as absent, not as the old number). With nothing ingested, the
 command returns `n/a` plus a notice (`no coverage ingested — run 'logos coverage
 ingest <report>' …`) and exits 0 — absent evidence is never fabricated into a
 zero.
+
+## Security findings
+
+Security scanners report *that* a finding exists; Logos stores each one as
+evidence in `.logos/history.db`, anchored to HEAD, the scanner and the file it
+names, beside coverage. Like the other evidence tiers it is advisory here:
+nothing in this section moves the quality `gate`. No snippet of source is ever
+stored. A secret-class finding's message is replaced before it is written, and
+every other message is stored with anything shaped like a secret masked.
+Each command below has an MCP twin returning the same payload (`security_scan`,
+`security_ingest`, `security_status`, `security_findings`).
+
+### `security scan [--consent]`
+
+```bash
+logos security scan --consent      # the first scan in a project: record consent, then scan
+logos security scan                # later scans
+logos security scan --json         # one outcome per registered scanner
+```
+
+Runs every installed, enabled scanner — Semgrep, Trivy, Gitleaks, OSV-Scanner,
+Bandit, gosec, Checkov, CodeQL and Dependency-Check — with the fixed commands
+listed in [configuration.md](configuration.md#user-level-config--settings-no-repository-can-choose),
+writes each SARIF report to `.logos/security/` and ingests it as it finishes.
+Logos never installs a scanner; `[security_scan]` in `.logos/config.toml` switches
+one off.
+
+The first scan needs `--consent`, because a scanner may reach the network to
+refresh its rules or database; without it the command exits 2 naming the flag and
+the scanners. Later scans do not ask, and a newly installed or enabled scanner is
+asked for alone ([Scan consent](configuration.md#scan-consent)). Nothing starts
+before that check. Consent is yours to give: the MCP `security_scan` tool never
+records it and refuses a `consent` argument, so an agent that meets the refusal
+must ask you to run `logos security scan --consent`.
+
+The payload has one entry per registered scanner, with its `outcome`:
+
+| `outcome` | Meaning |
+|---|---|
+| `ran` | It ran; `sarif` lists its reports, `findings` counts them, `ingests` holds each ingest summary |
+| `not_installed` | No binary was found |
+| `disabled` | `[security_scan.<scanner>] enabled = false` |
+| `requires_build` | CodeQL only: every language present needs a build; ingest a CI report instead |
+| `not_applicable` | CodeQL only: no file in a language it analyses |
+| `failed` | It produced no report, or one that could not be ingested |
+
+One scanner failing never stops the others, and a failed scanner's previous
+snapshot is kept. A `failed` entry carries the scanner's `exit_code`, the `log`
+holding its whole captured output (`.logos/security/<scanner>.failed.log`;
+`null` if Logos could not write it, which never stops the other scanners), and
+in `stderr` the output's last lines with anything that looks like a secret
+replaced by `[masked]`: a password or token value, a URL's credentials, a private
+key block, or a long generated token. The full text stays in the log, which is
+under the gitignored `.logos/security/`. The log is removed the next time that
+scanner runs cleanly, and `security status` reports it as `last_failure` until
+then.
+
+Exit 2 also for an invalid `[security_scan]` table or user-level config; the
+scan then starts nothing.
+
+### `security ingest <REPORT>`
+
+```bash
+logos security ingest ci/codeql.sarif          # a report from CI, any SARIF 2.1.0 tool
+```
+
+Ingests one SARIF 2.1.0 report. The whole report is validated before anything is
+written; a malformed one is rejected naming its defect, and the store is left as
+it was. Report paths bind to indexed files by longest unique suffix; an ambiguous
+or unknown path is listed `unmatched`, never guessed. Ingesting the same bytes at
+the same HEAD again writes nothing and says `already_ingested`. A report from a
+tool that is not a registered scanner is stored under its own name and listed by
+`security status` under `other_reports`.
+
+A running `serve` watcher ingests a `.sarif` file written directly into
+`.logos/security/` by itself — a read and a parse, never a scanner run.
+
+### `security status`
+
+```bash
+logos security status [--repo <MEMBER>]
+logos security status --json
+```
+
+One state per registered scanner:
+
+| `state` | Meaning |
+|---|---|
+| `not_installed` | No binary was found and no report is stored |
+| `disabled` | Switched off in `[security_scan]` |
+| `never_run` | Installed, and no report is stored |
+| `stale` | A report is stored, but HEAD moved since (`because: head_moved`) or a file it anchors changed (`files_changed`) |
+| `fresh` | A report is stored at this HEAD and no file holding one of its findings has changed. A report with no findings anchors no file, so only a new HEAD makes it stale |
+
+`never_run` carries no count; `fresh` carries `findings` (unsuppressed) and
+`suppressed`, so a clean scan reads `fresh` with `findings: 0` and is never
+confused with a scanner that has not run. A stored report counts whether or not
+the scanner is installed here, so a report ingested from CI reads `fresh` or
+`stale`. `consent` lists the scanners consented to and the `pending` ones the
+next scan will ask for. Starts no scanner.
+
+### `security findings`
+
+```bash
+logos security findings                                  # everything stored
+logos security findings --severity high                  # high and critical
+logos security findings --scanner semgrep --path src/api # filters intersect
+logos security findings --category A05 --edition 2021    # OWASP Top 10:2021 numbering
+logos security findings --suppression active             # what is not suppressed
+```
+
+Lists the stored findings, each with its OWASP Top 10 categories (2025 by
+default; `--edition 2021` reclassifies without re-ingesting) and its suppression
+from `.logos/security-ignore.toml`. The filters are `--severity` (the least
+severity listed: `critical`, `high`, `medium`, `low`, `info`), `--scanner` (a
+registry name or the report's tool name), `--category` (an id such as
+`A05:2025`, or its number `A05`), `--path` (a project-relative file, or a
+directory holding it), and `--suppression active|suppressed`; together they
+intersect. An unknown severity, edition or suppression token exits 2.
+
+The payload also says what the list is drawn from, so an empty list is never
+read as clean: `scanned` lists every stored report with its finding count
+(suppressed findings included, unlike `status`'s `findings`),
+`never_run` the installed, enabled scanners with none (as `security status` means
+it), and `notice` says when nothing is stored at all. `categories` gives every category of the edition: `covered`
+with the count of every stored finding under it (suppressed ones included, and
+whatever the filters), or `not_covered` when no enabled scanner whose report is stored can
+detect it. An installed scanner that has never run covers nothing: it has not
+looked. A `not_covered` category never reads as 0, though a
+finding can still fall under it and is listed. `suppressions` lists every
+ignore entry, flagged `expired` and `orphaned`.

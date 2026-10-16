@@ -21,7 +21,7 @@ use logos_core::federation::{
     self, query, Backing, BuildDependencies, ContractBridge, EngineRegistry,
     MemberSelectionError, TypeReferences,
 };
-use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
+use logos_core::{governance::DsmGranularity, model::NodeKind, security::FindingsFilter, Engine};
 use logos_ext::mcp::{InvalidParams, McpTool};
 use logos_ext::ExtensionHost;
 use rmcp::handler::server::tool::{ToolCallContext, ToolRoute, ToolRouter};
@@ -569,6 +569,51 @@ pub struct CoverageIngestParams {
     pub repo: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SecurityScanParams {
+    /// Refused, never acted on: consent is the user's, given with `logos security scan --consent` (FR-SC-07).
+    #[serde(default)]
+    #[schemars(skip)]
+    pub consent: Option<serde_json::Value>,
+    /// Captured so it can be refused, never served: this tool acts on the
+    /// default member only (FR-WS-42). Absent from the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub repo: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SecurityIngestParams {
+    /// Path to the SARIF 2.1.0 report to ingest (FR-SC-01).
+    pub report: String,
+    /// Captured so it can be refused, never served: this tool acts on the
+    /// default member only (FR-WS-42). Absent from the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub repo: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SecurityFindingsParams {
+    /// Least severity listed: critical, high, medium, low or info.
+    pub severity: Option<String>,
+    /// A scanner, by registry name (semgrep) or SARIF driver name (Semgrep OSS).
+    pub scanner: Option<String>,
+    /// An OWASP category, by id (A05:2025) or number (A05).
+    pub category: Option<String>,
+    /// A project-relative file, or a directory holding it.
+    pub path: Option<String>,
+    /// Only "active" or only "suppressed" findings.
+    pub suppression: Option<String>,
+    /// The OWASP edition: "2025" (default) or "2021".
+    pub edition: Option<String>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
+}
+
 // The parameter of a write or gate tool that takes nothing else (FR-WS-42): only
 // the captured `repo` it refuses. A plain comment: schemars would serve a doc
 // comment as the schema's description.
@@ -595,14 +640,15 @@ fn default_member_only(tool: &str, repo: Option<serde_json::Value>) -> Result<()
     }
 }
 
-// ── The 25 single-root core tools (FR-MC-01) ────────────────────────────────
+// ── The 29 single-root core tools (FR-MC-01) ────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
 // this roster is used alone (FR-WS-05). The read-only tools take `repo`
 // (FR-WS-42); the write and gate tools — `scan`, `rescan`, `check_rules`,
 // `doctor`, `verify`, `session_start`, `session_end`, `coverage_ingest`,
-// `coverage_refresh` — pass `None` and act on the default member.
+// `coverage_refresh`, `security_scan`, `security_ingest` — pass `None` and act
+// on the default member.
 
 #[tool_router(router = single_tool_router)]
 impl LogosMcp {
@@ -845,6 +891,53 @@ impl LogosMcp {
         default_member_only("coverage_refresh", p.repo)?;
         self.run_result("coverage_refresh", None, |e| e.coverage_refresh())
             .await
+    }
+
+    // — Security evidence tier (4): CR-217, FR-SC-01/06/07/08. Each behind the
+    //   SAME `api` method as its CLI twin (NFR-CC-01). —
+
+    #[tool(
+        description = "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`."
+    )]
+    async fn security_scan(&self, Parameters(p): Parameters<SecurityScanParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("security_scan", p.repo)?;
+        if p.consent.is_some() {
+            let refusal = "logos:security_scan cannot record network consent, the user's to give: run `logos security scan --consent` in a terminal (FR-SC-07)";
+            return Err(ErrorData::invalid_params(refusal, None));
+        }
+        self.run_result("security_scan", None, |e| e.security_scan(false)).await
+    }
+
+    #[tool(
+        description = "Ingest a SARIF 2.1.0 report from any tool into the evidence store (FR-SC-01): validated before any write, findings bound to indexed files, anchored to HEAD and the scanner, secret-class messages redacted, no snippet stored. A byte-identical re-ingest is a no-op reported already_ingested. Under a workspace it acts on the default member only: it takes no `repo`."
+    )]
+    async fn security_ingest(&self, Parameters(mut p): Parameters<SecurityIngestParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("security_ingest", p.repo.take())?;
+        self.run_result("security_ingest", None, move |e| e.security_ingest(std::path::Path::new(&p.report)))
+            .await
+    }
+
+    #[tool(
+        description = "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Also the consent state: the scanners consented to, and the ones the next scan will ask for."
+    )]
+    async fn security_status(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
+        self.run_result("security_status", p.repo, |e| e.security_status()).await
+    }
+
+    #[tool(
+        description = "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0."
+    )]
+    async fn security_findings(&self, Parameters(p): Parameters<SecurityFindingsParams>) -> Result<CallToolResult, ErrorData> {
+        let filter = FindingsFilter::parse(
+            p.severity.as_deref(),
+            p.scanner.as_deref(),
+            p.category.as_deref(),
+            p.path.as_deref(),
+            p.suppression.as_deref(),
+            p.edition.as_deref(),
+        )
+        .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
+        self.run_result("security_findings", p.repo, move |e| e.security_findings(&filter)).await
     }
 
     #[tool(

@@ -444,21 +444,22 @@ fn a_core_command_names_an_extensions_hidden_alias_only_while_composed() {
 }
 
 /// Extension subcommands are listed in one slot of `logos --help` — after the
-/// core's `coverage`, before `hook` — in registration order, rather than after
-/// `serve` where clap would append them: where `wiki` stood while it was a core
-/// command, so its help reads as it always did (S-644).
+/// core's evidence tiers, the last of which is `security` (S-667), before `hook`
+/// — in registration order, rather than after `serve` where clap would append
+/// them: where `wiki` stood while it was a core command, after the evidence
+/// tiers (S-644).
 #[test]
-fn an_extension_subcommand_is_listed_after_coverage_and_before_hook() {
+fn an_extension_subcommand_is_listed_after_the_evidence_tiers_and_before_hook() {
     let help = logos_cli::command(&host("stub")).render_help().to_string();
     let at = |verb: &str| {
         help.lines()
             .position(|line| line.trim_start().starts_with(&format!("{verb} ")))
             .unwrap_or_else(|| panic!("`{verb}` is listed:\n{help}"))
     };
-    assert_eq!(at(STUB_SUBCOMMAND), at("coverage") + 1, "directly after coverage:\n{help}");
+    assert_eq!(at(STUB_SUBCOMMAND), at("security") + 1, "directly after security:\n{help}");
     assert_eq!(at("hook"), at(STUB_SUBCOMMAND) + 1, "directly before hook:\n{help}");
     // The core's own order around the slot is unchanged.
-    assert!(at("serve") > at("hook") && at("hotspots") < at("coverage"), "{help}");
+    assert!(at("serve") > at("hook") && at("hotspots") < at("coverage") && at("coverage") < at("security"), "{help}");
     let public = logos_cli::command(&host("public")).render_help().to_string();
     assert_eq!(help.lines().count(), public.lines().count() + 1, "one line added, none moved out");
 }

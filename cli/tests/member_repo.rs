@@ -155,6 +155,8 @@ const TWINS: &[&[&str]] = &[
     &["dsm", "--no-reconcile"],
     &["evolution"],
     &["coverage", "status"],
+    &["security", "status"],
+    &["security", "findings"],
 ];
 
 /// Every twin takes `--repo` and answers for the member it names, saying so.
@@ -196,7 +198,7 @@ fn only_the_twins_of_the_listed_tools_take_repo() {
 /// The command path of a `TWINS` row: its leading words up to the first argument.
 fn twin_path(twin: &[&str]) -> String {
     match twin {
-        ["coverage", "status"] => "coverage status".to_string(),
+        ["coverage" | "security", sub, ..] => format!("{} {sub}", twin[0]),
         [name, ..] => (*name).to_string(),
         [] => unreachable!("a twin names a command"),
     }
@@ -207,7 +209,7 @@ fn twin_path(twin: &[&str]) -> String {
 #[test]
 fn write_and_gate_commands_refuse_repo() {
     let fx = Fixture::new();
-    for args in [&["scan"][..], &["check"], &["gate"], &["verify"], &["session-start"], &["session-end"], &["doctor"], &["coverage", "refresh"]] {
+    for args in [&["scan"][..], &["check"], &["gate"], &["verify"], &["session-start"], &["session-end"], &["doctor"], &["coverage", "refresh"], &["security", "scan"], &["security", "ingest", "r.sarif"]] {
         let mut args = args.to_vec();
         args.extend(["--repo", "svc-b"]);
         let out = fx.run("ws", &args);

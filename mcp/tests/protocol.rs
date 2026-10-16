@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 #[path = "support/roster.rs"]
 mod roster;
 
-use roster::{COVERAGE_TOOLS, NAV_TOOLS, QUALITY_TOOLS, TEMPORAL_TOOLS};
+use roster::{COVERAGE_TOOLS, NAV_TOOLS, QUALITY_TOOLS, SECURITY_TOOLS, TEMPORAL_TOOLS};
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -101,6 +101,7 @@ async fn exactly_the_declared_tool_roster_registers_with_bare_names() {
         .chain(QUALITY_TOOLS.iter())
         .chain(TEMPORAL_TOOLS.iter())
         .chain(COVERAGE_TOOLS.iter())
+        .chain(SECURITY_TOOLS.iter())
         .copied()
         .collect();
     expected.sort_unstable();
@@ -110,12 +111,13 @@ async fn exactly_the_declared_tool_roster_registers_with_bare_names() {
     assert_eq!(
         names,
         expected,
-        "exactly the {} navigation + {} quality + {} temporal + {} coverage tools must register \
-         (FR-MC-01) — the core roster; an extension's tools join it through the host",
+        "exactly the {} navigation + {} quality + {} temporal + {} coverage + {} security tools \
+         must register (FR-MC-01) — the core roster; an extension's tools join it through the host",
         NAV_TOOLS.len(),
         QUALITY_TOOLS.len(),
         TEMPORAL_TOOLS.len(),
         COVERAGE_TOOLS.len(),
+        SECURITY_TOOLS.len(),
     );
 
     // Namespacing is the HOST's job, derived from the server identity: names

@@ -8,6 +8,10 @@
 //! - [`Rules`] (`.logos/rules.toml`) → the architecture contract consumed by the
 //!   [governance-engine] ([FR-CF-03]).
 //!
+//! And one file outside every repository: the user-level [`UserConfig`]
+//! ([`user_config_dir`]), the only source of settings that choose what Logos
+//! runs, such as a security scanner's binary path and extra flags ([NFR-SE-08]).
+//!
 //! Plus discovery ([`discover`]): the gitignore-aware, root-contained walk that
 //! composes gitignore ∪ `exclude` ∪ `ignored_dirs` ([FR-IX-02], [FR-CF-02]) and
 //! skips oversized files with a notice ([FR-CF-04]).
@@ -30,6 +34,7 @@
 //! [FR-IX-02]: ../../../docs/specs/requirements/FR-IX-02.md
 //! [NFR-DM-04]: ../../../docs/specs/requirements/NFR-DM-04.md
 //! [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+//! [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
 
 use std::fs;
 use std::path::Path;
@@ -48,6 +53,7 @@ pub(crate) mod globs;
 mod rules;
 mod secrets;
 mod settings;
+mod user;
 mod wiki;
 mod workspace_tier;
 mod writeback;
@@ -106,7 +112,13 @@ pub use secrets::{load_secrets_from_root, ChatSecrets, MaskedSecret, Secrets};
 pub(crate) use secrets::SECRETS_RELPATH;
 pub use settings::{
     BindingPolicy, Config, ConfigArtifacts, CoverageIngest, Documentation, EffectiveCoverageIngest,
-    Resolution, Semantics, TypedEnrichment, Watcher, DEFAULT_MAX_FILE_SIZE,
+    Resolution, ScannerToggle, SecurityScan, Semantics, TypedEnrichment, Watcher,
+    DEFAULT_MAX_FILE_SIZE, SECURITY_SCANNERS,
+};
+pub use user::{
+    load_scan_consent, load_user_config, parse_user_config, record_scan_consent, user_config_dir,
+    user_config_dir_from, ScanConsent, ScannerOverride, UserConfig, UserSecurityScan,
+    SCAN_CONSENT_FILE, USER_CONFIG_FILE, USER_CONFIG_HOME_ENV,
 };
 pub use wiki::{EffectiveWikiModel, WikiConfig};
 pub use workspace_tier::{

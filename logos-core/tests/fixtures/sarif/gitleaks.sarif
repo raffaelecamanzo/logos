@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "gitleaks",
+          "semanticVersion": "v8.18.4",
+          "informationUri": "https://github.com/gitleaks/gitleaks",
+          "rules": [
+            {
+              "id": "generic-api-key",
+              "shortDescription": {
+                "text": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations."
+              }
+            },
+            {
+              "id": "private-key",
+              "shortDescription": {
+                "text": "Identified a Private Key, which may compromise cryptographic security and sensitive data encryption."
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "message": {
+            "text": "generic-api-key has detected secret for file app/settings.py."
+          },
+          "ruleId": "generic-api-key",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/settings.py"
+                },
+                "region": {
+                  "startLine": 4,
+                  "startColumn": 14,
+                  "endLine": 4,
+                  "endColumn": 45,
+                  "snippet": {
+                    "text": "lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "commitSha": "3f1c2a9e8b7d6c5f4e3a2b1c0d9e8f7a6b5c4d3e",
+            "email": "dev@example.test",
+            "author": "Fixture Dev",
+            "date": "2026-10-01T09:12:44Z",
+            "commitMessage": "wire the api client with lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw"
+          },
+          "properties": {
+            "tags": []
+          }
+        },
+        {
+          "message": {
+            "text": "generic-api-key has detected secret for file app/settings.py."
+          },
+          "ruleId": "generic-api-key",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/settings.py"
+                },
+                "region": {
+                  "startLine": 4,
+                  "startColumn": 14,
+                  "endLine": 4,
+                  "endColumn": 45,
+                  "snippet": {
+                    "text": "lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "commitSha": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b",
+            "email": "dev@example.test",
+            "author": "Fixture Dev",
+            "date": "2026-10-02T15:03:10Z",
+            "commitMessage": "move settings"
+          },
+          "properties": {
+            "tags": []
+          }
+        }
+      ]
+    }
+  ]
+}

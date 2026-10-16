@@ -459,17 +459,28 @@ pub fn run(
                     // Idempotent: a captured exact-symbol ref and the textual
                     // ref for the same call legitimately bind the same edge. An
                     // artifact bind carries its relation class onto the edge
-                    // (CR-011); code/doc/access binds pass `None`.
-                    if w.insert_edge_with_payload_if_absent(
+                    // (CR-011); code/doc/access binds pass `None`. An endpoint
+                    // a write since the snapshot deleted leaves the row for the
+                    // next pass, as an unbound one.
+                    match w.insert_edge_with_payload_if_live(
                         *source,
                         *target,
                         *kind,
                         payload.as_deref(),
                     )? {
-                        created += 1;
-                    }
-                    if !was_resolved && !spent.contains(ref_id) {
-                        w.mark_ref_resolved(*ref_id, true)?;
+                        Some(inserted) => {
+                            if inserted {
+                                created += 1;
+                            }
+                            if !was_resolved && !spent.contains(ref_id) {
+                                w.mark_ref_resolved(*ref_id, true)?;
+                            }
+                        }
+                        None => {
+                            if *was_resolved && !spent.contains(ref_id) {
+                                w.mark_ref_resolved(*ref_id, false)?;
+                            }
+                        }
                     }
                 }
                 binder::Outcome::BoundMany {
@@ -482,19 +493,24 @@ pub fn run(
                     // `.tf` files (CR-011), a `dyn T` call's impls (S-281), a Go
                     // import's package files (S-439). One edge per target, all
                     // sharing the payload, all idempotent. `targets` is
-                    // non-empty, so the row is resolved.
+                    // non-empty, so the row is resolved — unless a write since
+                    // the snapshot deleted every endpoint.
+                    let mut live = false;
                     for target in targets {
-                        if w.insert_edge_with_payload_if_absent(
+                        if let Some(inserted) = w.insert_edge_with_payload_if_live(
                             *source,
                             *target,
                             *kind,
                             payload.as_deref(),
                         )? {
-                            created += 1;
+                            live = true;
+                            if inserted {
+                                created += 1;
+                            }
                         }
                     }
-                    if !was_resolved && !spent.contains(ref_id) {
-                        w.mark_ref_resolved(*ref_id, true)?;
+                    if !spent.contains(ref_id) && live != *was_resolved {
+                        w.mark_ref_resolved(*ref_id, live)?;
                     }
                 }
                 binder::Outcome::Unbound => {

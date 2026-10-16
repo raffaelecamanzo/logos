@@ -66,6 +66,11 @@ pub const TEMPORAL_TOOLS: &[&str] = &["hotspots"];
 pub const COVERAGE_TOOLS: &[&str] =
     &["coverage_ingest", "coverage_status", "coverage_refresh"];
 
+/// The security tools wired to the evidence store and the scanner orchestrator
+/// (S-667, CR-217, FR-SC-01/06/07/08).
+pub const SECURITY_TOOLS: &[&str] =
+    &["security_scan", "security_ingest", "security_status", "security_findings"];
+
 /// The cross-service tools the **federated** backing adds on top of the
 /// single-root roster (S-248/CR-061 FR-WS-05; `workspace_reachability` by
 /// S-257, FR-WS-12; `workspace_check` by S-258, FR-WS-13; `xservice_build_deps`
@@ -88,8 +93,11 @@ pub const XSERVICE_TOOLS: &[&str] = &[
 /// The core's own roster. A composed extension's tools join it through the
 /// extension host (S-644), and are rostered with that extension; this
 /// repository's binary composes none.
-pub const SINGLE_ROOT: usize =
-    NAV_TOOLS.len() + QUALITY_TOOLS.len() + TEMPORAL_TOOLS.len() + COVERAGE_TOOLS.len();
+pub const SINGLE_ROOT: usize = NAV_TOOLS.len()
+    + QUALITY_TOOLS.len()
+    + TEMPORAL_TOOLS.len()
+    + COVERAGE_TOOLS.len()
+    + SECURITY_TOOLS.len();
 
 /// How many tools the federated backing registers — the single-root roster
 /// plus the cross-service family.
@@ -120,4 +128,6 @@ pub const MEMBER_SELECTABLE_TOOLS: &[&str] = &[
     "dsm",
     "evolution",
     "coverage_status",
+    "security_status",
+    "security_findings",
 ];
