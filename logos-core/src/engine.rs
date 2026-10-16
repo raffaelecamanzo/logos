@@ -113,6 +113,10 @@ pub struct Engine {
     /// How many residue walks this engine has run: one per memo miss. Read by
     /// the tests that prove a hit walks nothing (S-605).
     call_residue_walks: AtomicU64,
+    /// Where the security surfaces find the user-level directory and the
+    /// scanner binaries; `None` reads the process environment on each call
+    /// ([`Engine::with_scan_environment`]).
+    scan_env: Option<crate::security::ScanEnvironment>,
 }
 
 /// The per-language call residue, keyed by language name.
@@ -285,6 +289,7 @@ impl Engine {
             extension_state: std::sync::Mutex::default(),
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
+            scan_env: None,
         }
     }
 
@@ -549,6 +554,7 @@ impl Engine {
             extension_state: std::sync::Mutex::default(),
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
+            scan_env: None,
         };
 
         // Move a store whose symbols carry another coordinate than the
@@ -741,6 +747,7 @@ impl Engine {
             extension_state: std::sync::Mutex::default(),
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
+            scan_env: None,
         };
 
         engine.migrate_symbol_coordinate();
@@ -2279,17 +2286,7 @@ impl Engine {
     ) -> Result<crate::history::IngestSummary> {
         let rules = crate::config::load_rules_from_root(&self.root)?;
         let cfg = rules.coverage.effective();
-        // The indexed-file set the mapper binds against, supplied at the api
-        // layer from a graph read ([BR-28]); a transient/empty graph yields an
-        // empty set, so every report path is honestly reported unmatched.
-        let indexed_paths: Vec<String> = match self.runtime() {
-            Some(rt) => rt
-                .submit_read(|store| store.indexed_files())?
-                .into_iter()
-                .map(|f| f.path)
-                .collect(),
-            None => Vec::new(),
-        };
+        let indexed_paths = self.evidence_indexed_paths()?;
         crate::history::coverage::ingest(
             &self.root,
             report_path,
@@ -2298,6 +2295,159 @@ impl Engine {
             ingest_cfg,
             &indexed_paths,
         )
+    }
+
+    /// The indexed-file set an evidence report's paths bind against, supplied
+    /// at the api layer from a graph read so `history.db` is never `ATTACH`-ed to
+    /// the canonical graph ([BR-28], [ADR-79]). A transient or empty graph yields
+    /// an empty set, so every report path is honestly reported unmatched. Shared
+    /// by the coverage and security ingests — one binder, one indexed set.
+    ///
+    /// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
+    /// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
+    fn evidence_indexed_paths(&self) -> Result<Vec<String>> {
+        Ok(match self.runtime() {
+            Some(rt) => rt
+                .submit_read(|store| store.indexed_files())?
+                .into_iter()
+                .map(|f| f.path)
+                .collect(),
+            None => Vec::new(),
+        })
+    }
+
+    /// Ingest a security report (SARIF 2.1.0, from any tool) into the evidence
+    /// store ([FR-SC-01]..[FR-SC-03], [ADR-79]): parsed and validated before any
+    /// write, findings bound to indexed files by longest unique suffix, anchored
+    /// to HEAD and the scanner, keyed by fingerprint, and secret-class messages
+    /// redacted before the write. A byte-identical re-ingest at the same HEAD is a
+    /// no-op reported `already_ingested`. Security evidence is not gate input
+    /// here: nothing reads it on the gate path.
+    ///
+    /// # Errors
+    /// Returns an error (a non-zero exit on a surface) when the report is
+    /// unreadable, not SARIF, or malformed — the defect is named and nothing is
+    /// written — or `root` has no resolvable HEAD. Per-finding outcomes ride in
+    /// the returned summary.
+    ///
+    /// [FR-SC-01]: ../../../docs/specs/requirements/FR-SC-01.md
+    /// [FR-SC-03]: ../../../docs/specs/requirements/FR-SC-03.md
+    /// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
+    pub fn security_ingest(&self, report_path: &Path) -> Result<crate::history::SecurityIngestSummary> {
+        crate::observability::traced(Tool::SecurityIngest, || self.security_ingest_untraced(report_path))
+    }
+
+    /// The ingest body behind [`Engine::security_ingest`],
+    /// [`Engine::security_ingest_auto`] and [`Engine::security_scan`]. Not
+    /// `traced`: each public caller owns the span.
+    fn security_ingest_untraced(&self, report_path: &Path) -> Result<crate::history::SecurityIngestSummary> {
+        let indexed_paths = self.evidence_indexed_paths()?;
+        crate::history::security::ingest(&self.root, report_path, &indexed_paths)
+    }
+
+    /// Watcher-driven **automatic** security ingest ([FR-SC-06]): ingest the
+    /// SARIF report the watcher saw change under `.logos/security/`, through the
+    /// same path as [`Engine::security_ingest`] — a local read, parse and store,
+    /// **never** a scanner run. Its own span, so a watcher ingest is told apart
+    /// from one the user asked for, as [`Engine::coverage_ingest_auto`] is.
+    ///
+    /// Only a regular file is read: `.logos/security/` can hold what a
+    /// repository committed, and a symbolic link to a FIFO would block the one
+    /// sync worker for good, or one to `/dev/zero` grow its read without end.
+    ///
+    /// # Errors
+    /// As [`Engine::security_ingest`], or when `artifact` is not a regular file
+    /// (a symbolic link, FIFO or device); the watcher degrades them to a warning.
+    ///
+    /// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
+    pub fn security_ingest_auto(&self, artifact: &Path) -> Result<crate::history::SecurityIngestSummary> {
+        crate::observability::traced(Tool::SecurityIngestAuto, || {
+            let kind = std::fs::symlink_metadata(artifact)
+                .with_context(|| format!("reading {}", artifact.display()))?
+                .file_type();
+            if !kind.is_file() {
+                return Err(anyhow!(
+                    "{} is not a regular file; the watcher ingests a report only from one",
+                    artifact.display()
+                ));
+            }
+            self.security_ingest_untraced(artifact)
+        })
+    }
+
+    /// `logos security scan` / `security_scan` ([FR-SC-06], [FR-SC-07]): run
+    /// every installed, enabled scanner and ingest each report it writes under
+    /// `.logos/security/`, after checking the project's recorded consent. With
+    /// `consent`, the scanners the record does not name yet are added to it.
+    /// The payload is one outcome per registered scanner
+    /// ([`crate::security::scan`]).
+    ///
+    /// # Errors
+    /// Exit 2 for a missing consent (naming `--consent` and the scanners it
+    /// lacks) or an invalid repository or user config — nothing is started
+    /// then. A scanner's own failure is its `failed` outcome, never an error.
+    ///
+    /// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
+    /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
+    pub fn security_scan(&self, consent: bool) -> Result<crate::security::SecurityScanSummary> {
+        crate::observability::traced(Tool::SecurityScan, || {
+            crate::security::scan(&self.root, &self.scan_environment(), consent, |report| {
+                self.security_ingest_untraced(report)
+            })
+        })
+    }
+
+    /// `logos security status` / `security_status` ([FR-SC-08]): each
+    /// registered scanner's one state — not installed, disabled, never run,
+    /// stale, or fresh with its unsuppressed finding count — and the consent
+    /// state ([`crate::security::status`]). Starts no scanner.
+    ///
+    /// # Errors
+    /// Exit 2 for an invalid config, consent record or ignore file; otherwise
+    /// only a store failure.
+    ///
+    /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
+    pub fn security_status(&self) -> Result<crate::security::SecurityStatus> {
+        crate::observability::traced(Tool::SecurityStatus, || {
+            crate::security::status(&self.root, &self.scan_environment(), today_utc())
+        })
+    }
+
+    /// `logos security findings` / `security_findings` ([FR-SC-08]): the
+    /// stored findings with their OWASP categories ([S-664]) and suppression
+    /// ([S-666]), narrowed by `filter` ([`crate::security::findings`]). Starts
+    /// no scanner.
+    ///
+    /// # Errors
+    /// Exit 2 for an invalid config or ignore file; otherwise only a store
+    /// failure.
+    ///
+    /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
+    /// [S-664]: ../../../docs/planning/journal.md#s-664-findings-are-classified-by-owasp-top-10-2025-and-2021
+    /// [S-666]: ../../../docs/planning/journal.md#s-666-suppressions-live-in-a-committed-ignore-file-with-a-reason-and-an-expiry
+    pub fn security_findings(
+        &self,
+        filter: &crate::security::FindingsFilter,
+    ) -> Result<crate::security::SecurityFindings> {
+        crate::observability::traced(Tool::SecurityFindings, || {
+            crate::security::findings(&self.root, &self.scan_environment(), filter, today_utc())
+        })
+    }
+
+    /// This engine with the security surfaces looking in `env` instead of the
+    /// process environment: the user-level directory (overrides and consent)
+    /// and the scanner search path. For an embedder, and for tests that must
+    /// not change the process environment.
+    #[must_use]
+    pub fn with_scan_environment(mut self, env: crate::security::ScanEnvironment) -> Self {
+        self.scan_env = Some(env);
+        self
+    }
+
+    fn scan_environment(&self) -> crate::security::ScanEnvironment {
+        self.scan_env
+            .clone()
+            .unwrap_or_else(crate::security::ScanEnvironment::from_process)
     }
 
     /// Watcher-driven **automatic** coverage ingest ([FR-CV-10], [ADR-38]): ingest
@@ -3139,9 +3289,58 @@ fn degraded_sync(err: &anyhow::Error) -> SyncResult {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
+/// Today's date in UTC, from the system clock — the "today" suppression
+/// expiry is judged against. Read here, at the surface layer, and passed down:
+/// the evidence store never reads the clock ([BR-27]).
+///
+/// [BR-27]: ../../../docs/specs/software-spec.md
+fn today_utc() -> chrono::NaiveDate {
+    utc_date_of(std::time::SystemTime::now())
+}
+
+/// The UTC calendar date `instant` falls on; an instant before the epoch reads
+/// as the epoch's date.
+fn utc_date_of(instant: std::time::SystemTime) -> chrono::NaiveDate {
+    let days = instant
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400);
+    chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("the epoch is a date")
+        + chrono::Days::new(days)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two security reads are classed as quality verdicts and the scan and
+    /// ingests as engine-internal (S-667) — what `stats` attributes the calls
+    /// to. That each method traces under its own tool is
+    /// `tests/security_telemetry.rs`, a binary of its own: the shared emission
+    /// callsite's interest is cached across concurrently running tests.
+    #[test]
+    fn the_security_tools_are_classed_as_reads_and_writes() {
+        use crate::observability::ToolClass;
+        assert_eq!(Tool::SecurityStatus.tool_class(), ToolClass::QualityGate);
+        assert_eq!(Tool::SecurityFindings.tool_class(), ToolClass::QualityGate);
+        for internal in [Tool::SecurityScan, Tool::SecurityIngest, Tool::SecurityIngestAuto, Tool::WatchSecurityIngest] {
+            assert_eq!(internal.tool_class(), ToolClass::EngineInternal, "{internal:?}");
+        }
+    }
+
+    /// `today` for suppression expiry is the UTC date: a day starts at
+    /// midnight UTC and lasts 86 400 s.
+    #[test]
+    fn the_utc_date_of_an_instant_turns_at_midnight() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let date = |secs: u64| utc_date_of(UNIX_EPOCH + Duration::from_secs(secs)).to_string();
+        assert_eq!(date(0), "1970-01-01");
+        assert_eq!(date(86_399), "1970-01-01");
+        assert_eq!(date(86_400), "1970-01-02");
+        // 2026-10-16T00:00:00Z, and one second before it.
+        assert_eq!(date(1_792_108_800), "2026-10-16");
+        assert_eq!(date(1_792_108_799), "2026-10-15");
+        assert_eq!(utc_date_of(UNIX_EPOCH - Duration::from_secs(5)).to_string(), "1970-01-01");
+    }
 
     /// A **hand-maintained roster** of engine return types that satisfy the
     /// `serde::Serialize` adapter contract (ADR-01, NFR-MA-02). It is

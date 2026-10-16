@@ -1,0 +1,2648 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "fullName": "Trivy Vulnerability Scanner",
+          "informationUri": "https://github.com/aquasecurity/trivy",
+          "name": "Trivy",
+          "rules": [
+            {
+              "id": "CVE-2019-14234",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: SQL injection possibility in key and index lookups for JSONField/HStoreField"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. Due to an error in shallow key transformation, key and index lookups for django.contrib.postgres.fields.JSONField, and key lookups for django.contrib.postgres.fields.HStoreField, were subject to SQL injection. This could, for example, be exploited via crafted use of \"OR 1=1\" in a key or index name to return all records, using a suitably crafted dictionary, with dictionary expansion, as the **kwargs passed to the QuerySet.filter() function."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-14234",
+              "help": {
+                "text": "Vulnerability CVE-2019-14234\nSeverity: CRITICAL\nPackage: Django\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14234](https://avd.aquasec.com/nvd/cve-2019-14234)\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. Due to an error in shallow key transformation, key and index lookups for django.contrib.postgres.fields.JSONField, and key lookups for django.contrib.postgres.fields.HStoreField, were subject to SQL injection. This could, for example, be exploited via crafted use of \"OR 1=1\" in a key or index name to return all records, using a suitably crafted dictionary, with dictionary expansion, as the **kwargs passed to the QuerySet.filter() function.",
+                "markdown": "**Vulnerability CVE-2019-14234**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|CRITICAL|Django|1.11.23, 2.1.11, 2.2.4|[CVE-2019-14234](https://avd.aquasec.com/nvd/cve-2019-14234)|\n\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. Due to an error in shallow key transformation, key and index lookups for django.contrib.postgres.fields.JSONField, and key lookups for django.contrib.postgres.fields.HStoreField, were subject to SQL injection. This could, for example, be exploited via crafted use of \"OR 1=1\" in a key or index name to return all records, using a suitably crafted dictionary, with dictionary expansion, as the **kwargs passed to the QuerySet.filter() function."
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.8,
+                "cvssv3_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "cvssv40_baseScore": 9.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "9.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-19844",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: crafted email address allows account takeover"
+              },
+              "fullDescription": {
+                "text": "Django before 1.11.27, 2.x before 2.2.9, and 3.x before 3.0.1 allows account takeover. A suitably crafted email address (that is equal to an existing user's email address after case transformation of Unicode characters) would allow an attacker to be sent a password reset token for the matched user account. (One mitigation in the new releases is to send password reset tokens only to the registered user email address.)"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-19844",
+              "help": {
+                "text": "Vulnerability CVE-2019-19844\nSeverity: CRITICAL\nPackage: Django\nFixed Version: 1.11.27, 2.2.9, 3.0.1\nLink: [CVE-2019-19844](https://avd.aquasec.com/nvd/cve-2019-19844)\nDjango before 1.11.27, 2.x before 2.2.9, and 3.x before 3.0.1 allows account takeover. A suitably crafted email address (that is equal to an existing user's email address after case transformation of Unicode characters) would allow an attacker to be sent a password reset token for the matched user account. (One mitigation in the new releases is to send password reset tokens only to the registered user email address.)",
+                "markdown": "**Vulnerability CVE-2019-19844**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|CRITICAL|Django|1.11.27, 2.2.9, 3.0.1|[CVE-2019-19844](https://avd.aquasec.com/nvd/cve-2019-19844)|\n\nDjango before 1.11.27, 2.x before 2.2.9, and 3.x before 3.0.1 allows account takeover. A suitably crafted email address (that is equal to an existing user's email address after case transformation of Unicode characters) would allow an attacker to be sent a password reset token for the matched user account. (One mitigation in the new releases is to send password reset tokens only to the registered user email address.)"
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.8,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "cvssv40_baseScore": 9.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "9.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2020-7471",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: potential SQL injection via StringAgg(delimiter)"
+              },
+              "fullDescription": {
+                "text": "Django 1.11 before 1.11.28, 2.2 before 2.2.10, and 3.0 before 3.0.3 allows SQL Injection if untrusted data is used as a StringAgg delimiter (e.g., in Django applications that offer downloads of data as a series of rows with a user-specified column delimiter). By passing a suitably crafted delimiter to a contrib.postgres.aggregates.StringAgg instance, it was possible to break escaping and inject malicious SQL."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2020-7471",
+              "help": {
+                "text": "Vulnerability CVE-2020-7471\nSeverity: CRITICAL\nPackage: Django\nFixed Version: 1.11.28, 2.2.10, 3.0.3\nLink: [CVE-2020-7471](https://avd.aquasec.com/nvd/cve-2020-7471)\nDjango 1.11 before 1.11.28, 2.2 before 2.2.10, and 3.0 before 3.0.3 allows SQL Injection if untrusted data is used as a StringAgg delimiter (e.g., in Django applications that offer downloads of data as a series of rows with a user-specified column delimiter). By passing a suitably crafted delimiter to a contrib.postgres.aggregates.StringAgg instance, it was possible to break escaping and inject malicious SQL.",
+                "markdown": "**Vulnerability CVE-2020-7471**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|CRITICAL|Django|1.11.28, 2.2.10, 3.0.3|[CVE-2020-7471](https://avd.aquasec.com/nvd/cve-2020-7471)|\n\nDjango 1.11 before 1.11.28, 2.2 before 2.2.10, and 3.0 before 3.0.3 allows SQL Injection if untrusted data is used as a StringAgg delimiter (e.g., in Django applications that offer downloads of data as a series of rows with a user-specified column delimiter). By passing a suitably crafted delimiter to a contrib.postgres.aggregates.StringAgg instance, it was possible to break escaping and inject malicious SQL."
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.8,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "cvssv40_baseScore": 9.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "9.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2022-28346",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: SQL injection in QuerySet.annotate(),aggregate() and extra()"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. QuerySet.annotate(), aggregate(), and extra() methods are subject to SQL injection in column aliases via a crafted dictionary (with dictionary expansion) as the passed **kwargs."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2022-28346",
+              "help": {
+                "text": "Vulnerability CVE-2022-28346\nSeverity: CRITICAL\nPackage: Django\nFixed Version: 2.2.28, 3.2.13, 4.0.4\nLink: [CVE-2022-28346](https://avd.aquasec.com/nvd/cve-2022-28346)\nAn issue was discovered in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. QuerySet.annotate(), aggregate(), and extra() methods are subject to SQL injection in column aliases via a crafted dictionary (with dictionary expansion) as the passed **kwargs.",
+                "markdown": "**Vulnerability CVE-2022-28346**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|CRITICAL|Django|2.2.28, 3.2.13, 4.0.4|[CVE-2022-28346](https://avd.aquasec.com/nvd/cve-2022-28346)|\n\nAn issue was discovered in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. QuerySet.annotate(), aggregate(), and extra() methods are subject to SQL injection in column aliases via a crafted dictionary (with dictionary expansion) as the passed **kwargs."
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.8,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "cvssv40_baseScore": 9.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "9.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2022-28347",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: SQL injection via QuerySet.explain(options) on PostgreSQL"
+              },
+              "fullDescription": {
+                "text": "A SQL injection issue was discovered in QuerySet.explain() in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. This occurs by passing a crafted dictionary (with dictionary expansion) as the **options argument, and placing the injection payload in an option name."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2022-28347",
+              "help": {
+                "text": "Vulnerability CVE-2022-28347\nSeverity: CRITICAL\nPackage: Django\nFixed Version: 2.2.28, 3.2.13, 4.0.4\nLink: [CVE-2022-28347](https://avd.aquasec.com/nvd/cve-2022-28347)\nA SQL injection issue was discovered in QuerySet.explain() in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. This occurs by passing a crafted dictionary (with dictionary expansion) as the **options argument, and placing the injection payload in an option name.",
+                "markdown": "**Vulnerability CVE-2022-28347**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|CRITICAL|Django|2.2.28, 3.2.13, 4.0.4|[CVE-2022-28347](https://avd.aquasec.com/nvd/cve-2022-28347)|\n\nA SQL injection issue was discovered in QuerySet.explain() in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. This occurs by passing a crafted dictionary (with dictionary expansion) as the **options argument, and placing the injection payload in an option name."
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.8,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "cvssv40_baseScore": 9.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "9.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2025-64459",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Django SQL injection"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in 5.1 before 5.1.14, 4.2 before 4.2.26, and 5.2 before 5.2.8.\nThe methods `QuerySet.filter()`, `QuerySet.exclude()`, and `QuerySet.get()`, and the class `Q()`, are subject to SQL injection when using a suitably crafted dictionary, with dictionary expansion, as the `_connector` argument.\nEarlier, unsupported Django series (such as 5.0.x, 4.1.x, and 3.2.x) were not evaluated and may also be affected.\nDjango would like to thank cyberstan for reporting this issue."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2025-64459",
+              "help": {
+                "text": "Vulnerability CVE-2025-64459\nSeverity: CRITICAL\nPackage: Django\nFixed Version: 5.2.8, 5.1.14, 4.2.26\nLink: [CVE-2025-64459](https://avd.aquasec.com/nvd/cve-2025-64459)\nAn issue was discovered in 5.1 before 5.1.14, 4.2 before 4.2.26, and 5.2 before 5.2.8.\nThe methods `QuerySet.filter()`, `QuerySet.exclude()`, and `QuerySet.get()`, and the class `Q()`, are subject to SQL injection when using a suitably crafted dictionary, with dictionary expansion, as the `_connector` argument.\nEarlier, unsupported Django series (such as 5.0.x, 4.1.x, and 3.2.x) were not evaluated and may also be affected.\nDjango would like to thank cyberstan for reporting this issue.",
+                "markdown": "**Vulnerability CVE-2025-64459**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|CRITICAL|Django|5.2.8, 5.1.14, 4.2.26|[CVE-2025-64459](https://avd.aquasec.com/nvd/cve-2025-64459)|\n\nAn issue was discovered in 5.1 before 5.1.14, 4.2 before 4.2.26, and 5.2 before 5.2.8.\nThe methods `QuerySet.filter()`, `QuerySet.exclude()`, and `QuerySet.get()`, and the class `Q()`, are subject to SQL injection when using a suitably crafted dictionary, with dictionary expansion, as the `_connector` argument.\nEarlier, unsupported Django series (such as 5.0.x, 4.1.x, and 3.2.x) were not evaluated and may also be affected.\nDjango would like to thank cyberstan for reporting this issue."
+              },
+              "properties": {
+                "cvssv3_baseScore": 9.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                "precision": "very-high",
+                "security-severity": "9.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-14232",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: backtracking in a regular expression in django.utils.text.Truncator leads to DoS"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. If django.utils.text.Truncator's chars() and words() methods were passed the html=True argument, they were extremely slow to evaluate certain inputs due to a catastrophic backtracking vulnerability in a regular expression. The chars() and words() methods are used to implement the truncatechars_html and truncatewords_html template filters, which were thus vulnerable."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-14232",
+              "help": {
+                "text": "Vulnerability CVE-2019-14232\nSeverity: HIGH\nPackage: Django\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14232](https://avd.aquasec.com/nvd/cve-2019-14232)\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. If django.utils.text.Truncator's chars() and words() methods were passed the html=True argument, they were extremely slow to evaluate certain inputs due to a catastrophic backtracking vulnerability in a regular expression. The chars() and words() methods are used to implement the truncatechars_html and truncatewords_html template filters, which were thus vulnerable.",
+                "markdown": "**Vulnerability CVE-2019-14232**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|1.11.23, 2.1.11, 2.2.4|[CVE-2019-14232](https://avd.aquasec.com/nvd/cve-2019-14232)|\n\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. If django.utils.text.Truncator's chars() and words() methods were passed the html=True argument, they were extremely slow to evaluate certain inputs due to a catastrophic backtracking vulnerability in a regular expression. The chars() and words() methods are used to implement the truncatechars_html and truncatewords_html template filters, which were thus vulnerable."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-14233",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: the behavior of the underlying HTMLParser leading to DoS"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. Due to the behaviour of the underlying HTMLParser, django.utils.html.strip_tags would be extremely slow to evaluate certain inputs containing large sequences of nested incomplete HTML entities."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-14233",
+              "help": {
+                "text": "Vulnerability CVE-2019-14233\nSeverity: HIGH\nPackage: Django\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14233](https://avd.aquasec.com/nvd/cve-2019-14233)\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. Due to the behaviour of the underlying HTMLParser, django.utils.html.strip_tags would be extremely slow to evaluate certain inputs containing large sequences of nested incomplete HTML entities.",
+                "markdown": "**Vulnerability CVE-2019-14233**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|1.11.23, 2.1.11, 2.2.4|[CVE-2019-14233](https://avd.aquasec.com/nvd/cve-2019-14233)|\n\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. Due to the behaviour of the underlying HTMLParser, django.utils.html.strip_tags would be extremely slow to evaluate certain inputs containing large sequences of nested incomplete HTML entities."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-14235",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: Potential memory exhaustion in django.utils.encoding.uri_to_iri()"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. If passed certain inputs, django.utils.encoding.uri_to_iri could lead to significant memory usage due to a recursion when repercent-encoding invalid UTF-8 octet sequences."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-14235",
+              "help": {
+                "text": "Vulnerability CVE-2019-14235\nSeverity: HIGH\nPackage: Django\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14235](https://avd.aquasec.com/nvd/cve-2019-14235)\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. If passed certain inputs, django.utils.encoding.uri_to_iri could lead to significant memory usage due to a recursion when repercent-encoding invalid UTF-8 octet sequences.",
+                "markdown": "**Vulnerability CVE-2019-14235**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|1.11.23, 2.1.11, 2.2.4|[CVE-2019-14235](https://avd.aquasec.com/nvd/cve-2019-14235)|\n\nAn issue was discovered in Django 1.11.x before 1.11.23, 2.1.x before 2.1.11, and 2.2.x before 2.2.4. If passed certain inputs, django.utils.encoding.uri_to_iri could lead to significant memory usage due to a recursion when repercent-encoding invalid UTF-8 octet sequences."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-19118",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: privilege escalation in the django admin"
+              },
+              "fullDescription": {
+                "text": "Django 2.1 before 2.1.15 and 2.2 before 2.2.8 allows unintended model editing. A Django model admin displaying inline related models, where the user has view-only permissions to a parent model but edit permissions to the inline model, would be presented with an editing UI, allowing POST requests, for updating the inline model. Directly editing the view-only parent model was not possible, but the parent model's save() method was called, triggering potential side effects, and causing pre and post-save signal handlers to be invoked. (To resolve this, the Django admin is adjusted to require edit permissions on the parent model in order for inline models to be editable.)"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-19118",
+              "help": {
+                "text": "Vulnerability CVE-2019-19118\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.1.15, 2.2.8\nLink: [CVE-2019-19118](https://avd.aquasec.com/nvd/cve-2019-19118)\nDjango 2.1 before 2.1.15 and 2.2 before 2.2.8 allows unintended model editing. A Django model admin displaying inline related models, where the user has view-only permissions to a parent model but edit permissions to the inline model, would be presented with an editing UI, allowing POST requests, for updating the inline model. Directly editing the view-only parent model was not possible, but the parent model's save() method was called, triggering potential side effects, and causing pre and post-save signal handlers to be invoked. (To resolve this, the Django admin is adjusted to require edit permissions on the parent model in order for inline models to be editable.)",
+                "markdown": "**Vulnerability CVE-2019-19118**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.1.15, 2.2.8|[CVE-2019-19118](https://avd.aquasec.com/nvd/cve-2019-19118)|\n\nDjango 2.1 before 2.1.15 and 2.2 before 2.2.8 allows unintended model editing. A Django model admin displaying inline related models, where the user has view-only permissions to a parent model but edit permissions to the inline model, would be presented with an editing UI, allowing POST requests, for updating the inline model. Directly editing the view-only parent model was not possible, but the parent model's save() method was called, triggering potential side effects, and causing pre and post-save signal handlers to be invoked. (To resolve this, the Django admin is adjusted to require edit permissions on the parent model in order for inline models to be editable.)"
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+                "cvssv40_baseScore": 7.1,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "6.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2020-13254",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: potential data leakage via malformed memcached keys"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.13 and 3.0 before 3.0.7. In cases where a memcached backend does not perform key validation, passing malformed cache keys could result in a key collision, and potential data leakage."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2020-13254",
+              "help": {
+                "text": "Vulnerability CVE-2020-13254\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.13, 3.0.7\nLink: [CVE-2020-13254](https://avd.aquasec.com/nvd/cve-2020-13254)\nAn issue was discovered in Django 2.2 before 2.2.13 and 3.0 before 3.0.7. In cases where a memcached backend does not perform key validation, passing malformed cache keys could result in a key collision, and potential data leakage.",
+                "markdown": "**Vulnerability CVE-2020-13254**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.13, 3.0.7|[CVE-2020-13254](https://avd.aquasec.com/nvd/cve-2020-13254)|\n\nAn issue was discovered in Django 2.2 before 2.2.13 and 3.0 before 3.0.7. In cases where a memcached backend does not perform key validation, passing malformed cache keys could result in a key collision, and potential data leakage."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.9,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "cvssv40_baseScore": 8.2,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "5.9",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2020-24583",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: incorrect permissions on intermediate-level directories on Python 3.7+"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.16, 3.0 before 3.0.10, and 3.1 before 3.1.1 (when Python 3.7+ is used). FILE_UPLOAD_DIRECTORY_PERMISSIONS mode was not applied to intermediate-level directories created in the process of uploading files. It was also not applied to intermediate-level collected static directories when using the collectstatic management command."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2020-24583",
+              "help": {
+                "text": "Vulnerability CVE-2020-24583\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.16, 3.0.10, 3.1.1\nLink: [CVE-2020-24583](https://avd.aquasec.com/nvd/cve-2020-24583)\nAn issue was discovered in Django 2.2 before 2.2.16, 3.0 before 3.0.10, and 3.1 before 3.1.1 (when Python 3.7+ is used). FILE_UPLOAD_DIRECTORY_PERMISSIONS mode was not applied to intermediate-level directories created in the process of uploading files. It was also not applied to intermediate-level collected static directories when using the collectstatic management command.",
+                "markdown": "**Vulnerability CVE-2020-24583**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.16, 3.0.10, 3.1.1|[CVE-2020-24583](https://avd.aquasec.com/nvd/cve-2020-24583)|\n\nAn issue was discovered in Django 2.2 before 2.2.16, 3.0 before 3.0.10, and 3.1 before 3.1.1 (when Python 3.7+ is used). FILE_UPLOAD_DIRECTORY_PERMISSIONS mode was not applied to intermediate-level directories created in the process of uploading files. It was also not applied to intermediate-level collected static directories when using the collectstatic management command."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2020-9402",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: potential SQL injection via \"tolerance\" parameter in GIS functions and aggregates on Oracle"
+              },
+              "fullDescription": {
+                "text": "Django 1.11 before 1.11.29, 2.2 before 2.2.11, and 3.0 before 3.0.4 allows SQL Injection if untrusted data is used as a tolerance parameter in GIS functions and aggregates on Oracle. By passing a suitably crafted tolerance to GIS functions and aggregates on Oracle, it was possible to break escaping and inject malicious SQL."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2020-9402",
+              "help": {
+                "text": "Vulnerability CVE-2020-9402\nSeverity: HIGH\nPackage: Django\nFixed Version: 1.11.29, 2.2.11, 3.0.4\nLink: [CVE-2020-9402](https://avd.aquasec.com/nvd/cve-2020-9402)\nDjango 1.11 before 1.11.29, 2.2 before 2.2.11, and 3.0 before 3.0.4 allows SQL Injection if untrusted data is used as a tolerance parameter in GIS functions and aggregates on Oracle. By passing a suitably crafted tolerance to GIS functions and aggregates on Oracle, it was possible to break escaping and inject malicious SQL.",
+                "markdown": "**Vulnerability CVE-2020-9402**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|1.11.29, 2.2.11, 3.0.4|[CVE-2020-9402](https://avd.aquasec.com/nvd/cve-2020-9402)|\n\nDjango 1.11 before 1.11.29, 2.2 before 2.2.11, and 3.0 before 3.0.4 allows SQL Injection if untrusted data is used as a tolerance parameter in GIS functions and aggregates on Oracle. By passing a suitably crafted tolerance to GIS functions and aggregates on Oracle, it was possible to break escaping and inject malicious SQL."
+              },
+              "properties": {
+                "cvssv3_baseScore": 8.8,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "8.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-31542",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Potential directory-traversal via uploaded files"
+              },
+              "fullDescription": {
+                "text": "In Django 2.2 before 2.2.21, 3.1 before 3.1.9, and 3.2 before 3.2.1, MultiPartParser, UploadedFile, and FieldFile allowed directory traversal via uploaded files with suitably crafted file names."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-31542",
+              "help": {
+                "text": "Vulnerability CVE-2021-31542\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.21, 3.1.9, 3.2.1\nLink: [CVE-2021-31542](https://avd.aquasec.com/nvd/cve-2021-31542)\nIn Django 2.2 before 2.2.21, 3.1 before 3.1.9, and 3.2 before 3.2.1, MultiPartParser, UploadedFile, and FieldFile allowed directory traversal via uploaded files with suitably crafted file names.",
+                "markdown": "**Vulnerability CVE-2021-31542**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.21, 3.1.9, 3.2.1|[CVE-2021-31542](https://avd.aquasec.com/nvd/cve-2021-31542)|\n\nIn Django 2.2 before 2.2.21, 3.1 before 3.1.9, and 3.2 before 3.2.1, MultiPartParser, UploadedFile, and FieldFile allowed directory traversal via uploaded files with suitably crafted file names."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-33571",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Possible indeterminate SSRF, RFI, and LFI attacks since validators accepted leading zeros in IPv4 addresses"
+              },
+              "fullDescription": {
+                "text": "In Django 2.2 before 2.2.24, 3.x before 3.1.12, and 3.2 before 3.2.4, URLValidator, validate_ipv4_address, and validate_ipv46_address do not prohibit leading zero characters in octal literals. This may allow a bypass of access control that is based on IP addresses. (validate_ipv4_address and validate_ipv46_address are unaffected with Python 3.9.5+..) ."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-33571",
+              "help": {
+                "text": "Vulnerability CVE-2021-33571\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.24, 3.1.12, 3.2.4\nLink: [CVE-2021-33571](https://avd.aquasec.com/nvd/cve-2021-33571)\nIn Django 2.2 before 2.2.24, 3.x before 3.1.12, and 3.2 before 3.2.4, URLValidator, validate_ipv4_address, and validate_ipv46_address do not prohibit leading zero characters in octal literals. This may allow a bypass of access control that is based on IP addresses. (validate_ipv4_address and validate_ipv46_address are unaffected with Python 3.9.5+..) .",
+                "markdown": "**Vulnerability CVE-2021-33571**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.24, 3.1.12, 3.2.4|[CVE-2021-33571](https://avd.aquasec.com/nvd/cve-2021-33571)|\n\nIn Django 2.2 before 2.2.24, 3.x before 3.1.12, and 3.2 before 3.2.4, URLValidator, validate_ipv4_address, and validate_ipv46_address do not prohibit leading zero characters in octal literals. This may allow a bypass of access control that is based on IP addresses. (validate_ipv4_address and validate_ipv46_address are unaffected with Python 3.9.5+..) ."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-45115",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Denial-of-service possibility in UserAttributeSimilarityValidator"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1. UserAttributeSimilarityValidator incurred significant overhead in evaluating a submitted password that was artificially large in relation to the comparison values. In a situation where access to user registration was unrestricted, this provided a potential vector for a denial-of-service attack."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-45115",
+              "help": {
+                "text": "Vulnerability CVE-2021-45115\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.26, 3.2.11, 4.0.1\nLink: [CVE-2021-45115](https://avd.aquasec.com/nvd/cve-2021-45115)\nAn issue was discovered in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1. UserAttributeSimilarityValidator incurred significant overhead in evaluating a submitted password that was artificially large in relation to the comparison values. In a situation where access to user registration was unrestricted, this provided a potential vector for a denial-of-service attack.",
+                "markdown": "**Vulnerability CVE-2021-45115**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.26, 3.2.11, 4.0.1|[CVE-2021-45115](https://avd.aquasec.com/nvd/cve-2021-45115)|\n\nAn issue was discovered in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1. UserAttributeSimilarityValidator incurred significant overhead in evaluating a submitted password that was artificially large in relation to the comparison values. In a situation where access to user registration was unrestricted, this provided a potential vector for a denial-of-service attack."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-45116",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Potential information disclosure in dictsort template filter"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1. Due to leveraging the Django Template Language's variable resolution logic, the dictsort template filter was potentially vulnerable to information disclosure, or an unintended method call, if passed a suitably crafted key."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-45116",
+              "help": {
+                "text": "Vulnerability CVE-2021-45116\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.26, 3.2.11, 4.0.1\nLink: [CVE-2021-45116](https://avd.aquasec.com/nvd/cve-2021-45116)\nAn issue was discovered in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1. Due to leveraging the Django Template Language's variable resolution logic, the dictsort template filter was potentially vulnerable to information disclosure, or an unintended method call, if passed a suitably crafted key.",
+                "markdown": "**Vulnerability CVE-2021-45116**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.26, 3.2.11, 4.0.1|[CVE-2021-45116](https://avd.aquasec.com/nvd/cve-2021-45116)|\n\nAn issue was discovered in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1. Due to leveraging the Django Template Language's variable resolution logic, the dictsort template filter was potentially vulnerable to information disclosure, or an unintended method call, if passed a suitably crafted key."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2022-23833",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Denial-of-service possibility in file uploads"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in MultiPartParser in Django 2.2 before 2.2.27, 3.2 before 3.2.12, and 4.0 before 4.0.2. Passing certain inputs to multipart forms could result in an infinite loop when parsing files."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2022-23833",
+              "help": {
+                "text": "Vulnerability CVE-2022-23833\nSeverity: HIGH\nPackage: Django\nFixed Version: 2.2.27, 3.2.12, 4.0.2\nLink: [CVE-2022-23833](https://avd.aquasec.com/nvd/cve-2022-23833)\nAn issue was discovered in MultiPartParser in Django 2.2 before 2.2.27, 3.2 before 3.2.12, and 4.0 before 4.0.2. Passing certain inputs to multipart forms could result in an infinite loop when parsing files.",
+                "markdown": "**Vulnerability CVE-2022-23833**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|2.2.27, 3.2.12, 4.0.2|[CVE-2022-23833](https://avd.aquasec.com/nvd/cve-2022-23833)|\n\nAn issue was discovered in MultiPartParser in Django 2.2 before 2.2.27, 3.2 before 3.2.12, and 4.0 before 4.0.2. Passing certain inputs to multipart forms could result in an infinite loop when parsing files."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "cvssv40_baseScore": 8.7,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2022-36359",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "An issue was discovered in the HTTP FileResponse class in Django 3.2 b ..."
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in the HTTP FileResponse class in Django 3.2 before 3.2.15 and 4.0 before 4.0.7. An application is vulnerable to a reflected file download (RFD) attack that sets the Content-Disposition header of a FileResponse when the filename is derived from user-supplied input."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2022-36359",
+              "help": {
+                "text": "Vulnerability CVE-2022-36359\nSeverity: HIGH\nPackage: Django\nFixed Version: 3.2.15, 4.0.7\nLink: [CVE-2022-36359](https://avd.aquasec.com/nvd/cve-2022-36359)\nAn issue was discovered in the HTTP FileResponse class in Django 3.2 before 3.2.15 and 4.0 before 4.0.7. An application is vulnerable to a reflected file download (RFD) attack that sets the Content-Disposition header of a FileResponse when the filename is derived from user-supplied input.",
+                "markdown": "**Vulnerability CVE-2022-36359**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|3.2.15, 4.0.7|[CVE-2022-36359](https://avd.aquasec.com/nvd/cve-2022-36359)|\n\nAn issue was discovered in the HTTP FileResponse class in Django 3.2 before 3.2.15 and 4.0 before 4.0.7. An application is vulnerable to a reflected file download (RFD) attack that sets the Content-Disposition header of a FileResponse when the filename is derived from user-supplied input."
+              },
+              "properties": {
+                "cvssv3_baseScore": 8.8,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+                "precision": "very-high",
+                "security-severity": "8.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2025-57833",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Django SQL injection in FilteredRelation column aliases"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 4.2 before 4.2.24, 5.1 before 5.1.12, and 5.2 before 5.2.6. FilteredRelation is subject to SQL injection in column aliases, using a suitably crafted dictionary, with dictionary expansion, as the **kwargs passed QuerySet.annotate() or QuerySet.alias()."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2025-57833",
+              "help": {
+                "text": "Vulnerability CVE-2025-57833\nSeverity: HIGH\nPackage: Django\nFixed Version: 4.2.24, 5.1.12, 5.2.6\nLink: [CVE-2025-57833](https://avd.aquasec.com/nvd/cve-2025-57833)\nAn issue was discovered in Django 4.2 before 4.2.24, 5.1 before 5.1.12, and 5.2 before 5.2.6. FilteredRelation is subject to SQL injection in column aliases, using a suitably crafted dictionary, with dictionary expansion, as the **kwargs passed QuerySet.annotate() or QuerySet.alias().",
+                "markdown": "**Vulnerability CVE-2025-57833**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|4.2.24, 5.1.12, 5.2.6|[CVE-2025-57833](https://avd.aquasec.com/nvd/cve-2025-57833)|\n\nAn issue was discovered in Django 4.2 before 4.2.24, 5.1 before 5.1.12, and 5.2 before 5.2.6. FilteredRelation is subject to SQL injection in column aliases, using a suitably crafted dictionary, with dictionary expansion, as the **kwargs passed QuerySet.annotate() or QuerySet.alias()."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N",
+                "precision": "very-high",
+                "security-severity": "7.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2025-64458",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: Denial-of-service vulnerability in Django on Windows"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in 5.1 before 5.1.14, 4.2 before 4.2.26, and 5.2 before 5.2.8.\nNFKC normalization in Python is slow on Windows. As a consequence, `django.http.HttpResponseRedirect`, `django.http.HttpResponsePermanentRedirect`, and the shortcut `django.shortcuts.redirect`  were subject to a potential  denial-of-service attack via certain inputs with a very large number of Unicode characters.\nEarlier, unsupported Django series (such as 5.0.x, 4.1.x, and 3.2.x) were not evaluated and may also be affected.\nDjango would like to thank Seokchan Yoon for reporting this issue."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2025-64458",
+              "help": {
+                "text": "Vulnerability CVE-2025-64458\nSeverity: HIGH\nPackage: Django\nFixed Version: 5.2.8, 5.1.14, 4.2.26\nLink: [CVE-2025-64458](https://avd.aquasec.com/nvd/cve-2025-64458)\nAn issue was discovered in 5.1 before 5.1.14, 4.2 before 4.2.26, and 5.2 before 5.2.8.\nNFKC normalization in Python is slow on Windows. As a consequence, `django.http.HttpResponseRedirect`, `django.http.HttpResponsePermanentRedirect`, and the shortcut `django.shortcuts.redirect`  were subject to a potential  denial-of-service attack via certain inputs with a very large number of Unicode characters.\nEarlier, unsupported Django series (such as 5.0.x, 4.1.x, and 3.2.x) were not evaluated and may also be affected.\nDjango would like to thank Seokchan Yoon for reporting this issue.",
+                "markdown": "**Vulnerability CVE-2025-64458**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|Django|5.2.8, 5.1.14, 4.2.26|[CVE-2025-64458](https://avd.aquasec.com/nvd/cve-2025-64458)|\n\nAn issue was discovered in 5.1 before 5.1.14, 4.2 before 4.2.26, and 5.2 before 5.2.8.\nNFKC normalization in Python is slow on Windows. As a consequence, `django.http.HttpResponseRedirect`, `django.http.HttpResponsePermanentRedirect`, and the shortcut `django.shortcuts.redirect`  were subject to a potential  denial-of-service attack via certain inputs with a very large number of Unicode characters.\nEarlier, unsupported Django series (such as 5.0.x, 4.1.x, and 3.2.x) were not evaluated and may also be affected.\nDjango would like to thank Seokchan Yoon for reporting this issue."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-11358",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "jquery: Prototype pollution in object's prototype leading to denial of service, remote code execution, or property injection"
+              },
+              "fullDescription": {
+                "text": "jQuery before 3.4.0, as used in Drupal, Backdrop CMS, and other products, mishandles jQuery.extend(true, {}, ...) because of Object.prototype pollution. If an unsanitized source object contained an enumerable __proto__ property, it could extend the native Object.prototype."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-11358",
+              "help": {
+                "text": "Vulnerability CVE-2019-11358\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.1.9, 2.2.2\nLink: [CVE-2019-11358](https://avd.aquasec.com/nvd/cve-2019-11358)\njQuery before 3.4.0, as used in Drupal, Backdrop CMS, and other products, mishandles jQuery.extend(true, {}, ...) because of Object.prototype pollution. If an unsanitized source object contained an enumerable __proto__ property, it could extend the native Object.prototype.",
+                "markdown": "**Vulnerability CVE-2019-11358**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.1.9, 2.2.2|[CVE-2019-11358](https://avd.aquasec.com/nvd/cve-2019-11358)|\n\njQuery before 3.4.0, as used in Drupal, Backdrop CMS, and other products, mishandles jQuery.extend(true, {}, ...) because of Object.prototype pollution. If an unsanitized source object contained an enumerable __proto__ property, it could extend the native Object.prototype."
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                "precision": "very-high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-12308",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: missing URL validation by AdminURLFieldWidget leads to generation of clickable unsafe JavaScript link causing cross site scripting"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 1.11 before 1.11.21, 2.1 before 2.1.9, and 2.2 before 2.2.2. The clickable Current URL value displayed by the AdminURLFieldWidget displays the provided value without validating it as a safe URL. Thus, an unvalidated value stored in the database, or a value provided as a URL query parameter payload, could result in an clickable JavaScript link."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-12308",
+              "help": {
+                "text": "Vulnerability CVE-2019-12308\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 1.11.21, 2.1.9, 2.2.2\nLink: [CVE-2019-12308](https://avd.aquasec.com/nvd/cve-2019-12308)\nAn issue was discovered in Django 1.11 before 1.11.21, 2.1 before 2.1.9, and 2.2 before 2.2.2. The clickable Current URL value displayed by the AdminURLFieldWidget displays the provided value without validating it as a safe URL. Thus, an unvalidated value stored in the database, or a value provided as a URL query parameter payload, could result in an clickable JavaScript link.",
+                "markdown": "**Vulnerability CVE-2019-12308**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|1.11.21, 2.1.9, 2.2.2|[CVE-2019-12308](https://avd.aquasec.com/nvd/cve-2019-12308)|\n\nAn issue was discovered in Django 1.11 before 1.11.21, 2.1 before 2.1.9, and 2.2 before 2.2.2. The clickable Current URL value displayed by the AdminURLFieldWidget displays the provided value without validating it as a safe URL. Thus, an unvalidated value stored in the database, or a value provided as a URL query parameter payload, could result in an clickable JavaScript link."
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.1,
+                "cvssv3_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                "cvssv40_baseScore": 5.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+                "precision": "very-high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2019-12781",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "Django: Incorrect HTTP detection with reverse-proxy connecting via HTTPS"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 1.11 before 1.11.22, 2.1 before 2.1.10, and 2.2 before 2.2.3. An HTTP request is not redirected to HTTPS when the SECURE_PROXY_SSL_HEADER and SECURE_SSL_REDIRECT settings are used, and the proxy connects to Django via HTTPS. In other words, django.http.HttpRequest.scheme has incorrect behavior when a client uses HTTP."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2019-12781",
+              "help": {
+                "text": "Vulnerability CVE-2019-12781\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.1.10, 2.2.3, 1.11.22\nLink: [CVE-2019-12781](https://avd.aquasec.com/nvd/cve-2019-12781)\nAn issue was discovered in Django 1.11 before 1.11.22, 2.1 before 2.1.10, and 2.2 before 2.2.3. An HTTP request is not redirected to HTTPS when the SECURE_PROXY_SSL_HEADER and SECURE_SSL_REDIRECT settings are used, and the proxy connects to Django via HTTPS. In other words, django.http.HttpRequest.scheme has incorrect behavior when a client uses HTTP.",
+                "markdown": "**Vulnerability CVE-2019-12781**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.1.10, 2.2.3, 1.11.22|[CVE-2019-12781](https://avd.aquasec.com/nvd/cve-2019-12781)|\n\nAn issue was discovered in Django 1.11 before 1.11.22, 2.1 before 2.1.10, and 2.2 before 2.2.3. An HTTP request is not redirected to HTTPS when the SECURE_PROXY_SSL_HEADER and SECURE_SSL_REDIRECT settings are used, and the proxy connects to Django via HTTPS. In other words, django.http.HttpRequest.scheme has incorrect behavior when a client uses HTTP."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.3,
+                "cvssv3_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2020-13596",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: possible XSS via admin ForeignKeyRawIdWidget"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.13 and 3.0 before 3.0.7. Query parameters generated by the Django admin ForeignKeyRawIdWidget were not properly URL encoded, leading to a possibility of an XSS attack."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2020-13596",
+              "help": {
+                "text": "Vulnerability CVE-2020-13596\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.13, 3.0.7\nLink: [CVE-2020-13596](https://avd.aquasec.com/nvd/cve-2020-13596)\nAn issue was discovered in Django 2.2 before 2.2.13 and 3.0 before 3.0.7. Query parameters generated by the Django admin ForeignKeyRawIdWidget were not properly URL encoded, leading to a possibility of an XSS attack.",
+                "markdown": "**Vulnerability CVE-2020-13596**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.13, 3.0.7|[CVE-2020-13596](https://avd.aquasec.com/nvd/cve-2020-13596)|\n\nAn issue was discovered in Django 2.2 before 2.2.13 and 3.0 before 3.0.7. Query parameters generated by the Django admin ForeignKeyRawIdWidget were not properly URL encoded, leading to a possibility of an XSS attack."
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                "cvssv40_baseScore": 5.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+                "precision": "very-high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2020-24584",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: permission escalation in intermediate-level directories of the file system cache on Python 3.7+"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 2.2 before 2.2.16, 3.0 before 3.0.10, and 3.1 before 3.1.1 (when Python 3.7+ is used). The intermediate-level directories of the filesystem cache had the system's standard umask rather than 0o077."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2020-24584",
+              "help": {
+                "text": "Vulnerability CVE-2020-24584\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.16, 3.0.10, 3.1.1\nLink: [CVE-2020-24584](https://avd.aquasec.com/nvd/cve-2020-24584)\nAn issue was discovered in Django 2.2 before 2.2.16, 3.0 before 3.0.10, and 3.1 before 3.1.1 (when Python 3.7+ is used). The intermediate-level directories of the filesystem cache had the system's standard umask rather than 0o077.",
+                "markdown": "**Vulnerability CVE-2020-24584**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.16, 3.0.10, 3.1.1|[CVE-2020-24584](https://avd.aquasec.com/nvd/cve-2020-24584)|\n\nAn issue was discovered in Django 2.2 before 2.2.16, 3.0 before 3.0.10, and 3.1 before 3.1.1 (when Python 3.7+ is used). The intermediate-level directories of the filesystem cache had the system's standard umask rather than 0o077."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-28658",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: potential directory-traversal via uploaded files"
+              },
+              "fullDescription": {
+                "text": "In Django 2.2 before 2.2.20, 3.0 before 3.0.14, and 3.1 before 3.1.8, MultiPartParser allowed directory traversal via uploaded files with suitably crafted file names. Built-in upload handlers were not affected by this vulnerability."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-28658",
+              "help": {
+                "text": "Vulnerability CVE-2021-28658\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.20, 3.0.14, 3.1.8\nLink: [CVE-2021-28658](https://avd.aquasec.com/nvd/cve-2021-28658)\nIn Django 2.2 before 2.2.20, 3.0 before 3.0.14, and 3.1 before 3.1.8, MultiPartParser allowed directory traversal via uploaded files with suitably crafted file names. Built-in upload handlers were not affected by this vulnerability.",
+                "markdown": "**Vulnerability CVE-2021-28658**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.20, 3.0.14, 3.1.8|[CVE-2021-28658](https://avd.aquasec.com/nvd/cve-2021-28658)|\n\nIn Django 2.2 before 2.2.20, 3.0 before 3.0.14, and 3.1 before 3.1.8, MultiPartParser allowed directory traversal via uploaded files with suitably crafted file names. Built-in upload handlers were not affected by this vulnerability."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.3,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-32052",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: header injection possibility since URLValidator accepted newlines in input on Python 3.9.5+"
+              },
+              "fullDescription": {
+                "text": "In Django 2.2 before 2.2.22, 3.1 before 3.1.10, and 3.2 before 3.2.2 (with Python 3.9.5+), URLValidator does not prohibit newlines and tabs (unless the URLField form field is used). If an application uses values with newlines in an HTTP response, header injection can occur. Django itself is unaffected because HttpResponse prohibits newlines in HTTP headers."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-32052",
+              "help": {
+                "text": "Vulnerability CVE-2021-32052\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.22, 3.1.10, 3.2.2\nLink: [CVE-2021-32052](https://avd.aquasec.com/nvd/cve-2021-32052)\nIn Django 2.2 before 2.2.22, 3.1 before 3.1.10, and 3.2 before 3.2.2 (with Python 3.9.5+), URLValidator does not prohibit newlines and tabs (unless the URLField form field is used). If an application uses values with newlines in an HTTP response, header injection can occur. Django itself is unaffected because HttpResponse prohibits newlines in HTTP headers.",
+                "markdown": "**Vulnerability CVE-2021-32052**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.22, 3.1.10, 3.2.2|[CVE-2021-32052](https://avd.aquasec.com/nvd/cve-2021-32052)|\n\nIn Django 2.2 before 2.2.22, 3.1 before 3.1.10, and 3.2 before 3.2.2 (with Python 3.9.5+), URLValidator does not prohibit newlines and tabs (unless the URLField form field is used). If an application uses values with newlines in an HTTP response, header injection can occur. Django itself is unaffected because HttpResponse prohibits newlines in HTTP headers."
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                "cvssv40_baseScore": 5.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+                "precision": "very-high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-3281",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Potential directory-traversal via archive.extract()"
+              },
+              "fullDescription": {
+                "text": "In Django 2.2 before 2.2.18, 3.0 before 3.0.12, and 3.1 before 3.1.6, the django.utils.archive.extract method (used by \"startapp --template\" and \"startproject --template\") allows directory traversal via an archive with absolute paths or relative paths with dot segments."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-3281",
+              "help": {
+                "text": "Vulnerability CVE-2021-3281\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.18, 3.1.6, 3.0.12\nLink: [CVE-2021-3281](https://avd.aquasec.com/nvd/cve-2021-3281)\nIn Django 2.2 before 2.2.18, 3.0 before 3.0.12, and 3.1 before 3.1.6, the django.utils.archive.extract method (used by \"startapp --template\" and \"startproject --template\") allows directory traversal via an archive with absolute paths or relative paths with dot segments.",
+                "markdown": "**Vulnerability CVE-2021-3281**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.18, 3.1.6, 3.0.12|[CVE-2021-3281](https://avd.aquasec.com/nvd/cve-2021-3281)|\n\nIn Django 2.2 before 2.2.18, 3.0 before 3.0.12, and 3.1 before 3.1.6, the django.utils.archive.extract method (used by \"startapp --template\" and \"startproject --template\") allows directory traversal via an archive with absolute paths or relative paths with dot segments."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.3,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-33203",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Potential directory traversal via ``admindocs``"
+              },
+              "fullDescription": {
+                "text": "Django before 2.2.24, 3.x before 3.1.12, and 3.2.x before 3.2.4 has a potential directory traversal via django.contrib.admindocs. Staff members could use the TemplateDetailView view to check the existence of arbitrary files. Additionally, if (and only if) the default admindocs templates have been customized by application developers to also show file contents, then not only the existence but also the file contents would have been exposed. In other words, there is directory traversal outside of the template root directories."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-33203",
+              "help": {
+                "text": "Vulnerability CVE-2021-33203\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.24, 3.1.12, 3.2.4\nLink: [CVE-2021-33203](https://avd.aquasec.com/nvd/cve-2021-33203)\nDjango before 2.2.24, 3.x before 3.1.12, and 3.2.x before 3.2.4 has a potential directory traversal via django.contrib.admindocs. Staff members could use the TemplateDetailView view to check the existence of arbitrary files. Additionally, if (and only if) the default admindocs templates have been customized by application developers to also show file contents, then not only the existence but also the file contents would have been exposed. In other words, there is directory traversal outside of the template root directories.",
+                "markdown": "**Vulnerability CVE-2021-33203**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.24, 3.1.12, 3.2.4|[CVE-2021-33203](https://avd.aquasec.com/nvd/cve-2021-33203)|\n\nDjango before 2.2.24, 3.x before 3.1.12, and 3.2.x before 3.2.4 has a potential directory traversal via django.contrib.admindocs. Staff members could use the TemplateDetailView view to check the existence of arbitrary files. Additionally, if (and only if) the default admindocs templates have been customized by application developers to also show file contents, then not only the existence but also the file contents would have been exposed. In other words, there is directory traversal outside of the template root directories."
+              },
+              "properties": {
+                "cvssv3_baseScore": 4.9,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "4.9",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-44420",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: potential bypass of an upstream access control based on URL paths"
+              },
+              "fullDescription": {
+                "text": "In Django 2.2 before 2.2.25, 3.1 before 3.1.14, and 3.2 before 3.2.10, HTTP requests for URLs with trailing newlines could bypass upstream access control based on URL paths."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-44420",
+              "help": {
+                "text": "Vulnerability CVE-2021-44420\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.25, 3.1.14, 3.2.10\nLink: [CVE-2021-44420](https://avd.aquasec.com/nvd/cve-2021-44420)\nIn Django 2.2 before 2.2.25, 3.1 before 3.1.14, and 3.2 before 3.2.10, HTTP requests for URLs with trailing newlines could bypass upstream access control based on URL paths.",
+                "markdown": "**Vulnerability CVE-2021-44420**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.25, 3.1.14, 3.2.10|[CVE-2021-44420](https://avd.aquasec.com/nvd/cve-2021-44420)|\n\nIn Django 2.2 before 2.2.25, 3.1 before 3.1.14, and 3.2 before 3.2.10, HTTP requests for URLs with trailing newlines could bypass upstream access control based on URL paths."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.3,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:L/VA:L/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "7.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-45452",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Potential directory-traversal via Storage.save()"
+              },
+              "fullDescription": {
+                "text": "Storage.save in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1 allows directory traversal if crafted filenames are directly passed to it."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2021-45452",
+              "help": {
+                "text": "Vulnerability CVE-2021-45452\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.26, 3.2.11, 4.0.1\nLink: [CVE-2021-45452](https://avd.aquasec.com/nvd/cve-2021-45452)\nStorage.save in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1 allows directory traversal if crafted filenames are directly passed to it.",
+                "markdown": "**Vulnerability CVE-2021-45452**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.26, 3.2.11, 4.0.1|[CVE-2021-45452](https://avd.aquasec.com/nvd/cve-2021-45452)|\n\nStorage.save in Django 2.2 before 2.2.26, 3.2 before 3.2.11, and 4.0 before 4.0.1 allows directory traversal if crafted filenames are directly passed to it."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.3,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                "cvssv40_baseScore": 6.9,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2022-22818",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Possible XSS via '{% debug %}' template tag"
+              },
+              "fullDescription": {
+                "text": "The {% debug %} template tag in Django 2.2 before 2.2.27, 3.2 before 3.2.12, and 4.0 before 4.0.2 does not properly encode the current context. This may lead to XSS."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2022-22818",
+              "help": {
+                "text": "Vulnerability CVE-2022-22818\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 2.2.27, 3.2.12, 4.0.2\nLink: [CVE-2022-22818](https://avd.aquasec.com/nvd/cve-2022-22818)\nThe {% debug %} template tag in Django 2.2 before 2.2.27, 3.2 before 3.2.12, and 4.0 before 4.0.2 does not properly encode the current context. This may lead to XSS.",
+                "markdown": "**Vulnerability CVE-2022-22818**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|2.2.27, 3.2.12, 4.0.2|[CVE-2022-22818](https://avd.aquasec.com/nvd/cve-2022-22818)|\n\nThe {% debug %} template tag in Django 2.2 before 2.2.27, 3.2 before 3.2.12, and 4.0 before 4.0.2 does not properly encode the current context. This may lead to XSS."
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                "cvssv40_baseScore": 5.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+                "precision": "very-high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-45231",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "python-django: Potential user email enumeration via response status on password reset"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django v5.1.1, v5.0.9, and v4.2.16. The django.contrib.auth.forms.PasswordResetForm class, when used in a view implementing password reset flows, allows remote attackers to enumerate user e-mail addresses by sending password reset requests and observing the outcome (only when e-mail sending is consistently failing)."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2024-45231",
+              "help": {
+                "text": "Vulnerability CVE-2024-45231\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 5.1.1, 5.0.9, 4.2.16\nLink: [CVE-2024-45231](https://avd.aquasec.com/nvd/cve-2024-45231)\nAn issue was discovered in Django v5.1.1, v5.0.9, and v4.2.16. The django.contrib.auth.forms.PasswordResetForm class, when used in a view implementing password reset flows, allows remote attackers to enumerate user e-mail addresses by sending password reset requests and observing the outcome (only when e-mail sending is consistently failing).",
+                "markdown": "**Vulnerability CVE-2024-45231**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|5.1.1, 5.0.9, 4.2.16|[CVE-2024-45231](https://avd.aquasec.com/nvd/cve-2024-45231)|\n\nAn issue was discovered in Django v5.1.1, v5.0.9, and v4.2.16. The django.contrib.auth.forms.PasswordResetForm class, when used in a view implementing password reset flows, allows remote attackers to enumerate user e-mail addresses by sending password reset requests and observing the outcome (only when e-mail sending is consistently failing)."
+              },
+              "properties": {
+                "cvssv3_baseScore": 3.7,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                "cvssv40_baseScore": 6.3,
+                "cvssv40_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "precision": "very-high",
+                "security-severity": "3.7",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2025-48432",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "django: Django Path Injection Vulnerability"
+              },
+              "fullDescription": {
+                "text": "An issue was discovered in Django 5.2 before 5.2.3, 5.1 before 5.1.11, and 4.2 before 4.2.23. Internal HTTP response logging does not escape request.path, which allows remote attackers to potentially manipulate log output via crafted URLs. This may lead to log injection or forgery when logs are viewed in terminals or processed by external systems."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2025-48432",
+              "help": {
+                "text": "Vulnerability CVE-2025-48432\nSeverity: MEDIUM\nPackage: Django\nFixed Version: 5.2.2, 5.1.10, 4.2.22\nLink: [CVE-2025-48432](https://avd.aquasec.com/nvd/cve-2025-48432)\nAn issue was discovered in Django 5.2 before 5.2.3, 5.1 before 5.1.11, and 4.2 before 4.2.23. Internal HTTP response logging does not escape request.path, which allows remote attackers to potentially manipulate log output via crafted URLs. This may lead to log injection or forgery when logs are viewed in terminals or processed by external systems.",
+                "markdown": "**Vulnerability CVE-2025-48432**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|Django|5.2.2, 5.1.10, 4.2.22|[CVE-2025-48432](https://avd.aquasec.com/nvd/cve-2025-48432)|\n\nAn issue was discovered in Django 5.2 before 5.2.3, 5.1 before 5.1.11, and 4.2 before 4.2.23. Internal HTTP response logging does not escape request.path, which allows remote attackers to potentially manipulate log output via crafted URLs. This may lead to log injection or forgery when logs are viewed in terminals or processed by external systems."
+              },
+              "properties": {
+                "cvssv3_baseScore": 4,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:L/A:N",
+                "precision": "very-high",
+                "security-severity": "4.0",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2018-18074",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "python-requests: Redirect from HTTPS to HTTP does not remove Authorization header"
+              },
+              "fullDescription": {
+                "text": "The Requests package before 2.20.0 for Python sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect, which makes it easier for remote attackers to discover credentials by sniffing the network."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2018-18074",
+              "help": {
+                "text": "Vulnerability CVE-2018-18074\nSeverity: HIGH\nPackage: requests\nFixed Version: 2.20.0\nLink: [CVE-2018-18074](https://avd.aquasec.com/nvd/cve-2018-18074)\nThe Requests package before 2.20.0 for Python sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect, which makes it easier for remote attackers to discover credentials by sniffing the network.",
+                "markdown": "**Vulnerability CVE-2018-18074**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|HIGH|requests|2.20.0|[CVE-2018-18074](https://avd.aquasec.com/nvd/cve-2018-18074)|\n\nThe Requests package before 2.20.0 for Python sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect, which makes it easier for remote attackers to discover credentials by sniffing the network."
+              },
+              "properties": {
+                "cvssv3_baseScore": 7.5,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-32681",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "python-requests: Unintended leak of Proxy-Authorization header"
+              },
+              "fullDescription": {
+                "text": "Requests is a HTTP library. Since Requests 2.3.0, Requests has been leaking Proxy-Authorization headers to destination servers when redirected to an HTTPS endpoint. This is a product of how we use `rebuild_proxies` to reattach the `Proxy-Authorization` header to requests. For HTTP connections sent through the tunnel, the proxy will identify the header in the request itself and remove it prior to forwarding to the destination server. However when sent over HTTPS, the `Proxy-Authorization` header must be sent in the CONNECT request as the proxy has no visibility into the tunneled request. This results in Requests forwarding proxy credentials to the destination server unintentionally, allowing a malicious actor to potentially exfiltrate sensitive information. This issue has been patched in version 2.31.0."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2023-32681",
+              "help": {
+                "text": "Vulnerability CVE-2023-32681\nSeverity: MEDIUM\nPackage: requests\nFixed Version: 2.31.0\nLink: [CVE-2023-32681](https://avd.aquasec.com/nvd/cve-2023-32681)\nRequests is a HTTP library. Since Requests 2.3.0, Requests has been leaking Proxy-Authorization headers to destination servers when redirected to an HTTPS endpoint. This is a product of how we use `rebuild_proxies` to reattach the `Proxy-Authorization` header to requests. For HTTP connections sent through the tunnel, the proxy will identify the header in the request itself and remove it prior to forwarding to the destination server. However when sent over HTTPS, the `Proxy-Authorization` header must be sent in the CONNECT request as the proxy has no visibility into the tunneled request. This results in Requests forwarding proxy credentials to the destination server unintentionally, allowing a malicious actor to potentially exfiltrate sensitive information. This issue has been patched in version 2.31.0.",
+                "markdown": "**Vulnerability CVE-2023-32681**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|requests|2.31.0|[CVE-2023-32681](https://avd.aquasec.com/nvd/cve-2023-32681)|\n\nRequests is a HTTP library. Since Requests 2.3.0, Requests has been leaking Proxy-Authorization headers to destination servers when redirected to an HTTPS endpoint. This is a product of how we use `rebuild_proxies` to reattach the `Proxy-Authorization` header to requests. For HTTP connections sent through the tunnel, the proxy will identify the header in the request itself and remove it prior to forwarding to the destination server. However when sent over HTTPS, the `Proxy-Authorization` header must be sent in the CONNECT request as the proxy has no visibility into the tunneled request. This results in Requests forwarding proxy credentials to the destination server unintentionally, allowing a malicious actor to potentially exfiltrate sensitive information. This issue has been patched in version 2.31.0."
+              },
+              "properties": {
+                "cvssv3_baseScore": 6.1,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+                "precision": "very-high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-35195",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "requests: subsequent requests to the same host ignore cert verification"
+              },
+              "fullDescription": {
+                "text": "Requests is a HTTP library. Prior to 2.32.0, when making requests through a Requests `Session`, if the first request is made with `verify=False` to disable cert verification, all subsequent requests to the same host will continue to ignore cert verification regardless of changes to the value of `verify`. This behavior will continue for the lifecycle of the connection in the connection pool. This vulnerability is fixed in 2.32.0."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2024-35195",
+              "help": {
+                "text": "Vulnerability CVE-2024-35195\nSeverity: MEDIUM\nPackage: requests\nFixed Version: 2.32.0\nLink: [CVE-2024-35195](https://avd.aquasec.com/nvd/cve-2024-35195)\nRequests is a HTTP library. Prior to 2.32.0, when making requests through a Requests `Session`, if the first request is made with `verify=False` to disable cert verification, all subsequent requests to the same host will continue to ignore cert verification regardless of changes to the value of `verify`. This behavior will continue for the lifecycle of the connection in the connection pool. This vulnerability is fixed in 2.32.0.",
+                "markdown": "**Vulnerability CVE-2024-35195**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|requests|2.32.0|[CVE-2024-35195](https://avd.aquasec.com/nvd/cve-2024-35195)|\n\nRequests is a HTTP library. Prior to 2.32.0, when making requests through a Requests `Session`, if the first request is made with `verify=False` to disable cert verification, all subsequent requests to the same host will continue to ignore cert verification regardless of changes to the value of `verify`. This behavior will continue for the lifecycle of the connection in the connection pool. This vulnerability is fixed in 2.32.0."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.6,
+                "cvssv3_vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:N",
+                "precision": "very-high",
+                "security-severity": "5.6",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-47081",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "requests: Requests vulnerable to .netrc credentials leak via malicious URLs"
+              },
+              "fullDescription": {
+                "text": "Requests is a HTTP library. Due to a URL parsing issue, Requests releases prior to 2.32.4 may leak .netrc credentials to third parties for specific maliciously-crafted URLs. Users should upgrade to version 2.32.4 to receive a fix. For older versions of Requests, use of the .netrc file can be disabled with `trust_env=False` on one's Requests Session."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2024-47081",
+              "help": {
+                "text": "Vulnerability CVE-2024-47081\nSeverity: MEDIUM\nPackage: requests\nFixed Version: 2.32.4\nLink: [CVE-2024-47081](https://avd.aquasec.com/nvd/cve-2024-47081)\nRequests is a HTTP library. Due to a URL parsing issue, Requests releases prior to 2.32.4 may leak .netrc credentials to third parties for specific maliciously-crafted URLs. Users should upgrade to version 2.32.4 to receive a fix. For older versions of Requests, use of the .netrc file can be disabled with `trust_env=False` on one's Requests Session.",
+                "markdown": "**Vulnerability CVE-2024-47081**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|requests|2.32.4|[CVE-2024-47081](https://avd.aquasec.com/nvd/cve-2024-47081)|\n\nRequests is a HTTP library. Due to a URL parsing issue, Requests releases prior to 2.32.4 may leak .netrc credentials to third parties for specific maliciously-crafted URLs. Users should upgrade to version 2.32.4 to receive a fix. For older versions of Requests, use of the .netrc file can be disabled with `trust_env=False` on one's Requests Session."
+              },
+              "properties": {
+                "cvssv3_baseScore": 5.3,
+                "cvssv3_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+                "precision": "very-high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2026-25645",
+              "name": "LanguageSpecificPackageVulnerability",
+              "shortDescription": {
+                "text": "requests: Requests: Security bypass due to predictable temporary file creation"
+              },
+              "fullDescription": {
+                "text": "Requests is a HTTP library. Prior to version 2.33.0, the `requests.utils.extract_zipped_paths()` utility function uses a predictable filename when extracting files from zip archives into the system temporary directory. If the target file already exists, it is reused without validation. A local attacker with write access to the temp directory could pre-create a malicious file that would be loaded in place of the legitimate one. Standard usage of the Requests library is not affected by this vulnerability. Only applications that call `extract_zipped_paths()` directly are impacted. Starting in version 2.33.0, the library extracts files to a non-deterministic location. If developers are unable to upgrade, they can set `TMPDIR` in their environment to a directory with restricted write access."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/nvd/cve-2026-25645",
+              "help": {
+                "text": "Vulnerability CVE-2026-25645\nSeverity: MEDIUM\nPackage: requests\nFixed Version: 2.33.0\nLink: [CVE-2026-25645](https://avd.aquasec.com/nvd/cve-2026-25645)\nRequests is a HTTP library. Prior to version 2.33.0, the `requests.utils.extract_zipped_paths()` utility function uses a predictable filename when extracting files from zip archives into the system temporary directory. If the target file already exists, it is reused without validation. A local attacker with write access to the temp directory could pre-create a malicious file that would be loaded in place of the legitimate one. Standard usage of the Requests library is not affected by this vulnerability. Only applications that call `extract_zipped_paths()` directly are impacted. Starting in version 2.33.0, the library extracts files to a non-deterministic location. If developers are unable to upgrade, they can set `TMPDIR` in their environment to a directory with restricted write access.",
+                "markdown": "**Vulnerability CVE-2026-25645**\n| Severity | Package | Fixed Version | Link |\n| --- | --- | --- | --- |\n|MEDIUM|requests|2.33.0|[CVE-2026-25645](https://avd.aquasec.com/nvd/cve-2026-25645)|\n\nRequests is a HTTP library. Prior to version 2.33.0, the `requests.utils.extract_zipped_paths()` utility function uses a predictable filename when extracting files from zip archives into the system temporary directory. If the target file already exists, it is reused without validation. A local attacker with write access to the temp directory could pre-create a malicious file that would be loaded in place of the legitimate one. Standard usage of the Requests library is not affected by this vulnerability. Only applications that call `extract_zipped_paths()` directly are impacted. Starting in version 2.33.0, the library extracts files to a non-deterministic location. If developers are unable to upgrade, they can set `TMPDIR` in their environment to a directory with restricted write access."
+              },
+              "properties": {
+                "cvssv3_baseScore": 4.4,
+                "cvssv3_vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+                "precision": "very-high",
+                "security-severity": "4.4",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "DS-0001",
+              "name": "Misconfiguration",
+              "shortDescription": {
+                "text": "':latest' tag used"
+              },
+              "fullDescription": {
+                "text": "When using a 'FROM' statement you should use a specific tag to avoid uncontrolled behavior when the image is updated."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "helpUri": "https://avd.aquasec.com/misconfig/ds-0001",
+              "help": {
+                "text": "Misconfiguration DS-0001\nType: Dockerfile Security Check\nSeverity: MEDIUM\nCheck: ':latest' tag used\nMessage: Specify a tag in the 'FROM' statement for image 'ubuntu'\nLink: [DS-0001](https://avd.aquasec.com/misconfig/ds-0001)\nWhen using a 'FROM' statement you should use a specific tag to avoid uncontrolled behavior when the image is updated.",
+                "markdown": "**Misconfiguration DS-0001**\n| Type | Severity | Check | Message | Link |\n| --- | --- | --- | --- | --- |\n|Dockerfile Security Check|MEDIUM|':latest' tag used|Specify a tag in the 'FROM' statement for image 'ubuntu'|[DS-0001](https://avd.aquasec.com/misconfig/ds-0001)|\n\nWhen using a 'FROM' statement you should use a specific tag to avoid uncontrolled behavior when the image is updated."
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "5.5",
+                "tags": [
+                  "misconfiguration",
+                  "security",
+                  "MEDIUM"
+                ]
+              }
+            },
+            {
+              "id": "DS-0002",
+              "name": "Misconfiguration",
+              "shortDescription": {
+                "text": "Image user should not be 'root'"
+              },
+              "fullDescription": {
+                "text": "Running containers with 'root' user can lead to a container escape situation. It is a best practice to run containers as non-root users, which can be done by adding a 'USER' statement to the Dockerfile."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/misconfig/ds-0002",
+              "help": {
+                "text": "Misconfiguration DS-0002\nType: Dockerfile Security Check\nSeverity: HIGH\nCheck: Image user should not be 'root'\nMessage: Specify at least 1 USER command in Dockerfile with non-root user as argument\nLink: [DS-0002](https://avd.aquasec.com/misconfig/ds-0002)\nRunning containers with 'root' user can lead to a container escape situation. It is a best practice to run containers as non-root users, which can be done by adding a 'USER' statement to the Dockerfile.",
+                "markdown": "**Misconfiguration DS-0002**\n| Type | Severity | Check | Message | Link |\n| --- | --- | --- | --- | --- |\n|Dockerfile Security Check|HIGH|Image user should not be 'root'|Specify at least 1 USER command in Dockerfile with non-root user as argument|[DS-0002](https://avd.aquasec.com/misconfig/ds-0002)|\n\nRunning containers with 'root' user can lead to a container escape situation. It is a best practice to run containers as non-root users, which can be done by adding a 'USER' statement to the Dockerfile."
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "8.0",
+                "tags": [
+                  "misconfiguration",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "DS-0017",
+              "name": "Misconfiguration",
+              "shortDescription": {
+                "text": "'RUN \u003cpackage-manager\u003e update' instruction alone"
+              },
+              "fullDescription": {
+                "text": "The instruction 'RUN \u003cpackage-manager\u003e update' should always be followed by '\u003cpackage-manager\u003e install' in the same RUN statement."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://avd.aquasec.com/misconfig/ds-0017",
+              "help": {
+                "text": "Misconfiguration DS-0017\nType: Dockerfile Security Check\nSeverity: HIGH\nCheck: 'RUN \u003cpackage-manager\u003e update' instruction alone\nMessage: The instruction 'RUN \u003cpackage-manager\u003e update' should always be followed by '\u003cpackage-manager\u003e install' in the same RUN statement.\nLink: [DS-0017](https://avd.aquasec.com/misconfig/ds-0017)\nThe instruction 'RUN \u003cpackage-manager\u003e update' should always be followed by '\u003cpackage-manager\u003e install' in the same RUN statement.",
+                "markdown": "**Misconfiguration DS-0017**\n| Type | Severity | Check | Message | Link |\n| --- | --- | --- | --- | --- |\n|Dockerfile Security Check|HIGH|'RUN \u003cpackage-manager\u003e update' instruction alone|The instruction 'RUN \u003cpackage-manager\u003e update' should always be followed by '\u003cpackage-manager\u003e install' in the same RUN statement.|[DS-0017](https://avd.aquasec.com/misconfig/ds-0017)|\n\nThe instruction 'RUN \u003cpackage-manager\u003e update' should always be followed by '\u003cpackage-manager\u003e install' in the same RUN statement."
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "8.0",
+                "tags": [
+                  "misconfiguration",
+                  "security",
+                  "HIGH"
+                ]
+              }
+            },
+            {
+              "id": "DS-0026",
+              "name": "Misconfiguration",
+              "shortDescription": {
+                "text": "No HEALTHCHECK defined"
+              },
+              "fullDescription": {
+                "text": "You should add HEALTHCHECK instruction in your docker container images to perform the health check on running containers."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "helpUri": "https://avd.aquasec.com/misconfig/ds-0026",
+              "help": {
+                "text": "Misconfiguration DS-0026\nType: Dockerfile Security Check\nSeverity: LOW\nCheck: No HEALTHCHECK defined\nMessage: Add HEALTHCHECK instruction in your Dockerfile\nLink: [DS-0026](https://avd.aquasec.com/misconfig/ds-0026)\nYou should add HEALTHCHECK instruction in your docker container images to perform the health check on running containers.",
+                "markdown": "**Misconfiguration DS-0026**\n| Type | Severity | Check | Message | Link |\n| --- | --- | --- | --- | --- |\n|Dockerfile Security Check|LOW|No HEALTHCHECK defined|Add HEALTHCHECK instruction in your Dockerfile|[DS-0026](https://avd.aquasec.com/misconfig/ds-0026)|\n\nYou should add HEALTHCHECK instruction in your docker container images to perform the health check on running containers."
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "2.0",
+                "tags": [
+                  "misconfiguration",
+                  "security",
+                  "LOW"
+                ]
+              }
+            },
+            {
+              "id": "aws-access-key-id",
+              "name": "Secret",
+              "shortDescription": {
+                "text": "AWS Access Key ID"
+              },
+              "fullDescription": {
+                "text": "AWS_KEY = \"********************\""
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://github.com/aquasecurity/trivy/blob/main/pkg/fanal/secret/builtin-rules.go",
+              "help": {
+                "text": "Secret AWS Access Key ID\nSeverity: CRITICAL\nMatch: AWS_KEY = \"********************\"",
+                "markdown": "**Secret AWS Access Key ID**\n| Severity | Match |\n| --- | --- |\n|CRITICAL|AWS_KEY = \"********************\"|"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "9.5",
+                "tags": [
+                  "secret",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            },
+            {
+              "id": "github-pat",
+              "name": "Secret",
+              "shortDescription": {
+                "text": "GitHub Personal Access Token"
+              },
+              "fullDescription": {
+                "text": "GITHUB = \"****************************************\""
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "helpUri": "https://github.com/aquasecurity/trivy/blob/main/pkg/fanal/secret/builtin-rules.go",
+              "help": {
+                "text": "Secret GitHub Personal Access Token\nSeverity: CRITICAL\nMatch: GITHUB = \"****************************************\"",
+                "markdown": "**Secret GitHub Personal Access Token**\n| Severity | Match |\n| --- | --- |\n|CRITICAL|GITHUB = \"****************************************\"|"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "9.5",
+                "tags": [
+                  "secret",
+                  "security",
+                  "CRITICAL"
+                ]
+              }
+            }
+          ],
+          "version": "0.74.0"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2019-14234",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-14234\nSeverity: CRITICAL\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14234](https://avd.aquasec.com/nvd/cve-2019-14234)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-19844",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-19844\nSeverity: CRITICAL\nFixed Version: 1.11.27, 2.2.9, 3.0.1\nLink: [CVE-2019-19844](https://avd.aquasec.com/nvd/cve-2019-19844)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2020-7471",
+          "ruleIndex": 2,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2020-7471\nSeverity: CRITICAL\nFixed Version: 1.11.28, 2.2.10, 3.0.3\nLink: [CVE-2020-7471](https://avd.aquasec.com/nvd/cve-2020-7471)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2022-28346",
+          "ruleIndex": 3,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2022-28346\nSeverity: CRITICAL\nFixed Version: 2.2.28, 3.2.13, 4.0.4\nLink: [CVE-2022-28346](https://avd.aquasec.com/nvd/cve-2022-28346)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2022-28347",
+          "ruleIndex": 4,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2022-28347\nSeverity: CRITICAL\nFixed Version: 2.2.28, 3.2.13, 4.0.4\nLink: [CVE-2022-28347](https://avd.aquasec.com/nvd/cve-2022-28347)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2025-64459",
+          "ruleIndex": 5,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2025-64459\nSeverity: CRITICAL\nFixed Version: 5.2.8, 5.1.14, 4.2.26\nLink: [CVE-2025-64459](https://avd.aquasec.com/nvd/cve-2025-64459)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-14232",
+          "ruleIndex": 6,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-14232\nSeverity: HIGH\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14232](https://avd.aquasec.com/nvd/cve-2019-14232)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-14233",
+          "ruleIndex": 7,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-14233\nSeverity: HIGH\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14233](https://avd.aquasec.com/nvd/cve-2019-14233)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-14235",
+          "ruleIndex": 8,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-14235\nSeverity: HIGH\nFixed Version: 1.11.23, 2.1.11, 2.2.4\nLink: [CVE-2019-14235](https://avd.aquasec.com/nvd/cve-2019-14235)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-19118",
+          "ruleIndex": 9,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-19118\nSeverity: HIGH\nFixed Version: 2.1.15, 2.2.8\nLink: [CVE-2019-19118](https://avd.aquasec.com/nvd/cve-2019-19118)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2020-13254",
+          "ruleIndex": 10,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2020-13254\nSeverity: HIGH\nFixed Version: 2.2.13, 3.0.7\nLink: [CVE-2020-13254](https://avd.aquasec.com/nvd/cve-2020-13254)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2020-24583",
+          "ruleIndex": 11,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2020-24583\nSeverity: HIGH\nFixed Version: 2.2.16, 3.0.10, 3.1.1\nLink: [CVE-2020-24583](https://avd.aquasec.com/nvd/cve-2020-24583)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2020-9402",
+          "ruleIndex": 12,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2020-9402\nSeverity: HIGH\nFixed Version: 1.11.29, 2.2.11, 3.0.4\nLink: [CVE-2020-9402](https://avd.aquasec.com/nvd/cve-2020-9402)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-31542",
+          "ruleIndex": 13,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-31542\nSeverity: HIGH\nFixed Version: 2.2.21, 3.1.9, 3.2.1\nLink: [CVE-2021-31542](https://avd.aquasec.com/nvd/cve-2021-31542)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-33571",
+          "ruleIndex": 14,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-33571\nSeverity: HIGH\nFixed Version: 2.2.24, 3.1.12, 3.2.4\nLink: [CVE-2021-33571](https://avd.aquasec.com/nvd/cve-2021-33571)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-45115",
+          "ruleIndex": 15,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-45115\nSeverity: HIGH\nFixed Version: 2.2.26, 3.2.11, 4.0.1\nLink: [CVE-2021-45115](https://avd.aquasec.com/nvd/cve-2021-45115)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-45116",
+          "ruleIndex": 16,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-45116\nSeverity: HIGH\nFixed Version: 2.2.26, 3.2.11, 4.0.1\nLink: [CVE-2021-45116](https://avd.aquasec.com/nvd/cve-2021-45116)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2022-23833",
+          "ruleIndex": 17,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2022-23833\nSeverity: HIGH\nFixed Version: 2.2.27, 3.2.12, 4.0.2\nLink: [CVE-2022-23833](https://avd.aquasec.com/nvd/cve-2022-23833)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2022-36359",
+          "ruleIndex": 18,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2022-36359\nSeverity: HIGH\nFixed Version: 3.2.15, 4.0.7\nLink: [CVE-2022-36359](https://avd.aquasec.com/nvd/cve-2022-36359)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2025-57833",
+          "ruleIndex": 19,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2025-57833\nSeverity: HIGH\nFixed Version: 4.2.24, 5.1.12, 5.2.6\nLink: [CVE-2025-57833](https://avd.aquasec.com/nvd/cve-2025-57833)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2025-64458",
+          "ruleIndex": 20,
+          "level": "error",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2025-64458\nSeverity: HIGH\nFixed Version: 5.2.8, 5.1.14, 4.2.26\nLink: [CVE-2025-64458](https://avd.aquasec.com/nvd/cve-2025-64458)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-11358",
+          "ruleIndex": 21,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-11358\nSeverity: MEDIUM\nFixed Version: 2.1.9, 2.2.2\nLink: [CVE-2019-11358](https://avd.aquasec.com/nvd/cve-2019-11358)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-12308",
+          "ruleIndex": 22,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-12308\nSeverity: MEDIUM\nFixed Version: 1.11.21, 2.1.9, 2.2.2\nLink: [CVE-2019-12308](https://avd.aquasec.com/nvd/cve-2019-12308)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2019-12781",
+          "ruleIndex": 23,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2019-12781\nSeverity: MEDIUM\nFixed Version: 2.1.10, 2.2.3, 1.11.22\nLink: [CVE-2019-12781](https://avd.aquasec.com/nvd/cve-2019-12781)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2020-13596",
+          "ruleIndex": 24,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2020-13596\nSeverity: MEDIUM\nFixed Version: 2.2.13, 3.0.7\nLink: [CVE-2020-13596](https://avd.aquasec.com/nvd/cve-2020-13596)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2020-24584",
+          "ruleIndex": 25,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2020-24584\nSeverity: MEDIUM\nFixed Version: 2.2.16, 3.0.10, 3.1.1\nLink: [CVE-2020-24584](https://avd.aquasec.com/nvd/cve-2020-24584)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-28658",
+          "ruleIndex": 26,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-28658\nSeverity: MEDIUM\nFixed Version: 2.2.20, 3.0.14, 3.1.8\nLink: [CVE-2021-28658](https://avd.aquasec.com/nvd/cve-2021-28658)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-32052",
+          "ruleIndex": 27,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-32052\nSeverity: MEDIUM\nFixed Version: 2.2.22, 3.1.10, 3.2.2\nLink: [CVE-2021-32052](https://avd.aquasec.com/nvd/cve-2021-32052)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-3281",
+          "ruleIndex": 28,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-3281\nSeverity: MEDIUM\nFixed Version: 2.2.18, 3.1.6, 3.0.12\nLink: [CVE-2021-3281](https://avd.aquasec.com/nvd/cve-2021-3281)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-33203",
+          "ruleIndex": 29,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-33203\nSeverity: MEDIUM\nFixed Version: 2.2.24, 3.1.12, 3.2.4\nLink: [CVE-2021-33203](https://avd.aquasec.com/nvd/cve-2021-33203)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-44420",
+          "ruleIndex": 30,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-44420\nSeverity: MEDIUM\nFixed Version: 2.2.25, 3.1.14, 3.2.10\nLink: [CVE-2021-44420](https://avd.aquasec.com/nvd/cve-2021-44420)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2021-45452",
+          "ruleIndex": 31,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2021-45452\nSeverity: MEDIUM\nFixed Version: 2.2.26, 3.2.11, 4.0.1\nLink: [CVE-2021-45452](https://avd.aquasec.com/nvd/cve-2021-45452)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2022-22818",
+          "ruleIndex": 32,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2022-22818\nSeverity: MEDIUM\nFixed Version: 2.2.27, 3.2.12, 4.0.2\nLink: [CVE-2022-22818](https://avd.aquasec.com/nvd/cve-2022-22818)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2024-45231",
+          "ruleIndex": 33,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2024-45231\nSeverity: MEDIUM\nFixed Version: 5.1.1, 5.0.9, 4.2.16\nLink: [CVE-2024-45231](https://avd.aquasec.com/nvd/cve-2024-45231)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2025-48432",
+          "ruleIndex": 34,
+          "level": "warning",
+          "message": {
+            "text": "Package: Django\nInstalled Version: 2.2.0\nVulnerability CVE-2025-48432\nSeverity: MEDIUM\nFixed Version: 5.2.2, 5.1.10, 4.2.22\nLink: [CVE-2025-48432](https://avd.aquasec.com/nvd/cve-2025-48432)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: Django@2.2.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2018-18074",
+          "ruleIndex": 35,
+          "level": "error",
+          "message": {
+            "text": "Package: requests\nInstalled Version: 2.19.0\nVulnerability CVE-2018-18074\nSeverity: HIGH\nFixed Version: 2.20.0\nLink: [CVE-2018-18074](https://avd.aquasec.com/nvd/cve-2018-18074)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 1,
+                  "endLine": 2,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: requests@2.19.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2023-32681",
+          "ruleIndex": 36,
+          "level": "warning",
+          "message": {
+            "text": "Package: requests\nInstalled Version: 2.19.0\nVulnerability CVE-2023-32681\nSeverity: MEDIUM\nFixed Version: 2.31.0\nLink: [CVE-2023-32681](https://avd.aquasec.com/nvd/cve-2023-32681)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 1,
+                  "endLine": 2,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: requests@2.19.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2024-35195",
+          "ruleIndex": 37,
+          "level": "warning",
+          "message": {
+            "text": "Package: requests\nInstalled Version: 2.19.0\nVulnerability CVE-2024-35195\nSeverity: MEDIUM\nFixed Version: 2.32.0\nLink: [CVE-2024-35195](https://avd.aquasec.com/nvd/cve-2024-35195)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 1,
+                  "endLine": 2,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: requests@2.19.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2024-47081",
+          "ruleIndex": 38,
+          "level": "warning",
+          "message": {
+            "text": "Package: requests\nInstalled Version: 2.19.0\nVulnerability CVE-2024-47081\nSeverity: MEDIUM\nFixed Version: 2.32.4\nLink: [CVE-2024-47081](https://avd.aquasec.com/nvd/cve-2024-47081)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 1,
+                  "endLine": 2,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: requests@2.19.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2026-25645",
+          "ruleIndex": 39,
+          "level": "warning",
+          "message": {
+            "text": "Package: requests\nInstalled Version: 2.19.0\nVulnerability CVE-2026-25645\nSeverity: MEDIUM\nFixed Version: 2.33.0\nLink: [CVE-2026-25645](https://avd.aquasec.com/nvd/cve-2026-25645)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 1,
+                  "endLine": 2,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "requirements.txt: requests@2.19.0"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "DS-0001",
+          "ruleIndex": 40,
+          "level": "warning",
+          "message": {
+            "text": "Artifact: Dockerfile\nType: dockerfile\nVulnerability DS-0001\nSeverity: MEDIUM\nMessage: Specify a tag in the 'FROM' statement for image 'ubuntu'\nLink: [DS-0001](https://avd.aquasec.com/misconfig/ds-0001)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "Dockerfile"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "DS-0002",
+          "ruleIndex": 41,
+          "level": "error",
+          "message": {
+            "text": "Artifact: Dockerfile\nType: dockerfile\nVulnerability DS-0002\nSeverity: HIGH\nMessage: Specify at least 1 USER command in Dockerfile with non-root user as argument\nLink: [DS-0002](https://avd.aquasec.com/misconfig/ds-0002)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "Dockerfile"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "DS-0017",
+          "ruleIndex": 42,
+          "level": "error",
+          "message": {
+            "text": "Artifact: Dockerfile\nType: dockerfile\nVulnerability DS-0017\nSeverity: HIGH\nMessage: The instruction 'RUN \u003cpackage-manager\u003e update' should always be followed by '\u003cpackage-manager\u003e install' in the same RUN statement.\nLink: [DS-0017](https://avd.aquasec.com/misconfig/ds-0017)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 1,
+                  "endLine": 2,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "Dockerfile"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "DS-0026",
+          "ruleIndex": 43,
+          "level": "note",
+          "message": {
+            "text": "Artifact: Dockerfile\nType: dockerfile\nVulnerability DS-0026\nSeverity: LOW\nMessage: Add HEALTHCHECK instruction in your Dockerfile\nLink: [DS-0026](https://avd.aquasec.com/misconfig/ds-0026)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "Dockerfile"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "aws-access-key-id",
+          "ruleIndex": 44,
+          "level": "error",
+          "message": {
+            "text": "Artifact: app/config.py\nType: \nSecret AWS Access Key ID\nSeverity: CRITICAL\nMatch: AWS_KEY = \"********************\""
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/config.py",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 1,
+                  "endLine": 3,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "app/config.py"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "github-pat",
+          "ruleIndex": 45,
+          "level": "error",
+          "message": {
+            "text": "Artifact: app/config.py\nType: \nSecret GitHub Personal Access Token\nSeverity: CRITICAL\nMatch: GITHUB = \"****************************************\""
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/config.py",
+                  "uriBaseId": "ROOTPATH"
+                },
+                "region": {
+                  "startLine": 4,
+                  "startColumn": 1,
+                  "endLine": 4,
+                  "endColumn": 1
+                }
+              },
+              "message": {
+                "text": "app/config.py"
+              }
+            }
+          ]
+        }
+      ],
+      "columnKind": "utf16CodeUnits",
+      "originalUriBaseIds": {
+        "ROOTPATH": {
+          "uri": "file:///home/ci/project/"
+        }
+      }
+    }
+  ]
+}

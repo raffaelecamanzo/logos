@@ -35,6 +35,7 @@
 //! [S-046]: ../../../../docs/planning/journal.md#s-046-history-store-and-incremental-git-miner
 //! [S-049]: ../../../../docs/planning/journal.md#s-049-coverage-store-parsers-and-ingest-pipeline
 //! [S-051]: ../../../../docs/planning/journal.md#s-051-coverage-surfaces-and-untested-hotspots
+//! [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
 
 mod artifact;
 mod parse;
@@ -66,7 +67,8 @@ pub use parse::CoverageFormat;
 pub(crate) use artifact::{discover as discover_artifact, ArtifactMatcher};
 pub(crate) use read::read_latest;
 
-use pathmap::PathMapper;
+// The one report-path binder, shared with the security ingest ([FR-SC-02]).
+pub(crate) use pathmap::{Binding, PathMapper};
 use store::MatchedFile;
 
 /// The outcome of a coverage ingest — a `Serialize` read-model ([ADR-01]) so the
@@ -252,8 +254,9 @@ pub fn ingest(
 
 /// blake3 of a file's bytes — the per-file freshness anchor ([FR-CV-02]). `None`
 /// if the file cannot be read (the caller treats it as unmatched, never fabricates
-/// an anchor).
-fn content_hash(path: &Path) -> Option<String> {
+/// an anchor). The security ingest anchors its files with this same hash
+/// ([FR-SC-02]), so both evidence kinds read freshness one way.
+pub(crate) fn content_hash(path: &Path) -> Option<String> {
     std::fs::read(path)
         .ok()
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string())

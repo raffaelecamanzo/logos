@@ -1,0 +1,141 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Bandit",
+          "organization": "PyCQA",
+          "rules": [
+            {
+              "id": "B105",
+              "name": "hardcoded_password_string",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-259"
+                ],
+                "precision": "medium"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.7.10/plugins/b105_hardcoded_password_string.html"
+            },
+            {
+              "id": "B608",
+              "name": "hardcoded_sql_expressions",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-89"
+                ],
+                "precision": "low"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.7.10/plugins/b608_hardcoded_sql_expressions.html"
+            }
+          ],
+          "version": "1.7.10",
+          "semanticVersion": "1.7.10"
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "endTimeUtc": "2026-10-15T09:21:07Z"
+        }
+      ],
+      "properties": {
+        "metrics": {
+          "_totals": {
+            "loc": 31,
+            "nosec": 0,
+            "skipped_tests": 0,
+            "SEVERITY.UNDEFINED": 0,
+            "CONFIDENCE.UNDEFINED": 0,
+            "SEVERITY.LOW": 1,
+            "CONFIDENCE.LOW": 1,
+            "SEVERITY.MEDIUM": 1,
+            "CONFIDENCE.MEDIUM": 1,
+            "SEVERITY.HIGH": 0,
+            "CONFIDENCE.HIGH": 0
+          }
+        }
+      },
+      "results": [
+        {
+          "message": {
+            "text": "Possible hardcoded password: 'lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw'"
+          },
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "DB_PASSWORD = 'lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw'\n"
+                  },
+                  "endColumn": 45,
+                  "endLine": 3,
+                  "startColumn": 15,
+                  "startLine": 3
+                },
+                "artifactLocation": {
+                  "uri": "app/settings.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "DEBUG = False\nAPI_TIMEOUT = 30\nDB_PASSWORD = 'lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw'\nAPI_KEY = 'lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw'\n"
+                  },
+                  "endLine": 4,
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "MEDIUM",
+            "issue_severity": "LOW"
+          },
+          "ruleId": "B105",
+          "ruleIndex": 0
+        },
+        {
+          "message": {
+            "text": "Possible SQL injection vector through string-based query construction."
+          },
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    cursor.execute(\"SELECT * FROM users WHERE id = %s\" % user_id)\n"
+                  },
+                  "endColumn": 54,
+                  "endLine": 12,
+                  "startColumn": 20,
+                  "startLine": 12
+                },
+                "artifactLocation": {
+                  "uri": "app/db.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "    cursor = conn.cursor()\n    cursor.execute(\"SELECT * FROM users WHERE id = %s\" % user_id)\n    return cursor.fetchone()\n"
+                  },
+                  "endLine": 13,
+                  "startLine": 11
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "LOW",
+            "issue_severity": "MEDIUM"
+          },
+          "ruleId": "B608",
+          "ruleIndex": 1
+        }
+      ]
+    }
+  ],
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json"
+}

@@ -607,17 +607,189 @@ fn wake_after_worker_shutdown_is_a_noop() {
 /// Auto-ingest is a local read+parse+store; only the explicit `coverage refresh`
 /// (which lives in the engine, not here) ever runs a command. A structural guard
 /// over the module source so a future edit can't silently re-introduce a spawn.
+///
+/// The security half (FR-SC-06, S-667): the watcher's SARIF auto-ingest reaches
+/// the security ingest module, never the scanner orchestrator, and no file of
+/// that ingest module spawns anything either. A scanner runs only from the
+/// explicit `security scan` engine path.
 #[test]
 fn the_watch_module_spawns_no_subprocess() {
     let src = include_str!("mod.rs");
+    // `process::{…}` and `Command as` catch an import a plain search would miss.
+    let spawns = |text: &str| {
+        ["process::Command", "Command::new", "process::{", "Command as"].iter().any(|s| text.contains(s))
+    };
     assert!(
-        !src.contains("process::Command") && !src.contains("Command::new"),
+        !spawns(src),
         "the watch module must spawn no subprocess (ADR-38 no-suite-in-serve boundary)"
     );
     assert!(
         !src.contains("refresh_cmd"),
         "refresh_cmd belongs to the explicit `coverage refresh` engine path, never the watcher"
     );
+    for scanner_path in ["Orchestrator", "security_scan", "security::scan", "Selection"] {
+        assert!(
+            !src.contains(scanner_path),
+            "the watcher names `{scanner_path}`: a scanner runs from `security scan` alone"
+        );
+    }
+    assert!(
+        src.contains("security_ingest_auto"),
+        "the watcher's SARIF path is the security auto-ingest"
+    );
+    let ingest_module = [
+        ("history/security/mod.rs", include_str!("../history/security/mod.rs")),
+        ("history/security/parse.rs", include_str!("../history/security/parse.rs")),
+        ("history/security/read.rs", include_str!("../history/security/read.rs")),
+        ("history/security/redact.rs", include_str!("../history/security/redact.rs")),
+        ("history/security/store.rs", include_str!("../history/security/store.rs")),
+        ("history/security/owasp.rs", include_str!("../history/security/owasp.rs")),
+        ("history/security/suppress.rs", include_str!("../history/security/suppress.rs")),
+        // The binder and anchor hash the ingest shares with coverage.
+        ("history/coverage/mod.rs", include_str!("../history/coverage/mod.rs")),
+        ("history/coverage/pathmap.rs", include_str!("../history/coverage/pathmap.rs")),
+    ];
+    for (file, text) in ingest_module {
+        // Production code only: an inline test module may build a git fixture.
+        let production = text.split("#[cfg(test)]\nmod tests {").next().unwrap_or(text);
+        assert!(!spawns(production), "{file} is on the watcher's ingest path and must spawn nothing");
+    }
+    // The engine half of that path: from the indexed-set read to the security
+    // ingest bodies, the watcher's entry included. It reaches the ingest module
+    // alone — never the scanner surface. (The one process on the path is the
+    // HEAD anchor's `git rev-parse`, in `history::miner`, as coverage's own
+    // auto-ingest has always run it; no scanner and no suite.)
+    let engine = include_str!("../engine.rs");
+    let start = engine.find("fn evidence_indexed_paths").expect("the indexed-set read");
+    let end = start + engine[start..].find("/// `logos security scan`").expect("the scan method follows");
+    let entry = &engine[start..end];
+    assert!(entry.contains("fn security_ingest_auto"), "the watcher's engine entry is in the slice");
+    assert!(!spawns(entry), "the engine's ingest path must spawn nothing");
+    for scanner_path in ["Orchestrator", "crate::security::", "security::scan"] {
+        assert!(!entry.contains(scanner_path), "the engine's ingest path names `{scanner_path}`");
+    }
+}
+
+/// FR-SC-06: a SARIF report directly in `.logos/security/` is the one path under
+/// `.logos/` the watcher admits, and only that shape — not one in a
+/// subdirectory, not a log beside it, not a report anywhere else.
+#[test]
+fn classify_admits_a_sarif_report_in_the_security_directory_only() {
+    let root = Path::new("/project");
+    let ig = ignored_set();
+    let m = builtin_matcher();
+    for report in ["/project/.logos/security/semgrep.sarif", "/project/.logos/security/ci-codeql.sarif"] {
+        assert_eq!(classify(root, Path::new(report), &ig, &m, None), Admission::Security, "{report}");
+    }
+    for ignored in [
+        "/project/.logos/security/semgrep.failed.log",
+        "/project/.logos/security/empty-config.yaml",
+        "/project/.logos/security/codeql/python/results.sarif",
+        "/project/.logos/semgrep.sarif",
+        "/project/.logos/history.db",
+        "/project/.git/security/semgrep.sarif",
+        "/elsewhere/.logos/security/semgrep.sarif",
+    ] {
+        assert_eq!(classify(root, Path::new(ignored), &ig, &m, None), Admission::Ignored, "{ignored}");
+    }
+    // A report outside `.logos/security/` is not an auto-ingest path.
+    assert_eq!(
+        classify(root, Path::new("/project/reports/semgrep.sarif"), &ig, &m, None),
+        Admission::Source
+    );
+}
+
+/// The watcher's SARIF ingest emits its own telemetry tool, `ok` on success and
+/// not on failure — driving the real `auto_ingest_report`, not a mirror of it.
+#[test]
+fn the_security_auto_ingest_records_its_own_tool_and_outcome() {
+    use std::sync::Mutex as StdMutex;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Collects `(tool, ok)` from telemetry-target events whose tool is a watcher one.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<StdMutex<Vec<(String, bool)>>>);
+    #[derive(Default)]
+    struct Fields(String, bool);
+    impl tracing::field::Visit for Fields {
+        fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+            if f.name() == "tool" {
+                self.0 = v.to_string();
+            }
+        }
+        fn record_bool(&mut self, f: &tracing::field::Field, v: bool) {
+            if f.name() == "ok" {
+                self.1 = v;
+            }
+        }
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            if event.metadata().target() == crate::observability::TELEMETRY_TARGET {
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                if fields.0.starts_with("watch_") {
+                    self.0.lock().unwrap().push((fields.0, fields.1));
+                }
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .env("GIT_CEILING_DIRECTORIES", root.parent().unwrap())
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "user.email=t@logos", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    std::fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+    let reports = root.join(".logos/security");
+    std::fs::create_dir_all(&reports).unwrap();
+    let good = reports.join("good.sarif");
+    std::fs::write(&good, r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Bandit"}},"results":[]}]}"#).unwrap();
+    let bad = reports.join("bad.sarif");
+    std::fs::write(&bad, "{").unwrap();
+    let engine = Engine::start(&root).unwrap();
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        // Sibling tests reach these callsites from threads with no subscriber.
+        tracing::callsite::rebuild_interest_cache();
+        auto_ingest_report(&engine, &good);
+        auto_ingest_report(&engine, &bad);
+    });
+    assert_eq!(
+        *capture.0.lock().unwrap(),
+        [("watch_security_ingest".to_string(), true), ("watch_security_ingest".to_string(), false)]
+    );
+}
+
+/// A SARIF report lands in its own pending set, is counted, and wakes the worker.
+#[test]
+fn a_security_report_routes_to_its_own_set_and_wakes_the_worker() {
+    let h = Harness::new();
+    on_debounced(
+        &h.sink(),
+        Ok(debounced_events(&["/project/.logos/security/trivy.sarif", "/project/.logos/history.db"])),
+    );
+    let stats = h.counters.snapshot();
+    assert_eq!((stats.security_reports_accepted, stats.paths_accepted, stats.artifacts_accepted), (1, 0, 0));
+    assert_eq!(
+        h.reports_pending.lock().unwrap().iter().collect::<Vec<_>>(),
+        vec![&PathBuf::from("/project/.logos/security/trivy.sarif")]
+    );
+    assert!(h.sources.lock().unwrap().is_empty() && h.artifacts_pending.lock().unwrap().is_empty());
+    assert!(h.wake_rx.try_recv().is_ok());
 }
 
 // ── PrunedFileIdCache: registration-time seed-walk prune (CR-077, NFR-PE-05) ──
@@ -971,6 +1143,7 @@ struct Harness {
     authority: Option<AdmissionAuthority>,
     sources: Mutex<HashSet<PathBuf>>,
     artifacts_pending: Mutex<HashSet<PathBuf>>,
+    reports_pending: Mutex<HashSet<PathBuf>>,
     wake_tx: Sender<()>,
     wake_rx: Receiver<()>,
     counters: Counters,
@@ -986,6 +1159,7 @@ impl Harness {
             authority: None,
             sources: Mutex::new(HashSet::new()),
             artifacts_pending: Mutex::new(HashSet::new()),
+            reports_pending: Mutex::new(HashSet::new()),
             wake_tx,
             wake_rx,
             counters: Counters::default(),
@@ -1007,6 +1181,7 @@ impl Harness {
             authority: &self.authority,
             pending_sources: &self.sources,
             pending_artifacts: &self.artifacts_pending,
+            pending_reports: &self.reports_pending,
             wake_tx: &self.wake_tx,
             counters: &self.counters,
         }

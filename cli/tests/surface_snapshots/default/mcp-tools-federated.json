@@ -587,6 +587,111 @@
     "name": "search"
   },
   {
+    "description": "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "category": {
+          "description": "An OWASP category, by id (A05:2025) or number (A05).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edition": {
+          "description": "The OWASP edition: \"2025\" (default) or \"2021\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "A project-relative file, or a directory holding it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scanner": {
+          "description": "A scanner, by registry name (semgrep) or SARIF driver name (Semgrep OSS).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "description": "Least severity listed: critical, high, medium, low or info.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suppression": {
+          "description": "Only \"active\" or only \"suppressed\" findings.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "SecurityFindingsParams",
+      "type": "object"
+    },
+    "name": "security_findings"
+  },
+  {
+    "description": "Ingest a SARIF 2.1.0 report from any tool into the evidence store (FR-SC-01): validated before any write, findings bound to indexed files, anchored to HEAD and the scanner, secret-class messages redacted, no snippet stored. A byte-identical re-ingest is a no-op reported already_ingested. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "report": {
+          "description": "Path to the SARIF 2.1.0 report to ingest (FR-SC-01).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "report"
+      ],
+      "title": "SecurityIngestParams",
+      "type": "object"
+    },
+    "name": "security_ingest"
+  },
+  {
+    "description": "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "SecurityScanParams",
+      "type": "object"
+    },
+    "name": "security_scan"
+  },
+  {
+    "description": "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Also the consent state: the scanners consented to, and the ones the next scan will ask for.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RepoParams",
+      "type": "object"
+    },
+    "name": "security_status"
+  },
+  {
     "description": "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

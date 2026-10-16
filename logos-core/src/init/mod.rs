@@ -265,6 +265,9 @@ chat.db*
 baseline.json
 history.jsonl
 logs/
+# Security scan output: SARIF reports (which can quote a secret) and CodeQL
+# databases (S-665, ADR-80).
+security/
 # The chat API key (FR-CF-06, NFR-SE-07) — a secret, never committed.
 secrets.toml
 # logos:managed:end

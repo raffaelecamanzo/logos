@@ -4,6 +4,9 @@ Logos works with **zero configuration** — every setting has a sensible
 default. When you do need control, configuration lives in two human-editable
 TOML files under `.logos/`, designed to be **checked into version control**
 (they are policy that travels with the repo; the derived databases are not).
+Settings that decide which programs Logos runs are the exception: they live in
+a [user-level config](#user-level-config--settings-no-repository-can-choose)
+outside every repository.
 
 You can edit both files by hand, or interactively in the web UI's **Config**
 view (`logos serve --ui`, then `/config`): it offers typed fields plus a raw
@@ -21,6 +24,7 @@ Created automatically by the first `logos index`:
 | `.logos/logos.db` | The code-graph index (SQLite). Derived — rebuildable any time with `logos index`. | No |
 | `.logos/history.db` | The evidence store (SQLite): mined git history + ingested coverage, on its own forward-only migration track. Derived — created on demand by `logos hotspots` / `logos coverage ingest`; the gate never opens it. | No |
 | `.logos/telemetry.db` | Local usage/performance events feeding `logos stats`. Never leaves your machine. | No |
+| `.logos/security/` | SARIF reports written by the security scanners Logos runs, and CodeQL's databases. Disposable — a rescan rewrites them. | No |
 | `.logos/config.toml` | Indexing & resolution policy (optional). | Yes |
 | `.logos/rules.toml` | Architecture contract: layers, boundaries, budgets (optional). | Yes |
 | `.logos/hooks/` | Managed git hook scripts: freshness `post-commit`, `post-checkout`, `post-merge` plus the enforcing `pre-push` gate. Installed by `logos init --hooks`. | Yes |
@@ -794,6 +798,204 @@ directory name is left, or the local checkout `origin` names is away, so only it
 last path component is left. Following either would move the store back and
 forth as the condition comes and goes. A relative local `origin` is read from
 the main checkout, so a linked worktree derives what its main checkout derives.
+
+### `[security_scan]` — which scanners may run
+
+Logos can run the security scanners you have installed (it never installs one).
+Nine are registered: `semgrep`, `trivy`, `gitleaks`, `osv-scanner`, `bandit`,
+`gosec`, `checkov`, `codeql` and `dependency-check`. Each is enabled by default
+and runs only if it is installed. The repository can switch a scanner off:
+
+```toml
+[security_scan.codeql]
+enabled = false
+
+[security_scan.dependency-check]
+enabled = false
+```
+
+**`enabled` is the only key.** This file travels with every clone, so it must
+not be able to choose what Logos runs. A `path`, `extra_args`, `command` or any
+other key under `[security_scan.<scanner>]`, a bare key directly under
+`[security_scan]`, or a scanner name that is not registered fails the load with
+exit 2, before any scanner is started. The error names the file, the line and
+the key; for a `path` key it ends:
+
+```text
+unknown field `path`, expected `enabled`
+```
+
+The binary path and extra flags are set in the [user-level config](#user-level-config--settings-no-repository-can-choose)
+instead.
+
+### `.logos/security-ignore.toml` — suppressions
+
+Accepted security risk is recorded in a committed file, one entry per finding,
+each with a reason and an optional expiry:
+
+```toml
+[[ignore]]
+fingerprint = "<the finding's 64-character fingerprint>"
+reason = "test fixture, never deployed"
+expires = 2026-12-31          # optional; suppresses through this day inclusive
+```
+
+- **The fingerprint** is the one `logos security findings --json` shows for the
+  finding. It is derived from the rule, the file and the scanner's identity for
+  the result, so a suppression never leaks onto the same line in another file.
+  Renaming a file gives its findings new fingerprints.
+- **`reason` is required.** An entry without one, a value that is not a
+  fingerprint, a date that is not a calendar date, or a repeated fingerprint
+  rejects the whole file with exit 2, naming the line. A suppression that
+  silently did nothing would be worse than none.
+- **Expiry.** From the day after `expires` the entry no longer suppresses: the
+  finding comes back, and the entry is listed as `expired`.
+- **Orphans.** An entry that matches no stored finding is listed as `orphaned`
+  (the finding was fixed, or its scanner has not run here).
+- **Visible, never silent.** A suppressed finding is still returned by
+  `security findings`, with its reason; `--suppression active` hides it.
+
+The file is optional (absent means nothing is suppressed), travels with the
+repository (the managed `.logos/.gitignore` does not ignore it), and is read on
+every `security findings` and `security status`. See
+[commands.md](commands.md#security-findings).
+
+## User-level config — settings no repository can choose
+
+Settings that decide what Logos **runs** live in one file per user, outside
+every repository, so a cloned repository can never set them.
+
+**Where it is.** The first of these that is set to an absolute path wins:
+
+| Variable | Directory |
+|---|---|
+| `LOGOS_CONFIG_HOME` | `$LOGOS_CONFIG_HOME` |
+| `XDG_CONFIG_HOME` | `$XDG_CONFIG_HOME/logos` |
+| `HOME` | `$HOME/.config/logos` (on macOS too) |
+| `APPDATA` (Windows) | `%APPDATA%\logos` |
+
+An unset, empty or relative value is skipped. The file is `config.toml` in that
+directory. It is optional: a missing directory or file means no overrides.
+`LOGOS_CONFIG_HOME` exists so tests and sandboxes can point Logos at a
+throwaway directory. The record of which scanners you allowed to reach the
+network is kept in the same directory (see [Scan consent](#scan-consent) below).
+
+A file that exists is parsed as strictly as `.logos/config.toml`: an unknown
+table or key fails with exit 2.
+
+**`[security_scan.<scanner>]`** — overrides for one registered scanner:
+
+```toml
+[security_scan.semgrep]
+# Run this binary instead of the first `semgrep` on PATH. Must be absolute.
+path = "/opt/semgrep/bin/semgrep"
+# Extra flags, one argument per entry (no shell splitting). They are inserted
+# at a fixed place in the scanner's command line, before its path arguments.
+extra_args = ["--exclude", "vendor"]
+
+[security_scan.codeql]
+# For CodeQL the extra flags go to `database analyze`, never `database create`.
+extra_args = ["--threads=4"]
+```
+
+`path` must be absolute; a path that does not exist reports the scanner as not
+installed, without falling back to `PATH`. An empty `extra_args` entry, a
+scanner name that is not registered, and an `enabled` key (switching scanners is
+the repository's call) all fail with exit 2.
+
+**How a scanner is found and run.** Without a `path` override, Logos takes the
+first match on `PATH`, using only the entries that are absolute and outside the
+project: an empty or relative entry (`.`, `bin`) and an absolute one inside the
+project (an activated in-repo virtualenv, `node_modules/.bin`) are skipped. The
+scanner runs with that same reduced `PATH`, so a tool it starts by name (`git`,
+`go`, `java`) is never one the repository holds. A scanner is started directly
+with its argument list, never through a shell, with the project root as its
+working directory, and its stdout and stderr are captured up to a bound (64 KiB
+and 16 KiB). On Linux and macOS it runs in a process group of its own, and when
+it exits the group is killed, so nothing it started outlives the run. Each
+command line is fixed in Logos:
+
+| Scanner | Binary | Version probe | Command line (`OUT` is under `.logos/security/`) |
+|---|---|---|---|
+| Semgrep | `semgrep` | `--version` | `scan --config p/default --sarif --output OUT --metrics off --disable-version-check --quiet --exclude .logos` *extra* `.` |
+| Trivy | `trivy` | `--version` | `fs --scanners vuln,secret,misconfig --format sarif --output OUT --skip-dirs .logos --config .logos/security/empty-config.yaml` *extra* `.` |
+| Gitleaks | `gitleaks` | `version` | `detect --redact --no-banner --exit-code 0 --report-format sarif --report-path OUT` *extra* `--source .` |
+| OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output OUT` *extra* `--recursive .` |
+| Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos` *extra* `.` |
+| gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *extra* `./...` (with `GOTOOLCHAIN=local`) |
+| Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet --skip-path .logos` *extra* `--directory .` |
+| CodeQL | `codeql` | `version --format=terse` | per language: `database create DB --language=L --build-mode=none --source-root=. --overwrite`, then `database analyze DB --format=sarif-latest --output OUT` *extra*, with `OUT` in `.logos/security/codeql/`; Logos then merges every language's runs into one `codeql.sarif`, so a project's languages are one snapshot |
+| Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/** --disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` *extra* |
+
+The commands were written against Semgrep 1.85, Trivy 0.74, Gitleaks 8.18,
+OSV-Scanner 1.9, Bandit 1.7.10, gosec 2.21, Checkov 3.2, CodeQL 2.19 and
+Dependency-Check 10.0. A release whose flags have since changed fails, and the
+scanner's own error is reported. Detecting a scanner runs only its version
+probe, with the update-check opt-outs Semgrep (`SEMGREP_ENABLE_VERSION_CHECK=0`)
+and Trivy (`TRIVY_SKIP_VERSION_CHECK=true`) honour set on it and on every scan.
+
+**A repository cannot make a scanner run its code.** Some scanners read a
+config file from the directory they scan, and some of those files can name code
+for the scanner to run. Logos closes the ones it knows:
+
+- **Checkov** loads `.checkov.yaml` / `.checkov.yml` from the scanned directory,
+  and that file can name external checks, which are Python Checkov runs. When
+  either file is at the project root, Checkov is not started; it is reported
+  failed with `not run: the repository's .checkov.yaml can make checkov run code
+  it names; remove it, or run checkov in CI and ingest its SARIF`.
+- **Trivy** would read `trivy.yaml` from its working directory, which can point
+  its database and cache at other hosts. Logos passes `--config` with an empty
+  file it writes itself (`.logos/security/empty-config.yaml`).
+- **Dependency-Check**'s Yarn, pnpm, bundle-audit, Go-module and mix_audit
+  analyzers start the project's package manager or toolchain (Yarn runs a
+  committed `yarnPath`), so they are switched off.
+- **gosec** runs with `GOTOOLCHAIN=local`, so a `go.mod` cannot make Go fetch and
+  run another toolchain.
+
+Config files that only tune findings (`.gitleaks.toml`, `.semgrepignore`,
+`.trivyignore`, `.bandit`) are still read. Scan output goes only to
+`.logos/security/`: if `.logos` or `.logos/security` is a symbolic link the scan
+is refused, and a link in place of any report, output directory or CodeQL
+database below it is removed, never written or deleted through.
+`.logos/security/` is in the `.logos/.gitignore` that `logos init` maintains: a
+report can quote a secret, so it is never meant to be committed.
+
+**CodeQL never builds your project.** It runs only with `--build-mode=none`, and
+only on JavaScript/TypeScript, Python and Ruby, whose extraction reads source and
+nothing else. Every other language is reported `requires a build — ingest a CI
+report` and nothing is started for it: Go, Kotlin, Swift and C/C++ extract only
+from a build, and the build-free mode of Java, C# and Rust still evaluates the
+project to resolve its dependencies (through Maven or Gradle, MSBuild, or Cargo
+and its `.cargo/config.toml`). Run CodeQL for those in CI and ingest its SARIF. A
+project with none of these languages is reported not applicable for CodeQL.
+
+### Scan consent
+
+A scanner may reach the network to refresh its rules or its vulnerability
+database (Semgrep's registry rules, Trivy's and OSV-Scanner's databases,
+Dependency-Check's NVD feed). So the first `logos security scan` in a project
+refuses with exit 2 until you consent, naming the scanners it would start and
+the flag that records your consent:
+
+```text
+error: invalid value for consent: none is recorded in this project for semgrep, trivy — a scanner may
+reach the network to refresh its rules or vulnerability database. Run `logos security scan --consent`
+in a terminal to record it (an MCP client cannot); later scans will not ask again
+```
+
+`--consent` records every installed, enabled scanner the record does not name
+yet, then scans. Later scans do not ask. A scanner you install or enable later
+is not in the record, so the next scan asks again, for that scanner alone.
+Nothing starts before the check, not even a version probe. Only the command line
+records consent: the MCP `security_scan` tool refuses a `consent` argument and,
+until you have consented, fails with the message above.
+
+The record is `security-consent.toml` in the user-level directory, never in the
+repository. Logos writes it; it is keyed by the project's canonical root path,
+so each checkout (and each worktree) has its own consent, and no repository can
+claim another's. To withdraw consent, delete the project's table from the file,
+or the file. `logos security status` reports the consent state: the scanners
+consented to, and the ones the next scan will ask for.
 
 ## Documentation — indexing markdown
 

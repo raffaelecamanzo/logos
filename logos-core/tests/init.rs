@@ -252,6 +252,8 @@ fn gitignore_ignores_derived_state_and_keeps_policy_tracked() {
         "baseline.json",
         "history.jsonl",
         "logs/",
+        // S-665: security scan reports and CodeQL databases.
+        "security/",
         // S-169 / FR-CF-06: the chat API key store is gitignored — the one
         // non-derived file that must never be committed (NFR-SE-07).
         "secrets.toml",
@@ -269,6 +271,7 @@ fn gitignore_ignores_derived_state_and_keeps_policy_tracked() {
             .success()
     };
     assert!(check(".logos/logos.db"), "logos.db ignored");
+    assert!(check(".logos/security/bandit.sarif"), "scan reports ignored");
     assert!(check(".logos/logos.db-wal"), "WAL sidecar ignored (.db-*)");
     assert!(
         check(".logos/telemetry.db-shm"),

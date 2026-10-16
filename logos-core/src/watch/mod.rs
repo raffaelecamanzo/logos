@@ -47,7 +47,17 @@
 //!
 //! Events under `.logos/` (the store the sync itself writes!) and `.git/`
 //! are filtered *before* coalescing — without this, every sync's own
-//! `logos.db` write would re-trigger the watcher forever.
+//! `logos.db` write would re-trigger the watcher forever. The one exception is
+//! a SARIF report directly in `.logos/security/` ([FR-SC-06]): it is ingested,
+//! and an ingest writes only `history.db`, which is not a report, so the
+//! exception cannot re-trigger itself.
+//!
+//! # No subprocess, ever ([ADR-38], [NFR-SE-01])
+//!
+//! A coverage artifact or a SARIF report is ingested by a local read, parse and
+//! store. The watcher never runs a test suite or a scanner: the explicit
+//! `coverage refresh` and `security scan` engine paths are the only ones that
+//! spawn one, and this module names neither.
 //!
 //! [S-022]: ../../../docs/planning/journal.md#s-022-incremental-sync-hardening-with-watcher-and-git-hooks
 //! [FR-SY-04]: ../../../docs/specs/requirements/FR-SY-04.md
@@ -58,6 +68,9 @@
 //! [AR-01]: ../../../docs/specs/architecture.md#13-risk-register
 //! [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
 //! [filesystem-watcher]: ../../../docs/specs/architecture/integrations/filesystem-watcher.md
+//! [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
+//! [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
+//! [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -77,6 +90,7 @@ use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, FileIdCache}
 use crate::config::AdmissionAuthority;
 use crate::engine::Engine;
 use crate::history::coverage::ArtifactMatcher;
+use crate::security::OUTPUT_DIR;
 
 #[cfg(test)]
 mod tests;
@@ -88,7 +102,9 @@ mod tests;
 /// These are the **feedback-loop** filter: unlike the indexer's `ignored_dirs`,
 /// no allow-list exception (the coverage-artifact hook, [FR-CV-10]) ever re-admits
 /// a path under them — checked first in [`classify`] so a stray artifact glob can
-/// never re-open the self-trigger melt ([ADR-38], [ADR-11]).
+/// never re-open the self-trigger melt ([ADR-38], [ADR-11]). The single fixed
+/// exception is a SARIF report directly in [`OUTPUT_DIR`]
+/// ([`is_security_report`]), which no configuration can widen.
 const INTERNAL_DIRS: &[&str] = &[".logos", ".git"];
 
 /// How the watcher classifies a changed path: drive an incremental [`Engine::sync`]
@@ -103,6 +119,11 @@ enum Admission {
     Source,
     /// A coverage artifact (convention/configured) → auto-ingest it ([FR-CV-10]).
     Coverage,
+    /// A SARIF report directly in `.logos/security/` → auto-ingest it
+    /// ([FR-SC-06]).
+    ///
+    /// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
+    Security,
     /// Outside the root, under a feedback-loop/ignored dir → dropped.
     Ignored,
 }
@@ -132,6 +153,10 @@ struct Counters {
     /// Auto-ingests the worker actually attempted (one per changed artifact);
     /// failures are counted here too — they degrade to a warning, [ADR-38].
     coverage_ingests_run: AtomicU64,
+    /// SARIF reports accepted into the pending report set ([FR-SC-06]).
+    security_reports_accepted: AtomicU64,
+    /// SARIF auto-ingests the worker attempted, failures included.
+    security_ingests_run: AtomicU64,
 }
 
 /// A point-in-time snapshot of the watcher's counters ([`WatchHandle::stats`]).
@@ -151,6 +176,10 @@ pub struct WatchStats {
     pub artifacts_accepted: u64,
     /// Auto-ingests the worker attempted (success or degraded-to-warning).
     pub coverage_ingests_run: u64,
+    /// SARIF reports accepted from `.logos/security/` ([FR-SC-06]).
+    pub security_reports_accepted: u64,
+    /// SARIF auto-ingests the worker attempted (success or degraded).
+    pub security_ingests_run: u64,
 }
 
 impl Counters {
@@ -163,6 +192,8 @@ impl Counters {
             files_synced: self.files_synced.load(Ordering::Acquire),
             artifacts_accepted: self.artifacts_accepted.load(Ordering::Acquire),
             coverage_ingests_run: self.coverage_ingests_run.load(Ordering::Acquire),
+            security_reports_accepted: self.security_reports_accepted.load(Ordering::Acquire),
+            security_ingests_run: self.security_ingests_run.load(Ordering::Acquire),
         }
     }
 }
@@ -322,6 +353,8 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     // A sibling pending set for coverage artifacts: the worker drains it through
     // the non-load-bearing auto-ingest path, never `Engine::sync` ([FR-CV-10]).
     let pending_artifacts: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+    // And one for SARIF reports, drained through the security auto-ingest.
+    let pending_reports: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     // The 1-slot wake channel: a full slot means a wake is already pending —
     // `try_send` drops, nothing blocks the debouncer's delivery thread.
     let (wake_tx, wake_rx) = bounded::<()>(1);
@@ -335,8 +368,11 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
         // actually syncing. Every caller of [`spawn`] outlives its handle, so the
         // upgrade succeeds for as long as the watcher is meant to run.
         Arc::downgrade(&engine),
-        Arc::clone(&pending),
-        Arc::clone(&pending_artifacts),
+        Pending {
+            sources: Arc::clone(&pending),
+            artifacts: Arc::clone(&pending_artifacts),
+            reports: Arc::clone(&pending_reports),
+        },
         wake_rx,
         Arc::clone(&counters),
         cadence,
@@ -346,6 +382,7 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
         let root = root.clone();
         let pending = Arc::clone(&pending);
         let pending_artifacts = Arc::clone(&pending_artifacts);
+        let pending_reports = Arc::clone(&pending_reports);
         let counters = Arc::clone(&counters);
         let wake_tx = wake_tx.clone();
         let ignored_dirs = Arc::clone(&ignored_dirs);
@@ -359,6 +396,7 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
                 authority: &authority,
                 pending_sources: &pending,
                 pending_artifacts: &pending_artifacts,
+                pending_reports: &pending_reports,
                 wake_tx: &wake_tx,
                 counters: &counters,
             };
@@ -424,6 +462,8 @@ struct DebounceSink<'a> {
     pending_sources: &'a Mutex<HashSet<PathBuf>>,
     /// Coalesced coverage-artifact paths bound for non-load-bearing auto-ingest.
     pending_artifacts: &'a Mutex<HashSet<PathBuf>>,
+    /// Coalesced SARIF report paths bound for the security auto-ingest.
+    pending_reports: &'a Mutex<HashSet<PathBuf>>,
     /// The 1-slot wake channel into the worker.
     wake_tx: &'a Sender<()>,
     /// Live behaviour counters.
@@ -432,9 +472,12 @@ struct DebounceSink<'a> {
 
 /// Classify a changed path ([FR-CV-10], [ADR-38]). Order is load-bearing:
 ///
-/// 1. **Feedback-loop dirs first** — anything under `.logos/`/`.git/` (or outside
-///    the root) is [`Ignored`](Admission::Ignored) with **no** exception, so a
-///    stray artifact glob can never re-open the self-trigger melt ([ADR-11]).
+/// 0. **A SARIF report directly in `.logos/security/`** is
+///    [`Security`](Admission::Security) ([FR-SC-06]) — a fixed path, never a
+///    glob, and ingesting it writes no report.
+/// 1. **Feedback-loop dirs first** — anything else under `.logos/`/`.git/` (or
+///    outside the root) is [`Ignored`](Admission::Ignored) with **no** exception,
+///    so a stray artifact glob can never re-open the self-trigger melt ([ADR-11]).
 /// 2. **Coverage-artifact allow-list** — a path the [`ArtifactMatcher`] recognizes
 ///    is [`Coverage`](Admission::Coverage) even under a `target/`-class ignored dir
 ///    (the bounded hole [ADR-38] sanctions).
@@ -458,6 +501,7 @@ struct DebounceSink<'a> {
 ///
 /// [CR-210]: ../../../docs/requests/CR-210-the-watcher-honors-nested-gitignore-files.md
 /// [FR-CV-10]: ../../../docs/specs/requirements/FR-CV-10.md
+/// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
 /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
 /// [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
 /// [ADR-48]: ../../../docs/specs/architecture/decisions/ADR-48.md
@@ -472,6 +516,10 @@ fn classify(
     let Ok(relative) = path.strip_prefix(root) else {
         return Admission::Ignored;
     };
+    // (0) The one fixed path under `.logos/` the watcher admits.
+    if is_security_report(relative) {
+        return Admission::Security;
+    }
     // (1) The feedback-loop filter is absolute — checked before the allow-list.
     let under_internal = relative.components().any(|component| {
         matches!(component, Component::Normal(name) if INTERNAL_DIRS.iter().any(|d| name == *d))
@@ -521,6 +569,14 @@ fn classify(
     Admission::Source
 }
 
+/// `true` for `relative` naming a `.sarif` file directly in [`OUTPUT_DIR`] —
+/// not one in a subdirectory (CodeQL's databases), and nothing else there (the
+/// failure logs, the pinned config).
+fn is_security_report(relative: &Path) -> bool {
+    relative.parent() == Some(Path::new(OUTPUT_DIR))
+        && relative.extension().is_some_and(|ext| ext == "sarif")
+}
+
 /// The debouncer-thread half: classify, coalesce, wake. Never blocks, never
 /// errs — a failed batch is logged and dropped (reconcile is the backstop).
 fn on_debounced(sink: &DebounceSink, result: DebounceEventResult) {
@@ -552,6 +608,7 @@ fn on_debounced(sink: &DebounceSink, result: DebounceEventResult) {
 
     let mut sources_accepted = 0u64;
     let mut artifacts_accepted = 0u64;
+    let mut reports_accepted = 0u64;
     {
         // A poisoned lock means a *previous* callback panicked mid-insert; the
         // sets are plain HashSets with no invariant to corrupt, so keep serving
@@ -561,6 +618,7 @@ fn on_debounced(sink: &DebounceSink, result: DebounceEventResult) {
             .pending_artifacts
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut reports = sink.pending_reports.lock().unwrap_or_else(|p| p.into_inner());
         for path in events.iter().flat_map(|event| event.paths.iter()) {
             match classify(sink.root, path, sink.ignored_dirs, sink.artifacts, sink.authority.as_ref()) {
                 Admission::Source => {
@@ -573,11 +631,16 @@ fn on_debounced(sink: &DebounceSink, result: DebounceEventResult) {
                         artifacts_accepted += 1;
                     }
                 }
+                Admission::Security => {
+                    if reports.insert(path.clone()) {
+                        reports_accepted += 1;
+                    }
+                }
                 Admission::Ignored => {}
             }
         }
     }
-    if sources_accepted == 0 && artifacts_accepted == 0 {
+    if sources_accepted == 0 && artifacts_accepted == 0 && reports_accepted == 0 {
         return;
     }
     sink.counters
@@ -586,6 +649,9 @@ fn on_debounced(sink: &DebounceSink, result: DebounceEventResult) {
     sink.counters
         .artifacts_accepted
         .fetch_add(artifacts_accepted, Ordering::AcqRel);
+    sink.counters
+        .security_reports_accepted
+        .fetch_add(reports_accepted, Ordering::AcqRel);
 
     match sink.wake_tx.try_send(()) {
         Ok(()) => {}
@@ -639,8 +705,7 @@ struct Cadence {
 /// [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
 fn spawn_sync_worker(
     engine: Weak<Engine>,
-    pending: Arc<Mutex<HashSet<PathBuf>>>,
-    pending_artifacts: Arc<Mutex<HashSet<PathBuf>>>,
+    pending: Pending,
     wake_rx: Receiver<()>,
     counters: Arc<Counters>,
     cadence: Cadence,
@@ -710,10 +775,7 @@ fn spawn_sync_worker(
                     break;
                 };
 
-                let artifacts: Vec<PathBuf> = {
-                    let mut pending = pending_artifacts.lock().unwrap_or_else(|p| p.into_inner());
-                    pending.drain().collect()
-                };
+                let artifacts = drain(&pending.artifacts);
                 for artifact in artifacts {
                     counters.coverage_ingests_run.fetch_add(1, Ordering::AcqRel);
                     let ingest_started = Instant::now();
@@ -760,11 +822,14 @@ fn spawn_sync_worker(
                     }
                 }
 
+                // The SARIF reports, the same way: ingested, never scanned.
+                for report in drain(&pending.reports) {
+                    counters.security_ingests_run.fetch_add(1, Ordering::AcqRel);
+                    auto_ingest_report(&engine, &report);
+                }
+
                 // Drain the coalesced set and run at most one sync (AR-01).
-                let paths: Vec<PathBuf> = {
-                    let mut pending = pending.lock().unwrap_or_else(|p| p.into_inner());
-                    pending.drain().collect()
-                };
+                let paths = drain(&pending.sources);
                 if !paths.is_empty() {
                     let started = Instant::now();
                     // Infallible surface (ADR-14): a failed sync degrades to a
@@ -799,6 +864,46 @@ fn spawn_sync_worker(
             }
         })
         .context("spawning the logos-watch-sync worker thread")
+}
+
+/// The worker's three pending sets, each filled by [`on_debounced`].
+struct Pending {
+    sources: Arc<Mutex<HashSet<PathBuf>>>,
+    artifacts: Arc<Mutex<HashSet<PathBuf>>>,
+    reports: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+/// Take every path out of `set`. A poisoned lock is recovered: the set holds no
+/// invariant a panic could break.
+fn drain(set: &Mutex<HashSet<PathBuf>>) -> Vec<PathBuf> {
+    set.lock().unwrap_or_else(|p| p.into_inner()).drain().collect()
+}
+
+/// Ingest one SARIF report the watcher saw change, through
+/// [`Engine::security_ingest_auto`] — a read, parse and store, never a scanner
+/// run. Non-load-bearing: a failure (a report still being written, a malformed
+/// one) is a warning plus a telemetry event, never an error.
+fn auto_ingest_report(engine: &Engine, report: &Path) {
+    let started = Instant::now();
+    let ingested = engine.security_ingest_auto(report);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    if let Err(e) = &ingested {
+        tracing::warn!(
+            target: "logos::watch",
+            surface = crate::observability::Surface::Watcher.as_str(),
+            report = %report.display(),
+            "auto security ingest failed (degraded to a warning; sync unaffected): {e:#}",
+        );
+    }
+    tracing::info!(
+        target: crate::observability::TELEMETRY_TARGET,
+        tool = crate::observability::Tool::WatchSecurityIngest.as_str(),
+        surface = crate::observability::Surface::Watcher.as_str(),
+        duration_ms,
+        ok = ingested.is_ok(),
+        report = %report.display(),
+        "watcher security ingest",
+    );
 }
 
 /// `true` if `path` lives under any ignored directory relative to `root` —
