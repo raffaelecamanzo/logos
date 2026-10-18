@@ -46,8 +46,10 @@
 #   Checks that origin can be read and its main still equals the local
 #   origin/main (so the parent is current) and that its branch sprint/N is absent
 #   or already the commit built; pushes the commit to refs/heads/sprint/N (never
-#   forced), then opens the pull request against main with `gh pr create --fill`
-#   (one commit, so title and body are its message). A push that already landed
+#   forced), then opens the pull request against main titled with the commit's
+#   subject, its body the commit's body on stdin. Never `--fill`: that reads the
+#   LOCAL branch of the same name, which is the raw sprint branch, not the one
+#   commit the term gate scanned (HF-9). A push that already landed
 #   (a re-run) skips straight to the pull request. Only the owner runs --push.
 #   The pull request is merged on GitHub with "Rebase and merge"; afterwards run
 #   `git fetch origin && git merge origin/main` to restore the local ancestry.
@@ -289,7 +291,11 @@ TRACKED="$(git rev-parse --verify --quiet "refs/remotes/$REMOTE/$BRANCH^{commit}
     || die 2 "$REMOTE/$BRANCH is $TRACKED, not the commit built ($SQUASH): refusing to move or reuse a published sprint branch"
 
 PUSH_CMD=(git push "$REMOTE" "$SQUASH:refs/heads/$BRANCH")
-PR_CMD=(gh pr create --base main --head "$BRANCH" --fill)
+# The pull request says exactly what the commit says — the message the term gate
+# scanned — read back from the commit object, never from a local branch (HF-9).
+PR_TITLE="$(git log -1 --format=%s "$SQUASH")"
+PR_BODY="$(git log -1 --format=%b "$SQUASH")"
+PR_CMD=(gh pr create --base main --head "$BRANCH" --title "$PR_TITLE" --body-file -)
 
 echo
 echo "message:"
@@ -325,5 +331,5 @@ elif [ "$REMOTE_BRANCH" = "$SQUASH" ]; then
 else
     die 2 "$REMOTE's $BRANCH is $REMOTE_BRANCH, not the commit built ($SQUASH): refusing to move or reuse a published sprint branch"
 fi
-"${PR_CMD[@]}" || die 5 "$BRANCH is on $REMOTE but the pull request could not be created: re-run to retry it"
+printf '%s\n' "$PR_BODY" | "${PR_CMD[@]}" || die 5 "$BRANCH is on $REMOTE but the pull request could not be created: re-run to retry it"
 echo "opened the pull request for $BRANCH"

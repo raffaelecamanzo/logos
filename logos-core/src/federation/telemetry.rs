@@ -52,7 +52,13 @@
 //!   [FR-UI-37] names four projections and neither is among them. If a later
 //!   story wants them app-wide they are the same fold as [`sum_by_tool`].
 //!
+//! The tool×invoker cross-tab ([FR-OB-15]) **is** carried: the agent kit is
+//! judged across a workspace by what its hooks and skills caused, and a count
+//! sums cleanly across members. It is [`sum_by_tool_invoker`], the
+//! [`sum_by_tool`] fold keyed on the invoker instead of the surface.
+//!
 //! [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+//! [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
 //!
 //! [CR-137]: ../../../docs/requests/CR-137-a-view-declares-the-scope-it-answers-for.md
 //! [ADR-13]: ../../../docs/specs/architecture/decisions/ADR-13.md
@@ -73,7 +79,7 @@ use serde::Serialize;
 use super::registry::{EngineRegistry, MemberEngine};
 use crate::models::outcome::OutcomeCounts;
 use crate::models::quality::{
-    AttributionCoverage, DailyActivity, OriginUsage, StatsInfo, ToolUsage,
+    AttributionCoverage, DailyActivity, OriginUsage, StatsInfo, ToolInvokerUsage, ToolUsage,
 };
 use crate::observability::{
     attribution_coverage, read_stats, DEFAULT_STATS_WINDOW_DAYS, NO_TELEMETRY_YET,
@@ -187,6 +193,13 @@ pub struct WorkspaceStatistics {
     /// Inherits [`attribution_coverage`](Self::attribution_coverage)'s
     /// raw-events-only limit from every member it sums.
     pub calls_by_origin: Vec<OriginUsage>,
+    /// The tool × invoker cross-tab summed across the read members ([FR-OB-15]),
+    /// sorted by tool, then invoker (`null` first). Inherits
+    /// [`attribution_coverage`](Self::attribution_coverage)'s raw-events-only
+    /// limit, and its pre-stamp `null` rows, from every member it sums.
+    ///
+    /// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+    pub calls_by_tool_invoker: Vec<ToolInvokerUsage>,
     /// Estimated ad-hoc file reads avoided, summed — an estimate, honestly
     /// labeled ([NFR-CC-04]).
     pub reads_saved_estimate: u64,
@@ -272,6 +285,7 @@ where
         calls_by_tool: sum_by_tool(&read),
         activity_by_day: sum_by_day(&read),
         calls_by_origin: sum_by_origin(&read),
+        calls_by_tool_invoker: sum_by_tool_invoker(&read),
         reads_saved_estimate: read.iter().map(|s| s.reads_saved_estimate).sum(),
         tokens_saved_estimate: read.iter().map(|s| s.tokens_saved_estimate).sum(),
         attribution_coverage: attribution_coverage(window_days),
@@ -383,6 +397,41 @@ fn sum_by_origin(read: &[StatsInfo]) -> Vec<OriginUsage> {
         .into_iter()
         .map(|(origin, (calls, ok_calls, outcomes))| OriginUsage {
             origin: origin.to_string(),
+            calls,
+            ok_calls,
+            outcomes,
+        })
+        .collect()
+}
+
+/// Sum the tool × invoker cross-tab across the read members ([FR-OB-15]).
+///
+/// The [`sum_by_tool`] fold keyed `(tool, invoker)`: the [`BTreeMap`] gives the
+/// order a single member's cross-tab already carries — tool, then invoker, the
+/// undeclared `None` first — and every count the cell carries is summed, the
+/// outcome counts included.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+fn sum_by_tool_invoker(read: &[StatsInfo]) -> Vec<ToolInvokerUsage> {
+    // `(class, calls, ok_calls, outcomes)` — the running sum of one cell.
+    type CellSum = (String, u64, u64, OutcomeCounts);
+    let mut by_cell: BTreeMap<(&str, Option<&str>), CellSum> = BTreeMap::new();
+    for info in read {
+        for cell in &info.calls_by_tool_invoker {
+            let entry = by_cell
+                .entry((cell.tool.as_str(), cell.invoker.as_deref()))
+                .or_insert_with(|| (cell.class.clone(), 0, 0, OutcomeCounts::default()));
+            entry.1 += cell.calls;
+            entry.2 += cell.ok_calls;
+            entry.3 += cell.outcomes;
+        }
+    }
+    by_cell
+        .into_iter()
+        .map(|((tool, invoker), (class, calls, ok_calls, outcomes))| ToolInvokerUsage {
+            tool: tool.to_string(),
+            class,
+            invoker: invoker.map(str::to_string),
             calls,
             ok_calls,
             outcomes,
@@ -910,5 +959,72 @@ mod tests {
             ),
             "the v3 member's two calls count; only the v4 member's one is classified"
         );
+    }
+
+    /// The tool × invoker cross-tab sums across members per `(tool, invoker)`
+    /// cell — a hook's calls in two members add up, the undeclared cell stays
+    /// apart from every declared one — in the single-member order, and every
+    /// count of the cell is summed ([FR-OB-15]). The summed `hook:stop` cell's
+    /// four numbers all differ, so a fold that dropped or swapped one would show.
+    ///
+    /// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+    #[test]
+    fn the_invoker_cross_tab_sums_each_cell_across_members() {
+        use crate::observability::Outcome::{Answered, Empty, Failed};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let fed = federation(root, &["api", "web"]);
+        let at = now() - 3_600;
+        let stop = Some("hook:stop");
+        crate::observability::seed_store_with_invokers_for_tests(
+            &logos_dir(root, "api"),
+            &[
+                ("callers", stop, true, Some(Answered), at),
+                ("callers", stop, false, Some(Failed), at),
+                ("review", Some("skill:logos-review"), true, None, at),
+                ("review", None, true, None, at),
+            ],
+        )
+        .expect("api store seeds");
+        crate::observability::seed_store_with_invokers_for_tests(
+            &logos_dir(root, "web"),
+            &[
+                ("callers", stop, true, Some(Answered), at),
+                ("callers", stop, true, Some(Empty), at),
+                ("callers", stop, true, None, at),
+                ("callers", stop, false, Some(Failed), at),
+                ("callers", None, true, None, at),
+            ],
+        )
+        .expect("web store seeds");
+
+        let agg = workspace_statistics(&registry_of(fed), None);
+        let cells: Vec<(&str, Option<&str>, u64)> = agg
+            .calls_by_tool_invoker
+            .iter()
+            .map(|c| (c.tool.as_str(), c.invoker.as_deref(), c.calls))
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                ("callers", None, 1),
+                ("callers", stop, 6),
+                ("review", None, 1),
+                ("review", Some("skill:logos-review"), 1),
+            ]
+        );
+        let summed = &agg.calls_by_tool_invoker[1];
+        assert_eq!(
+            (
+                summed.class.as_str(),
+                summed.calls,
+                summed.ok_calls,
+                summed.outcomes.answered_calls,
+                summed.outcomes.classified_calls
+            ),
+            ("navigation", 6, 4, 2, 5),
+            "every count of the cell is summed, and its class carried"
+        );
+        assert!(agg.attribution_coverage.null_invoker_includes_pre_stamp_rows);
     }
 }

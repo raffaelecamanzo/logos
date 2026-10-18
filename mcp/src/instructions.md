@@ -31,6 +31,8 @@ Prefer the graph tools over raw file reads, but match the tool to the question:
 - **Localized lookups** (a string, a value, a formula inside a file you can
   already name) — a direct read or grep is fine, sometimes faster. Don't force
   the graph on a question grep already answers.
+- **Security scanners** — no tool installs one: `security_status` names
+  `logos security install` for the user to run.
 - **Disambiguate by symbol** — prefer a unique name as the entry point. `node`
   on a common bare name (`new`, `map`, `severity`) resolves to one arbitrary
   match; pivot from a unique caller or qualify the path instead.

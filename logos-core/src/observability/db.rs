@@ -59,9 +59,20 @@ pub(crate) const RETENTION_DAYS: u32 = 90;
 /// reads `0` answered of `0` classified, which is what it recorded — nothing —
 /// and never the rate of the calls it did count.
 ///
+/// v5 adds who **invoked** the process ([FR-OB-15]), on the same `ADD COLUMN`
+/// path: a nullable `events.invoker` — `hook:stop`, `skill:logos-review`, … as
+/// the calling script declared it through [`super::INVOKER_ENV`]. `NULL` is "no
+/// invoker declared": a direct call, or any row written before v5. A pre-v5 row
+/// is **never imputed** one. No `CHECK`: the value is shape-validated once, at
+/// [`super::init`], and a constraint the writer could trip would cost the whole
+/// batch it rides in. `daily_rollup` gains nothing — its key grain stays
+/// `(day, surface, tool)`, so the invoker cross-tab is raw-events-only, as the
+/// origin one is.
+///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
 /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -112,6 +123,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE daily_rollup ADD COLUMN answered_calls   INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE daily_rollup ADD COLUMN classified_calls INTEGER NOT NULL DEFAULT 0;",
     ),
+    (
+        5,
+        // Nullable: NULL is "no invoker declared" — a direct call, or pre-v5 —
+        // and is never back-filled (FR-OB-15).
+        "ALTER TABLE events ADD COLUMN invoker TEXT;    -- declared by a hook or skill script (FR-OB-15)",
+    ),
 ];
 
 /// The first ledger version whose store carries the outcome columns
@@ -129,6 +146,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
 /// [ADR-50]: ../../../docs/specs/architecture/decisions/ADR-50.md
 /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 pub(super) const OUTCOME_VERSION: i64 = 4;
+
+/// The first ledger version whose store carries `events.invoker` ([FR-OB-15]).
+///
+/// The reader's gate, for the reason [`OUTCOME_VERSION`] is one: a member store
+/// no v5 process has opened yet is read as it is — every call with no invoker
+/// declared — never refused as unreadable for naming a column it lacks. Pinned
+/// to the ledger by `the_invoker_version_is_the_migration_that_adds_the_column`.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+pub(super) const INVOKER_VERSION: i64 = 5;
 
 /// The store's `user_version` — the ledger position [`apply_migrations`]
 /// advances, and the one fact a read-only reader can use to tell which columns
@@ -285,7 +312,7 @@ pub(crate) fn open_in_memory_v2() -> Connection {
 #[cfg(test)]
 pub(crate) fn open_in_memory_v3() -> Connection {
     let mut conn = Connection::open_in_memory().expect("in-memory telemetry store");
-    migrate_through_v3(&mut conn);
+    migrate_through(&mut conn, 3);
     conn
 }
 
@@ -295,25 +322,38 @@ pub(crate) fn open_in_memory_v3() -> Connection {
 #[cfg(test)]
 pub(crate) fn open_file_v3(path: &Path) -> Connection {
     let mut conn = Connection::open(path).expect("file-backed telemetry store");
-    migrate_through_v3(&mut conn);
+    migrate_through(&mut conn, 3);
     conn
 }
 
-/// Apply exactly the v1..v3 ledger entries — the one body both v3 seams share.
+/// An in-memory telemetry store migrated **only through v4** — the pre-
+/// `invoker` shape, so a test can drive the v5 forward migration ([FR-OB-15])
+/// over it and read it as the read-only reader meets it, unmigrated.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
 #[cfg(test)]
-fn migrate_through_v3(conn: &mut Connection) {
-    let tx = conn.transaction().expect("v1..v3 migration transaction");
-    for &(version, sql) in &MIGRATIONS[..3] {
-        tx.execute_batch(sql).expect("v1..v3 schema");
+pub(crate) fn open_in_memory_v4() -> Connection {
+    let mut conn = Connection::open_in_memory().expect("in-memory telemetry store");
+    migrate_through(&mut conn, 4);
+    conn
+}
+
+/// Apply exactly the v1..`last` ledger entries and stop there — the shape of a
+/// store no newer process has opened yet. The one body the v3 and v4 seams share.
+#[cfg(test)]
+fn migrate_through(conn: &mut Connection, last: i64) {
+    let tx = conn.transaction().expect("partial migration transaction");
+    for &(version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= last) {
+        tx.execute_batch(sql).expect("partial schema");
         tx.execute(
             "INSERT INTO schema_versions (version, applied_at) VALUES (?1, unixepoch())",
             [version],
         )
-        .expect("record v1..v3");
+        .expect("record a partial migration");
     }
-    tx.pragma_update(None, "user_version", 3)
-        .expect("set v3 user_version");
-    tx.commit().expect("commit v1..v3");
+    tx.pragma_update(None, "user_version", last)
+        .expect("set the partial user_version");
+    tx.commit().expect("commit the partial migration");
 }
 
 /// Apply every pending migration to `conn` — the test seam for driving the
@@ -340,8 +380,8 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
         let mut stmt = tx
             .prepare_cached(
                 "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id,
-                                     outcome)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                     outcome, invoker)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .context("preparing the telemetry insert")?;
         for e in batch {
@@ -354,6 +394,7 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
                 e.origin,
                 e.session_id,
                 e.outcome.map(super::Outcome::as_str),
+                e.invoker,
             ])
             .context("inserting a telemetry event")?;
         }

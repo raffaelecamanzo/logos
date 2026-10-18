@@ -592,12 +592,173 @@ fn adapter_lines() -> usize {
 ///
 /// [FR-SC-06]: ../../docs/specs/requirements/FR-SC-06.md
 /// [FR-SC-08]: ../../docs/specs/requirements/FR-SC-08.md
+///
+/// **S-507 1039→1047** for `check --bless`, the CLI twin of the `bless_rules`
+/// tool ([FR-GV-23]): measured 1037→1045 (+8: `lib.rs` +2, `dispatch.rs` +6),
+/// 2 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `--bless` flag on `Check` (`#[arg(long)]` and the field) | **+2** |
+/// | `dispatch.rs`: the `check` arm binds `bless` and picks `bless_rules` or `check_rules` inside the one `report_check` closure | **+6** |
+/// | | **+8** |
+///
+/// Routing, not logic: the bless write, the classification and the report are
+/// `logos_core::governance`'s, reached through `Engine::bless_rules`.
+///
+/// [FR-GV-23]: ../../docs/specs/requirements/FR-GV-23.md
+///
+/// **S-676 1047→1058** for `offenders`, the CLI twin of the `offenders` tool
+/// ([FR-QM-19]): measured 1045→1056 (+11: `lib.rs` +7, `dispatch.rs` +4),
+/// 2 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Offenders` variant of `Commands` — `--path` (2), `--dimension` (2), `--repo` (1), header and close (2) | **+7** |
+/// | `dispatch.rs`: the `offenders` arm turns its two tokens into the core's `OffendersFilter` before its one delegation | **+4** |
+/// | | **+11** |
+///
+/// Routing, not logic: the glob, the dimension vocabulary and the listing are
+/// `logos_core::governance::offenders`', reached through `Engine::offenders` —
+/// the function the MCP tool calls.
+///
+/// [FR-QM-19]: ../../docs/specs/requirements/FR-QM-19.md
+///
+/// **S-744 1047→1075** for `security install|uninstall` and `scan --install`
+/// ([FR-SC-22]), the CLI-only install lifecycle: measured 1045→1073 (+28:
+/// `lib.rs` +20, `dispatch.rs` +8), 2 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `--install` flag on `Scan` | **+2** |
+/// | `lib.rs`: `Install` — the variant, its five arguments (scanner names, `--all`, `--update`, `--from <DIR>`, `--consent`) and its close | **+12** |
+/// | `lib.rs`: `Uninstall` — the variant, the scanner names and `--all`, and its close | **+6** |
+/// | `dispatch.rs`: two imports, `scan` split into its plain and `--install` arms, the `install` arm building the core's `InstallRequest`, and the one-line `uninstall` arm | **+8** |
+/// | | **+28** |
+///
+/// Routing, not logic: the plan, the consent check and its refusal, the
+/// installs and the payloads are `logos_core::tools::surface`'s, reached
+/// through `Engine::security_install`, `security_uninstall` and
+/// `security_scan_install`; `--all` versus the named scanners is
+/// `Selection::named_or_all`. The two `CLI_ONLY` entries sit under
+/// `#[cfg(test)]` and are not counted.
+///
+/// [FR-SC-22]: ../../docs/specs/requirements/FR-SC-22.md
+///
+/// **Sprint 106 Iteration 2 merge 1058/1075→1086:** S-676 (+11) and S-744 (+28)
+/// branched from the same 1047 budget; the merged budget is 1047 + 11 + 28 = 1086,
+/// measured 1045 + 11 + 28 = 1084, keeping the 2 lines of headroom.
+///
+/// **S-679 1086→1091** for `init --uninstall` ([FR-IN-12]), measured 1086→1091:
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `--uninstall` flag on `Init` (attribute + field) | **+2** |
+/// | `lib.rs`: `init_options` names the new `claude_plugin` field | **+1** |
+/// | `dispatch.rs`: the one-line `uninstall` arm, and `uninstall: _` in the existing `Init` pattern | **+2** |
+/// | | **+5** |
+///
+/// Routing, not logic: plugin detection, the enrolment, the legacy removals and
+/// the uninstall are `logos_core::init`'s, reached through `Engine::init_with_contributions`
+/// and `Engine::init_uninstall`.
+///
+/// [FR-IN-12]: ../../docs/specs/requirements/FR-IN-12.md
+///
+/// **S-505 1086→1090** for `improvements`, the CLI twin of the `improvements`
+/// tool ([FR-QM-17]): measured 1086→1090 (+4), no headroom (the 1086 budget was
+/// already met exactly at the branch point). A sibling session in the same
+/// iteration adds its own delta to the 1086 this one branched from; the merged
+/// budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Improvements` variant of `Commands` — `--repo` (1), header and close (2) | **+3** |
+/// | `dispatch.rs`: the one-delegation `improvements` arm | **+1** |
+/// | | **+4** |
+///
+/// The surface-parity roster entry sits under `#[cfg(test)]` and is not counted.
+///
+/// Routing, not logic: the list is `Engine::improvements`' — the function the
+/// MCP tool calls — and `GET /api/v1/health` carries the same value.
+///
+/// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
+///
+/// Sprint 106 Iteration 3 merge: S-679 (+5) and S-505 (+4) each branched from
+/// the same 1086 budget; the merged budget is 1086 + 5 + 4 = 1095.
+///
+/// **S-677 1095→1105** for `review`, the CLI twin of the `review` tool
+/// ([FR-GV-24]): measured 1095→1105 (+10), no headroom. Sibling sessions in
+/// Iteration 4 add their own deltas to the 1095 this one branched from; the
+/// merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Review` variant of `Commands` — `--base` (2), `--repo` (1), header and close (2) | **+5** |
+/// | `dispatch.rs`: the `review` arm — one `Engine::review` call, the verdict on `measured`, and the core's own stderr note on the cache | **+5** |
+/// | | **+10** |
+///
+/// The surface-parity roster entry sits under `#[cfg(test)]` and is not counted.
+/// The note's wording is `BeforeStateCache::note`'s, in the core.
+///
+/// [FR-GV-24]: ../../docs/specs/requirements/FR-GV-24.md
+///
+/// **S-671 1095→1098** for `hotspots --with-findings` ([FR-SC-14]), measured
+/// 1095→1098 (+3). The coordinator sums this delta with the other Iteration 4
+/// sessions' at merge.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `--with-findings` flag on `Hotspots` (attribute + field) | **+2** |
+/// | `dispatch.rs`: `with_findings` named in the `Hotspots` pattern | **+1** |
+/// | | **+3** |
+///
+/// Routing, not logic: the column and the filter are `logos_core::history`'s,
+/// reached through `Engine::hotspots_with_findings`, the call the MCP tool and
+/// `GET /api/v1/files` also make.
+///
+/// [FR-SC-14]: ../../docs/specs/requirements/FR-SC-14.md
+///
+/// Sprint 106 Iteration 4 merge: S-677 (+10) and S-671 (+3) each branched from
+/// the same 1095 budget; S-673 and S-674 changed no `cli/src` file. The merged
+/// budget is 1095 + 10 + 3 = 1108.
+///
+/// **S-685 1108→1115** for `security scan --scanner --path` ([FR-SC-17]),
+/// measured 1108→1115 (+7), no headroom. Sibling sessions in Iteration 5 add
+/// their own deltas to the 1108 this one branched from; the merged budget is
+/// the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: `--scanner` and `--path` on `Scan` (attribute + field each) | **+4** |
+/// | `dispatch.rs`: the `Scan` arm builds a `ScanRequest` and calls `Engine::security_scan_selected` | **+3** |
+/// | | **+7** |
+///
+/// Routing, not logic: path confinement, the plan per scanner and the partial
+/// ingest are `logos_core::security`'s, the same call the MCP tool makes.
+///
+/// [FR-SC-17]: ../../docs/specs/requirements/FR-SC-17.md
+///
+/// **S-746 1115→1118** for `security install --accept-codeql-licence`
+/// ([FR-SC-23]), measured 1115→1118 (+3), no headroom. Sibling sessions in
+/// Iteration 6 add their own deltas to the 1115 this one branched from; the
+/// merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: `--accept-codeql-licence` on `Install` (attribute + field) | **+2** |
+/// | `dispatch.rs`: the `Install` arm turns the flag into the request's accepted licences | **+1** |
+/// | | **+3** |
+///
+/// Routing, not logic: the opt-in set, the licence check and its record are
+/// `logos_core::tools::surface`'s.
+///
+/// [FR-SC-23]: ../../docs/specs/requirements/FR-SC-23.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 1039,
-        "cli adapter exceeds the 1039 production-LOC budget (NFR-MA-02): \
+        lines <= 1118,
+        "cli adapter exceeds the 1118 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

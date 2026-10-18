@@ -161,3 +161,71 @@ fn stats_reports_usage_recorded_by_prior_commands() {
     assert_eq!(coverage["covered_window_days"], 90, "{wide}");
     assert_eq!(coverage["truncated_by_retention"], true, "{wide}");
 }
+
+/// Run `logos languages --json` in `root` as a process that declared `invoker`
+/// in `LOGOS_INVOKER` — or, for `None`, as a direct call with the variable
+/// removed from the inherited environment ([FR-OB-15]).
+///
+/// [FR-OB-15]: ../../docs/specs/requirements/FR-OB-15.md
+fn languages_invoked_by(root: &std::path::Path, invoker: Option<&str>) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_logos"));
+    cmd.args(["languages", "--json", "--project"]).arg(root);
+    match invoker {
+        Some(value) => cmd.env("LOGOS_INVOKER", value),
+        None => cmd.env_remove("LOGOS_INVOKER"),
+    };
+    assert!(cmd.output().expect("logos binary runs").status.success());
+}
+
+/// The invoker stamp end to end ([FR-OB-15]): a process that declares
+/// `hook:stop` or `skill:logos-review` records it on its events, a direct call
+/// records none, a malformed declaration records none rather than a corrected
+/// one, and `stats --json` cross-tabulates tool × invoker with its limits.
+///
+/// [FR-OB-15]: ../../docs/specs/requirements/FR-OB-15.md
+#[test]
+fn stats_cross_tabulates_the_invoker_each_process_declared() {
+    let dir = TempDir::new().expect("temp dir");
+    fs::create_dir_all(dir.path().join(".logos")).expect("pre-create .logos");
+
+    languages_invoked_by(dir.path(), Some("hook:stop"));
+    languages_invoked_by(dir.path(), Some("hook:stop"));
+    languages_invoked_by(dir.path(), Some("skill:logos-review"));
+    languages_invoked_by(dir.path(), None);
+    languages_invoked_by(dir.path(), Some("hook:Stop"));
+
+    let mut stats = Command::new(env!("CARGO_BIN_EXE_logos"));
+    stats.args(["stats", "--json", "--project"]).arg(dir.path());
+    let out = stats.env_remove("LOGOS_INVOKER").output().expect("logos binary runs");
+    assert!(out.status.success(), "stats exits 0");
+    let stats: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("clean JSON");
+
+    let cells: Vec<(serde_json::Value, u64)> = stats["calls_by_tool_invoker"]
+        .as_array()
+        .expect("calls_by_tool_invoker present")
+        .iter()
+        .filter(|c| c["tool"] == "languages")
+        .map(|c| (c["invoker"].clone(), c["calls"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            // The direct call and the malformed `hook:Stop` — neither declared one.
+            (serde_json::Value::Null, 2),
+            (serde_json::json!("hook:stop"), 2),
+            (serde_json::json!("skill:logos-review"), 1),
+        ],
+        "{stats}"
+    );
+
+    let coverage = &stats["attribution_coverage"];
+    assert_eq!(coverage["raw_events_only"], true, "{stats}");
+    assert_eq!(coverage["null_invoker_includes_pre_stamp_rows"], true, "{stats}");
+    assert!(
+        coverage["notes"]
+            .as_array()
+            .is_some_and(|n| n.iter().any(|s| s.as_str().is_some_and(|s| s.contains("LOGOS_INVOKER")))),
+        "the limits name the variable a script declares through: {stats}"
+    );
+}

@@ -909,6 +909,42 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub reachability: bool,
+    /// Whether this language declares the optional **member-access capability**
+    /// (S-523, [CR-171], [FR-QM-11]) — the gate the metrics engine's Cohesion
+    /// dimension reads, declared and consumed the way
+    /// [`reachability`](Self::reachability) is ([ADR-39]). `true` declares that
+    /// the language's queries capture its idiomatic field access — which
+    /// [FR-QM-11] defines to include bare and implicit forms — so LCOM4's
+    /// shared-field links exist for its classes; `false` (the default) makes
+    /// every class of the language not applicable for Cohesion rather than
+    /// scored from calls alone ([NFR-CC-04]). Declared by Java, TypeScript/TSX
+    /// and PHP. JavaScript, which the TypeScript grammars also parse, is carved
+    /// out through [`member_access_excluded_extensions`](Self::member_access_excluded_extensions):
+    /// a JavaScript class whose fields are assigned only in its constructor has
+    /// no `Field` node for `this.x` to bind to. Java declares it while capturing
+    /// `this.x` but not a bare `x`. A language CR declares the flag once its
+    /// capture is complete ([NFR-MA-01]).
+    ///
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub member_access: bool,
+    /// The extensions, among this plugin's own, that do **not** carry its
+    /// [`member_access`](Self::member_access) declaration (S-523, [CR-171]):
+    /// JavaScript files (`js`, `mjs`, `cjs`, `jsx`), which the TypeScript
+    /// grammars parse but whose constructor-assigned fields no query captures.
+    /// A class in such a file is not applicable for Cohesion. Defaults to
+    /// empty: the declaration covers every extension. The same shape as
+    /// [`arity_unchecked_extensions`](Self::arity_unchecked_extensions): each
+    /// entry must be one of [`extensions`](Self::extensions), and the key
+    /// requires `member_access = true`.
+    ///
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    #[serde(default)]
+    pub member_access_excluded_extensions: Vec<String>,
     /// Whether this grammar is a **documentation** plugin (S-033, [CR-003],
     /// [ADR-19]). `false` (the default) marks a code grammar extracted via the
     /// `symbols`/`references` tagging queries; `true` marks a markdown-style
@@ -1251,6 +1287,9 @@ impl PluginManifest {
     /// - `arity_unchecked_extensions` names extensions the plugin claims (S-592,
     ///   [FR-RS-43]): one it does not would never match a file of this
     ///   language.
+    /// - `member_access_excluded_extensions` names extensions the plugin claims and
+    ///   requires `member_access = true` (S-523): an exclusion from a declaration
+    ///   the plugin does not make, or of a file it never parses, excludes nothing.
     /// - `implicit_call_falls_through` is a rule of the unqualified in-class
     ///   call on the instance, so it requires `implicit_receiver = "self"`, and
     ///   `implicit_root_members` only qualifies it.
@@ -1275,9 +1314,15 @@ impl PluginManifest {
                 "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
             ));
         }
-        match self.arity_unchecked_extensions.iter().find(|e| !self.extensions.contains(e)) {
+        if let Some(bad) = self.arity_unchecked_extensions.iter().find(|e| !self.extensions.contains(e)) {
+            return Err(format!("`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"));
+        }
+        if !self.member_access_excluded_extensions.is_empty() && !self.member_access {
+            return Err("`member_access_excluded_extensions` requires `member_access = true`".to_string());
+        }
+        match self.member_access_excluded_extensions.iter().find(|e| !self.extensions.contains(e)) {
             Some(bad) => Err(format!(
-                "`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"
+                "`member_access_excluded_extensions` entry '{bad}' is not one of `extensions`"
             )),
             None => Ok(()),
         }
@@ -2746,6 +2791,31 @@ mod tests {
             !m.reachability,
             "a descriptor that omits the flag is not reachability-capable"
         );
+    }
+
+    #[test]
+    fn parses_the_member_access_capability_flag() {
+        // S-523 / CR-171: `member_access = true` parses the way `reachability`
+        // does; omitted, it defaults to false; a non-boolean is refused.
+        let base = r#"
+            name = "java"
+            extensions = ["java"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+        "#;
+        let with = |key: &str| PluginManifest::parse("java/plugin.toml", &format!("{base}{key}\n"));
+        assert!(with("member_access = true").unwrap().member_access);
+        assert!(!with("").unwrap().member_access, "omitted, the flag is off");
+        assert!(with("member_access = \"yes\"").is_err(), "a non-boolean is refused");
+        // The per-extension carve-out: claimed extensions only, under the flag.
+        let carved = with("member_access = true\nmember_access_excluded_extensions = [\"java\"]").unwrap();
+        assert_eq!(carved.member_access_excluded_extensions, ["java"]);
+        assert!(with("").unwrap().member_access_excluded_extensions.is_empty(), "defaults to empty");
+        let err = with("member_access = true\nmember_access_excluded_extensions = [\"js\"]").unwrap_err().to_string();
+        assert!(err.contains("'js' is not one of `extensions`"), "{err}");
+        let err = with("member_access_excluded_extensions = [\"java\"]").unwrap_err().to_string();
+        assert!(err.contains("requires `member_access = true`"), "{err}");
     }
 
     #[test]

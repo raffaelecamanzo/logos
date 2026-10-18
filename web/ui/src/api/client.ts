@@ -30,6 +30,7 @@ import type {
   NodeInfo,
   OverviewModel,
   QueryResponse,
+  SecurityModel,
   StatusInfo,
 } from "./types.ts";
 
@@ -179,14 +180,24 @@ export function fetchStatus(): Promise<StatusInfo> {
 // already-registered `/api/v1` handler (web/src/api_v1.rs) — no new Rust handler:
 // the foundation suite (S-183) shipped these endpoints behind the legacy UI.
 
-/** `GET /api/v1/files[?untested][?production_scope]` — the Files & Risk bundle
- *  (FR-UI-11). The `untested` toggle scopes the board to files lacking fresh
- *  positive coverage, exactly as the server-rendered view's filter does; the
- *  `productionScope` toggle drops whole test files from the candidate set
- *  before ranking (CR-076), matching the CLI `--production-scope` flag / MCP
- *  `production_scope` argument. */
-export function fetchFiles(untested = false, productionScope = false): Promise<FilesModel> {
-  return apiFetch<FilesModel>("files", { untested, production_scope: productionScope });
+/** `GET /api/v1/files[?untested][?production_scope][?with_findings]` — the Files
+ *  & Risk bundle (FR-UI-11). The `untested` toggle scopes the board to files
+ *  lacking fresh positive coverage, exactly as the server-rendered view's filter
+ *  does; the `productionScope` toggle drops whole test files from the candidate
+ *  set before ranking (CR-076), matching the CLI `--production-scope` flag / MCP
+ *  `production_scope` argument; `withFindings` ranks the files with a fresh
+ *  unsuppressed security finding first (FR-SC-14), as `--with-findings` /
+ *  `with_findings` do. */
+export function fetchFiles(
+  untested = false,
+  productionScope = false,
+  withFindings = false,
+): Promise<FilesModel> {
+  return apiFetch<FilesModel>("files", {
+    untested,
+    production_scope: productionScope,
+    with_findings: withFindings,
+  });
 }
 
 /** `GET /api/v1/coverage` — the Coverage bundle (FR-UI-11). */
@@ -204,4 +215,12 @@ export function fetchArchitecture(): Promise<ArchitectureModel> {
 /** `GET /api/v1/gaps` — the Rule-findings bundle (status + rules, CR-079). */
 export function fetchGaps(): Promise<GapsModel> {
   return apiFetch<GapsModel>("gaps");
+}
+
+/** `GET /api/v1/security` — the Security page bundle (S-670, FR-SC-09): scanner
+ *  matrix, every finding in graph context, both OWASP editions and the
+ *  `[security]` gate band. Unfiltered — the page filters and switches edition
+ *  over this one read. */
+export function fetchSecurity(): Promise<SecurityModel> {
+  return apiFetch<SecurityModel>("security");
 }

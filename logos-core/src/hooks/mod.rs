@@ -88,6 +88,8 @@ pub use quality_report::{
     materialize_quality_report as materialize_quality_report_hook, HookEmitSummary,
     QUALITY_REPORT_HOOK_SCRIPT_REL, SETTINGS_REL,
 };
+pub(crate) use quality_report::retire_quality_report as retire_quality_report_hook;
+pub(crate) use quality_report::parse_settings;
 
 /// What materialization did to a Logos-managed artifact — the session-start
 /// hook ([FR-IN-07]) and, sharing the shape for a uniform CLI JSON surface, the
@@ -233,6 +235,13 @@ pub struct HooksResult {
     pub worktrees: Vec<String>,
     /// Why anything was skipped — e.g. a foreign `core.hooksPath`.
     pub warnings: Vec<String>,
+    /// [`uninstall`] unset `core.hooksPath`, because it still pointed at
+    /// Logos's directory. Not serialized: it exists so a caller reports what
+    /// the uninstall did rather than re-reading git beside it ([FR-IN-12]).
+    ///
+    /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+    #[serde(skip)]
+    pub unset_hooks_path: bool,
 }
 
 /// Install the sync git hooks for the repository at `root` ([FR-SY-05]).
@@ -345,6 +354,7 @@ pub fn uninstall(root: &Path) -> Result<HooksResult> {
         if !status.status.success() {
             bail!("could not unset core.hooksPath");
         }
+        result.unset_hooks_path = true;
     }
     Ok(result)
 }
@@ -1093,12 +1103,20 @@ fn configured_hooks_path(root: &Path) -> Result<Option<String>> {
     Ok((!value.is_empty()).then_some(value))
 }
 
+/// Is `root` inside a git work tree? `false` too when git cannot answer.
+pub(crate) fn is_git_worktree(root: &Path) -> bool {
+    git(root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|output| inside_work_tree(&output))
+}
+
+/// Does this `git rev-parse --is-inside-work-tree` output say yes?
+fn inside_work_tree(output: &std::process::Output) -> bool {
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
 /// Fail with an actionable message unless `root` is inside a git work tree.
 fn ensure_git_worktree(root: &Path) -> Result<()> {
     let output = git(root, &["rev-parse", "--is-inside-work-tree"])?;
-    let inside =
-        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true";
-    if !inside {
+    if !inside_work_tree(&output) {
         bail!(
             "{} is not inside a git work tree — git hooks need a repository \
              (run `git init` first or skip hook installation)",

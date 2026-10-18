@@ -516,11 +516,7 @@ fn live_set(
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn reachability_capable(file_path: Option<&str>, reachable_exts: &HashSet<String>) -> bool {
-    file_path
-        .and_then(|p| std::path::Path::new(p).extension())
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|ext| reachable_exts.contains(&ext))
+    crate::plugin::registry::declares_by_extension(file_path, reachable_exts)
 }
 
 /// Whether a node is test code under the unified [FR-AN-05] definition — the

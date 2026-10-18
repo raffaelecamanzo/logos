@@ -21,9 +21,15 @@
 //! - **GET-only, except the enumerated config-write/apply routes.** Every
 //!   non-GET request is answered `405` ([`method_guard`]) before any handler
 //!   runs, **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`]
-//!   — the only mutating seam (FR-UI-03 as revised, NFR-SE-06, ADR-31). Those
-//!   `POST`s must additionally clear the same-origin + per-session intent
-//!   (CSRF) guard ([`intent_guard`]) or they are answered `403`.
+//!   — the only mutating seam (FR-UI-03 as revised, NFR-SE-06, ADR-31) — or
+//!   one of the enumerated [`SECURITY_SCAN_POST_ROUTES`] that start and cancel
+//!   a scan (S-673, ADR-80), or one of the enumerated
+//!   [`SECURITY_INSTALL_POST_ROUTES`] that start and cancel a scanner install
+//!   (S-747, FR-SC-24), or one of the enumerated
+//!   [`SECURITY_TRIAGE_POST_ROUTES`] that add and remove a suppression (S-672,
+//!   FR-SC-12). Those `POST`s must additionally clear the
+//!   same-origin + per-session intent (CSRF) guard ([`intent_guard`]) or they
+//!   are answered `403`.
 //! - **DNS-rebinding defense.** A request whose `Host` is not a loopback host
 //!   is answered `403` ([`host_guard`]).
 //! - **Self-only CSP.** Every response — success or error — carries the
@@ -388,6 +394,45 @@ pub const CONFIG_POST_ROUTES: &[&str] = &[
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
 pub const VERIFY_POST_ROUTE: &str = "/api/v1/verify";
 
+/// The enumerated security-scan `POST` routes (S-673, [FR-SC-15], [ADR-80] §6):
+/// start (or join) the member's scan, and cancel it. They are `POST`s so that
+/// each carries the same-origin + per-session intent-token proof
+/// [`intent_guard`] enforces ([NFR-SE-06]): a cross-origin page can neither
+/// start a scanner nor stop one. The scan runs as a detached job on the core's
+/// runner ([`logos_core::jobs`]), never on the request path. Kept in lock-step
+/// with [`method_guard`], which consults it.
+///
+/// [FR-SC-15]: ../../../docs/specs/requirements/FR-SC-15.md
+/// [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
+/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
+pub const SECURITY_SCAN_POST_ROUTES: &[&str] = &["/api/v1/security/scan", "/api/v1/security/scan/cancel"];
+
+/// The enumerated scanner-install `POST` routes (S-747, [FR-SC-24]): start the
+/// member's Install, Update or Install & scan as a `tool-install` job on the
+/// core's runner ([`logos_core::jobs`]), and cancel it. A start downloads and
+/// runs binaries under the user's consent, and a cancel stops a download, so
+/// each carries the same-origin + per-session intent-token proof
+/// [`intent_guard`] enforces ([NFR-SE-06]): a cross-origin page can neither
+/// install a scanner nor stop an install. Kept in lock-step with
+/// [`method_guard`], which consults it.
+///
+/// [FR-SC-24]: ../../../docs/specs/requirements/FR-SC-24.md
+/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
+pub const SECURITY_INSTALL_POST_ROUTES: &[&str] = &["/api/v1/security/install", "/api/v1/security/install/cancel"];
+
+/// The enumerated security-triage `POST` routes (S-672, [FR-SC-12]): add a
+/// suppression (reason required, expiry optional) and remove one, each written
+/// to the committed `.logos/security-ignore.toml` through
+/// [`Engine::security_suppress`] and [`Engine::security_unsuppress`]. Like every
+/// admitted `POST`, each carries the same-origin + per-session intent-token
+/// proof [`intent_guard`] enforces ([NFR-SE-06]): a cross-origin page cannot
+/// hide a finding or bring one back. Kept in lock-step with [`method_guard`],
+/// which consults it.
+///
+/// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
+/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
+pub const SECURITY_TRIAGE_POST_ROUTES: &[&str] = &["/api/v1/security/suppress", "/api/v1/security/unsuppress"];
+
 /// The request header carrying the per-session intent (CSRF) token on a mutating
 /// `POST` (NFR-SE-06, ADR-31). A **custom** header is deliberate: a cross-origin
 /// page cannot set it without a CORS preflight the surface never grants, so it is
@@ -477,6 +522,11 @@ pub(crate) struct WebState {
     /// [FR-UI-51]: ../../../docs/specs/requirements/FR-UI-51.md
     /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
     spa: Arc<dyn SpaAssets>,
+    /// The detached jobs this serve runs (S-673): the Security page's scan and
+    /// its scanner install (S-747), one of each kind per member at a time. Dropping the router drops it and cancels whatever
+    /// still runs; a serve killed by a signal runs no destructor, so its
+    /// running scanners finish on their own ([`logos_core::jobs::ScanJobs`]).
+    jobs: Arc<logos_core::jobs::ScanJobs>,
 }
 
 impl FromRef<WebState> for Arc<Engine> {
@@ -512,6 +562,12 @@ impl FromRef<WebState> for IntentToken {
 impl FromRef<WebState> for Arc<dyn SpaAssets> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.spa)
+    }
+}
+
+impl FromRef<WebState> for Arc<logos_core::jobs::ScanJobs> {
+    fn from_ref(state: &WebState) -> Self {
+        Arc::clone(&state.jobs)
     }
 }
 
@@ -629,6 +685,7 @@ fn make_state(
         intent,
         host: host.clone(),
         spa: Arc::new(EmbeddedSpa),
+        jobs: Arc::new(logos_core::jobs::ScanJobs::new()),
     }
 }
 
@@ -709,6 +766,24 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/gaps", get(api_v1::gaps))
         .route("/api/v1/files", get(api_v1::files))
         .route("/api/v1/coverage", get(api_v1::coverage))
+        // The Security page (S-670, FR-SC-09): scanner matrix, findings in graph
+        // context, both OWASP editions and the `[security]` gate band in one GET.
+        .route("/api/v1/security", get(api_v1::security))
+        // The Run scan job (S-673, FR-SC-15): GET replays the member's job, the
+        // two POSTs start/join and cancel it. Listed in `SECURITY_SCAN_POST_ROUTES`,
+        // which `method_guard` consults.
+        .route("/api/v1/security/scan", get(api_v1::security_scan_job).post(api_v1::security_scan_start))
+        .route("/api/v1/security/scan/cancel", post(api_v1::security_scan_cancel))
+        // Install and Install & scan (S-747, FR-SC-24): GET replays the member's
+        // `tool-install` job, the two POSTs start and cancel it. Listed in
+        // `SECURITY_INSTALL_POST_ROUTES`, which `method_guard` consults.
+        .route("/api/v1/security/install", get(api_v1::security_install_job).post(api_v1::security_install_start))
+        .route("/api/v1/security/install/cancel", post(api_v1::security_install_cancel))
+        // Triage (S-672, FR-SC-12): add and remove one suppression in the
+        // committed ignore file. Listed in `SECURITY_TRIAGE_POST_ROUTES`, which
+        // `method_guard` consults.
+        .route("/api/v1/security/suppress", post(api_v1::security_suppress))
+        .route("/api/v1/security/unsuppress", post(api_v1::security_unsuppress))
         .route("/api/v1/graph", get(api_v1::graph))
         .route("/api/v1/query", get(api_v1::search_query))
         // Read-only Decisions-panel impact read-model (FR-NV-10, FR-DG-02): the
@@ -787,6 +862,11 @@ fn build_router(state: WebState) -> Router {
         // verdict, read at the workspace root with no engine. Its save twin is
         // mounted with the enumerated POSTs below; single-root answers both `404`.
         .route("/api/v1/workspace/manifest", get(api_v1::workspace_manifest))
+        // ── The workspace security roll-up (S-674, [FR-SC-16]): every member's
+        // scanner states and fresh, unsuppressed findings, summed beside their
+        // denominators — the `app`-scoped twin of `/api/v1/security`. A GET over
+        // the member fan-out; single-root answers the family's `404`.
+        .route("/api/v1/workspace/security", get(api_v1::workspace_security))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof
@@ -870,14 +950,17 @@ async fn host_guard(req: Request, next: Next) -> Response {
 }
 
 /// Method guard (FR-UI-03 as revised, ADR-31, S-206): the surface is GET-only
-/// **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`] or the
-/// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check), or a `POST` route an
+/// **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`], the
+/// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check) or the
+/// [`SECURITY_SCAN_POST_ROUTES`] (S-673), the [`SECURITY_INSTALL_POST_ROUTES`]
+/// (S-747) or the [`SECURITY_TRIAGE_POST_ROUTES`] (S-672), or a `POST` route an
 /// active extension mounted ([`ExtensionPosts`], FR-DS-04) — the `chat`
 /// extension's two turns and their per-thread writes (S-643) and the `wiki`
 /// extension's generation trigger (S-644) among them. Every other method — and a
 /// `POST` to any other path — is answered `405` before any handler runs, so
 /// relaxing the read-only posture stays bounded to exactly the config-write/apply
-/// seam, the verify route, and the extensions' declared writes (NFR-SE-06).
+/// seam, the verify route, the security scan, install and triage routes, and the
+/// extensions' declared writes (NFR-SE-06).
 /// The admitted `POST`s are gated again by [`intent_guard`] for same-origin +
 /// intent-token defense.
 async fn method_guard(
@@ -894,7 +977,7 @@ async fn method_guard(
     if !allowed {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
-            "the Logos web UI is read-only except the enumerated config-write/apply, chat, wiki-generation, and verify routes",
+            "the Logos web UI is read-only except the enumerated config-write/apply, security-scan, security-install, security-triage, chat, wiki-generation, and verify routes",
         )
             .into_response();
     }
@@ -903,10 +986,17 @@ async fn method_guard(
 
 /// Is a `POST` to `path` admitted past [`method_guard`] by the core's own
 /// allow-list (every other method/path is `405`, unless an extension mounted it —
-/// [`ExtensionPosts`])? The config-write/apply seam ([`CONFIG_POST_ROUTES`]) and
-/// the deep-`verify` route ([`VERIFY_POST_ROUTE`]), in every build.
+/// [`ExtensionPosts`])? The config-write/apply seam ([`CONFIG_POST_ROUTES`]),
+/// the deep-`verify` route ([`VERIFY_POST_ROUTE`]), the security scan's start
+/// and cancel ([`SECURITY_SCAN_POST_ROUTES`]), the scanner install's start and
+/// cancel ([`SECURITY_INSTALL_POST_ROUTES`]) and the triage writes
+/// ([`SECURITY_TRIAGE_POST_ROUTES`]), in every build.
 fn post_route_admitted(path: &str) -> bool {
-    CONFIG_POST_ROUTES.contains(&path) || path == VERIFY_POST_ROUTE
+    CONFIG_POST_ROUTES.contains(&path)
+        || path == VERIFY_POST_ROUTE
+        || SECURITY_SCAN_POST_ROUTES.contains(&path)
+        || SECURITY_INSTALL_POST_ROUTES.contains(&path)
+        || SECURITY_TRIAGE_POST_ROUTES.contains(&path)
 }
 
 /// The `POST` routes the active extensions mounted ([FR-DS-04], [ADR-74]) — their
@@ -2100,11 +2190,17 @@ mod tests {
             .collect();
         // Anti-vacuity: a scan that matched nothing would pass the loop below.
         assert!(routes.len() > 20, "the route-table scan found only {} routes", routes.len());
-        for listed in CONFIG_POST_ROUTES {
+        for listed in CONFIG_POST_ROUTES
+            .iter()
+            .chain(SECURITY_SCAN_POST_ROUTES)
+            .chain(SECURITY_INSTALL_POST_ROUTES)
+            .chain(SECURITY_TRIAGE_POST_ROUTES)
+        {
             assert!(
                 posts.contains(listed),
-                "`{listed}` is in CONFIG_POST_ROUTES but no `post(` route mounts it — the \
-                 allowance admits a POST that nothing handles"
+                "`{listed}` is in CONFIG_POST_ROUTES, SECURITY_SCAN_POST_ROUTES, SECURITY_INSTALL_POST_ROUTES or \
+                 SECURITY_TRIAGE_POST_ROUTES but no `post(` \
+                 route mounts it — the allowance admits a POST that nothing handles"
             );
         }
 

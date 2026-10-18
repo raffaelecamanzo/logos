@@ -1,0 +1,596 @@
+{
+  "security": {
+    "members": [
+      {
+        "member": "scanned",
+        "result": {
+          "scan": "fresh",
+          "scanners_fresh": 1,
+          "scanners_enabled": 2,
+          "scanners": [
+            {
+              "scanner": "semgrep",
+              "driver": "Semgrep OSS",
+              "state": "fresh",
+              "snapshot_head": "cf3ac39071d86ae940d18e791c928f6751e7a29f",
+              "version": "1.85.0",
+              "findings": 2,
+              "suppressed": 1,
+              "installed": null,
+              "install": "logos security install semgrep",
+              "last_failure": null
+            },
+            {
+              "scanner": "trivy",
+              "driver": "Trivy",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "gitleaks",
+              "driver": "gitleaks",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "osv-scanner",
+              "driver": "osv-scanner",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "bandit",
+              "driver": "Bandit",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "gosec",
+              "driver": "gosec",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "checkov",
+              "driver": "Checkov",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "codeql",
+              "driver": "CodeQL",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "dependency-check",
+              "driver": "dependency-check",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "Acme Scanner",
+              "driver": "Acme Scanner",
+              "state": "stale",
+              "because": "files_changed",
+              "snapshot_head": "cf3ac39071d86ae940d18e791c928f6751e7a29f",
+              "version": "2.0.0",
+              "findings": 1,
+              "suppressed": 0,
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            }
+          ],
+          "findings": {
+            "critical": 0,
+            "high": 1,
+            "medium": 1,
+            "low": 0,
+            "info": 0,
+            "total": 2
+          },
+          "excluded": {
+            "not_fresh": 1,
+            "suppressed": 1
+          },
+          "owasp": [
+            {
+              "edition": "2025",
+              "categories": [
+                {
+                  "id": "A01:2025",
+                  "name": "Broken Access Control",
+                  "findings": 0
+                },
+                {
+                  "id": "A02:2025",
+                  "name": "Security Misconfiguration",
+                  "findings": 0
+                },
+                {
+                  "id": "A03:2025",
+                  "name": "Software Supply Chain Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A04:2025",
+                  "name": "Cryptographic Failures",
+                  "findings": 0
+                },
+                {
+                  "id": "A05:2025",
+                  "name": "Injection",
+                  "findings": 1
+                },
+                {
+                  "id": "A06:2025",
+                  "name": "Insecure Design",
+                  "findings": 0
+                },
+                {
+                  "id": "A07:2025",
+                  "name": "Authentication Failures",
+                  "findings": 1
+                },
+                {
+                  "id": "A08:2025",
+                  "name": "Software or Data Integrity Failures",
+                  "findings": 0
+                },
+                {
+                  "id": "A09:2025",
+                  "name": "Security Logging and Alerting Failures",
+                  "findings": 0
+                },
+                {
+                  "id": "A10:2025",
+                  "name": "Mishandling of Exceptional Conditions",
+                  "findings": 0
+                }
+              ],
+              "unclassified": 0
+            },
+            {
+              "edition": "2021",
+              "categories": [
+                {
+                  "id": "A01:2021",
+                  "name": "Broken Access Control",
+                  "findings": 0
+                },
+                {
+                  "id": "A02:2021",
+                  "name": "Cryptographic Failures",
+                  "findings": 0
+                },
+                {
+                  "id": "A03:2021",
+                  "name": "Injection",
+                  "findings": 1
+                },
+                {
+                  "id": "A04:2021",
+                  "name": "Insecure Design",
+                  "findings": 0
+                },
+                {
+                  "id": "A05:2021",
+                  "name": "Security Misconfiguration",
+                  "findings": 0
+                },
+                {
+                  "id": "A06:2021",
+                  "name": "Vulnerable and Outdated Components",
+                  "findings": null
+                },
+                {
+                  "id": "A07:2021",
+                  "name": "Identification and Authentication Failures",
+                  "findings": 1
+                },
+                {
+                  "id": "A08:2021",
+                  "name": "Software and Data Integrity Failures",
+                  "findings": 0
+                },
+                {
+                  "id": "A09:2021",
+                  "name": "Security Logging and Monitoring Failures",
+                  "findings": 0
+                },
+                {
+                  "id": "A10:2021",
+                  "name": "Server-Side Request Forgery",
+                  "findings": 0
+                }
+              ],
+              "unclassified": 0
+            }
+          ]
+        }
+      },
+      {
+        "member": "idle",
+        "result": {
+          "scan": "never_run",
+          "scanners_fresh": 0,
+          "scanners_enabled": 1,
+          "scanners": [
+            {
+              "scanner": "semgrep",
+              "driver": "Semgrep OSS",
+              "state": "not_installed",
+              "installed": null,
+              "install": "logos security install semgrep",
+              "last_failure": null
+            },
+            {
+              "scanner": "trivy",
+              "driver": "Trivy",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "gitleaks",
+              "driver": "gitleaks",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "osv-scanner",
+              "driver": "osv-scanner",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "bandit",
+              "driver": "Bandit",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "gosec",
+              "driver": "gosec",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "checkov",
+              "driver": "Checkov",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "codeql",
+              "driver": "CodeQL",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            },
+            {
+              "scanner": "dependency-check",
+              "driver": "dependency-check",
+              "state": "disabled",
+              "installed": null,
+              "install": null,
+              "last_failure": null
+            }
+          ],
+          "findings": null,
+          "excluded": {
+            "not_fresh": 0,
+            "suppressed": 0
+          },
+          "owasp": [
+            {
+              "edition": "2025",
+              "categories": [
+                {
+                  "id": "A01:2025",
+                  "name": "Broken Access Control",
+                  "findings": null
+                },
+                {
+                  "id": "A02:2025",
+                  "name": "Security Misconfiguration",
+                  "findings": null
+                },
+                {
+                  "id": "A03:2025",
+                  "name": "Software Supply Chain Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A04:2025",
+                  "name": "Cryptographic Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A05:2025",
+                  "name": "Injection",
+                  "findings": null
+                },
+                {
+                  "id": "A06:2025",
+                  "name": "Insecure Design",
+                  "findings": null
+                },
+                {
+                  "id": "A07:2025",
+                  "name": "Authentication Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A08:2025",
+                  "name": "Software or Data Integrity Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A09:2025",
+                  "name": "Security Logging and Alerting Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A10:2025",
+                  "name": "Mishandling of Exceptional Conditions",
+                  "findings": null
+                }
+              ],
+              "unclassified": 0
+            },
+            {
+              "edition": "2021",
+              "categories": [
+                {
+                  "id": "A01:2021",
+                  "name": "Broken Access Control",
+                  "findings": null
+                },
+                {
+                  "id": "A02:2021",
+                  "name": "Cryptographic Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A03:2021",
+                  "name": "Injection",
+                  "findings": null
+                },
+                {
+                  "id": "A04:2021",
+                  "name": "Insecure Design",
+                  "findings": null
+                },
+                {
+                  "id": "A05:2021",
+                  "name": "Security Misconfiguration",
+                  "findings": null
+                },
+                {
+                  "id": "A06:2021",
+                  "name": "Vulnerable and Outdated Components",
+                  "findings": null
+                },
+                {
+                  "id": "A07:2021",
+                  "name": "Identification and Authentication Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A08:2021",
+                  "name": "Software and Data Integrity Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A09:2021",
+                  "name": "Security Logging and Monitoring Failures",
+                  "findings": null
+                },
+                {
+                  "id": "A10:2021",
+                  "name": "Server-Side Request Forgery",
+                  "findings": null
+                }
+              ],
+              "unclassified": 0
+            }
+          ]
+        }
+      },
+      {
+        "member": "broken",
+        "error": "starting the engine for workspace member \"broken\": starting the execution runtime for root /tmp/workspace/broken: opening the writer store at /tmp/workspace/broken/.logos/logos.db: opening graph store at /tmp/workspace/broken/.logos/logos.db: unable to open database file: /tmp/workspace/broken/.logos/logos.db: Error code 14: unable to open database file"
+      }
+    ],
+    "members_total": 3,
+    "members_read": 2,
+    "members_never_scanned": 1,
+    "members_counted": 1,
+    "totals": {
+      "critical": 0,
+      "high": 1,
+      "medium": 1,
+      "low": 0,
+      "info": 0,
+      "total": 2
+    },
+    "excluded": {
+      "not_fresh": 1,
+      "suppressed": 1
+    },
+    "owasp": [
+      {
+        "edition": "2025",
+        "categories": [
+          {
+            "id": "A01:2025",
+            "name": "Broken Access Control",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A02:2025",
+            "name": "Security Misconfiguration",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A03:2025",
+            "name": "Software Supply Chain Failures",
+            "covered_in": 0,
+            "findings": null
+          },
+          {
+            "id": "A04:2025",
+            "name": "Cryptographic Failures",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A05:2025",
+            "name": "Injection",
+            "covered_in": 1,
+            "findings": 1
+          },
+          {
+            "id": "A06:2025",
+            "name": "Insecure Design",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A07:2025",
+            "name": "Authentication Failures",
+            "covered_in": 1,
+            "findings": 1
+          },
+          {
+            "id": "A08:2025",
+            "name": "Software or Data Integrity Failures",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A09:2025",
+            "name": "Security Logging and Alerting Failures",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A10:2025",
+            "name": "Mishandling of Exceptional Conditions",
+            "covered_in": 1,
+            "findings": 0
+          }
+        ],
+        "unclassified": 0
+      },
+      {
+        "edition": "2021",
+        "categories": [
+          {
+            "id": "A01:2021",
+            "name": "Broken Access Control",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A02:2021",
+            "name": "Cryptographic Failures",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A03:2021",
+            "name": "Injection",
+            "covered_in": 1,
+            "findings": 1
+          },
+          {
+            "id": "A04:2021",
+            "name": "Insecure Design",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A05:2021",
+            "name": "Security Misconfiguration",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A06:2021",
+            "name": "Vulnerable and Outdated Components",
+            "covered_in": 0,
+            "findings": null
+          },
+          {
+            "id": "A07:2021",
+            "name": "Identification and Authentication Failures",
+            "covered_in": 1,
+            "findings": 1
+          },
+          {
+            "id": "A08:2021",
+            "name": "Software and Data Integrity Failures",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A09:2021",
+            "name": "Security Logging and Monitoring Failures",
+            "covered_in": 1,
+            "findings": 0
+          },
+          {
+            "id": "A10:2021",
+            "name": "Server-Side Request Forgery",
+            "covered_in": 1,
+            "findings": 0
+          }
+        ],
+        "unclassified": 0
+      }
+    ]
+  },
+  "complete": false,
+  "degraded_rollup": {
+    "members": 3,
+    "opened": 2,
+    "not_attempted": 0,
+    "degraded_members": [
+      "broken"
+    ],
+    "covers_all_members": false
+  }
+}

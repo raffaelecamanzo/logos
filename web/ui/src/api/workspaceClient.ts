@@ -16,7 +16,7 @@
 
 import { ApiError, apiMutate } from "../intent.ts";
 import { apiFetch, apiUrl } from "./client.ts";
-import { ConfigMutateError, FORM_HEADERS, detailOf, formBody, writeSecret } from "./configClient.ts";
+import { ConfigMutateError, FORM_HEADERS, apiErrorDetail, formBody, writeSecret } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
   ManifestSaveOutcome,
@@ -25,6 +25,7 @@ import type {
   WorkspaceManifestDocument,
   WorkspaceReachabilityAnswer,
   WorkspaceRoster,
+  WorkspaceSecurityAnswer,
   WorkspaceStatistics,
   WorkspaceStatus,
   WorkspaceTierDocument,
@@ -135,17 +136,17 @@ export function fetchWorkspaceManifest(): Promise<WorkspaceManifestDocument> {
   return apiFetch<WorkspaceManifestDocument>("workspace/manifest");
 }
 
-/** The `/api/v1` family's JSON error body (`{ "error": "…" }`) as its message, or
- *  {@link detailOf}'s verbatim text when the body is not that shape. */
-async function workspaceErrorDetail(res: Response): Promise<string> {
-  const text = await detailOf(res);
-  try {
-    const parsed = JSON.parse(text) as { error?: unknown };
-    if (typeof parsed.error === "string") return parsed.error;
-  } catch {
-    // Not JSON — the verbatim text is the honest detail.
-  }
-  return text;
+/**
+ * `GET /api/v1/workspace/security` (S-674, FR-SC-16) — every member's scanner
+ * states and fresh, unsuppressed findings, summed beside the members they were
+ * summed over. A member never scanned has no count (`null`, never 0); one that
+ * could not be opened is a row with its `error`, named by `degraded_rollup`.
+ *
+ * App-level: no `?repo=`, like every `workspace/*` read. Read-only — it starts
+ * no scan; a scan is started per member, from that member's Security page.
+ */
+export function fetchWorkspaceSecurity(): Promise<WorkspaceSecurityAnswer> {
+  return apiFetch<WorkspaceSecurityAnswer>("workspace/security");
 }
 
 /**
@@ -171,7 +172,7 @@ export async function saveWorkspaceManifest(
     credentials: "same-origin",
   });
   if (res.ok || res.status === 409) return (await res.json()) as ManifestSaveOutcome;
-  throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
+  throw new ConfigMutateError(res.status, await apiErrorDetail(res));
 }
 
 /**
@@ -250,7 +251,7 @@ export async function saveWorkspaceConfig(
     credentials: "same-origin",
   });
   if (res.ok || res.status === 409) return (await res.json()) as WorkspaceTierSaveOutcome;
-  throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
+  throw new ConfigMutateError(res.status, await apiErrorDetail(res));
 }
 
 /**

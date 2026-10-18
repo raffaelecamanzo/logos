@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
+import type { HealthModel, MetricSnapshot, MetricValue, WhereToStart } from "../../api/types.ts";
 import { Badge, type BadgeTone } from "../../components/index.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import {
@@ -10,14 +10,20 @@ import {
   NO_APPLICABLE_CONSTRUCT,
   READING_ABSENCE,
   gate as gateCopy,
+  OUTLIER_MEASURE,
   qualitySignal as qualitySignalCopy,
   signalTrend as signalTrendCopy,
+  whereToStart as whereToStartCopy,
 } from "../../copy/health.copy.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { HealthView } from "./HealthView.tsx";
 import { widgetsIn, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import { metricRows, type DimensionKey } from "./healthModel.ts";
 import realOffenders from "./fixtures/worst-offenders.real.json";
+import realWhereToStartJson from "./fixtures/where-to-start.real.json";
+
+/** The real `improvements` payloads, typed: a JSON import widens `kind` to `string`. */
+const realWhereToStart = realWhereToStartJson as { recorded: WhereToStart; recordedEmpty: WhereToStart; notRecorded: WhereToStart };
 
 function mv(n: number): MetricValue {
   return { raw: n, normalized: n };
@@ -28,7 +34,10 @@ function metrics(over: Partial<MetricSnapshot> = {}): MetricSnapshot {
     modularity: mv(0.9),
     modularity_not_applicable: null,
     acyclicity: mv(0.8),
+    acyclicity_not_applicable: null,
     depth: mv(0.7),
+    depth_not_applicable: null,
+    cross_module_edge_count: 40,
     equality: mv(0.6),
     redundancy: mv(0.5),
     nesting: mv(0.9),
@@ -66,6 +75,7 @@ const HEALTH: HealthModel = {
       equality: [],
       redundancy: [],
     },
+    where_to_start: realWhereToStart.recorded,
     warnings: [],
   },
   evolution: {
@@ -150,7 +160,7 @@ afterEach(() => {
 beforeEach(() => vi.clearAllMocks());
 
 describe("HealthView on the widget frame (S-615, FR-UI-43)", () => {
-  it("renders Gate, Quality signal, the ten dimensions and Signal trend in ONE WidgetStack", async () => {
+  it("renders Gate, Quality signal, Where to start, the ten dimensions and Signal trend in ONE WidgetStack", async () => {
     stub(HEALTH);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
@@ -158,9 +168,16 @@ describe("HealthView on the widget frame (S-615, FR-UI-43)", () => {
     const stack = document.querySelector("[data-widget-stack]")!;
     // Each widget is its own child of the one stack, so the stack owns every gap.
     const children = [...stack.children];
-    expect(children).toHaveLength(13);
-    expect(children.map((c) => c.querySelectorAll("[data-widget]").length)).toEqual(Array(13).fill(1));
-    expect(frames().map(widgetTitle)).toEqual(["Gate", "Quality signal", ...DIMENSION_TITLES, "Signal trend"]);
+    expect(children).toHaveLength(14);
+    expect(children.map((c) => c.querySelectorAll("[data-widget]").length)).toEqual(Array(14).fill(1));
+    // S-505: the Where to start card sits above the per-metric (dimension) cards.
+    expect(frames().map(widgetTitle)).toEqual([
+      "Gate",
+      "Quality signal",
+      "Where to start",
+      ...DIMENSION_TITLES,
+      "Signal trend",
+    ]);
   });
 
   it("enumerates 10 of 10 dimension widgets from the Quality signal table's own list, in its order", async () => {
@@ -184,6 +201,7 @@ describe("HealthView on the widget frame (S-615, FR-UI-43)", () => {
     expectWidgetCopy(widget("Gate"), gateCopy);
     expectWidgetCopy(widget("Quality signal"), qualitySignalCopy);
     expectWidgetCopy(widget("Signal trend"), signalTrendCopy);
+    expectWidgetCopy(widget("Where to start"), whereToStartCopy);
     for (const row of metricRows(HEALTH.scan.metrics)) {
       expectWidgetCopy(widget(row.name), DIMENSION_COPY[row.key]);
     }
@@ -1019,5 +1037,452 @@ describe("not-current readings (CR-135, S-436)", () => {
     expect(widgetsNaming("logos index")).toEqual([]);
     expect(screen.queryByText(/no index or sync time is recorded/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/recorded ahead of now/i)).not.toBeInTheDocument();
+  });
+});
+
+// ── S-505 / FR-QM-17: the Where to start card ────────────────────────────────
+
+const REAL = realWhereToStart.recorded;
+
+/** The Where to start widget's table, by the caption that names it. */
+const card = () => widget("Where to start");
+
+describe("Where to start card (S-505, FR-QM-17)", () => {
+  it("renders above the ten dimension cards and below the Quality signal", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const titles = frames().map(widgetTitle);
+    const at = titles.indexOf("Where to start");
+    expect(at).toBe(titles.indexOf("Quality signal") + 1);
+    for (const dimension of DIMENSION_TITLES) expect(titles.indexOf(dimension), dimension).toBeGreaterThan(at);
+  });
+
+  it("tabulates Rank · Unit · Dimension · Est. points · Outlier, one row per ranked unit in payload order", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const table = within(part(card(), "evidence")!).getByRole("table");
+    // A sortable header's text carries its sort glyph (↕); the column is its name.
+    const headers = within(table).getAllByRole("columnheader").map((h) => seen(h).replace(/[↕↑↓]/g, ""));
+    expect(headers).toEqual(["Rank", "Unit", "Dimension", "Est. points", "Outlier"]);
+    const rows = within(table).getAllByRole("row").slice(1);
+    // 2 of 2 units the real payload ranked, in its own order (points descending).
+    expect(rows).toHaveLength(REAL.units.length);
+    expect(REAL.units).toHaveLength(2);
+    const cells = rows.map((r) => within(r).getAllByRole("cell").map((c) => seen(c)));
+    expect(cells[0][0]).toBe("1");
+    expect(cells[0][1]).toContain("sum_left");
+    expect(cells[0][1]).toContain("clone group #11 · 3 members × 11 lines");
+    expect(cells[0][1]).toContain("src/lib.rs:65");
+    expect(cells[0].slice(2)).toEqual(["Uniqueness", String(REAL.units[0].points), ""]);
+    expect(cells[1][0]).toBe("2");
+    expect(cells[1][1]).toContain("deep_one");
+    expect(cells[1][1]).toContain("nesting depth 6");
+    expect(cells[1].slice(2)).toEqual(["Nesting", String(REAL.units[1].points), "Nesting"]);
+  });
+
+  it("names every outlier measure a unit carries, and every dimension it offends", async () => {
+    const m = clone();
+    m.scan.where_to_start = {
+      ...REAL,
+      units: [
+        {
+          ...REAL.units[1],
+          dimensions: ["nesting", "conciseness"],
+          outliers: ["nesting", "cc", "lcom4"],
+        },
+      ],
+    };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const [row] = within(part(card(), "evidence")!).getAllByRole("row").slice(1);
+    const cells = within(row).getAllByRole("cell").map((c) => seen(c));
+    expect(cells[2]).toBe("Nesting, Conciseness");
+    expect(cells[4]).toBe("Nesting, CC, LCOM4");
+  });
+
+  it("captions the table: the estimates are advisory and never gate, and shows the payload's own basis", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const evidence = part(card(), "evidence")!;
+    const caption = evidence.querySelector("caption")!;
+    expect(caption).not.toBeNull();
+    // Visible, not sr-only: a reader sees it (DataTable `captionVisible`).
+    expect(caption.className).not.toMatch(/srOnly|sr-only/);
+    expect(seen(caption)).toMatch(/advisory/);
+    expect(seen(caption)).toMatch(/never gate/);
+    // `basis` is what the estimate means, shown verbatim from the read-model.
+    expect(REAL.basis).toMatch(/^estimate:/);
+    expect(seen(evidence)).toContain(REAL.basis);
+    // Said under the table as what the Est. points column means.
+    expect(seen(evidence.querySelector('[data-where-to-start="basis"]'))).toBe(`Est. points: ${REAL.basis}.`);
+  });
+
+  it("states a snapshot with no recorded ranking by naming `logos scan`, never a table or a clean result", async () => {
+    const m = clone();
+    m.scan.where_to_start = realWhereToStart.notRecorded;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const evidence = part(card(), "evidence")!;
+    expect(within(evidence).queryByRole("table")).toBeNull();
+    expect(evidence.querySelector('[data-where-to-start="not-recorded"]')).not.toBeNull();
+    expect(seen(evidence)).toMatch(/not recorded/i);
+    expect(seen(evidence)).toMatch(/logos scan/);
+    expect(seen(card())).not.toMatch(/clean|no single unit/i);
+    expectWidgetCopy(card(), whereToStartCopy);
+  });
+
+  it("states a recorded ranking with no units as `no single unit recovers a whole point` — never clean", async () => {
+    const m = clone();
+    m.scan.where_to_start = realWhereToStart.recordedEmpty;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const evidence = part(card(), "evidence")!;
+    expect(within(evidence).queryByRole("table")).toBeNull();
+    expect(evidence.querySelector('[data-where-to-start="no-whole-point"]')).not.toBeNull();
+    expect(seen(evidence)).toMatch(/no single unit recovers a whole point/i);
+    expect(seen(card())).not.toMatch(/clean|none flagged|no offenders/i);
+    expectWidgetCopy(card(), whereToStartCopy);
+  });
+
+  it("renders no card when the snapshot holds no metrics (the Gate and Quality signal name why)", async () => {
+    const m = clone();
+    m.gate.signal = null;
+    m.scan.metrics.empty = true;
+    m.evolution.snapshots = [];
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal trend");
+    expect(frames().map(widgetTitle)).not.toContain("Where to start");
+  });
+
+  it("says the card is not a current reading when the graph has moved past its snapshot", async () => {
+    const m = clone();
+    m.status.last_full_index_at = "500";
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(card(), "figure"))).toMatch(/same snapshot as the Gate/);
+  });
+});
+
+describe("the Redundancy, Equality and Depth drill-downs and the other two notes (S-505, FR-QM-17)", () => {
+  const THREE = ["Redundancy", "Equality", "Depth"];
+
+  function withLists(): HealthModel {
+    const m = clone();
+    m.scan.worst_offenders = {
+      ...realOffenders.recordedEmpty,
+      redundancy: [{ name: "sum_left", file: "src/lib.rs", line: 65, detail: "duplicate" }],
+      equality: [{ name: "branchy", file: "src/lib.rs", line: 3, detail: "complexity 14" }],
+      depth: [{ name: "api", file: "", line: null, detail: "api → core → util (3 directories)" }],
+    };
+    return m;
+  }
+
+  it("lists 3 of 3 drill-down tables, each with its own offenders", async () => {
+    stub(withLists());
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(THREE).toHaveLength(3);
+    for (const name of THREE) {
+      const evidence = part(widget(name), "evidence")!;
+      expect(within(evidence).getByRole("table", { name: "Worst offenders" }), name).toBeInTheDocument();
+      expect(within(evidence).getAllByRole("row").length, name).toBe(2);
+    }
+  });
+
+  it("says why Equality and Depth carry no points — and Redundancy, which does, does not", async () => {
+    stub(withLists());
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    for (const name of ["Equality", "Depth"]) {
+      const note = part(widget(name), "evidence")!.querySelector('[data-where-to-start="unranked"]');
+      expect(note, name).not.toBeNull();
+      expect(seen(note), name).toMatch(/Where to start/);
+      expect(seen(note), name).toMatch(/no single result/);
+    }
+    expect(part(widget("Redundancy"), "evidence")!.querySelector('[data-where-to-start="unranked"]')).toBeNull();
+    expect(part(widget("Modularity"), "evidence")!.querySelector('[data-where-to-start="unranked"]')).toBeNull();
+  });
+
+  it("explains a list, so it is absent where nothing was recorded and where the dimension dropped out", async () => {
+    const m = clone();
+    m.scan.worst_offenders = realOffenders.notRecorded;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(document.querySelectorAll('[data-where-to-start="unranked"]')).toHaveLength(0);
+  });
+
+  it("keeps the note under a dimension with none flagged, never under a not-applicable one", async () => {
+    const m = clone();
+    m.scan.metrics.depth = null as unknown as MetricSnapshot["depth"];
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    // A dimension that dropped out has no evidence: no list, so nothing to explain.
+    expect(seen(part(widget("Depth"), "evidence"))).toBe("");
+    expect(widget("Depth").querySelector('[data-where-to-start="unranked"]')).toBeNull();
+    expect(part(widget("Equality"), "evidence")!.querySelector('[data-where-to-start="unranked"]')).not.toBeNull();
+  });
+
+  it("links Acyclicity to Architecture / Cycles only while the view and its cycle list are shown", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    // Hidden (CR-208, CR-203 item 22): a link would land on Health, so none renders.
+    expect(within(widget("Acyclicity")).queryByRole("link")).toBeNull();
+    cleanup();
+
+    const restoreView = removeHiddenWidgetEntry("architecture-view");
+    const restoreCycles = removeHiddenWidgetEntry("architecture-cycles");
+    try {
+      stub(HEALTH);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      const link = within(widget("Acyclicity")).getByRole("link", { name: "Architecture / Cycles" });
+      expect(link.getAttribute("href")).toBe("/architecture");
+      // Only Acyclicity carries it.
+      expect(screen.getAllByRole("link", { name: "Architecture / Cycles" })).toHaveLength(1);
+    } finally {
+      restoreCycles();
+      restoreView();
+    }
+  });
+
+  it("names the dependency matrix while the view is shown but its cycle list is still hidden (FR-UI-05)", async () => {
+    const restore = removeHiddenWidgetEntry("architecture-view");
+    try {
+      stub(HEALTH);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      const link = within(widget("Acyclicity")).getByRole("link", { name: "Architecture dependency matrix" });
+      expect(link.getAttribute("href")).toBe("/architecture");
+      // The list is hidden, so nothing claims to link to its Cycles.
+      expect(within(widget("Acyclicity")).queryByRole("link", { name: "Architecture / Cycles" })).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it("draws no link while only the cycle list is shown: its view is hidden, so the route lands on Health", async () => {
+    const restore = removeHiddenWidgetEntry("architecture-cycles");
+    try {
+      stub(HEALTH);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      expect(within(widget("Acyclicity")).queryByRole("link")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows the link on a not-recorded Acyclicity too", async () => {
+    const restoreView = removeHiddenWidgetEntry("architecture-view");
+    const restoreCycles = removeHiddenWidgetEntry("architecture-cycles");
+    try {
+      const m = clone();
+      m.scan.worst_offenders = realOffenders.notRecorded;
+      stub(m);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      expect(within(widget("Acyclicity")).getByRole("link", { name: "Architecture / Cycles" })).toBeInTheDocument();
+    } finally {
+      restoreCycles();
+      restoreView();
+    }
+  });
+});
+
+describe("Where to start card: unit cell (review S-505)", () => {
+  it("states a unit's detail and location from what the payload recorded — no `:null`, no empty segment", async () => {
+    const m = clone();
+    m.scan.where_to_start = {
+      ...REAL,
+      units: [
+        { ...REAL.units[1], line: null },
+        { ...REAL.units[0], file: "", line: null, detail: "" },
+      ],
+    };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const rows = within(part(card(), "evidence")!).getAllByRole("row").slice(1);
+    // The name, then the note under it: two blocks, read apart rather than as one run.
+    const unit = (r: HTMLElement) => {
+      const cell = within(r).getAllByRole("cell")[1];
+      return [seen(cell.querySelector(".mono")), seen(cell.querySelector("[data-figure-note]"))];
+    };
+    expect(unit(rows[0])).toEqual(["deep_one", "nesting depth 6 · src/lib.rs"]);
+    expect(unit(rows[1])).toEqual(["sum_left", ""]);
+  });
+});
+
+describe("Where to start card: figure (review S-505)", () => {
+  it.each([
+    [2, "2 units ranked by estimated points, most first"],
+    [1, "1 unit ranked by estimated points, most first"],
+  ])("counts the ranked units in the figure row: %i", async (count, expected) => {
+    const m = clone();
+    m.scan.where_to_start = { ...REAL, units: REAL.units.slice(0, count) };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(card(), "figure"))).toBe(expected);
+  });
+});
+
+describe("Where to start card: Acyclicity's note and link sentence (review S-505)", () => {
+  it("says why Acyclicity carries no points, as Equality and Depth do", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const note = part(widget("Acyclicity"), "evidence")!.querySelector('[data-where-to-start="unranked"]');
+    expect(note).not.toBeNull();
+    expect(seen(note)).toMatch(/^Not ranked in Where to start: a cycle can be broken in several ways/);
+    expect(seen(note)).toMatch(/no single result/);
+  });
+
+  it.each([
+    [["architecture-view", "architecture-cycles"] as const, "See these cycles in the Architecture / Cycles view."],
+    [["architecture-view"] as const, "See these cycles outlined in the Architecture dependency matrix."],
+  ])("reads the whole link sentence while %j are shown", async (shown, sentence) => {
+    const restores = shown.map((id) => removeHiddenWidgetEntry(id));
+    try {
+      stub(HEALTH);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      const line = widget("Acyclicity").querySelector('[data-where-to-start="cycles-link"]');
+      expect(seen(line)).toBe(sentence);
+    } finally {
+      restores.forEach((restore) => restore());
+    }
+  });
+});
+
+describe("Where to start card: outlier names (review S-505)", () => {
+  const NAMES: Record<string, string> = {
+    lcom4: "LCOM4",
+    methods: "Methods",
+    span: "Span",
+    cc: "CC",
+    nesting: "Nesting",
+    duplicate_mass: "Duplicate mass",
+    clone_mass: "Clone mass",
+    // Not a measure the engine labels on: shown as its own key, never dropped.
+    zzz: "zzz",
+  };
+
+  it("names exactly the seven measures the engine labels on", () => {
+    expect(Object.keys(OUTLIER_MEASURE)).toEqual(Object.keys(NAMES).filter((k) => k !== "zzz"));
+  });
+
+  it.each(Object.entries(NAMES))("renders the %s outlier as %s", async (measure, name) => {
+    const m = clone();
+    m.scan.where_to_start = { ...REAL, units: [{ ...REAL.units[1], outliers: [measure] }] };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const [row] = within(part(card(), "evidence")!).getAllByRole("row").slice(1);
+    expect(seen(within(row).getAllByRole("cell")[4])).toBe(name);
+  });
+});
+
+describe("Where to start card: the basis note (review S-505)", () => {
+  it("draws no basis line, and never `undefined`, when a recorded set carries no basis", async () => {
+    const m = clone();
+    m.scan.where_to_start = { recorded: true, units: [REAL.units[0]], outliers: [] };
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(card().querySelector('[data-where-to-start="basis"]')).toBeNull();
+    expect(seen(card())).not.toContain("undefined");
+  });
+});
+
+describe("Where to start card: sorting (review S-505)", () => {
+  /** Two units whose rank, name, file, dimension, points and outlier count all
+   *  order differently, so each column's sort is pinned to its own key. */
+  function crafted(): HealthModel {
+    const m = clone();
+    m.scan.where_to_start = {
+      ...REAL,
+      units: [
+        { ...REAL.units[0], name: "alpha", file: "src/z.rs", dimensions: ["uniqueness"], points: 300, outliers: [] },
+        { ...REAL.units[1], name: "zeta", file: "src/a.rs", dimensions: ["nesting"], points: 100, outliers: ["nesting"] },
+      ],
+    };
+    return m;
+  }
+
+  // Ascending on a first click: [header, the unit first, its rank].
+  it.each([
+    ["Rank", "alpha"],
+    ["Unit", "alpha"],
+    ["Dimension", "zeta"],
+    ["Est. points", "zeta"],
+    ["Outlier", "alpha"],
+  ])("a click on %s sorts by that column's own key, leaving each rank as ranked", async (header, first) => {
+    stub(crafted());
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const table = within(part(card(), "evidence")!).getByRole("table");
+    await userEvent.click(within(table).getByRole("button", { name: new RegExp(`^${header}`) }));
+    const rows = within(table).getAllByRole("row").slice(1);
+    const cells = (r: HTMLElement) => within(r).getAllByRole("cell").map((c) => seen(c));
+    expect(cells(rows[0])[1]).toContain(first);
+    // The rank a unit carries is its place in the ranking, not in the sort.
+    const ranks = Object.fromEntries(rows.map((r) => [cells(r)[1].startsWith("alpha") ? "alpha" : "zeta", cells(r)[0]]));
+    expect(ranks).toEqual({ alpha: "1", zeta: "2" });
+  });
+});
+
+describe("Where to start card: not-current line in the states without a table (review S-505)", () => {
+  it.each([
+    ["not recorded", realWhereToStart.notRecorded],
+    ["recorded, no whole point", realWhereToStart.recordedEmpty],
+  ])("says the snapshot is not a current reading when %s", async (_state, ranking) => {
+    const m = clone();
+    m.status.last_full_index_at = "500";
+    m.scan.where_to_start = ranking;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(card(), "figure"))).toMatch(/same snapshot as the Gate/);
+    expect(within(part(card(), "evidence")!).queryByRole("table")).toBeNull();
+  });
+});
+
+describe("Where to start card: whole statements and the unit kind (review S-505)", () => {
+  it("states each empty state in full", async () => {
+    for (const [ranking, state, sentence] of [
+      [realWhereToStart.notRecorded, "not-recorded", "A ranking was not recorded for this snapshot; run logos scan to record it."],
+      [realWhereToStart.recordedEmpty, "no-whole-point", "No single unit recovers a whole point, so none is ranked."],
+    ] as const) {
+      cleanup();
+      const m = clone();
+      m.scan.where_to_start = ranking;
+      stub(m);
+      render(<HealthView />);
+      await screen.findByText("Signal evolution");
+      expect(seen(card().querySelector(`[data-where-to-start="${state}"]`))).toBe(sentence);
+    }
+  });
+
+  it("marks each row with its unit's kind", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const rows = within(part(card(), "evidence")!).getAllByRole("row").slice(1);
+    expect(rows.map((r) => r.querySelector("[data-unit-kind]")?.getAttribute("data-unit-kind"))).toEqual(
+      REAL.units.map((u) => u.kind),
+    );
+    expect(REAL.units.map((u) => u.kind)).toEqual(["clone_group", "function"]);
   });
 });

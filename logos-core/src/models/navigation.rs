@@ -1687,7 +1687,7 @@ pub struct ReferencingDocsResult {
 // ── Shared primitives ──────────────────────────────────────────────────────
 
 /// A lightweight reference to a symbol (used in many read-models).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SymbolRef {
     /// The canonical SCIP symbol string — round-trips into any navigation
     /// tool's `symbol` argument.

@@ -1,5 +1,5 @@
 /*
- * FilesView (S-188, S-616, FR-UI-11, FR-UI-21, FR-UI-44) — the Files & Risk tab
+ * FilesView (S-188, S-616, S-671, FR-UI-11, FR-UI-21, FR-UI-44, FR-SC-14) — the Files & Risk tab
  * over `/api/v1/files`: two widgets in one stack, each saying what it shows and
  * why it matters (CR-203 items 23–24, CR-206; copy in `copy/files.copy.ts`).
  *
@@ -9,8 +9,10 @@
  * hotspot score) joined with the per-file temporal churn/age facts. The table is
  * the shared interactive data-table: client-side sort + pagination over the FULL
  * dataset, numeric columns right-aligned, an absent churn/age rendered `n/a` —
- * never a fabricated zero (NFR-CC-04). The `--untested` filter is a React toggle
- * that re-fetches. "Ownership dispersion" follows. Both tables abbreviate long
+ * never a fabricated zero (NFR-CC-04). A Findings column (count and highest
+ * severity of the unsuppressed, fresh findings, each cell linking to
+ * `/security?path=`) appears only once a scan is stored. The `--untested` filter
+ * is a React toggle that re-fetches. "Ownership dispersion" follows. Both tables abbreviate long
  * paths through `PathCell`, the full path on hover and focus (FR-UI-44). Every
  * read is GET-only (ADR-28).
  */
@@ -31,9 +33,22 @@ import {
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
-import { filesAbsence, filesRankedByRisk, ownershipDispersion, withRankCommand } from "../../copy/files.copy.ts";
-import { fileRiskRows, ownershipRows, pctBp, type FileRiskRow } from "./analyticsModel.ts";
-import { CoverageCellView, Na } from "./cells.tsx";
+import {
+  filesAbsence,
+  filesFindingsNote,
+  filesRankedByRisk,
+  ownershipDispersion,
+  withRankCommand,
+} from "../../copy/files.copy.ts";
+import {
+  fileRiskRows,
+  findingsSortValue,
+  hasFindingsColumn,
+  ownershipRows,
+  pctBp,
+  type FileRiskRow,
+} from "./analyticsModel.ts";
+import { CoverageCellView, FindingsCellView, Na } from "./cells.tsx";
 
 /** The risk table's columns after File (which `pathColumn` builds over the rows). */
 const FILE_COLUMNS: Column<FileRiskRow>[] = [
@@ -96,6 +111,14 @@ const FILE_COLUMNS: Column<FileRiskRow>[] = [
   },
 ];
 
+/** The findings column (FR-SC-14), after Coverage — present only once a scan is stored. */
+const FINDINGS_COLUMN: Column<FileRiskRow> = {
+  key: "findings",
+  header: "Findings",
+  cell: (r) => (r.findings ? <FindingsCellView cell={r.findings} path={r.path} /> : <Na />),
+  sortValue: (r) => (r.findings ? findingsSortValue(r.findings) : -1),
+};
+
 /** The ownership table's columns after File. */
 const OWNERSHIP_COLUMNS: Column<FileTemporal>[] = [
   {
@@ -117,9 +140,10 @@ const OWNERSHIP_COLUMNS: Column<FileTemporal>[] = [
 export function FilesView() {
   const [untested, setUntested] = useState(false);
   const [productionScope, setProductionScope] = useState(false);
+  const [withFindings, setWithFindings] = useState(false);
   const files = useApiResource<FilesModel>(
-    () => fetchFiles(untested, productionScope),
-    [untested, productionScope],
+    () => fetchFiles(untested, productionScope, withFindings),
+    [untested, productionScope, withFindings],
   );
 
   return (
@@ -131,6 +155,8 @@ export function FilesView() {
           onToggle={setUntested}
           productionScope={productionScope}
           onToggleProductionScope={setProductionScope}
+          withFindings={withFindings}
+          onToggleWithFindings={setWithFindings}
         />
       )}
     </AsyncResource>
@@ -143,12 +169,16 @@ function FilesContent({
   onToggle,
   productionScope,
   onToggleProductionScope,
+  withFindings,
+  onToggleWithFindings,
 }: {
   model: FilesModel;
   untested: boolean;
   onToggle: (v: boolean) => void;
   productionScope: boolean;
   onToggleProductionScope: (v: boolean) => void;
+  withFindings: boolean;
+  onToggleWithFindings: (v: boolean) => void;
 }) {
   const { hotspots, temporal } = model;
   const rows = useMemo(() => fileRiskRows(hotspots, temporal), [hotspots, temporal]);
@@ -156,9 +186,15 @@ function FilesContent({
   // One labelling for the risk table AND its figure row, so the top file reads
   // the same in both and never takes a label another row shares.
   const riskLabels = useMemo(() => abbreviatePaths(rows.map((r) => r.path)), [rows]);
+  // No scan stored → no findings column, rather than a column of zeros.
+  const findingsColumn = hasFindingsColumn(rows);
   const fileColumns = useMemo(
-    () => [pathColumn(rows, (r) => r.path, riskLabels), ...FILE_COLUMNS],
-    [rows, riskLabels],
+    () => [
+      pathColumn(rows, (r) => r.path, riskLabels),
+      ...FILE_COLUMNS,
+      ...(findingsColumn ? [FINDINGS_COLUMN] : []),
+    ],
+    [rows, riskLabels, findingsColumn],
   );
   const ownershipColumns = useMemo(
     () => [pathColumn(ownership, (r) => r.path), ...OWNERSHIP_COLUMNS],
@@ -198,6 +234,24 @@ function FilesContent({
         <Button variant="ghost" size="sm" onClick={() => onToggleProductionScope(true)}>
           Production files only
         </Button>
+      )}
+      {/* The findings filter needs a stored scan to prefer anything: offered only then. */}
+      {(findingsColumn || withFindings) && (
+        <>
+          {" · "}
+          {withFindings ? (
+            <>
+              <span className="muted">files with findings first</span>{" "}
+              <Button variant="ghost" size="sm" onClick={() => onToggleWithFindings(false)}>
+                Rank by risk only
+              </Button>
+            </>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => onToggleWithFindings(true)}>
+              Files with findings first
+            </Button>
+          )}
+        </>
       )}
     </p>
   );
@@ -246,6 +300,7 @@ function FilesContent({
         <p className="muted">
           Defect column: {hotspots.defect_label} (commit-hygiene, not a defect measure).
         </p>
+        {findingsColumn && <p className="muted">{filesFindingsNote}</p>}
         {hotspots.coverage_label && (
           <p className="muted">
             Coverage basis: {hotspots.coverage_basis} — {hotspots.coverage_label}.

@@ -100,6 +100,9 @@ fn listed_calls(repo: &str) -> Vec<(&'static str, Value)> {
         ("coverage_status", json!({})),
         ("security_status", json!({})),
         ("security_findings", json!({})),
+        ("offenders", json!({})),
+        ("review", json!({"base": "HEAD"})),
+        ("improvements", json!({})),
     ];
     base.into_iter()
         .map(|(tool, mut args)| {

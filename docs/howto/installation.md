@@ -1,8 +1,10 @@
 # Installation
 
 Logos ships as a **single static binary with zero runtime dependencies** —
-no network access, no external services, no system libraries. SQLite and the
-bundled tree-sitter grammars are compiled in.
+no network access of its own, no external services, no system libraries. SQLite
+and the bundled tree-sitter grammars are compiled in. The one download is the
+optional `logos security install`, which runs the system `curl` (and `uv`) under
+your consent ([Installing scanners](security.md#installing-scanners)).
 
 ## Supported platforms & minimum OS baseline
 
@@ -73,12 +75,32 @@ logos index     # build the code graph into .logos/logos.db
 logos status    # confirm a populated, fresh index
 ```
 
-`init -i` interactively offers to inject the `logos` MCP server block into
-the project's `.mcp.json`, write the managed `CLAUDE.md` usage block, and
-(optionally, also available as `logos init --hooks`) install git hooks that
-keep the graph synced on commit/checkout/merge. Every step is idempotent and
+`init -i` writes the policy files, injects the `logos` MCP server block into the
+project's `.mcp.json`, writes the managed `CLAUDE.md` usage block and the
+session-start readout hook, and on a terminal asks whether to install git hooks
+(the default is no; `logos init --hooks` installs the hooks that keep the graph
+synced on commit, checkout and merge and gate a push). Plain `logos init` writes
+only the policy files and the store inside `.logos/`. Every step is idempotent and
 non-clobbering — re-running `init` never overwrites your edits. Restart your
-agent afterwards: the `logos:*` tools appear automatically.
+agent afterwards: the `logos:*` tools appear automatically. `logos init
+--uninstall` removes what `init` wrote outside `.logos/`.
+
+### Claude Code: install the plugin
+
+On Claude Code, the plugin carries the MCP server and the session-start readout,
+and adds the review loop (a Stop check, the `/logos:review` skill and a
+guardrail). It needs `logos` 1.20.0 or newer on `PATH`:
+
+```bash
+claude plugin marketplace add raffaelecamanzo/logos
+claude plugin install logos@logos
+logos init -i   # with the plugin enabled: enrols it, no .mcp.json entry
+logos index
+```
+
+See [The Claude Code plugin and the review loop](plugin.md) for what each part
+does, how to migrate a project that ran `init -i` before the plugin existed, and
+the off switches.
 
 ## Build from source (alternative)
 
@@ -222,9 +244,10 @@ and full-tier evidence without it, and CI runs it first on the checkout.
 The shell scripts' own suites (`scripts/tests/test-*.sh`) run in a
 `script-suites` leg, one evidence unit per suite (a suite that exits non-zero is
 a failed unit). `gate.sh full` always runs it. `gate.sh fast` runs it when
-`git diff --name-only` against the gate base touches `scripts/`, and prints a
-note otherwise. A glob that matches no suite fails the leg. The leg prints each
-suite with its counts; ten suites today, about two minutes in all.
+`git diff --name-only` against the gate base touches `scripts/`, `plugins/` or
+`.claude-plugin/` (the Claude Code plugin's scripts are tested by
+`scripts/tests/test-plugin-*.sh`), and prints a note otherwise. A glob that
+matches no suite fails the leg. The leg prints each suite with its counts.
 `scripts/verify-evidence.sh --tier full` refuses evidence without the leg or
 with a failed suite. `--tier fast` validates it when present. CI runs every
 suite right after checkout. To run them by hand:

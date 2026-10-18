@@ -460,6 +460,47 @@ pub(crate) struct EventRecord {
     ///
     /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
     pub(crate) outcome: Option<Outcome>,
+    /// Who started this process, as it declared itself ([FR-OB-15]): `Some`
+    /// only when [`INVOKER_ENV`] held a well-formed value at [`init`] — a plugin
+    /// hook (`hook:stop`) or a skill script (`skill:logos-review`) — and `None`
+    /// for everything else, a direct CLI call included. A per-process constant
+    /// like [`origin`](Self::origin), never guessed. Stored in `events.invoker`
+    /// from migration v5.
+    ///
+    /// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+    pub(crate) invoker: Option<String>,
+}
+
+/// The environment variable a calling script declares itself through
+/// ([FR-OB-15]): the plugin's hooks export `hook:stop`, `hook:pre-tool-use` and
+/// `hook:session-start`, its skills' scripts `skill:logos-review` and
+/// `skill:logos-sec-review`. Read once, at [`init`].
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+pub(crate) const INVOKER_ENV: &str = "LOGOS_INVOKER";
+
+/// The invoker a process declared, or `None` ([FR-OB-15]).
+///
+/// Shape-checked, not looked up: `hook:` or `skill:` and a name of lowercase
+/// ASCII letters, digits and inner hyphens, at most 64 bytes. A closed list would
+/// make every new hook or skill wait for a binary release, and the plugin and the
+/// binary version independently; the shape keeps the column to declared script
+/// names — no path, no free text — so nothing but a name is ever stored. Anything
+/// else, including an empty value, records no invoker rather than a corrected
+/// one: an attribution is declared or absent, never repaired into a guess.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+fn declared_invoker(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let (kind, name) = value.split_once(':')?;
+    let well_formed = matches!(kind, "hook" | "skill")
+        && (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-');
+    well_formed.then(|| value.to_string())
 }
 
 /// The development-increment `origin` stamped onto every event this process
@@ -546,6 +587,9 @@ fn generate_session_id() -> String {
 /// - Every event is also stamped with an opaque per-process `session_id`
 ///   ([FR-OB-12]), computed once here by [`generate_session_id`] — orthogonal
 ///   to `origin` and never on the hot path.
+/// - And with the `invoker` the process declared in [`INVOKER_ENV`]
+///   ([FR-OB-15]), read once here through [`declared_invoker`]; `None` when it
+///   declared none, or nothing well formed.
 /// - A second call (or a test that already installed a subscriber) is a
 ///   no-op for logging; the returned guard is still safe to drop.
 ///
@@ -572,8 +616,12 @@ pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
         // independently of origin — no shared resolution, since it needs no
         // git call at all.
         let session_id = generate_session_id();
+        // The per-process invoker stamp (FR-OB-15): declared by the calling
+        // script, or absent — read once, never per event.
+        let invoker = declared_invoker(std::env::var(INVOKER_ENV).ok().as_deref());
         let (sink, guard) = layer::spawn_writer(logos_dir.join(TELEMETRY_DB_FILENAME));
         let telemetry = layer::TelemetryLayer::new(surface.into(), origin, session_id, sink)
+            .with_invoker(invoker)
             .with_filter(filter_fn(|meta| meta.target() == TELEMETRY_TARGET));
         (Some(telemetry), guard)
     } else {
@@ -823,6 +871,40 @@ pub(crate) fn seed_store_with_outcomes_for_tests(
             origin: origin.to_string(),
             session_id: "test-session".to_string(),
             outcome,
+            invoker: None,
+        })
+        .collect();
+    db::write_batch(&mut conn, &batch)
+}
+
+/// One seeded event with its invoker: `(tool, invoker, ok, outcome, at)`.
+#[cfg(test)]
+pub(crate) type InvokedSeed<'a> = (&'a str, Option<&'a str>, bool, Option<Outcome>, i64);
+
+/// A file-backed, fully migrated store under `logos_dir` holding one raw `cli`
+/// event per [`InvokedSeed`] ([FR-OB-15]) — a `None` invoker is a call that
+/// declared none. Seeded through the real migration and insert.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+#[cfg(test)]
+pub(crate) fn seed_store_with_invokers_for_tests(
+    logos_dir: &Path,
+    events: &[InvokedSeed<'_>],
+) -> Result<()> {
+    std::fs::create_dir_all(logos_dir)?;
+    let mut conn = db::open(&logos_dir.join(TELEMETRY_DB_FILENAME))?;
+    let batch: Vec<EventRecord> = events
+        .iter()
+        .map(|&(tool, invoker, ok, outcome, at)| EventRecord {
+            at,
+            surface: "cli",
+            tool: tool.to_string(),
+            duration_ms: 5,
+            ok,
+            origin: "main".to_string(),
+            session_id: "test-session".to_string(),
+            outcome,
+            invoker: invoker.map(str::to_string),
         })
         .collect();
     db::write_batch(&mut conn, &batch)

@@ -196,6 +196,9 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // Workspace Chat's consent banner makes. Engine-free by its own contract
     // (`the_read_roots_read_model_warms_no_member`), and walked by the same loops.
     "/api/v1/workspace/config/read-roots",
+    // S-674 / [FR-SC-16]: the workspace security roll-up. A GET over the member
+    // fan-out, walked by the same three loops; it must store no scan.
+    "/api/v1/workspace/security",
 ];
 
 /// The **mutating** workspace routes — S-450's two config-root writes
@@ -3488,4 +3491,220 @@ async fn code_refs_resolve_against_the_addressed_member_only() {
         vec![pair("src/main.rs", "unresolved"), pair("get_user", "unresolved")],
         "the `api` member's graph does not answer for `web`'s file and symbol: {body}"
     );
+}
+
+// ── S-674: the workspace security roll-up ([FR-SC-16]) ───────────────────────
+
+/// A Semgrep report over `src/lib.rs` in the `scanned` member: an injection
+/// (`high`) and a hard-coded credential (`medium`) that count, and a second
+/// injection (`high`) the member's ignore file suppresses.
+const ROLLUP_SEMGREP: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0","rules":[
+{"id":"rust.lang.security.formatted-sql","properties":{"tags":["CWE-89: SQL Injection","security"]}},
+{"id":"rust.lang.security.sql-concat","properties":{"tags":["CWE-89: SQL Injection","security"]}},
+{"id":"generic.secrets.hardcoded-key","properties":{"tags":["CWE-798: Hard-coded Credentials","security"]}}]}},
+"results":[
+{"ruleId":"rust.lang.security.formatted-sql","level":"error","message":{"text":"Formatted SQL query."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":1}}}]},
+{"ruleId":"rust.lang.security.sql-concat","level":"error","message":{"text":"Concatenated SQL query."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":2}}}]},
+{"ruleId":"generic.secrets.hardcoded-key","level":"warning","message":{"text":"A hard-coded key."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":3}}}]}]}]}"#;
+
+/// A report from a tool Logos does not register, over `src/other.rs`: one
+/// injection that goes stale when that file is edited after the ingest.
+const ROLLUP_OTHER_TOOL: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Acme Scanner","semanticVersion":"2.0.0","rules":[
+{"id":"acme.sqli","properties":{"tags":["CWE-89: SQL Injection"]}}]}},
+"results":[
+{"ruleId":"acme.sqli","level":"error","message":{"text":"SQL injection."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/other.rs"},"region":{"startLine":1}}}]}]}]}"#;
+
+/// `[security_scan]` disabling every registered scanner but Semgrep, so no
+/// scanner on this machine is probed beyond Semgrep's version command (a
+/// stored report outranks detection, so Semgrep reads `fresh` whether or not
+/// it is installed here).
+fn semgrep_only_config() -> String {
+    logos_core::security::registry::REGISTRY
+        .iter()
+        .filter(|s| s.name != "semgrep")
+        .map(|s| format!("[security_scan.{}]\nenabled = false\n", s.name))
+        .collect()
+}
+
+/// Three members, in roster order: `scanned` — a fresh Semgrep report with one
+/// suppressed finding, and a stale report from an unregistered tool; `idle`
+/// — indexed, never scanned; `broken` — a directory where its store must be,
+/// so nothing can open it.
+fn security_workspace() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    for member in ["scanned", "idle", "broken"] {
+        let dir = root.join(member);
+        std::fs::create_dir_all(&dir).unwrap();
+        sh_git(&dir, &["init", "-q", "-b", "main"]);
+        write(&dir, ".logos/config.toml", &semgrep_only_config());
+        write(&dir, "src/lib.rs", "pub fn find() {}\npub fn list() {}\npub fn key() {}\n");
+        write(&dir, "src/other.rs", "pub fn other() {}\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-q", "-m", "init"]);
+        Engine::start(&dir).expect("member engine").index();
+    }
+
+    let scanned = root.join("scanned");
+    let engine = Engine::start(&scanned).expect("scanned engine");
+    for (name, report) in [("semgrep.sarif", ROLLUP_SEMGREP), ("acme.sarif", ROLLUP_OTHER_TOOL)] {
+        let path = root.join(name);
+        std::fs::write(&path, report).unwrap();
+        engine.security_ingest(&path).expect("the report ingests");
+    }
+    let listed = engine
+        .security_findings(&logos_core::security::FindingsFilter::default())
+        .expect("the stored findings list");
+    let concat = listed
+        .findings
+        .iter()
+        .find(|f| f.finding.rule_id == "rust.lang.security.sql-concat")
+        .expect("the concatenated-SQL finding is stored");
+    write(
+        &scanned,
+        ".logos/security-ignore.toml",
+        &format!("[[ignore]]\nfingerprint = \"{}\"\nreason = \"parameterised upstream\"\n", concat.finding.fingerprint),
+    );
+    // The unregistered tool's anchored file changes after its scan: stale.
+    write(&scanned, "src/other.rs", "pub fn other() { let _ = 1; }\n");
+    drop(engine);
+
+    let db = root.join("broken").join(".logos").join("logos.db");
+    std::fs::remove_file(&db).expect("clear the store file");
+    std::fs::create_dir_all(&db).expect("a directory where the store must be");
+
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"secure\"\nmembers = [\"scanned\", \"idle\", \"broken\"]\ndefault = \"scanned\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// The roll-up row for `member`.
+fn rollup_row<'a>(v: &'a serde_json::Value, member: &str) -> &'a serde_json::Value {
+    v["security"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["member"] == member)
+        .unwrap_or_else(|| panic!("a row for {member}: {v}"))
+}
+
+/// One summed category of the edition at `edition` (0: 2025, 1: 2021).
+fn rollup_category<'a>(v: &'a serde_json::Value, edition: usize, id: &str) -> &'a serde_json::Value {
+    v["security"]["owasp"][edition]["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap_or_else(|| panic!("category {id}: {v}"))
+}
+
+/// **The workspace security roll-up ([FR-SC-16], [UAT-SC-03]).** Over a scanned,
+/// a never-scanned and an unopenable member: the never-scanned member reads
+/// `never_run` with no figure (never `0`); the unopenable one is a row with its
+/// error, named by the open-state roll-up, and hides neither other member; the
+/// totals and the category counts hold only fresh, unsuppressed findings, with
+/// the stale and the suppressed ones counted apart; and the read stores no scan.
+#[tokio::test]
+async fn workspace_security_rolls_up_fresh_unsuppressed_findings_per_member() {
+    let tmp = security_workspace();
+    let history = tmp.path().join("scanned/.logos/history.db");
+    let snapshots = || {
+        let conn = Connection::open_with_flags(&history, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM security_snapshots", [], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    let before = snapshots();
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/security").await;
+    let s = &v["security"];
+
+    // Every member has a row, in roster order — the broken one included.
+    let order: Vec<&str> = s["members"].as_array().unwrap().iter().map(|m| m["member"].as_str().unwrap()).collect();
+    assert_eq!(order, ["scanned", "idle", "broken"], "{v}");
+    assert_eq!(
+        (s["members_total"].as_u64(), s["members_read"].as_u64(), s["members_never_scanned"].as_u64(), s["members_counted"].as_u64()),
+        (Some(3), Some(2), Some(1), Some(1)),
+        "{s}"
+    );
+
+    // Scanned: two fresh unsuppressed findings; the suppressed one and the
+    // stale tool's one are excluded and counted apart.
+    let scanned = &rollup_row(&v, "scanned")["result"];
+    assert_eq!(scanned["scan"], "fresh", "{scanned}");
+    assert_eq!(scanned["findings"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "total": 2}));
+    assert_eq!(scanned["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1}));
+    assert_eq!((scanned["scanners_fresh"].as_u64(), scanned["scanners_enabled"].as_u64()), (Some(1), Some(2)), "{scanned}");
+    let state_of = |name: &str| {
+        scanned["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == name).map(|r| r["state"].clone())
+    };
+    assert_eq!(state_of("semgrep"), Some("fresh".into()));
+    assert_eq!(state_of("Acme Scanner"), Some("stale".into()));
+    assert_eq!(state_of("bandit"), Some("disabled".into()));
+
+    // Unscanned: never run, and no figure at all — not a zero.
+    let idle = &rollup_row(&v, "idle")["result"];
+    assert_eq!(idle["scan"], "never_run", "{idle}");
+    assert!(idle["findings"].is_null(), "a never-scanned member has no count, not 0: {idle}");
+    assert!(
+        idle["owasp"][0]["categories"].as_array().unwrap().iter().all(|c| c["findings"].is_null()),
+        "and covers no category: {idle}"
+    );
+
+    // Broken: a row with its reason, no result, and named as not opened.
+    let broken = rollup_row(&v, "broken");
+    assert!(broken.get("result").is_none(), "{broken}");
+    assert!(broken["error"].as_str().is_some_and(|e| !e.is_empty()), "{broken}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
+
+    // Totals: only the scanned member's fresh, unsuppressed findings.
+    assert_eq!(s["totals"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "total": 2}));
+    assert_eq!(s["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1}));
+
+    // OWASP: Injection holds the one counted injection — neither the suppressed
+    // nor the stale one — in each edition under its own id; a category no fresh
+    // report can see is not covered, never 0.
+    let editions: Vec<&str> = s["owasp"].as_array().unwrap().iter().map(|e| e["edition"].as_str().unwrap()).collect();
+    assert_eq!(editions, ["2025", "2021"]);
+    for (edition, id) in [(0, "A05:2025"), (1, "A03:2021")] {
+        let injection = rollup_category(&v, edition, id);
+        assert_eq!((injection["covered_in"].as_u64(), injection["findings"].as_u64()), (Some(1), Some(1)), "{injection}");
+    }
+    let supply_chain = rollup_category(&v, 0, "A03:2025");
+    assert_eq!(supply_chain["covered_in"], 0, "{supply_chain}");
+    assert!(supply_chain["findings"].is_null(), "not covered carries no count: {supply_chain}");
+    for edition in 0..2 {
+        assert_eq!(s["owasp"][edition]["unclassified"], 0, "both counted findings sit under a category: {s}");
+    }
+
+    // Read-only: a second load stores no scan.
+    json_body(&router, "/api/v1/workspace/security").await;
+    assert_eq!(snapshots(), before, "a GET stores no scan");
+}
+
+/// A member that opens and then fails its security read — here an ignore file
+/// that does not parse — is a row with its error and counts against
+/// `members_read`, and every other member still answers. The open-state
+/// roll-up names only the member that would not open: the read failure is
+/// stated by its row, not by `degraded_rollup` ([FR-WS-16]).
+#[tokio::test]
+async fn a_member_whose_security_read_fails_is_a_row_and_hides_no_other() {
+    let tmp = security_workspace();
+    write(&tmp.path().join("idle"), ".logos/security-ignore.toml", "[[ignore]]\nreason = \"no fingerprint\"\n");
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/security").await;
+    let s = &v["security"];
+
+    let idle = rollup_row(&v, "idle");
+    assert!(idle.get("result").is_none(), "{idle}");
+    assert!(idle["error"].as_str().is_some_and(|e| e.contains("security-ignore")), "the reason names the file: {idle}");
+    assert_eq!(rollup_row(&v, "scanned")["result"]["scan"], "fresh", "the others still answer: {v}");
+    assert_eq!((s["members_total"].as_u64(), s["members_read"].as_u64()), (Some(3), Some(1)), "{s}");
+    assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
 }

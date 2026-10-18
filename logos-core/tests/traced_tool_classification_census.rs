@@ -99,10 +99,17 @@
 //!
 //! # The denominator
 //!
-//! **2026-10-16 — 67 registered tools enumerated, 4 classified, 63 excluded
+//! **2026-10-17 — 71 registered tools enumerated, 4 classified, 67 excluded
 //! with a reason**, pinned by
 //! [`the_census_reports_its_denominator`], which prints the three counts. It was
-//! 61/4/57 on 2026-10-10; S-667 registered the security tier's six tools
+//! 70/4/66 on 2026-10-16; S-677 registered the branch delta (`review`),
+//! unclassified and excluded under the quality-gate reason. It was 69/4/65
+//! earlier that day; S-505 registered the "where to start" list
+//! (`improvements`), unclassified and excluded under the quality-gate reason. It
+//! was 68/4/64 before that; S-676 registered the uncapped `offenders`
+//! listing, unclassified and excluded under the quality-gate reason. It was
+//! 67/4/63 before that; S-507 registered the ratchet's `bless_rules`,
+//! unclassified and excluded under the quality-gate reason. It was 61/4/57 on 2026-10-10; S-667 registered the security tier's six tools
 //! (`security_scan`, `security_ingest`, `security_ingest_auto`,
 //! `security_status`, `security_findings` and the watcher's
 //! `watch_security_ingest`), none classified and each excluded under the
@@ -130,7 +137,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 /// The date the figures in this module's header were taken.
-const AUDITED_ON: &str = "2026-10-16";
+const AUDITED_ON: &str = "2026-10-17";
 
 /// The registry file, and the production tree the classification is read
 /// from, both relative to `logos-core` (`env!("CARGO_MANIFEST_DIR")`).
@@ -202,6 +209,7 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("Rescan", REASON_QUALITY_GATE),
     ("Gate", REASON_QUALITY_GATE),
     ("CheckRules", REASON_QUALITY_GATE),
+    ("BlessRules", REASON_QUALITY_GATE),
     ("Evolution", REASON_QUALITY_GATE),
     ("Dsm", REASON_QUALITY_GATE),
     ("DocGaps", REASON_QUALITY_GATE),
@@ -220,6 +228,12 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("CoverageStatus", REASON_QUALITY_GATE),
     ("SecurityStatus", REASON_QUALITY_GATE),
     ("SecurityFindings", REASON_QUALITY_GATE),
+    // The uncapped offender listing (S-676, FR-QM-19).
+    ("Offenders", REASON_QUALITY_GATE),
+    // The branch delta against the merge-base (S-677, FR-GV-24).
+    ("Review", REASON_QUALITY_GATE),
+    // The advisory "where to start" list (S-505, FR-QM-17).
+    ("Improvements", REASON_QUALITY_GATE),
     // ── Session gate ─────────────────────────────────────────────────────────
     ("SessionStart", REASON_SESSION_GATE),
     ("SessionEnd", REASON_SESSION_GATE),
@@ -643,8 +657,8 @@ fn the_census_reports_its_denominator() {
     );
     assert_eq!(
         (enumerated, classified_count, excluded_count),
-        (67, 4, 63),
-        "traced-tool classification census as of {AUDITED_ON}: expected 67 enumerated tools, \
-         4 classified via traced_with, 63 excluded with a reason"
+        (71, 4, 67),
+        "traced-tool classification census as of {AUDITED_ON}: expected 71 enumerated tools, \
+         4 classified via traced_with, 67 excluded with a reason"
     );
 }

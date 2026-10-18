@@ -334,7 +334,7 @@ TIER_FLAG=""
 # --- the script-suites gate (S-719) ---------------------------------------------
 #
 # Required at the full tier, one unit per scripts/tests/test-*.sh the tree holds.
-# `gate.sh fast` runs it exactly when scripts/ changed, so the fast tier accepts
+# `gate.sh fast` runs it exactly when scripts/ or the plugin tree changed, so the fast tier accepts
 # evidence with or without it and validates it when it is there. A unit's exit
 # status is read on its own, not only through `failed`.
 

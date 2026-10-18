@@ -200,6 +200,17 @@ pub struct Semantics {
     /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub reachability: bool,
+    /// Whether this language declares the optional member-access capability
+    /// (S-523, [CR-171]; see [`PluginManifest::member_access`]); gates Cohesion
+    /// in the metrics engine ([FR-QM-11]) through
+    /// [`LanguageRegistry::member_access_extensions`](crate::plugin::LanguageRegistry::member_access_extensions).
+    ///
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    pub member_access: bool,
+    /// The extensions of this plugin its `member_access` declaration does not
+    /// cover (S-523; see [`PluginManifest::member_access_excluded_extensions`]).
+    pub member_access_excluded_extensions: Vec<String>,
     /// Whether this is a documentation grammar (S-033, [CR-003], [ADR-19]):
     /// when `true`, extraction routes the file structurally through
     /// `extract::doc` into `DocFile`/`DocSection` nodes instead of the code
@@ -406,6 +417,8 @@ impl CompiledPlugin {
             export_convention: manifest.export_convention,
             test_convention: manifest.test_convention,
             reachability: manifest.reachability,
+            member_access: manifest.member_access,
+            member_access_excluded_extensions: manifest.member_access_excluded_extensions,
             documentation: manifest.documentation,
             artifact: manifest.artifact,
             filenames: manifest.filenames,

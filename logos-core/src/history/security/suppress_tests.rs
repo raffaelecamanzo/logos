@@ -11,7 +11,7 @@ use std::path::Path;
 
 use chrono::NaiveDate;
 
-use super::suppress::{label, IgnoreFile, Suppression, IGNORE_FILE};
+use super::suppress::{label, parse_expires, suppress, unsuppress, IgnoreFile, Suppression, IGNORE_FILE};
 use super::{FindingBinding, SecurityFinding, Severity};
 use crate::config::ConfigError;
 use crate::error::exit_code;
@@ -459,4 +459,209 @@ fn findings_come_back_in_input_order_not_fingerprint_order() {
         .map(|f| (f.finding.fingerprint.as_str(), f.is_suppressed()))
         .collect();
     assert_eq!(order, [(FP_C, false), (FP_A, false), (FP_B, true)]);
+}
+
+// ── triage: add and remove one entry ([S-672], [FR-SC-12]) ───────────────────
+//
+// [S-672]: ../../../../docs/planning/journal.md#s-672-findings-are-triaged-from-the-security-page
+// [FR-SC-12]: ../../../../docs/specs/requirements/FR-SC-12.md
+
+/// Sorts between the fixture's first and second entries, so the added entry
+/// lands mid-file and the round trip proves the removal restores the order.
+const FP_MID: &str = "3e8a0c5f1d7b9264a0c3e5f7b1d9a2846c0e2a4f6b8d1c3e5a7f9b2d4c6e8a01";
+
+/// A project root holding `text` as its ignore file.
+fn root_with(text: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".logos")).unwrap();
+    std::fs::write(dir.path().join(IGNORE_FILE), text).unwrap();
+    dir
+}
+
+fn on_disk(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(IGNORE_FILE)).ok()
+}
+
+const TODAY: (i32, u32, u32) = (2026, 10, 17);
+
+fn today() -> NaiveDate {
+    day(TODAY.0, TODAY.1, TODAY.2)
+}
+
+#[test]
+fn adding_then_removing_an_entry_restores_the_file_byte_for_byte() {
+    let dir = root_with(&sorted_fixture());
+
+    let added = suppress(dir.path(), FP_MID, "  reviewed: not reachable  ", Some(day(2027, 1, 31)), today()).unwrap();
+    assert_eq!(added.file, IGNORE_FILE);
+    assert_eq!(added.entries, 4);
+    assert_eq!(added.entry.reason, "reviewed: not reachable", "the reason is stored trimmed");
+    let written = on_disk(dir.path()).unwrap();
+    let fingerprints: Vec<&str> = written.lines().filter_map(|l| l.strip_prefix("fingerprint = \"")).collect();
+    assert_eq!(fingerprints.len(), 4);
+    assert!(fingerprints[1].starts_with(FP_MID), "the new entry sorts second: {written}");
+    assert!(written.contains("reason = \"reviewed: not reachable\"\nexpires = 2027-01-31\n"), "{written}");
+
+    let removed = unsuppress(dir.path(), FP_MID).unwrap();
+    assert_eq!(removed.entries, 3);
+    assert_eq!(removed.entry, added.entry);
+
+    // The comparison the story names, as `cmp` over the two files.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/security-ignore/sorted.toml");
+    let status = std::process::Command::new("cmp")
+        .arg(&fixture)
+        .arg(dir.path().join(IGNORE_FILE))
+        .status()
+        .unwrap();
+    assert!(status.success(), "cmp reported a difference after add-then-remove");
+}
+
+#[test]
+fn the_first_suppression_creates_the_file_and_removing_the_last_deletes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let added = suppress(dir.path(), FP_A, "fixture", None, today()).unwrap();
+    assert_eq!(added.entries, 1);
+    assert_eq!(on_disk(dir.path()).unwrap(), entry(FP_A, "reason = \"fixture\"\n"));
+
+    unsuppress(dir.path(), FP_A).unwrap();
+    assert!(!dir.path().join(IGNORE_FILE).exists(), "an absent file is restored as absent");
+    assert!(dir.path().join(".logos").is_dir(), "only the file goes, never the directory");
+}
+
+#[test]
+fn a_refused_suppression_writes_nothing_and_says_why() {
+    let text = sorted_fixture();
+    let expired_yesterday = today().pred_opt().unwrap();
+    let cases: [(&str, &str, Option<NaiveDate>, &str); 5] = [
+        (FP_MID, "", None, "`reason` is empty"),
+        (FP_MID, " \t\n", None, "`reason` is empty"),
+        ("not-a-fingerprint", "r", None, "is not a finding fingerprint"),
+        (FP_A, "again", None, "already suppressed"),
+        (FP_MID, "r", Some(expired_yesterday), "already past"),
+    ];
+    for (fingerprint, reason, expires, why) in cases {
+        let dir = root_with(&text);
+        let err = suppress(dir.path(), fingerprint, reason, expires, today()).unwrap_err();
+        assert_eq!(exit_code(&err), 2, "{fingerprint} {reason:?}: {err}");
+        assert!(err.downcast_ref::<ConfigError>().is_some(), "a validation fault: {err}");
+        assert!(err.to_string().contains(why), "{fingerprint} {reason:?}: {err}");
+        assert_eq!(on_disk(dir.path()).unwrap(), text, "a refused write leaves the file as it was");
+    }
+}
+
+#[test]
+fn an_expiry_of_today_is_accepted_because_it_still_suppresses_today() {
+    // The near miss of the past-expiry refusal: `expires` is inclusive.
+    let dir = root_with(&sorted_fixture());
+    let added = suppress(dir.path(), FP_MID, "r", Some(today()), today()).unwrap();
+    assert!(!added.entry.is_expired(today()));
+}
+
+#[test]
+fn removing_an_entry_the_file_does_not_hold_is_refused_and_writes_nothing() {
+    let text = sorted_fixture();
+    let dir = root_with(&text);
+    let err = unsuppress(dir.path(), FP_MID).unwrap_err();
+    assert_eq!(exit_code(&err), 2);
+    assert!(err.to_string().contains("no entry suppresses"), "{err}");
+    assert_eq!(on_disk(dir.path()).unwrap(), text);
+
+    let absent = tempfile::tempdir().unwrap();
+    assert!(unsuppress(absent.path(), FP_MID).is_err());
+    assert!(!absent.path().join(".logos").exists(), "a refused removal creates nothing");
+}
+
+#[test]
+fn a_hand_spelled_file_is_never_rewritten_so_its_comments_survive() {
+    // Valid, but not the canonical spelling: a rewrite would drop the comment
+    // and reorder the entries, so the triage write refuses instead.
+    let hand = format!(
+        "# accepted risk, reviewed weekly\n{}\n{}",
+        entry(FP_B, "reason = \"r\"\n"),
+        entry(FP_A, "reason = \"r\"\n")
+    );
+    for text in [hand.as_str(), "# nothing suppressed yet\n"] {
+        let dir = root_with(text);
+        let err = suppress(dir.path(), FP_MID, "r", None, today()).unwrap_err();
+        assert_eq!(exit_code(&err), 2);
+        assert!(err.to_string().contains("not in the canonical spelling"), "{err}");
+        assert_eq!(on_disk(dir.path()).unwrap(), text, "the hand-spelled file is untouched");
+    }
+}
+
+#[test]
+fn a_malformed_file_is_refused_before_any_write() {
+    let dir = root_with(&entry(FP_A, ""));
+    let err = suppress(dir.path(), FP_MID, "r", None, today()).unwrap_err();
+    assert_eq!(exit_code(&err), 2);
+    assert_eq!(on_disk(dir.path()).unwrap(), entry(FP_A, ""));
+}
+
+#[test]
+fn an_expiry_sent_as_text_is_read_strictly_as_a_calendar_date() {
+    assert_eq!(parse_expires("2026-12-31").unwrap(), day(2026, 12, 31));
+    assert_eq!(parse_expires(" 2026-12-31 ").unwrap(), day(2026, 12, 31), "a date input's padding is tolerated");
+    for text in ["2026-1-31", "2026-02-30", "2026-12-31T00:00", "31/12/2026", ""] {
+        let err = parse_expires(text).expect_err(text);
+        assert_eq!(exit_code(&err), 2, "{text}");
+        assert!(err.to_string().contains("not a calendar date"), "{text}: {err}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_ignore_file_that_cannot_be_read_is_refused_and_left_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let text = sorted_fixture();
+    let dir = root_with(&text);
+    let path = dir.path().join(IGNORE_FILE);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        // Running as root: permissions do not stop the read, so nothing to prove.
+        return;
+    }
+    let result = suppress(dir.path(), FP_MID, "r", None, today());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let err = result.expect_err("an unreadable file must be refused, never treated as absent");
+    assert!(matches!(err.downcast_ref::<ConfigError>(), Some(ConfigError::Io { .. })), "{err}");
+    assert_eq!(on_disk(dir.path()).unwrap(), text, "the committed entries survive");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_write_is_reported_and_the_file_is_left_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let text = sorted_fixture();
+    let dir = root_with(&text);
+    let logos = dir.path().join(".logos");
+    std::fs::set_permissions(&logos, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(logos.join("probe"), "").is_ok() {
+        // Running as root: a read-only directory does not stop the write.
+        std::fs::set_permissions(&logos, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let result = suppress(dir.path(), FP_MID, "r", None, today());
+    std::fs::set_permissions(&logos, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = result.expect_err("a write that did not happen must not report success");
+    assert!(matches!(err.downcast_ref::<ConfigError>(), Some(ConfigError::Write { .. })), "{err}");
+    assert_eq!(on_disk(dir.path()).unwrap(), text);
+}
+
+#[test]
+fn concurrent_suppressions_keep_every_entry() {
+    // Each write reads, edits and publishes the whole file: without the
+    // serialisation, a later publish drops the entries written meanwhile.
+    let dir = tempfile::tempdir().unwrap();
+    std::thread::scope(|scope| {
+        for i in 0..32u32 {
+            let root = dir.path();
+            scope.spawn(move || suppress(root, &format!("{i:064x}"), "r", None, today()).unwrap());
+        }
+    });
+    let file = IgnoreFile::load(dir.path()).unwrap();
+    assert_eq!(file.len(), 32, "every concurrent suppression is in the file");
 }

@@ -22,48 +22,70 @@
 //! [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
 //! [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 
-use super::{FindingBinding, ScannerSnapshot, SecurityFinding, SecurityView, Severity};
+use rusqlite::OptionalExtension;
+
+use super::{ScannerSnapshot, SecurityBaseline, SecurityFinding, SecurityView};
 use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE};
 
 /// Read every scanner's latest snapshot under `root`, findings freshness-resolved.
 ///
+/// With no `history.db` at all nothing was ever stored, so the view is empty
+/// and no store is created: a read writes nothing ([ADR-28]). The workspace
+/// security roll-up reads every member this way, never-scanned ones included.
+///
 /// # Errors
 /// Returns an error only on an unexpected store failure.
+///
+/// [ADR-28]: ../../../../docs/specs/architecture/decisions/ADR-28.md
 pub fn read_latest(root: &Path) -> Result<SecurityView> {
+    read_where(root, LATEST, None, true)
+}
+
+/// Every scanner's latest snapshot as [`read_latest`] reads it, without its
+/// findings: no file is hashed.
+///
+/// # Errors
+/// Returns an error only on an unexpected store failure.
+pub fn latest_snapshots(root: &Path) -> Result<Vec<ScannerSnapshot>> {
+    Ok(read_where(root, LATEST, None, false)?.snapshots)
+}
+
+/// The condition selecting each scanner's most recently written snapshot.
+const LATEST: &str = "s.id = (SELECT MAX(id) FROM security_snapshots WHERE scanner_name = s.scanner_name)";
+
+/// Read every scanner's snapshot anchored to `commit` — at most one per scanner
+/// (a re-ingest at one HEAD replaces it) — findings freshness-resolved against
+/// the working tree as [`read_latest`] resolves them. The merge-base half of
+/// the branch security delta ([FR-SC-18]): the snapshot *recorded* at that
+/// commit, never a scan of its tree. An empty view when none was recorded,
+/// and no store is created ([ADR-28]).
+///
+/// # Errors
+/// Returns an error only on an unexpected store failure.
+///
+/// [FR-SC-18]: ../../../../docs/specs/requirements/FR-SC-18.md
+/// [ADR-28]: ../../../../docs/specs/architecture/decisions/ADR-28.md
+pub fn read_at(root: &Path, commit: &str) -> Result<SecurityView> {
+    read_where(root, "s.head_sha = ?1", Some(commit), true)
+}
+
+/// The snapshots `filter` (a condition on `security_snapshots s`, with `param`
+/// bound as `?1` when given) selects, and — `with_findings` — their findings.
+fn read_where(root: &Path, filter: &str, param: Option<&str>, with_findings: bool) -> Result<SecurityView> {
+    if !crate::history::db_path(root).exists() {
+        return Ok(SecurityView { snapshots: Vec::new(), findings: Vec::new() });
+    }
     let conn = crate::history::open(root)?;
+    let snapshots = snapshots_where(&conn, filter, param)?;
 
-    let snapshots: Vec<ScannerSnapshot> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.id, s.scanner_name, s.scanner_version, s.head_sha, s.report_hash,
-                        (SELECT COUNT(*) FROM security_findings f WHERE f.snapshot_id = s.id)
-                   FROM security_snapshots s
-                  WHERE s.id = (SELECT MAX(id) FROM security_snapshots
-                                 WHERE scanner_name = s.scanner_name)
-                  ORDER BY s.scanner_name",
-            )
-            .context("preparing the latest security snapshot read")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ScannerSnapshot {
-                    snapshot_id: row.get(0)?,
-                    scanner_name: row.get(1)?,
-                    scanner_version: row.get(2)?,
-                    head_sha: row.get(3)?,
-                    report_hash: row.get(4)?,
-                    finding_count: row.get::<_, i64>(5)? as usize,
-                })
-            })
-            .context("reading the latest security snapshots")?;
-        rows.collect::<rusqlite::Result<_>>()
-            .context("collecting the latest security snapshots")?
-    };
-
+    if !with_findings {
+        return Ok(SecurityView { snapshots, findings: Vec::new() });
+    }
     // Each file's current hash is computed once, however many snapshots anchor it.
     let mut current: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut findings = Vec::new();
@@ -79,48 +101,13 @@ pub fn read_latest(root: &Path) -> Result<SecurityView> {
                 .context("collecting the security file anchors")?
         };
 
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT fingerprint, rule_id, severity, cwes, message, redacted, binding,
-                        report_path, path, start_line, start_column, end_line, end_column
-                   FROM security_findings
-                  WHERE snapshot_id = ?1
-                  ORDER BY path IS NULL, path, start_line, start_column, rule_id, fingerprint",
-            )
-            .context("preparing the security finding read")?;
-        type Row = (
-            String,
-            String,
-            String,
-            String,
-            String,
-            bool,
-            String,
-            Option<String>,
-            Option<String>,
-            [Option<i64>; 4],
-        );
-        let rows: Vec<Row> = stmt
-            .query_map([snap.snapshot_id], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    [row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?],
-                ))
-            })
-            .context("reading security findings")?
-            .collect::<rusqlite::Result<_>>()
-            .context("collecting security findings")?;
-
-        for (fingerprint, rule_id, severity, cwes, message, redacted, binding, report_path, path, region) in rows {
-            let freshness = match path.as_deref() {
+        let rows = super::store::finding_rows(
+            &conn,
+            snap.snapshot_id,
+            "path IS NULL, path, start_line, start_column, rule_id, fingerprint",
+        )?;
+        for row in rows {
+            let freshness = match row.path.as_deref() {
                 Some(p) => {
                     let now = current
                         .entry(p.to_string())
@@ -139,29 +126,102 @@ pub fn read_latest(root: &Path) -> Result<SecurityView> {
                 scanner_name: snap.scanner_name.clone(),
                 scanner_version: snap.scanner_version.clone(),
                 head_sha: snap.head_sha.clone(),
-                fingerprint,
-                severity: Severity::from_str_stored(&severity)
-                    .ok_or_else(|| anyhow!("stored severity {severity:?} is not one Logos writes"))?,
-                cwes: if cwes.is_empty() {
-                    Vec::new()
-                } else {
-                    cwes.split(',').map(str::to_string).collect()
-                },
-                rule_id,
-                message,
-                redacted,
-                binding: FindingBinding::from_str_stored(&binding)
-                    .ok_or_else(|| anyhow!("stored binding {binding:?} is not one Logos writes"))?,
-                report_path,
-                path,
-                start_line: region[0],
-                start_column: region[1],
-                end_line: region[2],
-                end_column: region[3],
+                fingerprint: row.fingerprint,
+                severity: row.severity,
+                cwes: row.cwes,
+                rule_id: row.rule_id,
+                message: row.message,
+                redacted: row.redacted,
+                binding: row.binding,
+                report_path: row.report_path,
+                path: row.path,
+                start_line: row.region.start_line,
+                start_column: row.region.start_column,
+                end_line: row.region.end_line,
+                end_column: row.region.end_column,
                 freshness,
             });
         }
     }
 
     Ok(SecurityView { snapshots, findings })
+}
+
+/// The snapshots `filter` selects (see [`read_where`]), by scanner name, each
+/// with its stored scope decoded.
+fn snapshots_where(conn: &rusqlite::Connection, filter: &str, param: Option<&str>) -> Result<Vec<ScannerSnapshot>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT s.id, s.scanner_name, s.scanner_version, s.head_sha, s.report_hash,
+                    (SELECT COUNT(*) FROM security_findings f WHERE f.snapshot_id = s.id),
+                    s.created_at, s.full_head_sha, s.scope
+               FROM security_snapshots s
+              WHERE {filter}
+              ORDER BY s.scanner_name"
+        ))
+        .context("preparing the security snapshot read")?;
+    let params: Vec<&dyn rusqlite::ToSql> = param.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    let rows = stmt
+        .query_map(params.as_slice(), |row| {
+            Ok((
+                ScannerSnapshot {
+                    snapshot_id: row.get(0)?,
+                    scanner_name: row.get(1)?,
+                    scanner_version: row.get(2)?,
+                    head_sha: row.get(3)?,
+                    report_hash: row.get(4)?,
+                    finding_count: row.get::<_, i64>(5)? as usize,
+                    created_at: row.get(6)?,
+                    full_head_sha: row.get(7)?,
+                    scope: Vec::new(),
+                },
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })
+        .context("reading the security snapshots")?;
+    let mut snapshots = Vec::new();
+    for row in rows {
+        let (mut snapshot, scope) = row.context("collecting the security snapshots")?;
+        if let Some(scope) = scope {
+            snapshot.scope = serde_json::from_str(&scope).context("reading a stored scan scope")?;
+        }
+        snapshots.push(snapshot);
+    }
+    Ok(snapshots)
+}
+
+/// Read the security ratchet's baseline under `root` — the fingerprints the
+/// last `gate --save` recorded under a `[security]` table ([FR-SC-10]) — or
+/// `None` when none was ever saved, which is not an empty baseline. With no
+/// `history.db` at all none was, and no store is created ([ADR-28]), as
+/// [`read_latest`] does.
+///
+/// [FR-SC-10]: ../../../../docs/specs/requirements/FR-SC-10.md
+/// [ADR-28]: ../../../../docs/specs/architecture/decisions/ADR-28.md
+///
+/// # Errors
+/// Returns an error only on an unexpected store failure.
+pub fn read_baseline(root: &Path) -> Result<Option<SecurityBaseline>> {
+    if !crate::history::db_path(root).exists() {
+        return Ok(None);
+    }
+    let conn = crate::history::open(root)?;
+    let Some((head_sha, config_hash)) = conn
+        .query_row("SELECT head_sha, config_hash FROM security_baseline WHERE id = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .context("reading the security baseline")?
+    else {
+        return Ok(None);
+    };
+    let mut stmt = conn
+        .prepare("SELECT fingerprint FROM security_baseline_findings ORDER BY fingerprint")
+        .context("preparing the security baseline read")?;
+    let fingerprints = stmt
+        .query_map([], |row| row.get(0))
+        .context("reading the security baseline fingerprints")?
+        .collect::<rusqlite::Result<BTreeSet<String>>>()
+        .context("collecting the security baseline fingerprints")?;
+    Ok(Some(SecurityBaseline { head_sha, config_hash, fingerprints }))
 }

@@ -13,7 +13,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use logos_core::config::{self, Config, ConfigError, MaxDead, MaxDeadBaseline, DEFAULT_MAX_FILE_SIZE};
+use logos_core::config::{
+    self, Budget, Config, ConfigError, CountBudget, GodContainersBudget, MaxDead, MaxDeadBaseline,
+    RatioBudget, DEFAULT_MAX_FILE_SIZE,
+};
 use tempfile::tempdir;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -277,13 +280,13 @@ fn valid_rules_parse() {
         "#,
     );
     let rules = config::load_rules(&path).unwrap();
-    assert_eq!(rules.constraints.max_cycles, Some(0));
-    assert_eq!(rules.constraints.no_god_files, Some(40));
+    assert_eq!(rules.constraints.max_cycles, Some(CountBudget::Absolute(0)));
+    assert_eq!(rules.constraints.no_god_files, Some(Budget::Absolute(40)));
     // CR-002 / FR-GV-11: the coupling & redundancy budgets parse.
-    assert_eq!(rules.constraints.max_fan_in, Some(20));
-    assert_eq!(rules.constraints.max_fan_out, Some(15));
+    assert_eq!(rules.constraints.max_fan_in, Some(Budget::Absolute(20)));
+    assert_eq!(rules.constraints.max_fan_out, Some(Budget::Absolute(15)));
     assert_eq!(rules.constraints.max_dead, Some(MaxDead::Absolute(0)));
-    assert_eq!(rules.constraints.max_duplicates, Some(3));
+    assert_eq!(rules.constraints.max_duplicates, Some(Budget::Absolute(3)));
     assert_eq!(rules.layers.len(), 2);
     assert_eq!(rules.layers[0].name, "domain");
     assert_eq!(rules.boundaries.len(), 1);
@@ -421,10 +424,10 @@ duplicate_min_tokens = 12
 ",
     );
     let rules = config::load_rules(&path).unwrap();
-    assert_eq!(rules.constraints.max_nesting_depth, Some(4));
-    assert_eq!(rules.constraints.max_brain_methods, Some(0));
-    assert_eq!(rules.constraints.max_clone_ratio, Some(0.0));
-    assert_eq!(rules.constraints.no_god_containers, Some(true));
+    assert_eq!(rules.constraints.max_nesting_depth, Some(Budget::Absolute(4)));
+    assert_eq!(rules.constraints.max_brain_methods, Some(Budget::Absolute(0)));
+    assert_eq!(rules.constraints.max_clone_ratio, Some(RatioBudget::Absolute(0.0)));
+    assert_eq!(rules.constraints.no_god_containers, Some(GodContainersBudget::Flag(true)));
     assert_eq!(rules.metric_thresholds.nesting_depth, Some(5));
     assert_eq!(rules.metric_thresholds.god_methods, Some(30));
     // CR-013: the two near-clone keys parse under [metric_thresholds].
@@ -1123,7 +1126,7 @@ fn load_rules_from_root_reads_the_logos_subdir() {
         "[constraints]\nmax_cycles = 1\n",
     );
     let rules = config::load_rules_from_root(dir.path()).unwrap();
-    assert_eq!(rules.constraints.max_cycles, Some(1));
+    assert_eq!(rules.constraints.max_cycles, Some(CountBudget::Absolute(1)));
 }
 
 #[test]

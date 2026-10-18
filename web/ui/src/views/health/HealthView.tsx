@@ -8,7 +8,9 @@
  * (web/src/views/health.rs, frontend-design §4.2) and renders it through the
  * S-611 `Widget` frame in one `WidgetStack` (S-615, CR-203, FR-UI-43): the Gate
  * widget leads, then the Quality signal widget (scope line and thresholds
- * disclosure folded in), then one widget per quality dimension — all ten, in
+ * disclosure folded in), then the Where to start widget (S-505, FR-QM-17: the
+ * snapshot's ranked fix units, drawn only when the snapshot holds metrics), then
+ * one widget per quality dimension — all ten, in
  * canonical order — then the Signal trend (the non-gated pointer to Files & Risk
  * that sat between them is hidden through the hidden-widget register,
  * S-612/FR-UI-41). Every widget sentence and figure text is the
@@ -41,6 +43,7 @@ import type {
   HealthModel,
   Offender,
   ScanResult,
+  WhereToStart,
 } from "../../api/types.ts";
 import {
   Badge,
@@ -56,11 +59,13 @@ import {
   type Column,
 } from "../../components/index.ts";
 import {
+  CYCLES_LINK,
   DIMENSION_COPY,
   DIMENSION_NOT_CURRENT,
   NO_APPLICABLE_CONSTRUCT,
   NO_SNAPSHOTS,
   OFFENDER_STATEMENT,
+  OUTLIER_MEASURE,
   READING_ABSENCE,
   THRESHOLDS_DISCLOSURE,
   gate as gateCopy,
@@ -73,6 +78,11 @@ import {
   signalFigure,
   signalTrend as signalTrendCopy,
   staleNote,
+  whereToStart as whereToStartCopy,
+  whereToStartBasis,
+  whereToStartFigure,
+  WHERE_TO_START_CAPTION,
+  WHERE_TO_START_STATEMENT,
 } from "../../copy/health.copy.ts";
 import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
@@ -89,10 +99,13 @@ import {
   shortSha,
   signalAbsence,
   snapshotStaleness,
+  unitLocation,
+  whereToStart,
   type DimensionDetail,
   type MetricRow,
   type SignalAbsence,
   type SnapshotCurrency,
+  type WhereToStartRow,
 } from "./healthModel.ts";
 import styles from "./Health.module.css";
 
@@ -128,6 +141,9 @@ function Health({ data }: { data: HealthModel }) {
     <WidgetStack>
       <GateWidget gate={data.gate} absence={absence} currency={currency} lowest={lowest} />
       <QualitySignalWidget scan={data.scan} absence={absence} currency={currency} />
+      {!data.scan.metrics.empty && (
+        <WhereToStartWidget ranking={data.scan.where_to_start} currency={currency} />
+      )}
       {!data.scan.metrics.empty &&
         dimensionDetails(data.scan).map((dim) => (
           <DimensionWidget key={dim.key} dim={dim} currency={currency} />
@@ -418,10 +434,53 @@ function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: Sn
   );
 }
 
-/** A dimension widget's evidence: the offender table, the statement of a state
- *  with no table, or — for the dimension the payload lists nothing for — the
- *  named absence. */
+/** A dimension widget's evidence: what the dimension lists, then — where the
+ *  dimension has them — why its units carry no Where to start points and the
+ *  link to its cycles (S-505, FR-QM-17). A dimension that dropped out has no
+ *  evidence at all, and so none of these; one with nothing recorded has the
+ *  absence statement alone (plus Acyclicity's link, which points at where the
+ *  cycles can be read). */
 function DimensionEvidence({ dim }: { dim: DimensionDetail }) {
+  if (dim.offenderState === "not-applicable") return null;
+  // The note explains a list (or the lack of one within thresholds), so it is
+  // drawn only where the snapshot recorded one: an unrecorded dimension has no
+  // list to say anything about, and its absence statement stands alone.
+  const unranked =
+    dim.offenderState === "listed" || dim.offenderState === "none-flagged" ? DIMENSION_COPY[dim.key].unranked : undefined;
+  return (
+    <>
+      <OffenderEvidence dim={dim} />
+      {unranked !== undefined && (
+        <p className={styles.statement} data-where-to-start="unranked">
+          {unranked}
+        </p>
+      )}
+      {dim.key === "acyclicity" && <CyclesLink />}
+    </>
+  );
+}
+
+/** The link from Acyclicity to the Architecture view, drawn only while that view
+ *  is shown: a link into a hidden view would land back on Health (CR-208), so the
+ *  register decides, and bringing the view back brings the link with it. It names
+ *  the view's Cycles while that list is shown, and the dependency matrix, whose
+ *  cycle cells stay outlined, while the list is still hidden (S-505, FR-QM-17,
+ *  FR-UI-05). */
+function CyclesLink() {
+  if (isWidgetHidden("architecture-view")) return null;
+  const link = isWidgetHidden("architecture-cycles") ? CYCLES_LINK.matrix : CYCLES_LINK.cycles;
+  return (
+    <p className={styles.statement} data-where-to-start="cycles-link">
+      {link.before}
+      <a href="/architecture">{link.label}</a>
+      {link.after}
+    </p>
+  );
+}
+
+/** The offender table, the statement of a state with no table, or — for the
+ *  dimension the payload lists nothing for — the named absence. */
+function OffenderEvidence({ dim }: { dim: DimensionDetail }) {
   switch (dim.offenderState) {
     case "not-applicable":
       return null;
@@ -467,6 +526,109 @@ function OffendersTable({ offenders }: { offenders: Offender[] }) {
       rows={offenders}
       rowKey={(o, i) => `${o.file}:${o.name}:${i}`}
       caption="Worst offenders"
+      captionVisible
+      pageSize={DEFAULT_TABLE_PAGE_SIZE}
+    />
+  );
+}
+
+/** The Where to start widget (S-505, FR-QM-17): the snapshot's ranked fix units,
+ *  each with the signal points fixing it would recover — an advisory estimate,
+ *  which the caption and the payload's own `basis` say. `recorded` decides what an
+ *  empty list means (`whereToStart`): never read from the list's length. The
+ *  not-current line is the dimension widgets' own, pointing at the Gate. */
+function WhereToStartWidget({
+  ranking,
+  currency,
+}: {
+  ranking: WhereToStart;
+  currency: SnapshotCurrency | null;
+}) {
+  const { state, rows } = whereToStart(ranking);
+  const stale = currency !== null && <FigureNote block>{DIMENSION_NOT_CURRENT}</FigureNote>;
+  // The figure row holds what there is to say about the ranking itself: how many
+  // units it ranked, and that its snapshot is not a current reading. A state with
+  // neither has no figure row at all.
+  const figure =
+    state === "listed" || currency !== null ? (
+      <div className={styles.figureLines}>
+        {state === "listed" && <span className="num">{whereToStartFigure(rows.length)}</span>}
+        {stale}
+      </div>
+    ) : undefined;
+  if (state !== "listed") {
+    return (
+      <Widget title="Where to start" copy={whereToStartCopy} figure={figure}>
+        <p className={styles.statement} data-where-to-start={state}>
+          {WHERE_TO_START_STATEMENT[state]}
+        </p>
+      </Widget>
+    );
+  }
+  return (
+    <Widget title="Where to start" copy={whereToStartCopy} figure={figure}>
+      <WhereToStartTable rows={rows} />
+      {ranking.basis !== undefined && (
+        <p className={styles.statement} data-where-to-start="basis">
+          {whereToStartBasis(ranking.basis)}
+        </p>
+      )}
+    </Widget>
+  );
+}
+
+/** The ranked units as one table, in the payload's own order (the engine's:
+ *  points descending, then dimension, then node id — a header click may re-sort
+ *  what is shown, never what is ranked). */
+function WhereToStartTable({ rows }: { rows: WhereToStartRow[] }) {
+  const columns: Column<WhereToStartRow>[] = [
+    { key: "rank", header: "Rank", numeric: true, mono: true, cell: (r) => r.rank, sortValue: (r) => r.rank },
+    {
+      key: "unit",
+      header: "Unit",
+      cell: (r) => (
+        <span data-unit-kind={r.kind}>
+          <span className="mono">{r.name}</span>
+          <FigureNote block>
+            {[r.detail, unitLocation(r.file, r.line)].filter((part) => part !== "").join(" · ")}
+          </FigureNote>
+        </span>
+      ),
+      sortValue: (r) => r.name,
+    },
+    {
+      key: "dimension",
+      header: "Dimension",
+      cell: (r) => r.dimensions.join(", "),
+      sortValue: (r) => r.dimensions.join(", "),
+    },
+    {
+      key: "points",
+      header: "Est. points",
+      numeric: true,
+      mono: true,
+      cell: (r) => r.points,
+      sortValue: (r) => r.points,
+    },
+    {
+      key: "outlier",
+      header: "Outlier",
+      cell: (r) =>
+        r.outliers.map((measure, i) => (
+          <span key={measure}>
+            {i > 0 && ", "}
+            <CopyTextView text={OUTLIER_MEASURE[measure] ?? measure} />
+          </span>
+        )),
+      sortValue: (r) => r.outliers.length,
+    },
+  ];
+  return (
+    <DataTable
+      columns={columns}
+      rows={rows}
+      rowKey={(r) => `${r.rank}:${r.name}`}
+      caption={WHERE_TO_START_CAPTION}
       captionVisible
       pageSize={DEFAULT_TABLE_PAGE_SIZE}
     />

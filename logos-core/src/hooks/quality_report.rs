@@ -63,7 +63,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::EmitAction;
 
@@ -467,29 +467,159 @@ fn sweep_retired_scripts(base: &Path, spec: &HookSpec, unsweepable: &[&str]) -> 
                 .push(format!("{rel} (left: its settings entry was not recognized)"));
             continue;
         }
-        let path = base.join(rel);
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            // Genuinely absent — the common, silent case.
-            continue;
-        };
-        if !meta.is_file() {
-            sweep
-                .skipped
-                .push(format!("{rel} (left: not a regular file)"));
-            continue;
-        }
-        match fs::read_to_string(&path) {
-            Ok(body) if body.contains(MANAGED_MARKER) => match fs::remove_file(&path) {
-                Ok(()) => sweep.removed.push(rel.to_string()),
-                Err(err) => sweep.skipped.push(format!("{rel} (left: {err})")),
-            },
-            Ok(_) => sweep
-                .skipped
-                .push(format!("{rel} (left: not a Logos-authored script)")),
-            Err(err) => sweep.skipped.push(format!("{rel} (left: {err})")),
-        }
+        remove_managed_script(base, rel, &mut sweep);
     }
     sweep
+}
+
+/// Delete the script at `base/rel` if it is a regular file carrying
+/// [`MANAGED_MARKER`], recording the outcome in `sweep` — the per-file rule
+/// [`sweep_retired_scripts`] documents, shared with [`retire_quality_report`].
+/// A genuinely absent path records nothing.
+fn remove_managed_script(base: &Path, rel: &str, sweep: &mut ScriptSweep) {
+    let path = base.join(rel);
+    let Ok(meta) = fs::symlink_metadata(&path) else {
+        // Genuinely absent — the common, silent case.
+        return;
+    };
+    if !meta.is_file() {
+        sweep
+            .skipped
+            .push(format!("{rel} (left: not a regular file)"));
+        return;
+    }
+    match fs::read_to_string(&path) {
+        Ok(body) if body.contains(MANAGED_MARKER) => match fs::remove_file(&path) {
+            Ok(()) => sweep.removed.push(rel.to_string()),
+            Err(err) => sweep.skipped.push(format!("{rel} (left: {err})")),
+        },
+        Ok(_) => sweep
+            .skipped
+            .push(format!("{rel} (left: not a Logos-authored script)")),
+        Err(err) => sweep.skipped.push(format!("{rel} (left: {err})")),
+    }
+}
+
+/// What [`retire_quality_report`] did ([FR-IN-12]).
+///
+/// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HookRetireSummary {
+    /// The hook script path, repo-relative.
+    pub script: String,
+    /// Artifacts removed, repo-relative; a settings entry is named
+    /// `<script> (settings entry)`, as [`HookEmitSummary::retired_removed`]
+    /// names one. Empty when nothing of the hook was left.
+    pub removed: Vec<String>,
+    /// Artifacts left in place, each with the reason.
+    pub skipped: Vec<String>,
+    /// Why the settings file was not touched at all; `None` when it was read.
+    pub notice: Option<String>,
+}
+
+/// Remove the session-start quality-report hook from `base` ([FR-IN-12]):
+/// its `SessionStart` entry and the retired `SessionEnd` one from
+/// `.claude/settings.json`, and their marker-tagged scripts. What the Claude
+/// Code plugin migration and `init --uninstall` both call — the plugin carries
+/// the readout, so this copy would print it a second time.
+///
+/// The inverse of [`materialize_quality_report`], under the same rules:
+/// - only a hook whose command is exactly one Logos wrote is removed, at hook
+///   granularity, so a user command sharing the entry survives;
+/// - an event array, a `hooks` object or the whole file is dropped only when
+///   this call emptied it;
+/// - a settings file that does not parse, or an event that is not an array,
+///   leaves its entry **and** that entry's script alone, so no registration is
+///   left pointing at nothing;
+/// - a script goes only when it is a regular file carrying the marker.
+///
+/// A second call finds nothing and writes nothing.
+///
+/// # Errors
+/// Only on an I/O failure reading or writing the settings file.
+///
+/// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+pub(crate) fn retire_quality_report(base: &Path) -> Result<HookRetireSummary> {
+    let spec = &QUALITY_REPORT_SPEC;
+    let mut summary = HookRetireSummary {
+        script: spec.script_rel.to_string(),
+        ..HookRetireSummary::default()
+    };
+    // (event, command, script) for the live hook and every retired one.
+    let owned: Vec<(&str, &str, &str)> = std::iter::once((spec.event, spec.command, spec.script_rel))
+        .chain(spec.retired.iter().map(|r| (r.event, r.command, r.script_rel)))
+        .collect();
+    let settings_path = base.join(spec.settings_rel);
+    let mut unsweepable: Vec<&str> = Vec::new();
+    if settings_path.exists() {
+        // A shared file, not a Logos-written one: one that cannot be read is
+        // left alone with the reason, never a failure that stops the caller.
+        let text = match fs::read_to_string(&settings_path) {
+            Ok(text) => text,
+            Err(err) => {
+                summary.notice = Some(format!(
+                    "existing {} could not be read ({err}) — left untouched",
+                    spec.settings_rel
+                ));
+                return Ok(summary);
+            }
+        };
+        let mut obj = match parse_settings(Some(&text)) {
+            Ok(obj) => obj,
+            Err(shape) => {
+                summary.notice = Some(shape.reason(spec.settings_rel));
+                return Ok(summary);
+            }
+        };
+        let mut swept = Vec::new();
+        match obj.get_mut("hooks") {
+            None => {}
+            Some(Value::Object(hooks)) => {
+                for (event, command, script) in &owned {
+                    let Some(entries) = hooks.get_mut(*event) else { continue };
+                    let Some(arr) = entries.as_array_mut() else {
+                        unsweepable.push(*script);
+                        continue;
+                    };
+                    if prune_our_hooks(arr, command) {
+                        swept.push(*script);
+                        if arr.is_empty() {
+                            hooks.shift_remove(*event);
+                        }
+                    }
+                }
+                if !swept.is_empty() && hooks.is_empty() {
+                    obj.shift_remove("hooks");
+                }
+            }
+            Some(_) => unsweepable.extend(owned.iter().map(|(_, _, script)| *script)),
+        }
+        if !swept.is_empty() {
+            if obj.is_empty() {
+                fs::remove_file(&settings_path)
+                    .with_context(|| format!("removing {}", settings_path.display()))?;
+            } else {
+                fs::write(&settings_path, serialize(&Value::Object(obj)))
+                    .with_context(|| format!("writing {}", settings_path.display()))?;
+            }
+            summary
+                .removed
+                .extend(swept.iter().map(|script| format!("{script} (settings entry)")));
+        }
+    }
+    let mut sweep = ScriptSweep::default();
+    for (_, _, script) in &owned {
+        if unsweepable.contains(script) {
+            sweep
+                .skipped
+                .push(format!("{script} (left: its settings entry was not recognized)"));
+        } else {
+            remove_managed_script(base, script, &mut sweep);
+        }
+    }
+    summary.removed.extend(sweep.removed);
+    summary.skipped.extend(sweep.skipped);
+    Ok(summary)
 }
 
 /// Write the marker-tagged hook script, marking it executable on Unix.
@@ -587,26 +717,17 @@ fn prune_our_hooks(arr: &mut Vec<Value>, command: &str) -> bool {
 /// verbatim.
 fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge {
     let settings = spec.settings_rel;
-    let mut config: Value = match existing {
-        None => json!({}),
-        Some(text) if text.trim().is_empty() => json!({}),
-        Some(text) => match serde_json::from_str(text) {
-            Ok(value) => value,
-            Err(_) => {
-                return Merge::Foreign {
-                    reason: format!(
-                        "existing {settings} is not valid JSON — left untouched; \
-                         run `logos hook --emit` after fixing it"
-                    ),
-                };
-            }
-        },
-    };
-
-    let Some(obj) = config.as_object_mut() else {
-        return Merge::Foreign {
-            reason: format!("existing {settings} is not a JSON object — left untouched"),
-        };
+    let mut obj = match parse_settings(existing) {
+        Ok(obj) => obj,
+        Err(SettingsShape::NotJson) => {
+            return Merge::Foreign {
+                reason: format!(
+                    "{}; run `logos hook --emit` after fixing it",
+                    SettingsShape::NotJson.reason(settings)
+                ),
+            };
+        }
+        Err(shape) => return Merge::Foreign { reason: shape.reason(settings) },
     };
     let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
     let Some(hooks_obj) = hooks.as_object_mut() else {
@@ -688,10 +809,45 @@ fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge
     };
 
     Merge::Write {
-        json: serialize(&config),
+        json: serialize(&Value::Object(obj)),
         action,
         swept,
         unsweepable,
+    }
+}
+
+/// Why a Claude Code settings file cannot be edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsShape {
+    /// It does not parse as JSON.
+    NotJson,
+    /// It parses, but not as an object.
+    NotObject,
+}
+
+impl SettingsShape {
+    /// The reason reported for the settings file at `rel`.
+    pub(crate) fn reason(self, rel: &str) -> String {
+        match self {
+            Self::NotJson => format!("existing {rel} is not valid JSON — left untouched"),
+            Self::NotObject => format!("existing {rel} is not a JSON object — left untouched"),
+        }
+    }
+}
+
+/// A settings file's text as the object to edit — `{}` for an absent or blank
+/// file — or why it must be left alone. The one parse the hook materializer,
+/// its retirement and the plugin enrolment share, so the three agree on what
+/// an editable settings file is.
+pub(crate) fn parse_settings(text: Option<&str>) -> Result<Map<String, Value>, SettingsShape> {
+    match text {
+        None => Ok(Map::new()),
+        Some(text) if text.trim().is_empty() => Ok(Map::new()),
+        Some(text) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(obj)) => Ok(obj),
+            Ok(_) => Err(SettingsShape::NotObject),
+            Err(_) => Err(SettingsShape::NotJson),
+        },
     }
 }
 
@@ -1624,5 +1780,106 @@ mod tests {
             stdout.is_empty() && stderr.is_empty(),
             "an older binary's usage error is swallowed: stdout={stdout:?} stderr={stderr:?}"
         );
+    }
+
+    // ── retire_quality_report ([FR-IN-12]) ──────────────────────────────────
+
+    fn settings_of(base: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(base.join(SETTINGS_REL)).unwrap()).unwrap()
+    }
+
+    /// The inverse of an install: entry and script go, the user's keys and a
+    /// hook of theirs sharing our entry stay, and the user's key order holds.
+    #[test]
+    fn retire_removes_exactly_what_materialize_wrote() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        fs::create_dir_all(base.join(".claude")).unwrap();
+        fs::write(base.join(SETTINGS_REL), r#"{"permissions":{},"hooks":{},"model":"x"}"#).unwrap();
+        materialize_quality_report(base, false).unwrap();
+        // A user command appended into the entry Logos installed.
+        let mut settings = settings_of(base);
+        settings["hooks"]["SessionStart"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "type": "command", "command": "theirs.sh" }));
+        fs::write(base.join(SETTINGS_REL), serialize(&settings)).unwrap();
+
+        let summary = retire_quality_report(base).unwrap();
+        assert_eq!(
+            summary.removed,
+            vec![
+                format!("{QUALITY_REPORT_HOOK_SCRIPT_REL} (settings entry)"),
+                QUALITY_REPORT_HOOK_SCRIPT_REL.to_string()
+            ]
+        );
+        assert!(!base.join(QUALITY_REPORT_HOOK_SCRIPT_REL).exists());
+        let left = settings_of(base);
+        let start = left["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start.len(), 1, "the entry survives for the user's hook: {left}");
+        assert_eq!(start[0]["hooks"], json!([{ "type": "command", "command": "theirs.sh" }]));
+        let keys: Vec<&String> = left.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["permissions", "hooks", "model"], "the user's key order holds");
+
+        let again = retire_quality_report(base).unwrap();
+        assert!(again.removed.is_empty() && again.skipped.is_empty(), "{again:?}");
+    }
+
+    /// A settings file Logos created holds nothing once the entry goes, so it
+    /// goes too; and the retired SessionEnd hook goes with the live one.
+    #[test]
+    fn retire_deletes_a_settings_file_it_emptied_and_the_retired_hook() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        materialize_quality_report(base, false).unwrap();
+        let mut settings = settings_of(base);
+        settings["hooks"]["SessionEnd"] = serde_json::from_str(&format!("[{RETIRED_ENTRY}]")).unwrap();
+        fs::write(base.join(SETTINGS_REL), serialize(&settings)).unwrap();
+        fs::write(base.join(".claude/hooks/logos-quality-report.sh"), RETIRED_SCRIPT_BODY).unwrap();
+
+        let summary = retire_quality_report(base).unwrap();
+        assert_eq!(summary.removed.len(), 4, "{summary:?}");
+        assert!(!base.join(SETTINGS_REL).exists(), "a file this emptied is deleted");
+        assert!(!base.join(".claude/hooks/logos-quality-report.sh").exists());
+
+        // A `hooks` object this emptied goes without reordering the user's keys.
+        fs::write(base.join(SETTINGS_REL), r#"{"a":1,"hooks":{},"b":2,"c":3}"#).unwrap();
+        materialize_quality_report(base, false).unwrap();
+        retire_quality_report(base).unwrap();
+        let keys: Vec<String> = settings_of(base).as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+    }
+
+    /// Ownership near misses: an unmarked script at our path, a symlink there,
+    /// a command that merely names our script, and an unparseable or
+    /// non-array settings shape are all left alone — and an entry left in
+    /// place keeps its script.
+    #[test]
+    fn retire_leaves_what_logos_did_not_write() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let script = base.join(QUALITY_REPORT_HOOK_SCRIPT_REL);
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/bin/sh\n# my own readout\n").unwrap();
+        let near = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"wrap.sh ${CLAUDE_PROJECT_DIR}/.claude/hooks/logos-quality-open.sh"}]}]}}"#;
+        fs::write(base.join(SETTINGS_REL), near).unwrap();
+        let summary = retire_quality_report(base).unwrap();
+        assert!(summary.removed.is_empty(), "{summary:?}");
+        assert_eq!(summary.skipped, [format!("{QUALITY_REPORT_HOOK_SCRIPT_REL} (left: not a Logos-authored script)")]);
+        assert_eq!(fs::read_to_string(base.join(SETTINGS_REL)).unwrap(), near, "not rewritten");
+
+        fs::write(&script, QUALITY_REPORT_HOOK_SCRIPT).unwrap();
+        fs::write(base.join(SETTINGS_REL), "{ not json").unwrap();
+        let summary = retire_quality_report(base).unwrap();
+        assert!(summary.notice.is_some() && summary.removed.is_empty(), "{summary:?}");
+        assert!(script.exists(), "an unreadable settings file keeps the script its entry may name");
+
+        for shape in [r#"{"hooks":{"SessionStart":{"x":1}}}"#, r#"{"hooks":[1]}"#] {
+            fs::write(base.join(SETTINGS_REL), shape).unwrap();
+            let summary = retire_quality_report(base).unwrap();
+            assert!(summary.removed.is_empty(), "{shape}: {summary:?}");
+            assert!(script.exists(), "{shape}: an unrecognized shape keeps its script");
+            assert!(summary.skipped.iter().any(|s| s.contains("not recognized")), "{shape}: {summary:?}");
+        }
     }
 }

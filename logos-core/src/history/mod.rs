@@ -49,15 +49,15 @@ pub use coverage::{
     FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE,
 };
 pub use hotspot::{
-    aggregate_complexity, rank, test_only_files, CoverageCell, FileCoverage, Hotspot,
-    HotspotReport, COVERAGE_BASIS, DEFECT_LABEL, FIRST_MINE_NOTICE, STATIC_BASIS,
+    aggregate_complexity, rank, rank_with_findings, test_only_files, CoverageCell, FileCoverage,
+    FindingsOverlay, Hotspot, HotspotReport, COVERAGE_BASIS, DEFECT_LABEL, FIRST_MINE_NOTICE, STATIC_BASIS,
     STATIC_FALLBACK_LABEL, TIER_LABEL,
 };
 pub(crate) use miner::head_sha;
 pub use miner::{DegradedReason, MineOutcome};
 pub use security::{
-    FindingBinding, ScannerIngest, ScannerSnapshot, SecurityFinding, SecurityFormat,
-    SecurityIngestSummary, SecurityView, Severity, UnmatchedPath,
+    path_findings, FindingBinding, PathFindings, ScannerIngest, ScannerSnapshot, SecurityBaseline, SecurityFinding,
+    SecurityFormat, SecurityIngestSummary, SecurityView, Severity, UnmatchedPath,
 };
 pub use temporal::{FileTemporal, TemporalReport};
 

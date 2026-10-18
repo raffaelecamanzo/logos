@@ -144,3 +144,100 @@ async fn cli_and_mcp_health_payloads_are_identical() {
     client.cancel().await.expect("client shuts down");
     let _ = server.await;
 }
+
+// ── S-505 / [FR-QM-17]: the `improvements` twin ──────────────────────────────
+//
+// The "where to start" list rides three surfaces over ONE read of the last
+// snapshot: `GET /api/v1/health` (as `scan.where_to_start`), the MCP
+// `improvements` tool and `logos --json improvements`. The CLI and MCP arms are
+// compared here, where `Engine` and `LogosMcp` are both reachable; the web arm
+// is pinned against the binary in `cli/tests/improvements_parity.rs`, the one
+// crate that reaches the binary and the router. Each pair is checked where both
+// of its surfaces are reachable (the `xservice_surface.rs` convention), and the
+// pairs meet on `Engine::latest_health()` — the value the Health handler
+// serialises — which this test also compares, so the chain closes.
+//
+// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
+
+/// Eight shallow functions and one nested six deep, scanned once: the deep one is
+/// a ranked fix unit and a nesting outlier against the member's own distribution
+/// (nine units, past the eight-unit floor), so the list holds real entries and
+/// two empty read-models cannot pass by agreeing.
+fn scanned_fixture() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut source: String = (0..8)
+        .map(|i| format!("pub fn shallow_{i}(x: i32) -> i32 {{\n    if x > {i} {{\n        return x;\n    }}\n    0\n}}\n"))
+        .collect();
+    let open: String = (0..6).map(|i| format!("if x > {i} {{\n")).collect();
+    source.push_str(&format!("pub fn deep_one(x: i32) -> i32 {{\n{open}return x;\n{}0\n}}\n", "}\n".repeat(6)));
+    write(tmp.path(), "src/lib.rs", &source);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    engine.scan(true).expect("scan runs");
+    tmp
+}
+
+/// The CLI payload for `logos --json improvements`: the engine's list,
+/// serialised exactly as `Output::print` does.
+fn cli_improvements(root: &Path) -> Value {
+    let engine = Engine::start(root).expect("engine");
+    serde_json::to_value(engine.improvements().expect("improvements reads")).expect("serialize")
+}
+
+async fn mcp_improvements(client: &Client) -> String {
+    let result = client
+        .call_tool(CallToolRequestParams::new("improvements"))
+        .await
+        .expect("improvements tool call");
+    assert_ne!(result.is_error, Some(true), "improvements must succeed: {result:?}");
+    result.content.first().unwrap().as_text().unwrap().text.clone()
+}
+
+#[tokio::test]
+async fn cli_and_mcp_improvements_payloads_are_identical_and_equal_the_health_lists() {
+    let tmp = scanned_fixture();
+    let root = tmp.path();
+
+    let cli = cli_improvements(root);
+    let health = {
+        let engine = Engine::start(root).expect("engine");
+        serde_json::to_value(engine.latest_health().expect("health").scan.where_to_start).unwrap()
+    };
+    let (client, server) = boot(root).await;
+    let (first, second) = (mcp_improvements(&client).await, mcp_improvements(&client).await);
+    assert_eq!(first, second, "the MCP payload is byte-stable on an unchanged snapshot");
+    let mcp: Value = serde_json::from_str(&first).expect("valid JSON");
+
+    // Non-trivial first: a recorded list with a ranked unit and a label.
+    assert_eq!(cli["recorded"], Value::Bool(true), "{cli}");
+    assert_eq!(cli["units"][0]["name"], "deep_one", "{cli}");
+    assert!(cli["units"][0]["points"].as_i64().is_some_and(|p| p >= 1), "{cli}");
+    assert!(cli["basis"].as_str().is_some_and(|b| b.starts_with("estimate")), "labelled an estimate: {cli}");
+    assert!(
+        cli["outliers"].as_array().unwrap().iter().any(|m| m["measure"] == "nesting" && m["labelled"] == 1),
+        "{cli}"
+    );
+
+    assert_eq!(cli, mcp, "the CLI and MCP `improvements` payloads must be identical (NFR-CC-01)");
+    assert_eq!(health, mcp, "and equal the list `GET /api/v1/health` carries as `scan.where_to_start`");
+
+    client.cancel().await.expect("client shuts down");
+    let _ = server.await;
+}
+
+/// A never-scanned store answers `recorded: false`, never an empty "clean" list
+/// ([NFR-CC-04]) — on both surfaces.
+///
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[tokio::test]
+async fn a_never_scanned_store_reads_improvements_not_recorded_on_both_surfaces() {
+    let tmp = fixture();
+    let root = tmp.path();
+    let cli = cli_improvements(root);
+    let (client, server) = boot(root).await;
+    let mcp: Value = serde_json::from_str(&mcp_improvements(&client).await).unwrap();
+    assert_eq!(cli, serde_json::json!({"recorded": false, "units": [], "outliers": []}));
+    assert_eq!(cli, mcp);
+    client.cancel().await.expect("client shuts down");
+    let _ = server.await;
+}

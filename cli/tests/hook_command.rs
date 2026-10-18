@@ -17,8 +17,12 @@ use tempfile::TempDir;
 const SCRIPT_REL: &str = ".claude/hooks/logos-quality-open.sh";
 const SETTINGS_REL: &str = ".claude/settings.json";
 
+/// The user's Claude Code directory points at a path that does not exist, so a
+/// developer who enabled the Logos plugin does not turn `init -i` here into the
+/// plugin-aware one, which writes no hook (FR-IN-12).
 fn logos(project: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_logos"))
+        .env("CLAUDE_CONFIG_DIR", project.join(".no-claude-config"))
         .arg("--project")
         .arg(project)
         .args(args)

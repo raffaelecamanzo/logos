@@ -65,12 +65,13 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
     // merge. A derived expectation agrees with whatever survived the merge and
     // reports nothing. Architecture is absent while the register hides it (CR-208).
     const member = navItemsFor(true).filter((i) => i.scope === "member").map((i) => i.id);
-    expect(member).toEqual(["overview", "health", "graph", "files", "gaps", "coverage", "statistics", "config"]);
+    expect(member).toEqual(["overview", "health", "graph", "files", "gaps", "coverage", "security", "statistics", "config"]);
     const added = navItemsFor(true).filter((i) => !NAV_ITEMS.includes(i));
     expect(added.map((i) => [i.id, i.path])).toEqual([
       ["workspace-dashboard", "/workspace-dashboard"],
       ["workspace-health", "/workspace-health"],
       ["workspace", "/workspace"],
+      ["workspace-security", "/workspace-security"],
       ["workspace-statistics", "/workspace-statistics"],
       ["workspace-config", "/workspace-config"],
     ]);
@@ -172,6 +173,7 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
       ["workspace-dashboard", "app"],
       ["workspace-health", "app"],
       ["workspace", "app"],
+      ["workspace-security", "app"],
       ["workspace-statistics", "app"],
       ["workspace-config", "app"],
     ]);
@@ -198,9 +200,15 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     // Statistics entry the moment it was registered, and would sweep in the next
     // one too — an expectation that grows a new obligation every time the list does
     // is asserting the list, not the property.
-    const twinned = ["workspace-dashboard", "workspace-health", "workspace-statistics", "workspace-config"];
+    const twinned = [
+      "workspace-dashboard",
+      "workspace-health",
+      "workspace-security",
+      "workspace-statistics",
+      "workspace-config",
+    ];
     const appLabels = WORKSPACE_NAV_ITEMS.filter((i) => twinned.includes(i.id)).map((i) => i.label);
-    expect(appLabels).toEqual(["Dashboard", "Health", "Statistics", "Config"]);
+    expect(appLabels).toEqual(["Dashboard", "Health", "Security", "Statistics", "Config"]);
     for (const label of appLabels) {
       expect(NAV_ITEMS.map((i) => i.label)).toContain(label);
     }
@@ -246,6 +254,19 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     expect(app.group).toBe(member.group);
     const ids = WORKSPACE_NAV_ITEMS.map((i) => i.id);
     expect(ids.indexOf("workspace-config")).toBeGreaterThan(ids.indexOf("workspace-statistics"));
+  });
+
+  it("files the app-scoped Security tab in its member-scoped twin's group, after Workspace (S-674)", () => {
+    // frontend-design §3 (CR-217): the Workspace section gains Security after
+    // Workspace. Asserted as the group equality, like the two pairs above, so the
+    // day the member Security tab moves group the two move together.
+    const member = NAV_ITEMS.find((i) => i.id === "security") as NavItem;
+    const app = WORKSPACE_NAV_ITEMS.find((i) => i.id === "workspace-security") as NavItem;
+    expect(member).toBeDefined();
+    expect(app).toBeDefined();
+    expect(app.group).toBe(member.group);
+    const ids = WORKSPACE_NAV_ITEMS.map((i) => i.id);
+    expect(ids.indexOf("workspace-security")).toBe(ids.indexOf("workspace") + 1);
   });
 
   it("keeps every app-scoped route a SIBLING of /workspace, never a child of it", () => {

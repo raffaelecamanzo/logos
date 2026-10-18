@@ -17,12 +17,14 @@
 
 import type {
   EvolutionReport,
+  FixUnitKind,
   GateResult,
   MetricSnapshot,
   MetricValue,
   Offender,
   ScanResult,
   StatusInfo,
+  WhereToStart,
   WorstOffenders,
 } from "../../api/types.ts";
 import { UNKNOWN_AGE_AHEAD_OF_NOW, parseSecs } from "../dashboard/dashboardModel.ts";
@@ -296,8 +298,9 @@ export interface MetricRow {
   /** `null` renders a muted `n/a`, never a zero (ADR-21, NFR-CC-04). */
   value: MetricValue | null;
   /** The server's reason when the dimension is computed but not applicable
-   *  (CR-156: Modularity on too few edges) — rendered in place of a score, with
-   *  the computed `value` still shown beside it; `null` when it applies. */
+   *  (FR-QM-18: Modularity, Acyclicity or Depth on too few cross-module edges) —
+   *  rendered in place of a score, with the computed `value` still shown beside
+   *  it; `null` when it applies. */
   notApplicable: string | null;
 }
 
@@ -320,9 +323,16 @@ export function metricRows(m: MetricSnapshot): MetricRow[] {
     { key: "focus", name: "Focus", value: m.focus },
     { key: "uniqueness", name: "Uniqueness", value: m.uniqueness },
   ];
+  // FR-QM-18: each graph dimension carries its own server-decided drop-out; the
+  // other seven never do (theirs is the `null` value above).
+  const notApplicable: Partial<Record<DimensionKey, MetricSnapshot["modularity_not_applicable"]>> = {
+    modularity: m.modularity_not_applicable,
+    acyclicity: m.acyclicity_not_applicable,
+    depth: m.depth_not_applicable,
+  };
   return rows.map((r) => ({
     ...r,
-    notApplicable: r.key === "modularity" ? (m.modularity_not_applicable?.reason ?? null) : null,
+    notApplicable: notApplicable[r.key]?.reason ?? null,
   }));
 }
 
@@ -332,7 +342,7 @@ function isApplicable(row: MetricRow): row is MetricRow & { value: MetricValue }
 }
 
 /** `k` in "the geometric mean of the k applicable dimensions" (FR-QM-14): the
- *  rows the aggregate is taken over — ADR-21 and CR-156 drop-outs excluded. */
+ *  rows the aggregate is taken over — ADR-21 and FR-QM-18 drop-outs excluded. */
 export function applicableCount(rows: MetricRow[]): number {
   return rows.filter(isApplicable).length;
 }
@@ -485,4 +495,73 @@ export function optDelta(value: number | null): string {
  *  `—` for a snapshot recorded without a commit. */
 export function shortSha(sha: string | null): string {
   return sha === null ? "—" : [...sha].slice(0, 9).join("");
+}
+
+/**
+ * What the "Where to start" card says about the snapshot's ranking (S-505,
+ * FR-QM-17):
+ *  - `not-recorded`   — the snapshot recorded no ranking (written before it, or
+ *    never scanned), so its empty lists mean nothing and are never shown as a
+ *    clean result (NFR-CC-04);
+ *  - `no-whole-point` — recorded, and no single unit recovers a whole signal
+ *    point. NOT "clean": on a large member one deep function often recovers 0;
+ *  - `listed`         — recorded, with ranked units to tabulate.
+ */
+export type WhereToStartState = "not-recorded" | "no-whole-point" | "listed";
+
+/** One ranked unit as the card's table reads it. */
+export interface WhereToStartRow {
+  /** 1-based, in the payload's own order — never re-sorted here. */
+  rank: number;
+  name: string;
+  kind: FixUnitKind;
+  file: string;
+  line: number | null;
+  /** The dimensions the unit offends, as the widget titles spell them. */
+  dimensions: string[];
+  /** The estimated recoverable signal points (always ≥ 1). */
+  points: number;
+  /** The `OutlierMeasure.measure` keys the unit is labelled an outlier on. */
+  outliers: string[];
+  detail: string;
+}
+
+/** A dimension key as its widget title spells it (`nesting` → `Nesting`). */
+function dimensionName(key: string): string {
+  return key.length === 0 ? key : key[0].toUpperCase() + key.slice(1);
+}
+
+/** Where a unit is declared, from what the payload recorded: `file:line`, the
+ *  bare file when no line is recorded, nothing when it is bound to no file —
+ *  never a fabricated position. */
+export function unitLocation(file: string, line: number | null): string {
+  if (file === "") return "";
+  return line === null ? file : `${file}:${line}`;
+}
+
+/**
+ * The "Where to start" card's state and rows. `recorded` is read FIRST and is the
+ * only thing that can make an empty list mean anything: an absent or `false` flag
+ * is "not recorded" whatever the lists hold, and `units.length` is consulted only
+ * once the snapshot is known to have recorded the ranking. Rank is the unit's
+ * position in the payload, which the engine orders (points descending, then
+ * dimension, then node id) — the card renders that order, it does not recompute it.
+ */
+export function whereToStart(w: WhereToStart): { state: WhereToStartState; rows: WhereToStartRow[] } {
+  if (w.recorded !== true) return { state: "not-recorded", rows: [] };
+  if (w.units.length === 0) return { state: "no-whole-point", rows: [] };
+  return {
+    state: "listed",
+    rows: w.units.map((u, i) => ({
+      rank: i + 1,
+      name: u.name,
+      kind: u.kind,
+      file: u.file,
+      line: u.line,
+      dimensions: u.dimensions.map(dimensionName),
+      points: u.points,
+      outliers: u.outliers,
+      detail: u.detail,
+    })),
+  };
 }

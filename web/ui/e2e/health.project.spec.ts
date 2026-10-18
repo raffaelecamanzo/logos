@@ -54,6 +54,19 @@ function populated(recorded: boolean) {
         conciseness: [], cohesion: [], focus: [], uniqueness: [],
         acyclicity: [], depth: [], equality: [], redundancy: [],
       },
+      // The Where to start card (S-505): one ranked unit when recorded, and a
+      // snapshot that recorded no ranking otherwise.
+      where_to_start: recorded
+        ? {
+            recorded: true,
+            basis: "estimate: the signal recomputed with this one unit's contribution removed and nothing else changed, minus the current signal; advisory, never gated",
+            units: [{
+              kind: "function", node_id: 7, name: "deep_fn", file: "src/lib.rs", line: 12,
+              dimensions: ["nesting"], points: 120, detail: "nesting depth 6", outliers: ["nesting"],
+            }],
+            outliers: [],
+          }
+        : { recorded: false, units: [], outliers: [] },
       warnings: [],
     },
     evolution: {
@@ -97,8 +110,8 @@ for (const recorded of [true, false]) {
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(populated(recorded)) }),
     );
     const { stack, violations } = await openHealth(page);
-    await expect(stack.locator("[data-widget]")).toHaveCount(13);
-    expect(await widgetTitles(stack)).toEqual(["Gate", "Quality signal", ...DIMENSIONS, "Signal trend"]);
+    await expect(stack.locator("[data-widget]")).toHaveCount(14);
+    expect(await widgetTitles(stack)).toEqual(["Gate", "Quality signal", "Where to start", ...DIMENSIONS, "Signal trend"]);
     if (recorded) {
       await expect(page.getByRole("table", { name: "Worst offenders" })).toHaveCount(1);
     } else {
@@ -108,7 +121,7 @@ for (const recorded of [true, false]) {
     // Modularity, the one dimension with no list, states that and renders no table.
     await expect(stack.locator('[data-offender-state="unlisted"]')).toHaveCount(1);
     const m = await expectWidgetStackLayout(stack);
-    expect(m.gaps).toHaveLength(12);
+    expect(m.gaps).toHaveLength(13);
     expect(violations).toEqual([]);
   });
 }

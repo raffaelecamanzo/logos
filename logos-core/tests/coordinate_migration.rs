@@ -101,10 +101,25 @@ fn metadata(root: &Path, key: &str) -> Option<String> {
         .ok()
 }
 
-/// Every row of `table`, every column, in rowid order.
+/// The columns `table` has in the 1.17.0 fixture store, in order — read from a
+/// throwaway copy, so the fixture itself is never opened for writing.
+fn fixture_columns(table: &str) -> Vec<String> {
+    let tmp = TempDir::new().unwrap();
+    let copy = tmp.path().join("logos.db");
+    fs::copy(Path::new(FIXTURE).join("logos-1.17.0.db"), &copy).unwrap();
+    let conn = rusqlite::Connection::open(&copy).unwrap();
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid").unwrap();
+    stmt.query_map([table], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// Every row of `table`, every column the 1.17.0 store has, in rowid order. A
+/// column a later migration appends (S-504's `metric_snapshots.insight_recorded`,
+/// S-676's offender value columns, `NULL` on every old row) is not part of the history being kept: the schema
+/// migrations own it, and their own tests assert it arrives `NULL`.
 fn rows(root: &Path, table: &str) -> Vec<Vec<Value>> {
     let conn = rusqlite::Connection::open(db(root)).unwrap();
-    let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).unwrap();
+    let columns = fixture_columns(table).join(", ");
+    let mut stmt = conn.prepare(&format!("SELECT {columns} FROM {table} ORDER BY rowid")).unwrap();
     let width = stmt.column_count();
     stmt.query_map([], |r| (0..width).map(|i| r.get::<_, Value>(i)).collect())
         .unwrap()

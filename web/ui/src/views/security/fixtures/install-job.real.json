@@ -1,0 +1,535 @@
+{
+  "id": 0,
+  "kind": "tool-install",
+  "state": "completed",
+  "elapsed_ms": 2204,
+  "events": [
+    {
+      "seq": 0,
+      "at_ms": 14,
+      "event": {
+        "phase": "install_started",
+        "tool": "trivy",
+        "version": "0.74.0"
+      }
+    },
+    {
+      "seq": 1,
+      "at_ms": 992,
+      "event": {
+        "phase": "install_finished",
+        "tool": "trivy",
+        "version": "0.74.0",
+        "outcome": "installed",
+        "binary": "/home/user/.local/share/tools/trivy/0.74.0/trivy"
+      }
+    },
+    {
+      "seq": 2,
+      "at_ms": 992,
+      "event": {
+        "phase": "install_started",
+        "tool": "gitleaks",
+        "version": "8.18.4"
+      }
+    },
+    {
+      "seq": 3,
+      "at_ms": 1022,
+      "event": {
+        "phase": "install_finished",
+        "tool": "gitleaks",
+        "version": "8.18.4",
+        "outcome": "installed",
+        "binary": "/home/user/.local/share/tools/gitleaks/8.18.4/gitleaks"
+      }
+    },
+    {
+      "seq": 4,
+      "at_ms": 1022,
+      "event": {
+        "phase": "install_started",
+        "tool": "osv-scanner",
+        "version": "1.9.2"
+      }
+    },
+    {
+      "seq": 5,
+      "at_ms": 1034,
+      "event": {
+        "phase": "install_finished",
+        "tool": "osv-scanner",
+        "version": "1.9.2",
+        "outcome": "installed",
+        "binary": "/home/user/.local/share/tools/osv-scanner/1.9.2/osv-scanner"
+      }
+    },
+    {
+      "seq": 6,
+      "at_ms": 1034,
+      "event": {
+        "phase": "install_started",
+        "tool": "gosec",
+        "version": "2.21.4"
+      }
+    },
+    {
+      "seq": 7,
+      "at_ms": 1062,
+      "event": {
+        "phase": "install_finished",
+        "tool": "gosec",
+        "version": "2.21.4",
+        "outcome": "installed",
+        "binary": "/home/user/.local/share/tools/gosec/2.21.4/gosec"
+      }
+    },
+    {
+      "seq": 8,
+      "at_ms": 1062,
+      "event": {
+        "phase": "finished",
+        "scanner": "semgrep",
+        "driver": "Semgrep OSS",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 9,
+      "at_ms": 1062,
+      "event": {
+        "phase": "started",
+        "scanner": "trivy"
+      }
+    },
+    {
+      "seq": 10,
+      "at_ms": 1367,
+      "event": {
+        "phase": "finished",
+        "scanner": "trivy",
+        "driver": "Trivy",
+        "version": "0.74.0",
+        "outcome": "ran",
+        "sarif": [
+          ".logos/security/trivy.sarif"
+        ],
+        "requires_build": [],
+        "findings": 0,
+        "ingests": [
+          {
+            "format": "sarif",
+            "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+            "report_hash": "a97c4ef759f72fde205dffa0d06cf932acaff04925c36dc395a85d790ec22e88",
+            "scanners": [
+              {
+                "name": "Trivy",
+                "version": "unknown",
+                "snapshot_id": 1,
+                "findings": 0,
+                "replaced_existing": false
+              }
+            ],
+            "findings": 0,
+            "bound": 0,
+            "unbound": 0,
+            "redacted": 0,
+            "unmatched": [],
+            "already_ingested": false
+          }
+        ]
+      }
+    },
+    {
+      "seq": 11,
+      "at_ms": 1367,
+      "event": {
+        "phase": "started",
+        "scanner": "gitleaks"
+      }
+    },
+    {
+      "seq": 12,
+      "at_ms": 1647,
+      "event": {
+        "phase": "finished",
+        "scanner": "gitleaks",
+        "driver": "gitleaks",
+        "version": "8.18.4",
+        "outcome": "ran",
+        "sarif": [
+          ".logos/security/gitleaks.sarif"
+        ],
+        "requires_build": [],
+        "findings": 0,
+        "ingests": [
+          {
+            "format": "sarif",
+            "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+            "report_hash": "4e58e728994f63a75c10873f8af366075282bc9958f71d7279777906ff7e1cb0",
+            "scanners": [
+              {
+                "name": "gitleaks",
+                "version": "unknown",
+                "snapshot_id": 2,
+                "findings": 0,
+                "replaced_existing": false
+              }
+            ],
+            "findings": 0,
+            "bound": 0,
+            "unbound": 0,
+            "redacted": 0,
+            "unmatched": [],
+            "already_ingested": false
+          }
+        ]
+      }
+    },
+    {
+      "seq": 13,
+      "at_ms": 1647,
+      "event": {
+        "phase": "started",
+        "scanner": "osv-scanner"
+      }
+    },
+    {
+      "seq": 14,
+      "at_ms": 1927,
+      "event": {
+        "phase": "finished",
+        "scanner": "osv-scanner",
+        "driver": "osv-scanner",
+        "version": "1.9.2",
+        "outcome": "ran",
+        "sarif": [
+          ".logos/security/osv-scanner.sarif"
+        ],
+        "requires_build": [],
+        "findings": 0,
+        "ingests": [
+          {
+            "format": "sarif",
+            "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+            "report_hash": "3da6dbf8018878902d1b7275ea5b1166a42f619cb36c1d94e44ccee5e5fd120f",
+            "scanners": [
+              {
+                "name": "osv-scanner",
+                "version": "unknown",
+                "snapshot_id": 3,
+                "findings": 0,
+                "replaced_existing": false
+              }
+            ],
+            "findings": 0,
+            "bound": 0,
+            "unbound": 0,
+            "redacted": 0,
+            "unmatched": [],
+            "already_ingested": false
+          }
+        ]
+      }
+    },
+    {
+      "seq": 15,
+      "at_ms": 1927,
+      "event": {
+        "phase": "finished",
+        "scanner": "bandit",
+        "driver": "Bandit",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 16,
+      "at_ms": 1927,
+      "event": {
+        "phase": "started",
+        "scanner": "gosec"
+      }
+    },
+    {
+      "seq": 17,
+      "at_ms": 2204,
+      "event": {
+        "phase": "finished",
+        "scanner": "gosec",
+        "driver": "gosec",
+        "version": "2.21.4",
+        "outcome": "ran",
+        "sarif": [
+          ".logos/security/gosec.sarif"
+        ],
+        "requires_build": [],
+        "findings": 0,
+        "ingests": [
+          {
+            "format": "sarif",
+            "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+            "report_hash": "72c18f95a18091f513c5536eaf3128a98765a35c1efad9f1978f0a5304a62ad6",
+            "scanners": [
+              {
+                "name": "gosec",
+                "version": "unknown",
+                "snapshot_id": 4,
+                "findings": 0,
+                "replaced_existing": false
+              }
+            ],
+            "findings": 0,
+            "bound": 0,
+            "unbound": 0,
+            "redacted": 0,
+            "unmatched": [],
+            "already_ingested": false
+          }
+        ]
+      }
+    },
+    {
+      "seq": 18,
+      "at_ms": 2204,
+      "event": {
+        "phase": "finished",
+        "scanner": "checkov",
+        "driver": "Checkov",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 19,
+      "at_ms": 2204,
+      "event": {
+        "phase": "finished",
+        "scanner": "codeql",
+        "driver": "CodeQL",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 20,
+      "at_ms": 2204,
+      "event": {
+        "phase": "finished",
+        "scanner": "dependency-check",
+        "driver": "dependency-check",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    }
+  ],
+  "events_dropped": 0,
+  "result": {
+    "install": {
+      "consent_recorded": [
+        "trivy 0.74.0",
+        "gitleaks 8.18.4",
+        "osv-scanner 1.9.2",
+        "gosec 2.21.4"
+      ],
+      "licence_recorded": [],
+      "kept": [],
+      "tools": [
+        {
+          "tool": "trivy",
+          "version": "0.74.0",
+          "outcome": "installed",
+          "binary": "/home/user/.local/share/tools/trivy/0.74.0/trivy"
+        },
+        {
+          "tool": "gitleaks",
+          "version": "8.18.4",
+          "outcome": "installed",
+          "binary": "/home/user/.local/share/tools/gitleaks/8.18.4/gitleaks"
+        },
+        {
+          "tool": "osv-scanner",
+          "version": "1.9.2",
+          "outcome": "installed",
+          "binary": "/home/user/.local/share/tools/osv-scanner/1.9.2/osv-scanner"
+        },
+        {
+          "tool": "gosec",
+          "version": "2.21.4",
+          "outcome": "installed",
+          "binary": "/home/user/.local/share/tools/gosec/2.21.4/gosec"
+        }
+      ]
+    },
+    "scan": {
+      "consent_recorded": [],
+      "scanners": [
+        {
+          "scanner": "semgrep",
+          "driver": "Semgrep OSS",
+          "version": null,
+          "outcome": "not_installed"
+        },
+        {
+          "scanner": "trivy",
+          "driver": "Trivy",
+          "version": "0.74.0",
+          "outcome": "ran",
+          "sarif": [
+            ".logos/security/trivy.sarif"
+          ],
+          "requires_build": [],
+          "findings": 0,
+          "ingests": [
+            {
+              "format": "sarif",
+              "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+              "report_hash": "a97c4ef759f72fde205dffa0d06cf932acaff04925c36dc395a85d790ec22e88",
+              "scanners": [
+                {
+                  "name": "Trivy",
+                  "version": "unknown",
+                  "snapshot_id": 1,
+                  "findings": 0,
+                  "replaced_existing": false
+                }
+              ],
+              "findings": 0,
+              "bound": 0,
+              "unbound": 0,
+              "redacted": 0,
+              "unmatched": [],
+              "already_ingested": false
+            }
+          ]
+        },
+        {
+          "scanner": "gitleaks",
+          "driver": "gitleaks",
+          "version": "8.18.4",
+          "outcome": "ran",
+          "sarif": [
+            ".logos/security/gitleaks.sarif"
+          ],
+          "requires_build": [],
+          "findings": 0,
+          "ingests": [
+            {
+              "format": "sarif",
+              "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+              "report_hash": "4e58e728994f63a75c10873f8af366075282bc9958f71d7279777906ff7e1cb0",
+              "scanners": [
+                {
+                  "name": "gitleaks",
+                  "version": "unknown",
+                  "snapshot_id": 2,
+                  "findings": 0,
+                  "replaced_existing": false
+                }
+              ],
+              "findings": 0,
+              "bound": 0,
+              "unbound": 0,
+              "redacted": 0,
+              "unmatched": [],
+              "already_ingested": false
+            }
+          ]
+        },
+        {
+          "scanner": "osv-scanner",
+          "driver": "osv-scanner",
+          "version": "1.9.2",
+          "outcome": "ran",
+          "sarif": [
+            ".logos/security/osv-scanner.sarif"
+          ],
+          "requires_build": [],
+          "findings": 0,
+          "ingests": [
+            {
+              "format": "sarif",
+              "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+              "report_hash": "3da6dbf8018878902d1b7275ea5b1166a42f619cb36c1d94e44ccee5e5fd120f",
+              "scanners": [
+                {
+                  "name": "osv-scanner",
+                  "version": "unknown",
+                  "snapshot_id": 3,
+                  "findings": 0,
+                  "replaced_existing": false
+                }
+              ],
+              "findings": 0,
+              "bound": 0,
+              "unbound": 0,
+              "redacted": 0,
+              "unmatched": [],
+              "already_ingested": false
+            }
+          ]
+        },
+        {
+          "scanner": "bandit",
+          "driver": "Bandit",
+          "version": null,
+          "outcome": "not_installed"
+        },
+        {
+          "scanner": "gosec",
+          "driver": "gosec",
+          "version": "2.21.4",
+          "outcome": "ran",
+          "sarif": [
+            ".logos/security/gosec.sarif"
+          ],
+          "requires_build": [],
+          "findings": 0,
+          "ingests": [
+            {
+              "format": "sarif",
+              "head_sha": "3c260384fdf842e49017ea8fdc5a6f9cb1135e5c",
+              "report_hash": "72c18f95a18091f513c5536eaf3128a98765a35c1efad9f1978f0a5304a62ad6",
+              "scanners": [
+                {
+                  "name": "gosec",
+                  "version": "unknown",
+                  "snapshot_id": 4,
+                  "findings": 0,
+                  "replaced_existing": false
+                }
+              ],
+              "findings": 0,
+              "bound": 0,
+              "unbound": 0,
+              "redacted": 0,
+              "unmatched": [],
+              "already_ingested": false
+            }
+          ]
+        },
+        {
+          "scanner": "checkov",
+          "driver": "Checkov",
+          "version": null,
+          "outcome": "not_installed"
+        },
+        {
+          "scanner": "codeql",
+          "driver": "CodeQL",
+          "version": null,
+          "outcome": "not_installed"
+        },
+        {
+          "scanner": "dependency-check",
+          "driver": "dependency-check",
+          "version": null,
+          "outcome": "not_installed"
+        }
+      ],
+      "findings": 0
+    }
+  },
+  "error": null
+}

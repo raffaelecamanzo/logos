@@ -24,6 +24,14 @@ implicit_receiver = "none"
 
 capabilities = ["symbols", "references", "frameworks", "invocations"]
 
+# The optional member-access capability (S-523, CR-171, ADR-39): Cohesion
+# scores a class only in a language that declares it, so a class of a language
+# capturing no field access is not applicable rather than scored from calls alone.
+# PHP's queries capture `$this->x` member access as Accesses edges
+# (`queries/references.scm`, `@ref.access`), so its classes' LCOM4 has its
+# shared-field links.
+member_access = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # `elseif` is PHP's own keyword; `?` covers the ternary and `?:`; `&&`/`||`
 # plus the word forms `and`/`or`/`xor`; `catch` for try/catch.

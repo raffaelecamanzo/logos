@@ -42,8 +42,9 @@
 #   recomputation from counters, same tree identity, same refusal of a "skip".
 #   (public-terms is required at both tiers, S-716: a term merged after a fast
 #   gate is as public as one merged after a full gate. script-suites, S-719, is
-#   required at full only: `gate.sh fast` runs it exactly when scripts/ changed,
-#   so fast accepts evidence with or without it and validates it when present.)
+#   required at full only: `gate.sh fast` runs it exactly when scripts/ or the
+#   plugin tree (plugins/, .claude-plugin/) changed, so fast accepts evidence
+#   with or without it and validates it when present.)
 #   The fast tier exists because the standing sprint contract runs one full gate
 #   on MERGED MAIN at review rather than eight per-branch full gates, and
 #   without it a fast-tier session cannot hand off at all. Three properties keep it honest:
@@ -159,7 +160,7 @@ ALL_GATES = [
     "script-suites", "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
 ]
 # What `gate.sh fast` actually runs. Its two UI legs are conditional on web/ui
-# having changed (and script-suites, when scripts/ did), so they are not
+# having changed (and script-suites, when scripts/ or the plugin tree did), so they are not
 # required — but a gate this tier does not require is still VALIDATED when its
 # evidence describes THIS tree, so a passing-looking leg cannot be admitted
 # unexamined. Evidence describing an

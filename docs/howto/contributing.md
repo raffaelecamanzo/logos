@@ -51,7 +51,9 @@ a change that is already public.
    ```
 
    It pushes the commit to `refs/heads/sprint/N` (never forced) and opens the
-   pull request against `main` with `gh pr create --fill`. A re-run after a
+   pull request against `main`, titled with the commit's subject and carrying
+   its body — read from the commit itself, so the pull request says exactly
+   what the term gate scanned. A re-run after a
    push that already landed goes straight to the pull request.
 
 4. Wait for CI, then merge the pull request on GitHub with **Rebase and merge**.

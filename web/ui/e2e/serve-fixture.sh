@@ -82,6 +82,10 @@ if [ "$KIND" = single ]; then
     bash "$HERE/fixtures/single.history.sh" "$RUN"
     "$BIN" --project "$RUN" index --quiet
     "$BIN" --project "$RUN" hotspots --quiet >/dev/null
+    # A stored security report (S-670), so the Security page renders findings in
+    # graph context rather than only its no-scan state. Ingesting reads and parses
+    # the report; no scanner runs.
+    "$BIN" --project "$RUN" security ingest "$HERE/fixtures/single.security.sarif" >/dev/null
 else
     for member in "$RUN"/*/; do
         git_repo "${member%/}"
@@ -93,6 +97,22 @@ else
         echo "serve-fixture.sh: init --workspace wrote no manifest in $RUN; refusing to serve" >&2
         exit 2
     fi
+    # A stored security report in `api` only (S-674), so Workspace security
+    # renders a scanned member beside a never-scanned one (`web`). Ingesting
+    # reads and parses the report; no scanner runs.
+    "$BIN" --project "$RUN/api" security ingest "$HERE/fixtures/workspace.security.sarif" >/dev/null
 fi
 
-exec "$BIN" serve --ui --port "$PORT" --project "$RUN"
+# The security surfaces look for scanners on PATH, in the managed-tools directory
+# and under the user config directory. Serve with all three pointed away from this
+# machine's, so the Security page (S-670) reads only the fixture's stored report
+# and starts no version probe of a scanner installed here: a first run of a large
+# scanner binary can outlast a page's ready wait, and no spec may depend on what
+# the host has installed. PATH keeps git alone, which serve needs.
+HOST_GIT="$(command -v git)"
+SCANNERLESS="$HERE/.run/$KIND-scannerless"
+rm -rf "$SCANNERLESS"
+mkdir -p "$SCANNERLESS/bin"
+ln -s "$HOST_GIT" "$SCANNERLESS/bin/git"
+exec env PATH="$SCANNERLESS/bin" LOGOS_CONFIG_HOME="$SCANNERLESS/config" LOGOS_DATA_HOME="$SCANNERLESS/tools" \
+    "$BIN" serve --ui --port "$PORT" --project "$RUN"

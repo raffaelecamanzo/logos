@@ -180,8 +180,8 @@ const KNOWN_EXCEPTIONS: &[KnownException] = &[
     },
     KnownException {
         surface: Surface::MethodGuard,
-        item: "the Logos web UI is read-only except the enumerated config-write/apply, chat, \
-               wiki-generation, and verify routes",
+        item: "the Logos web UI is read-only except the enumerated config-write/apply, \
+               security-scan, security-install, security-triage, chat, wiki-generation, and verify routes",
         reason: "kept byte-identical in every build: user-visible text no snapshot covers \
                  (Limitation 4). The one sentence names chat as well as wiki-generation",
         decision: WIKI_T2_LIMITATIONS,

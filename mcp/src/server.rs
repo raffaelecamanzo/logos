@@ -21,7 +21,7 @@ use logos_core::federation::{
     self, query, Backing, BuildDependencies, ContractBridge, EngineRegistry,
     MemberSelectionError, TypeReferences,
 };
-use logos_core::{governance::DsmGranularity, model::NodeKind, security::FindingsFilter, Engine};
+use logos_core::{governance::{DsmGranularity, OffendersFilter}, model::NodeKind, security::FindingsFilter, Engine};
 use logos_ext::mcp::{InvalidParams, McpTool};
 use logos_ext::ExtensionHost;
 use rmcp::handler::server::tool::{ToolCallContext, ToolRoute, ToolRouter};
@@ -205,6 +205,29 @@ impl LogosMcp {
         F: FnOnce(&Engine) -> T + Send + 'static,
     {
         self.run_result(tool, repo, move |engine| Ok(call(engine))).await
+    }
+
+    /// The one body of `check_rules` and its bless twin `bless_rules`
+    /// ([FR-GV-23]): the two tools differ only in which engine call they make,
+    /// so neither can drift from the other's `repo` refusal or reconcile flag.
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    async fn rules_report(
+        &self,
+        tool: &'static str,
+        p: ReconcileParams,
+        bless: bool,
+    ) -> Result<CallToolResult, ErrorData> {
+        default_member_only(tool, p.repo)?;
+        let reconcile = !p.no_reconcile.unwrap_or(false);
+        self.run_result(tool, None, move |e| {
+            if bless {
+                e.bless_rules(None, reconcile)
+            } else {
+                e.check_rules(None, reconcile)
+            }
+        })
+        .await
     }
 
     /// The fallible body behind [`run`](Self::run), used directly by the
@@ -531,6 +554,26 @@ pub struct DsmParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct OffendersParams {
+    /// Only offenders defined in files matching this project-relative glob ("*" stays in one directory, "**" crosses them, e.g. "src/a/**").
+    pub path: Option<String>,
+    /// Only this dimension: nesting, conciseness, cohesion, focus, uniqueness, acyclicity, depth, equality or redundancy.
+    pub dimension: Option<String>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ReviewParams {
+    /// The ref to compare against; omit for the repository's default branch (origin/HEAD, else main, else master).
+    pub base: Option<String>,
+    /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct HotspotsParams {
     /// Cap the ranked files returned (default: all, FR-GH-06).
     pub limit: Option<usize>,
@@ -541,6 +584,9 @@ pub struct HotspotsParams {
     /// Drop whole test files (`is_test`-only) from the candidate set before
     /// ranking (default false — whole-repo board unchanged, CR-076).
     pub production_scope: Option<bool>,
+    /// Rank hotspots with a fresh unsuppressed security finding first, highest
+    /// severity first (default false, FR-SC-14).
+    pub with_findings: Option<bool>,
     /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
     pub repo: Option<String>,
 }
@@ -572,6 +618,12 @@ pub struct CoverageIngestParams {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SecurityScanParams {
+    /// Run only these scanners, by registry name (semgrep) or SARIF driver name (Semgrep OSS) (FR-SC-17); every installed, enabled one when absent.
+    #[serde(default)]
+    pub scanners: Option<Vec<String>>,
+    /// Scan only these files or directories, relative to the project root (FR-SC-17). A path outside the root is refused before any scanner starts.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
     /// Refused, never acted on: consent is the user's, given with `logos security scan --consent` (FR-SC-07).
     #[serde(default)]
     #[schemars(skip)]
@@ -640,13 +692,13 @@ fn default_member_only(tool: &str, repo: Option<serde_json::Value>) -> Result<()
     }
 }
 
-// ── The 29 single-root core tools (FR-MC-01) ────────────────────────────────
+// ── The 33 single-root core tools (FR-MC-01) ────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
 // this roster is used alone (FR-WS-05). The read-only tools take `repo`
 // (FR-WS-42); the write and gate tools — `scan`, `rescan`, `check_rules`,
-// `doctor`, `verify`, `session_start`, `session_end`, `coverage_ingest`,
+// `bless_rules`, `doctor`, `verify`, `session_start`, `session_end`, `coverage_ingest`,
 // `coverage_refresh`, `security_scan`, `security_ingest` — pass `None` and act
 // on the default member.
 
@@ -807,10 +859,17 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ReconcileParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        default_member_only("check_rules", p.repo)?;
-        let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("check_rules", None, move |e| e.check_rules(None, reconcile))
-            .await
+        self.rules_report("check_rules", p, false).await
+    }
+
+    #[tool(
+        description = "Bless the current offenders of every `ratchet = true` constraint (FR-GV-23): write them, sorted and deterministic, to the checked-in .logos/rules-baseline.json, then return the check_rules report against it — blessed debt is a warning, new or worsened debt an error. The CLI twin is `logos check --bless`. Blessing debt is a human decision that belongs in code review: do not call this to make a failing check pass. Under a workspace it acts on the default member only: it takes no `repo`."
+    )]
+    async fn bless_rules(
+        &self,
+        Parameters(p): Parameters<ReconcileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.rules_report("bless_rules", p, true).await
     }
 
     #[tool(
@@ -834,13 +893,36 @@ impl LogosMcp {
             .await
     }
 
+    #[tool(
+        description = "Every offender the last snapshot recorded, UNCAPPED (FR-QM-19) — the full lists behind scan's top-10 worst offenders, narrowed by a project-relative path glob and/or one dimension (nesting, conciseness, cohesion, focus, uniqueness, acyclicity, depth, equality, redundancy). Each entry carries its dimension, node_id (the symbol id without its repository coordinate — the identity a ratchet blessed entry uses, stable across re-indexing), name, file, line, detail, the measure its value counts, the value and the threshold it met (value >= threshold; null where the dimension has none). Ordered as the capped lists are, byte-stable. A pure read: run scan first to measure. recorded:false with not_recorded_because (never_scanned, or a snapshot that predates the uncapped list) means nothing was recorded, never clean."
+    )]
+    async fn offenders(&self, Parameters(p): Parameters<OffendersParams>) -> Result<CallToolResult, ErrorData> {
+        let filter = OffendersFilter::parse(p.path.as_deref(), p.dimension.as_deref())
+            .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
+        self.run_result("offenders", p.repo, move |e| e.offenders(&filter)).await
+    }
+
+    #[tool(
+        description = "The branch delta (FR-GV-24): every offender (all nine dimensions, uncapped) and every check violation, classified new, worsened, improved, resolved or unchanged PER SYMBOL against the merge-base of HEAD and `base` (default: the repository's default branch). Changed entries are listed; unchanged ones are only counted (offender_counts, violation_counts). Each entry carries its value before and after, its threshold, and a trust label: resolved, stale (the file changed since the last sync — run sync), or the tag of a language the graph binds within files only. Also lists near-clone groups the branch introduced, and under sections.security the security findings the branch introduced, touched or resolved (FR-SC-18): each with its method (fingerprint against the report recorded at the merge-base, else hunk), freshness, severity, OWASP categories and reachability confidence; a finding removed on a file edited since the last scan reads stale, never resolved; suppressed findings are listed apart; messages stay redacted; never scanned reads measured:false. The before-state is the snapshot recorded at the merge-base, else a shadow index of that tree cached by commit (the first call may take as long as an index); no other commit is ever compared. Advisory: never moves check or gate. measured:false with not_measured_because means nothing was classified. Byte-stable; the CLI twin is `logos review --base <ref>`."
+    )]
+    async fn review(&self, Parameters(p): Parameters<ReviewParams>) -> Result<CallToolResult, ErrorData> {
+        self.run_result("review", p.repo, move |e| e.review(p.base.as_deref())).await
+    }
+
+    #[tool(
+        description = "Where to start (FR-QM-17): the ranked fix units the last snapshot recorded — at most 10 classes, functions, exact-duplicate groups and near-clone groups, each with its dimension(s), its `points` and the `outliers` measures it is labelled on — plus the per-member outlier labels of each measure. `points` is an ESTIMATE under a single-unit counterfactual (the signal recomputed with that one unit's contribution removed, minus the current signal), and `basis` says so. Advisory: it never enters the signal, the gate or `check`. Ordered by points descending, then dimension, then node id; byte-stable. A pure read: run scan first to measure. recorded:false means no snapshot recorded a ranking (never scanned, or one that predates it); recorded:true with no units means no single unit recovers a whole point, never that the code is clean."
+    )]
+    async fn improvements(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
+        self.run_result("improvements", p.repo, |e| e.improvements()).await
+    }
+
     // — Temporal tier (1): the non-gated git-history surface (CR-006,
     //   FR-GH-06). Behind the SAME `api` method as the CLI `hotspots`
     //   subcommand, so payloads are byte-identical (NFR-CC-01). Advisory only:
     //   the temporal tier never moves the gate (BR-26). —
 
     #[tool(
-        description = "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Non-git/shallow repos return n/a + a notice."
+        description = "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Each file carries a findings cell (unsuppressed fresh security findings: count, highest severity; stale ones counted apart) once a scan is stored, none before; `with_findings:true` ranks files with a fresh finding first, highest severity first (FR-SC-14). Non-git/shallow repos return n/a + a notice."
     )]
     async fn hotspots(
         &self,
@@ -848,8 +930,9 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let untested = p.untested.unwrap_or(false);
         let production_scope = p.production_scope.unwrap_or(false);
+        let with_findings = p.with_findings.unwrap_or(false);
         self.run_result("hotspots", p.repo.clone(), move |e| {
-            e.hotspots(p.limit, untested, production_scope)
+            e.hotspots_with_findings(p.limit, untested, production_scope, with_findings)
         })
         .await
     }
@@ -897,7 +980,7 @@ impl LogosMcp {
     //   SAME `api` method as its CLI twin (NFR-CC-01). —
 
     #[tool(
-        description = "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`."
+        description = "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, not_selected, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. `scanners` and `paths` make it a re-scan that takes seconds (FR-SC-17): Semgrep, Gitleaks, Bandit, gosec and Checkov run on the paths only and replace only their findings there (Gitleaks keeps its history findings there); Trivy, OSV-Scanner and Dependency-Check report whole-manifest only, CodeQL whole-project only, and each runs unscoped when named. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn security_scan(&self, Parameters(p): Parameters<SecurityScanParams>) -> Result<CallToolResult, ErrorData> {
         default_member_only("security_scan", p.repo)?;
@@ -905,7 +988,8 @@ impl LogosMcp {
             let refusal = "logos:security_scan cannot record network consent, the user's to give: run `logos security scan --consent` in a terminal (FR-SC-07)";
             return Err(ErrorData::invalid_params(refusal, None));
         }
-        self.run_result("security_scan", None, |e| e.security_scan(false)).await
+        let request = logos_core::security::ScanRequest::new(p.scanners.unwrap_or_default(), p.paths.unwrap_or_default());
+        self.run_result("security_scan", None, move |e| e.security_scan_selected(false, &request, |_| {})).await
     }
 
     #[tool(
@@ -918,14 +1002,14 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Also the consent state: the scanners consented to, and the ones the next scan will ask for."
+        description = "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Also the consent state: the scanners consented to, and the ones the next scan will ask for."
     )]
     async fn security_status(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
         self.run_result("security_status", p.repo, |e| e.security_status()).await
     }
 
     #[tool(
-        description = "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0."
+        description = "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0. Each finding carries its graph context (FR-SC-13): the enclosing symbol, whether a route reaches it over call edges (reachable, unreachable or unknown, naming the nearest route) and its blast radius (the sizes of impact on that symbol), each labelled resolved, unresolved or unbound from the language's resolution denominator — an unresolved claim is never unreachable, and a lockfile finding is unbound at its manifest line."
     )]
     async fn security_findings(&self, Parameters(p): Parameters<SecurityFindingsParams>) -> Result<CallToolResult, ErrorData> {
         let filter = FindingsFilter::parse(

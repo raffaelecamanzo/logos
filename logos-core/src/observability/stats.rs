@@ -46,6 +46,16 @@
 //!
 //! [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 //!
+//! # Who invoked the call ([FR-OB-15])
+//!
+//! `calls_by_tool_invoker` is the third attribution projection: per-tool counts
+//! split by the invoker a process declared (a plugin hook, a skill script) or
+//! `null` for none. It has the origin cross-tab's coverage — raw events only —
+//! plus one limit of its own, stated in `attribution_coverage`: rows written
+//! before the stamp existed are `null` too, and are never imputed an invoker.
+//!
+//! [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+//!
 //! The headline **tokens-saved figure is an estimate** — the dogfood metric
 //! that says whether Logos earns its place ([NFR-OO-03]) — and is honestly
 //! labeled as such ([NFR-CC-04]; the constants are SRS OQ-01).
@@ -106,8 +116,8 @@ use rusqlite::Connection;
 use super::tool;
 use crate::models::outcome::OutcomeCounts;
 use crate::models::quality::{
-    AttributionCoverage, ClassUsage, DailyActivity, OriginUsage, StatsInfo, ToolOriginUsage,
-    ToolUsage,
+    AttributionCoverage, ClassUsage, DailyActivity, OriginUsage, StatsInfo, ToolInvokerUsage,
+    ToolOriginUsage, ToolUsage,
 };
 
 /// Default stats window in days ([FR-OB-04]: "default window 7 days").
@@ -182,7 +192,7 @@ fn tallies(conn: &Connection) -> Result<(String, &'static str)> {
 /// the store: calls, the successful subset, and what they answered
 /// ([FR-OB-14]).
 ///
-/// One accumulator for all five projections, so a projection cannot carry
+/// One accumulator for every projection, so a projection cannot carry
 /// `ok_calls` and forget the outcome counts — which is how the workspace
 /// aggregate would silently zero them, and why its fold uses the same fields.
 ///
@@ -219,6 +229,23 @@ impl std::ops::AddAssign for Tally {
         self.ok_calls += other.ok_calls;
         self.outcomes += other.outcomes;
     }
+}
+
+/// The `events` column the invoker cross-tab groups on, for this store
+/// ([FR-OB-15]).
+///
+/// `invoker` on a store at [`super::db::INVOKER_VERSION`] or later; the literal
+/// `NULL` on an older one — read-only, so never migrated by the reader — whose
+/// every call therefore lands in the no-invoker cell, which is what it recorded.
+/// The [`tallies`] gate, for the second column a reader cannot assume.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+fn invoker_column(conn: &Connection) -> Result<&'static str> {
+    Ok(if super::db::user_version(conn)? >= super::db::INVOKER_VERSION {
+        "invoker"
+    } else {
+        "NULL"
+    })
 }
 
 /// Aggregate usage/perf stats for the project rooted at `root`.
@@ -552,6 +579,10 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         })
         .collect();
 
+    // Tool × invoker cross-tab ([FR-OB-15]), its own function so this one keeps
+    // to the `max_cc` budget.
+    let calls_by_tool_invoker = tool_invoker_cross_tab(conn, cutoff, &raw_tally, &engine_query)?;
+
     let calls_by_tool: Vec<ToolUsage> = usage
         .into_iter()
         .map(|((surface, tool), t)| ToolUsage {
@@ -582,16 +613,66 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         calls_by_origin,
         calls_by_tool_origin,
         calls_by_class,
+        calls_by_tool_invoker,
         attribution_coverage: attribution_coverage(window_days),
         warnings: Vec::new(),
     })
 }
 
-/// What the two attribution projections cover, stated in the payload
-/// ([FR-OB-11], [NFR-CC-04]).
+/// The tool × invoker cross-tab ([FR-OB-15]): who started the process that made
+/// each call — a plugin hook, a skill script, or nobody declared. Raw events
+/// only, exactly as the origin cross-tab: `daily_rollup` carries no invoker. Keyed
+/// `(tool, invoker)` so the order is tool-then-invoker with the undeclared
+/// (`None`) cell first ([NFR-RA-06]). `raw_tally` and `engine_query` are the ones
+/// [`stats_from`] chose, so this projection counts by the same rules as the rest.
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn tool_invoker_cross_tab(
+    conn: &Connection,
+    cutoff: i64,
+    raw_tally: &str,
+    engine_query: &str,
+) -> Result<Vec<ToolInvokerUsage>> {
+    let invoker = invoker_column(conn)?;
+    let mut by_tool_invoker: BTreeMap<(String, Option<String>), Tally> = BTreeMap::new();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT tool, {invoker}, {raw_tally}
+             FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1, 2",
+        ))
+        .context("preparing the tool-by-invoker cross-tab query")?;
+    let rows = stmt
+        .query_map([cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                Tally::read(r, 2)?,
+            ))
+        })
+        .context("querying the tool-by-invoker cross-tab")?;
+    for row in rows {
+        let (tool, invoker, tally) = row.context("reading an invoker cross-tab row")?;
+        *by_tool_invoker.entry((tool, invoker)).or_default() += tally;
+    }
+    Ok(by_tool_invoker
+        .into_iter()
+        .map(|((tool, invoker), t)| ToolInvokerUsage {
+            class: tool::class_of_wire(&tool).to_string(),
+            tool,
+            invoker,
+            calls: t.calls,
+            ok_calls: t.ok_calls,
+            outcomes: t.outcomes,
+        })
+        .collect())
+}
+
+/// What the attribution projections cover, stated in the payload
+/// ([FR-OB-11], [FR-OB-15], [NFR-CC-04]).
 ///
 /// The limits are structural, not data-dependent — they follow from
-/// `daily_rollup`'s schema and the [FR-OB-08] migration — so this is a pure
+/// `daily_rollup`'s schema and the [FR-OB-08] and [FR-OB-15] migrations — so this is a pure
 /// function of the requested window rather than something measured per query.
 ///
 /// `covered_window_days` is therefore a **guaranteed floor, not a measurement**.
@@ -605,15 +686,17 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
 ///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
     let covered_window_days = window_days.min(super::db::RETENTION_DAYS);
     let truncated_by_retention = covered_window_days < window_days;
     let mut notes = vec![
-        "`calls_by_tool_origin` and `calls_by_class` are computed from raw events only: \
-         `daily_rollup` is keyed (day, surface, tool) and carries no origin column, so a \
-         rolled-up day is absent from both rather than mis-attributed. `calls_by_origin` \
-         shares this limit; the totals, `calls_by_tool` and `activity_by_day` do not."
+        "`calls_by_tool_origin`, `calls_by_class` and `calls_by_tool_invoker` are computed \
+         from raw events only: `daily_rollup` is keyed (day, surface, tool) and carries no \
+         origin or invoker column, so a rolled-up day is absent from all three rather than \
+         mis-attributed. `calls_by_origin` shares this limit; the totals, `calls_by_tool` \
+         and `activity_by_day` do not."
             .to_string(),
         format!(
             "Raw events are retained for about {} days, so these projections are guaranteed \
@@ -629,6 +712,16 @@ pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
          and tool class are still read per row, but whether they came from a dev pane or main \
          is unknown, so treat that period as a distinct population rather than mixing it with \
          origin-stamped data."
+            .to_string(),
+        format!(
+            "`calls_by_tool_invoker` names an invoker only where the process declared one in \
+             {}: the plugin's hooks and skill scripts do. A direct CLI call, an MCP tool call \
+             the agent makes itself and a web request declare none, so a null invoker means \
+             \"none declared\", never a guessed caller.",
+            super::INVOKER_ENV,
+        ),
+        "Events written before the invoker stamp existed have invoker IS NULL and are never \
+         imputed one, so the historical null-invoker bucket also holds hook and skill calls."
             .to_string(),
     ];
     if truncated_by_retention {
@@ -646,6 +739,7 @@ pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
         covered_window_days,
         truncated_by_retention,
         legacy_null_origin_folds_into_main: true,
+        null_invoker_includes_pre_stamp_rows: true,
         notes,
     }
 }

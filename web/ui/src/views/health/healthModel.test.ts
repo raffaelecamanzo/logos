@@ -5,8 +5,10 @@ import type {
   EvolutionReport,
   MetricSnapshot,
   MetricValue,
+  FixUnit,
   ScanResult,
   StatusInfo,
+  WhereToStart,
 } from "../../api/types.ts";
 import {
   aggregateSignal,
@@ -21,10 +23,16 @@ import {
   passFloor,
   shortSha,
   snapshotStaleness,
+  unitLocation,
+  whereToStart,
   type DimensionDetail,
 } from "./healthModel.ts";
 import realOffenders from "./fixtures/worst-offenders.real.json";
+import realWhereToStartJson from "./fixtures/where-to-start.real.json";
 import { UNKNOWN_AGE_AHEAD_OF_NOW } from "../dashboard/dashboardModel.ts";
+
+/** The real `improvements` payloads, typed: a JSON import widens `kind` to `string`. */
+const realWhereToStart = realWhereToStartJson as { recorded: WhereToStart; recordedEmpty: WhereToStart; notRecorded: WhereToStart };
 
 function mv(n: number): MetricValue {
   return { raw: n, normalized: n };
@@ -35,7 +43,10 @@ function snapshot(over: Partial<MetricSnapshot> = {}): MetricSnapshot {
     modularity: mv(0.9),
     modularity_not_applicable: null,
     acyclicity: mv(0.8),
+    acyclicity_not_applicable: null,
     depth: mv(0.7),
+    depth_not_applicable: null,
+    cross_module_edge_count: 40,
     equality: mv(0.6),
     redundancy: mv(0.5),
     nesting: mv(0.9),
@@ -71,6 +82,7 @@ function scan(over: Partial<ScanResult> = {}): ScanResult {
       equality: [],
       redundancy: [],
     },
+    where_to_start: realWhereToStart.notRecorded,
     warnings: [],
     ...over,
   };
@@ -147,6 +159,21 @@ describe("metricRows", () => {
     // Only Modularity carries the reason; an applicable dimension carries none.
     expect(rows.filter((r) => r.notApplicable !== null).map((r) => r.name)).toEqual(["Modularity"]);
     expect(metricRows(snapshot()).every((r) => r.notApplicable === null)).toBe(true);
+  });
+  it("marks each FR-QM-18 graph-dimension drop-out with its own reason, and no other dimension", () => {
+    const na = { edges: 2, min_edges: 5, reason: "2 of 5 cross-module edges — too few to measure module structure" };
+    const thin = snapshot({ modularity_not_applicable: na, acyclicity_not_applicable: na, depth_not_applicable: na, cross_module_edge_count: 2 });
+    const rows = metricRows(thin);
+    expect(rows.filter((r) => r.notApplicable !== null).map((r) => [r.name, r.notApplicable])).toEqual([
+      ["Modularity", na.reason], ["Acyclicity", na.reason], ["Depth", na.reason],
+    ]);
+    // The computed pairs stay beside the reasons.
+    expect(rows.find((r) => r.name === "Acyclicity")?.value).toEqual(mv(0.8));
+    expect(rows.find((r) => r.name === "Depth")?.value).toEqual(mv(0.7));
+    // Each dimension reads its own field: Depth alone drops only Depth.
+    const depthOnly = metricRows(snapshot({ depth_not_applicable: na }));
+    expect(depthOnly.filter((r) => r.notApplicable !== null).map((r) => r.name)).toEqual(["Depth"]);
+    expect(applicableCount(rows)).toBe(7);
   });
 });
 
@@ -601,5 +628,86 @@ describe("snapshotStaleness", () => {
 
     const undatedSnapshot = status(true, { last_full_index_at: String(NOW - 60) });
     expect(snapshotStaleness(undatedSnapshot, evolution(), NOW)).not.toBeNull();
+  });
+});
+
+// ── S-505: the "Where to start" card's projection (FR-QM-17) ─────────────────
+
+function unit(over: Partial<FixUnit> = {}): FixUnit {
+  return {
+    kind: "function",
+    node_id: 1,
+    name: "deep_one",
+    file: "src/lib.rs",
+    line: 49,
+    dimensions: ["nesting"],
+    points: 100,
+    detail: "nesting depth 6",
+    outliers: [],
+    ...over,
+  };
+}
+
+function recorded(units: FixUnit[]): WhereToStart {
+  return { recorded: true, basis: "estimate: …", units, outliers: [] };
+}
+
+describe("whereToStart (S-505, FR-QM-17)", () => {
+  it("reads `recorded` first: a snapshot that recorded no ranking is not-recorded whatever its lists hold", () => {
+    expect(whereToStart(realWhereToStart.notRecorded)).toEqual({ state: "not-recorded", rows: [] });
+    // Never inferred from the lists: units under `recorded: false` are not shown.
+    const forged: WhereToStart = { recorded: false, units: [unit()], outliers: [] };
+    expect(whereToStart(forged)).toEqual({ state: "not-recorded", rows: [] });
+  });
+
+  it("a recorded ranking with no units is no-whole-point — never `none flagged` or clean", () => {
+    expect(whereToStart(realWhereToStart.recordedEmpty)).toEqual({ state: "no-whole-point", rows: [] });
+  });
+
+  it("ranks the real payload's units 1..n in the payload's own order, never re-sorting", () => {
+    const real = realWhereToStart.recorded;
+    const projected = whereToStart(real);
+    expect(projected.state).toBe("listed");
+    expect(projected.rows.map((r) => [r.rank, r.name, r.points])).toEqual(
+      real.units.map((u, i) => [i + 1, u.name, u.points]),
+    );
+    // A payload in an order the model might be tempted to "fix" keeps it.
+    const ascending = recorded([unit({ name: "low", points: 1 }), unit({ name: "high", points: 90 })]);
+    expect(whereToStart(ascending).rows.map((r) => [r.rank, r.name])).toEqual([[1, "low"], [2, "high"]]);
+  });
+
+  it("projects dimension names, the measures a unit is an outlier on, and its location", () => {
+    const both = unit({ dimensions: ["nesting", "conciseness"], outliers: ["nesting", "cc"], line: 7 });
+    const [row] = whereToStart(recorded([both])).rows;
+    expect(row).toMatchObject({
+      rank: 1,
+      name: "deep_one",
+      kind: "function",
+      file: "src/lib.rs",
+      line: 7,
+      dimensions: ["Nesting", "Conciseness"],
+      points: 100,
+      outliers: ["nesting", "cc"],
+      detail: "nesting depth 6",
+    });
+    const real = whereToStart(realWhereToStart.recorded).rows;
+    expect(real.find((r) => r.kind === "clone_group")?.dimensions).toEqual(["Uniqueness"]);
+    expect(real.find((r) => r.kind === "function")?.outliers).toEqual(["nesting"]);
+  });
+
+  it("spells every dimension exactly as its widget title does (one spelling, no second source)", () => {
+    // `whereToStart` capitalises the key rather than reading `metricRows`, which
+    // carries S-523's not-applicable logic; this pins the two spellings together.
+    for (const row of metricRows(snapshot())) {
+      const [projected] = whereToStart(recorded([unit({ dimensions: [row.key] })])).rows;
+      expect(projected.dimensions, row.key).toEqual([row.name]);
+    }
+  });
+
+  it("states a location from what the payload recorded, never a fabricated line", () => {
+    expect(unitLocation("src/lib.rs", 49)).toBe("src/lib.rs:49");
+    expect(unitLocation("src/lib.rs", null)).toBe("src/lib.rs");
+    expect(unitLocation("", null)).toBe("");
+    expect(unitLocation("", 3)).toBe("");
   });
 });

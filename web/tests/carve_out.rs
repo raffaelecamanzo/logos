@@ -547,6 +547,91 @@ async fn wiki_generation_post_is_405_without_the_wiki_extension() {
     .await;
 }
 
+/// The security scan's start and cancel (S-673, [FR-SC-15]) are, with the
+/// triage writes below, the only `POST`s under `/api/v1/security`, and they are
+/// intent-guarded like every
+/// admitted `POST` ([NFR-SE-06]): a cross-origin or tokenless one is refused
+/// `403` — admitted past the method guard, stopped by the intent guard, so no
+/// scanner can be started or stopped by another page — while a `POST` to any
+/// other path beside them stays `405`. (A valid start runs scanners; that half
+/// is `tests/security_job.rs`, over stub scanners.)
+///
+/// [FR-SC-15]: ../../docs/specs/requirements/FR-SC-15.md
+/// [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
+#[tokio::test]
+async fn security_scan_posts_are_admitted_only_with_same_origin_intent() {
+    assert_eq!(web::SECURITY_SCAN_POST_ROUTES, ["/api/v1/security/scan", "/api/v1/security/scan/cancel"]);
+    for path in web::SECURITY_SCAN_POST_ROUTES {
+        let (_dir, router, intent) = mutating_router();
+        let cross_origin = config_post(path, Some(intent.as_str()), Some("http://evil.example"), "{}");
+        assert_eq!(router.clone().oneshot(cross_origin).await.unwrap().status(), StatusCode::FORBIDDEN, "cross-origin POST {path}");
+        let tokenless = config_post(path, None, Some("http://127.0.0.1:4983"), "{}");
+        assert_eq!(router.oneshot(tokenless).await.unwrap().status(), StatusCode::FORBIDDEN, "tokenless POST {path}");
+    }
+    for path in ["/api/v1/security/scans", "/api/v1/security/scan/start", "/api/v1/security/findings"] {
+        assert_unmounted_post_is_405(path, "only the start and cancel routes are admitted").await;
+    }
+}
+
+/// The scanner install's start and cancel (S-747, [FR-SC-24]) download and run
+/// binaries, or stop a download, so they are intent-guarded like every
+/// admitted `POST` ([NFR-SE-06]): a cross-origin, tokenless or forged-token one
+/// is refused `403` — past the method guard, stopped by the intent guard —
+/// before any handler runs. A `POST` to a path beside them stays `405`. (The
+/// admitted install is `tests/security_install_job.rs`.)
+///
+/// [FR-SC-24]: ../../docs/specs/requirements/FR-SC-24.md
+/// [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
+#[tokio::test]
+async fn security_install_posts_are_refused_without_same_origin_intent() {
+    assert_eq!(web::SECURITY_INSTALL_POST_ROUTES, ["/api/v1/security/install", "/api/v1/security/install/cancel"]);
+    let body = r#"{"scan":true,"consent":["trivy 0.74.0"],"scan_consent":["trivy"]}"#;
+    for path in web::SECURITY_INSTALL_POST_ROUTES {
+        let (_dir, router, intent) = mutating_router();
+        for (req, what) in [
+            (config_post(path, Some(intent.as_str()), Some("http://evil.example"), body), "cross-origin"),
+            (config_post(path, None, Some("http://127.0.0.1:4983"), body), "intent-less"),
+            (config_post(path, Some("forged"), Some("http://127.0.0.1:4983"), body), "forged-token"),
+        ] {
+            let status = router.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{what} POST {path}");
+        }
+    }
+    for path in ["/api/v1/security/installs", "/api/v1/security/install/start", "/api/v1/security/uninstall"] {
+        assert_unmounted_post_is_405(path, "only the install start and cancel routes are admitted").await;
+    }
+}
+
+/// The triage writes (S-672, [FR-SC-12]) add and remove a suppression in the
+/// committed `.logos/security-ignore.toml`, so they are intent-guarded like
+/// every admitted `POST` ([NFR-SE-06]): a cross-origin, tokenless or
+/// forged-token one is refused `403` — past the method guard, stopped by the
+/// intent guard — and the file is never created. A `POST` to a path beside them
+/// stays `405`. (The admitted write is `tests/api_v1.rs`.)
+///
+/// [FR-SC-12]: ../../docs/specs/requirements/FR-SC-12.md
+/// [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
+#[tokio::test]
+async fn security_triage_posts_are_refused_without_same_origin_intent() {
+    assert_eq!(web::SECURITY_TRIAGE_POST_ROUTES, ["/api/v1/security/suppress", "/api/v1/security/unsuppress"]);
+    let body = r#"{"fingerprint":"0a7c3e51d9b84f26a1c05e8d7b3f9246e1d08a5c7b2f4963d8e0a1b5c7f92e43","reason":"forged"}"#;
+    for path in web::SECURITY_TRIAGE_POST_ROUTES {
+        let (dir, router, intent) = mutating_router();
+        for (req, what) in [
+            (config_post(path, Some(intent.as_str()), Some("http://evil.example"), body), "cross-origin"),
+            (config_post(path, None, Some("http://127.0.0.1:4983"), body), "intent-less"),
+            (config_post(path, Some("forged"), Some("http://127.0.0.1:4983"), body), "forged-token"),
+        ] {
+            let status = router.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{what} POST {path}");
+        }
+        assert!(!dir.path().join(".logos/security-ignore.toml").exists(), "a refused POST {path} wrote the ignore file");
+    }
+    for path in ["/api/v1/security/suppressions", "/api/v1/security/suppress/all", "/api/v1/security/ignore"] {
+        assert_unmounted_post_is_405(path, "only the suppress and unsuppress routes are admitted").await;
+    }
+}
+
 /// An invalid candidate is rejected `422` with the typed validation message and
 /// **no partial write** — the engine validates before the atomic swap (S-096,
 /// NFR-RA-07); the file stays absent here.

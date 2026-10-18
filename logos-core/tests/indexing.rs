@@ -2121,7 +2121,10 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 35 (S-609, the `nodes.uninherited` column), 34 (S-606, the
+    // Migrations 38 (S-523, the graph-dimension flags and cross-module count),
+    // 37 (S-676, the offender value columns, the uncapped offender
+    // table and their flag column), 36 (S-504, the snapshot where-to-start
+    // tables and their flag column), 35 (S-609, the `nodes.uninherited` column), 34 (S-606, the
     // associated-item columns and the impl-block table), 33 (S-591, the `nodes` arity columns and the ledger's
     // `arg_count` in its identity index), 32 (S-587, the ledger's `peeled`
     // column and its identity index), 31 (S-597, the alias in the ledger identity index), 30 (S-518,
@@ -2131,7 +2134,16 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
+        "ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
+         ALTER TABLE metric_snapshots DROP COLUMN acyclicity_applicable; DELETE FROM schema_versions WHERE version = 38; \
+         DROP TABLE metric_snapshot_offenders_uncapped; ALTER TABLE metric_snapshot_offenders DROP COLUMN threshold; \
+         ALTER TABLE metric_snapshot_offenders DROP COLUMN value; ALTER TABLE metric_snapshot_offenders DROP COLUMN measure; \
+         ALTER TABLE metric_snapshot_offenders DROP COLUMN node_id; \
+         ALTER TABLE metric_snapshots DROP COLUMN offender_values_recorded; DELETE FROM schema_versions WHERE version = 37; \
+         DROP TABLE metric_snapshot_outlier_labels; DROP TABLE metric_snapshot_outlier_measures; \
+         DROP TABLE metric_snapshot_fix_units; ALTER TABLE metric_snapshots DROP COLUMN insight_recorded; \
+         DELETE FROM schema_versions WHERE version = 36; \
+         ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
          DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
          ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
          ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \

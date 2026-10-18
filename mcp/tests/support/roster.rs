@@ -56,6 +56,14 @@ pub const QUALITY_TOOLS: &[&str] = &[
     "check_rules",
     "evolution",
     "dsm",
+    // The ratchet's bless command, twin of `check --bless` (S-507, FR-GV-23).
+    "bless_rules",
+    // The uncapped per-symbol offender listing (S-676, FR-QM-19).
+    "offenders",
+    // The branch delta against the merge-base (S-677, FR-GV-24).
+    "review",
+    // The advisory "where to start" ranking (S-505, FR-QM-17).
+    "improvements",
 ];
 
 /// The temporal tool wired to the history engine (S-048, CR-006, FR-GH-06).
@@ -130,4 +138,7 @@ pub const MEMBER_SELECTABLE_TOOLS: &[&str] = &[
     "coverage_status",
     "security_status",
     "security_findings",
+    "offenders",
+    "review",
+    "improvements",
 ];

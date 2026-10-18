@@ -553,3 +553,177 @@ fn shallow_clone_reports_na_without_partial_numbers() {
         "a one-line notice explains the shallow-clone degrade (UAT-GH-04)"
     );
 }
+
+// ── FR-SC-14: findings column and filter ─────────────────────────────────────
+
+/// A SARIF 2.1.0 report with one result per `(path, level)`, from a scanner the
+/// store reads as it reads Semgrep: `error` is high, `warning` medium.
+fn sarif(results: &[(&str, &str)]) -> String {
+    let results: Vec<String> = results
+        .iter()
+        .enumerate()
+        .map(|(n, (path, level))| {
+            format!(
+                r#"{{"ruleId":"rule.{n}","level":"{level}","message":{{"text":"finding {n}"}},
+                "locations":[{{"physicalLocation":{{"artifactLocation":{{"uri":"{path}"}},
+                "region":{{"startLine":1}}}}}}]}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"version":"2.1.0","runs":[{{"tool":{{"driver":{{"name":"Semgrep OSS","semanticVersion":"1.85.0",
+        "rules":[]}}}},"results":[{}]}}]}}"#,
+        results.join(",")
+    )
+}
+
+/// Two files identical on churn and complexity — only a finding can separate
+/// them — indexed and mined, with the history warmed so no board carries the
+/// first-mine notice.
+fn twin_repo() -> TempDir {
+    let tmp = TempDir::new().expect("temp root");
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+    for name in ["a", "z"] {
+        for n in 0..2 {
+            commit(
+                repo,
+                &format!("src/{name}.rs"),
+                &format!("{}// rev {n}\n", complex_source(name)),
+                &format!("{name} v{n}"),
+            );
+        }
+    }
+    let engine = Engine::start(repo).expect("engine starts");
+    engine.index();
+    engine.hotspots(None, false, false).expect("warm-up mine");
+    tmp
+}
+
+fn ingest(engine: &Engine, root: &Path, results: &[(&str, &str)]) {
+    let report = root.parent().unwrap().join(format!(
+        "{}-report.sarif",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::write(&report, sarif(results)).unwrap();
+    engine.security_ingest(&report).expect("the report ingests");
+}
+
+fn cell<'a>(report: &'a logos_core::history::HotspotReport, path: &str) -> &'a logos_core::history::PathFindings {
+    report
+        .files
+        .iter()
+        .find(|h| h.path == path)
+        .and_then(|h| h.findings.as_ref())
+        .unwrap_or_else(|| panic!("{path} carries a findings cell"))
+}
+
+#[test]
+fn a_project_nothing_was_scanned_in_has_no_findings_column() {
+    let tmp = twin_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    for report in [
+        engine.hotspots(None, false, false).unwrap(),
+        engine.hotspots_with_findings(None, false, false, true).unwrap(),
+        engine.latest_hotspots_with_findings(None, false, false, true).unwrap(),
+    ] {
+        assert!(report.files.iter().all(|h| h.findings.is_none()), "no scan, no cell");
+        assert!(!report.with_findings, "the filter has nothing to prefer");
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json["files"][0].get("findings").is_none(), "{json}");
+    }
+}
+
+#[test]
+fn under_the_filter_a_fresh_high_finding_ranks_above_an_identical_hotspot() {
+    let tmp = twin_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
+
+    let plain = engine.hotspots(None, false, false).unwrap();
+    let paths: Vec<&str> = plain.files.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, ["src/a.rs", "src/z.rs"], "the filter off keeps the path tie-break");
+    assert_eq!(plain.files[0].score, plain.files[1].score, "the twins are identical");
+    assert_eq!(cell(&plain, "src/z.rs").count, 1, "the column shows without the filter");
+    assert_eq!(cell(&plain, "src/a.rs").count, 0, "a scanned file with none reads zero");
+
+    for filtered in [
+        engine.hotspots_with_findings(None, false, false, true).unwrap(),
+        engine.latest_hotspots_with_findings(None, false, false, true).unwrap(),
+    ] {
+        let paths: Vec<&str> = filtered.files.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["src/z.rs", "src/a.rs"], "the fresh high finding leads: {paths:?}");
+        assert_eq!(
+            serde_json::to_value(cell(&filtered, "src/z.rs").highest).unwrap(),
+            "high"
+        );
+        assert!(filtered.with_findings);
+    }
+}
+
+#[test]
+fn a_stale_finding_is_labelled_and_excluded_from_the_count_and_the_ranking() {
+    let tmp = twin_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
+    // The file moves after the report was ingested: its anchor no longer matches.
+    std::fs::write(tmp.path().join("src/z.rs"), "// moved\n").unwrap();
+
+    let filtered = engine.hotspots_with_findings(None, false, false, true).unwrap();
+    let z = cell(&filtered, "src/z.rs");
+    assert_eq!((z.count, z.highest, z.stale), (0, None, 1), "labelled stale, not counted");
+    let paths: Vec<&str> = filtered.files.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, ["src/a.rs", "src/z.rs"], "a stale finding ranks nothing: {paths:?}");
+}
+
+#[test]
+fn a_suppressed_finding_leaves_the_count_and_an_expired_suppression_returns_it() {
+    let tmp = twin_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
+    let fingerprint = engine
+        .security_findings(&logos_core::security::FindingsFilter::default())
+        .unwrap()
+        .findings[0]
+        .finding
+        .fingerprint
+        .clone();
+    let ignore = |expires: &str| {
+        std::fs::write(
+            tmp.path().join(".logos/security-ignore.toml"),
+            format!("[[ignore]]\nfingerprint = \"{fingerprint}\"\nreason = \"accepted risk\"\nexpires = {expires}\n"),
+        )
+        .unwrap();
+    };
+
+    ignore("2999-01-01");
+    let suppressed = engine.hotspots(None, false, false).unwrap();
+    assert_eq!(cell(&suppressed, "src/z.rs").count, 0, "an unexpired entry suppresses it");
+
+    ignore("2000-01-01");
+    let expired = engine.hotspots(None, false, false).unwrap();
+    assert_eq!(cell(&expired, "src/z.rs").count, 1, "an expired entry no longer does");
+}
+
+#[test]
+fn an_invalid_ignore_file_fails_the_board_only_once_a_scan_is_stored() {
+    let tmp = twin_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    std::fs::write(tmp.path().join(".logos/security-ignore.toml"), "not toml [[[").unwrap();
+
+    // Nothing scanned: there is nothing to label, so the board does not depend on the file.
+    let board = engine.hotspots(None, false, false).expect("a never-scanned board ignores the file");
+    assert!(board.files.iter().all(|h| h.findings.is_none()));
+
+    // A stored report makes the suppressions load-bearing: an unreadable file is an error
+    // (exit 2), never a silent board of unsuppressed findings.
+    ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
+    for result in [
+        engine.hotspots(None, false, false),
+        engine.latest_hotspots_with_findings(None, false, false, true),
+    ] {
+        let err = result.expect_err("a stored report with an unreadable ignore file must not rank");
+        assert!(format!("{err:#}").contains("security-ignore.toml"), "{err:#}");
+    }
+}

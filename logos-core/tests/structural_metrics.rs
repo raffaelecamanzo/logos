@@ -954,7 +954,7 @@ class Split {
             .hydrate(Granularity::ExcludeContains)
             .expect("dependency view hydrates");
         let rt = engine.runtime().unwrap();
-        let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+        let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
             .expect("snapshot runs")
             .metrics;
 

@@ -1,3 +1,9 @@
+/api/v1/security/install
+/api/v1/security/install/cancel
+/api/v1/security/scan
+/api/v1/security/scan/cancel
+/api/v1/security/suppress
+/api/v1/security/unsuppress
 /api/v1/verify
 /api/v1/workspace/config/save
 /api/v1/workspace/config/secret

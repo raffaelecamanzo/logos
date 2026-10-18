@@ -228,7 +228,7 @@ fn project_from_engine(engine: &Engine) -> GoldenSignal {
     let view = engine
         .hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
-    let snap = metrics::snapshot(rt, &view, Some("golden"), metrics::Thresholds::default())
+    let snap = metrics::snapshot(rt, &view, Some("golden"), metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs")
         .metrics;
 

@@ -24,7 +24,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use logos_core::security::{FindingsFilter, ScanEnvironment};
+use logos_core::security::{FindingsFilter, ScanEnvironment, ScanRequest};
 use logos_core::Engine;
 use mcp::LogosMcp;
 use rmcp::{
@@ -37,6 +37,29 @@ use tempfile::TempDir;
 
 /// Printed by the failing stub; must reach no payload.
 const PLANTED: &str = "LOGOSPLANTEDSECRET0123456789abcdef";
+
+/// `app/db.py` with a function around each line `semgrep.sarif` names (12 and
+/// 18), so each finding binds to an enclosing symbol. Python resolves no call
+/// across files here, so reachability is `unresolved` (S-669).
+const DB_PY: &str = r#"import sqlite3
+
+
+def connect():
+    return sqlite3.connect("app.db")
+
+
+def find(user_id):
+    conn = connect()
+    cursor = conn.cursor()
+    # look the user up
+    cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)
+    return cursor.fetchone()
+
+
+def delete(uid):
+    conn = connect()
+    return conn.execute(f"DELETE FROM users WHERE id = {uid}")
+"#;
 
 const CLEAN_BANDIT: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Bandit","rules":[]}},"results":[]}]}"#;
 
@@ -83,7 +106,7 @@ fn fixture() -> Fixture {
     for dir in [&root.join("app"), &root.join(".logos"), &bin, &user] {
         fs::create_dir_all(dir).unwrap();
     }
-    fs::write(root.join("app/db.py"), "import sqlite3\n").unwrap();
+    fs::write(root.join("app/db.py"), DB_PY).unwrap();
     fs::write(root.join(".logos/config.toml"), "[project]\nid = \"security-parity-fixture\"\n").unwrap();
     git(&root, &["init", "-q", "-b", "main"]);
     git(&root, &["add", "."]);
@@ -94,7 +117,11 @@ fn fixture() -> Fixture {
     stub(&bin, "semgrep", Some(&semgrep), 0, "");
     stub(&bin, "bandit", Some(&clean), 0, "");
     stub(&bin, "gitleaks", None, 3, &format!("error: password={PLANTED}"));
-    let env = ScanEnvironment { user_dir: Some(user), search_path: Some(bin.into_os_string()) };
+    let env = ScanEnvironment {
+        user_dir: Some(user),
+        search_path: Some(bin.into_os_string()),
+        tools_dir: None,
+    };
     Engine::start(&root).expect("engine").index();
     Fixture { _tmp: tmp, root, env, clean }
 }
@@ -134,6 +161,27 @@ async fn call(client: &Client, tool: &str, args: Value) -> Result<Value, Service
 fn row<'a>(payload: &'a Value, scanner: &str) -> &'a Value {
     payload["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == scanner).unwrap()
 }
+
+/// Each listed finding's enclosing symbol and reachability `(confidence,
+/// verdict)` — its graph context (S-669).
+fn contexts(payload: &Value) -> Vec<(Option<&str>, Option<&str>, Option<&str>)> {
+    payload["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let c = &f["context"];
+            (c["enclosing"]["symbol"]["name"].as_str(), c["reachability"]["confidence"].as_str(), c["reachability"]["verdict"].as_str())
+        })
+        .collect()
+}
+
+/// What `contexts` reads on the fixture: each finding bound to its function,
+/// and no route claimed either way, Python resolving no call across files.
+const BOUND_UNRESOLVED: [(Option<&str>, Option<&str>, Option<&str>); 2] = [
+    (Some("find"), Some("unresolved"), Some("unknown")),
+    (Some("delete"), Some("unresolved"), Some("unknown")),
+];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
@@ -199,6 +247,7 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     let filter = FindingsFilter::parse(Some("medium"), Some("semgrep"), None, None, None, None).unwrap();
     assert_eq!(f.direct(|e| e.security_findings(&filter)), mcp_findings, "security_findings");
     assert_eq!(mcp_findings["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(contexts(&mcp_findings), BOUND_UNRESOLVED, "the graph context rides on the MCP payload");
     let every = FindingsFilter::parse(Some("medium"), Some("semgrep"), Some("A05"), Some("app"), Some("active"), Some("2025")).unwrap();
     assert_eq!(f.direct(|e| e.security_findings(&every)), mcp_every, "every filter, same slots");
     assert_eq!(mcp_every["findings"].as_array().unwrap().len(), 2, "{mcp_every}");
@@ -208,4 +257,85 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     for payload in [&cli_status, &cli_scan, &mcp_scan, &mcp_status, &mcp_findings, &mcp_ingest] {
         assert!(!payload.to_string().contains(PLANTED), "a planted secret reached a payload: {payload}");
     }
+}
+
+/// MCP cannot install a scanner ([FR-SC-22], [ADR-88] §6): no tool installs,
+/// uninstalls or records install consent, and `security_status` names the
+/// CLI command the user runs instead — on both surfaces, one payload. The
+/// instructions say so inside the 2048 characters a truncating host delivers.
+///
+/// [FR-SC-22]: ../../docs/specs/requirements/FR-SC-22.md
+/// [ADR-88]: ../../docs/specs/architecture/decisions/ADR-88.md
+#[tokio::test(flavor = "multi_thread")]
+async fn no_mcp_tool_installs_and_security_status_names_the_cli_install_command() {
+    let f = fixture();
+    let server = LogosMcp::new(f.engine(), &logos_ext::ExtensionHost::new());
+    let installers: Vec<String> = server
+        .list_tools()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .filter(|name| name.contains("install"))
+        .collect();
+    assert!(installers.is_empty(), "an MCP tool installs: {installers:?}");
+
+    let cli_status = f.direct(|e| e.security_status());
+    let (client, server) = boot(&f).await;
+    let mcp_status = call(&client, "security_status", json!({})).await.unwrap();
+    client.cancel().await.ok();
+    server.abort();
+    assert_eq!(mcp_status, cli_status);
+    // A missing scanner Logos installs names the command, and so does a PATH
+    // copy below the pinned minimum. CodeQL's names its licence flag, and its
+    // row the acknowledgement: none yet (S-746).
+    assert_eq!(row(&mcp_status, "trivy")["install"], "logos security install trivy");
+    assert_eq!(row(&mcp_status, "trivy")["installed"], Value::Null);
+    assert_eq!(row(&mcp_status, "checkov")["install"], "logos security install checkov");
+    assert_eq!(row(&mcp_status, "codeql")["install"], "logos security install codeql --accept-codeql-licence");
+    assert_eq!(row(&mcp_status, "codeql")["licence"], json!({"accepted": [], "pinned_accepted": false}));
+    let semgrep = row(&mcp_status, "semgrep");
+    assert_eq!(
+        semgrep["install"], "logos security install semgrep",
+        "a PATH copy below the pinned minimum (1.85.0) names the command"
+    );
+    assert_eq!(
+        (semgrep["installed"]["copy"].as_str(), semgrep["installed"]["version"].as_str()),
+        (Some("path"), Some("1.2.3")),
+        "the copy in use and its probed version: {semgrep}"
+    );
+
+    let line = "`security_status` names\n  `logos security install`";
+    let at = mcp::INSTRUCTIONS.find(line).expect("the instructions name the install command");
+    assert!(at + line.len() <= 2048, "the install line ends at {} — past what a host delivers", at + line.len());
+}
+
+/// [FR-SC-17] parity: a scan narrowed by scanner and path is one payload on
+/// both surfaces, and a path outside the root — exit 2 on the CLI — is refused
+/// on MCP with the same message, before any scanner starts. Like the consent
+/// refusal, it is the engine's error, so it travels as the tool's failure.
+///
+/// [FR-SC-17]: ../../docs/specs/requirements/FR-SC-17.md
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scoped_scan_is_one_payload_on_both_surfaces_and_an_outside_path_is_refused() {
+    let f = fixture();
+    f.direct(|e| e.security_scan(true));
+    let request = ScanRequest::new(vec!["semgrep".into()], vec!["app/db.py".into()]);
+    // The second run of the same scoped report is the no-op MCP's run repeats.
+    f.direct(|e| e.security_scan_selected(false, &request, |_| {}));
+    let cli = f.direct(|e| e.security_scan_selected(false, &request, |_| {}));
+    let (client, server) = boot(&f).await;
+    let mcp = call(&client, "security_scan", json!({"scanners": ["semgrep"], "paths": ["app/db.py"]})).await.unwrap();
+    assert_eq!(mcp, cli, "security_scan, scoped");
+    assert_eq!(row(&mcp, "semgrep")["scope"], json!({"kind": "paths", "paths": ["app/db.py"]}));
+    assert_eq!(row(&mcp, "bandit")["outcome"], "not_selected");
+
+    let Err(ServiceError::McpError(outside)) = call(&client, "security_scan", json!({"paths": ["../outside"]})).await else {
+        panic!("a path outside the root must be refused");
+    };
+    assert!(outside.message.contains("\"../outside\" resolves outside the project root"), "{}", outside.message);
+    let Err(ServiceError::McpError(unknown)) = call(&client, "security_scan", json!({"scanners": ["nmap"]})).await else {
+        panic!("an unregistered scanner must be refused");
+    };
+    assert!(unknown.message.contains("\"nmap\" is not a registered scanner"), "{}", unknown.message);
+    client.cancel().await.ok();
+    server.abort();
 }

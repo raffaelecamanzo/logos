@@ -1,5 +1,23 @@
 [
   {
+    "description": "Bless the current offenders of every `ratchet = true` constraint (FR-GV-23): write them, sorted and deterministic, to the checked-in .logos/rules-baseline.json, then return the check_rules report against it — blessed debt is a warning, new or worsened debt an error. The CLI twin is `logos check --bless`. Blessing debt is a human decision that belongs in code review: do not call this to make a failing check pass. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "no_reconcile": {
+          "description": "Skip the pre-evaluation reconcile for tight inner loops; the\nfreshness line marks the result assumed-fresh (FR-RC-04).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "ReconcileParams",
+      "type": "object"
+    },
+    "name": "bless_rules"
+  },
+  {
     "description": "Which git refs collide, and what a merge did not carry (FR-NV-13). Give the refs about to be merged; returns the symbols more than one of them modifies (naming the refs, and naming the refs that do NOT touch a shared symbol — the silent-drop shape), plus, with `merge`, the symbols and files a ref changed that the stated merge result does not. Ask BEFORE integrating parallel branches, and again after: a clean merge is not a complete merge. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -341,7 +359,7 @@
     "name": "health"
   },
   {
-    "description": "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Non-git/shallow repos return n/a + a notice.",
+    "description": "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Each file carries a findings cell (unsuppressed fresh security findings: count, highest severity; stale ones counted apart) once a scan is stored, none before; `with_findings:true` ranks files with a fresh finding first, highest severity first (FR-SC-14). Non-git/shallow repos return n/a + a notice.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -370,6 +388,13 @@
         },
         "untested": {
           "description": "Rank only untested hotspots (no fresh execution coverage); falls back to\nthe labeled static-reachability signal when no coverage is ingested\n(default false, FR-CV-07).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "with_findings": {
+          "description": "Rank hotspots with a fresh unsuppressed security finding first, highest\nseverity first (default false, FR-SC-14).",
           "type": [
             "boolean",
             "null"
@@ -453,6 +478,24 @@
     "name": "impact_intersection"
   },
   {
+    "description": "Where to start (FR-QM-17): the ranked fix units the last snapshot recorded — at most 10 classes, functions, exact-duplicate groups and near-clone groups, each with its dimension(s), its `points` and the `outliers` measures it is labelled on — plus the per-member outlier labels of each measure. `points` is an ESTIMATE under a single-unit counterfactual (the signal recomputed with that one unit's contribution removed, minus the current signal), and `basis` says so. Advisory: it never enters the signal, the gate or `check`. Ordered by points descending, then dimension, then node id; byte-stable. A pure read: run scan first to measure. recorded:false means no snapshot recorded a ranking (never scanned, or one that predates it); recorded:true with no units means no single unit recovers a whole point, never that the code is clean.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RepoParams",
+      "type": "object"
+    },
+    "name": "improvements"
+  },
+  {
     "description": "Everything about one symbol: kind, location, signature, annotations, immediate edges (FR-NV-04). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -483,6 +526,38 @@
       "type": "object"
     },
     "name": "node"
+  },
+  {
+    "description": "Every offender the last snapshot recorded, UNCAPPED (FR-QM-19) — the full lists behind scan's top-10 worst offenders, narrowed by a project-relative path glob and/or one dimension (nesting, conciseness, cohesion, focus, uniqueness, acyclicity, depth, equality, redundancy). Each entry carries its dimension, node_id (the symbol id without its repository coordinate — the identity a ratchet blessed entry uses, stable across re-indexing), name, file, line, detail, the measure its value counts, the value and the threshold it met (value >= threshold; null where the dimension has none). Ordered as the capped lists are, byte-stable. A pure read: run scan first to measure. recorded:false with not_recorded_because (never_scanned, or a snapshot that predates the uncapped list) means nothing was recorded, never clean.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "dimension": {
+          "description": "Only this dimension: nesting, conciseness, cohesion, focus, uniqueness, acyclicity, depth, equality or redundancy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Only offenders defined in files matching this project-relative glob (\"*\" stays in one directory, \"**\" crosses them, e.g. \"src/a/**\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "OffendersParams",
+      "type": "object"
+    },
+    "name": "offenders"
   },
   {
     "description": "Structural precedent (FR-NV-12): nodes analogous to a symbol or a project-relative file — those sharing a trait/interface implementation, a registration edge (the same registry, dispatcher or factory names both), or a call shape. Each result names WHY it is analogous and through which nodes; ranking is counted graph facts, never a score, and an empty answer states its reason, and names the resolution denominator where the reason is the index's reach rather than the code (`resolution_denominator`, FR-NV-14). Ask BEFORE writing new code, to find the sibling that already does this.",
@@ -526,6 +601,31 @@
       "type": "object"
     },
     "name": "rescan"
+  },
+  {
+    "description": "The branch delta (FR-GV-24): every offender (all nine dimensions, uncapped) and every check violation, classified new, worsened, improved, resolved or unchanged PER SYMBOL against the merge-base of HEAD and `base` (default: the repository's default branch). Changed entries are listed; unchanged ones are only counted (offender_counts, violation_counts). Each entry carries its value before and after, its threshold, and a trust label: resolved, stale (the file changed since the last sync — run sync), or the tag of a language the graph binds within files only. Also lists near-clone groups the branch introduced, and under sections.security the security findings the branch introduced, touched or resolved (FR-SC-18): each with its method (fingerprint against the report recorded at the merge-base, else hunk), freshness, severity, OWASP categories and reachability confidence; a finding removed on a file edited since the last scan reads stale, never resolved; suppressed findings are listed apart; messages stay redacted; never scanned reads measured:false. The before-state is the snapshot recorded at the merge-base, else a shadow index of that tree cached by commit (the first call may take as long as an index); no other commit is ever compared. Advisory: never moves check or gate. measured:false with not_measured_because means nothing was classified. Byte-stable; the CLI twin is `logos review --base <ref>`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base": {
+          "description": "The ref to compare against; omit for the repository's default branch (origin/HEAD, else main, else master).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "ReviewParams",
+      "type": "object"
+    },
+    "name": "review"
   },
   {
     "description": "Full architecture-quality scan, reconcile-then-score (ADR-11): the 0-10000 signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled. Under a workspace it acts on the default member only: it takes no `repo`.",
@@ -587,7 +687,7 @@
     "name": "search"
   },
   {
-    "description": "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0.",
+    "description": "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0. Each finding carries its graph context (FR-SC-13): the enclosing symbol, whether a route reaches it over call edges (reachable, unreachable or unknown, naming the nearest route) and its blast radius (the sizes of impact on that symbol), each labelled resolved, unresolved or unbound from the language's resolution denominator — an unresolved claim is never unreachable, and a lockfile finding is unbound at its manifest line.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -665,16 +765,40 @@
     "name": "security_ingest"
   },
   {
-    "description": "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "description": "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, not_selected, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. `scanners` and `paths` make it a re-scan that takes seconds (FR-SC-17): Semgrep, Gitleaks, Bandit, gosec and Checkov run on the paths only and replace only their findings there (Gitleaks keeps its history findings there); Trivy, OSV-Scanner and Dependency-Check report whole-manifest only, CodeQL whole-project only, and each runs unscoped when named. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "paths": {
+          "default": null,
+          "description": "Scan only these files or directories, relative to the project root (FR-SC-17). A path outside the root is refused before any scanner starts.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scanners": {
+          "default": null,
+          "description": "Run only these scanners, by registry name (semgrep) or SARIF driver name (Semgrep OSS) (FR-SC-17); every installed, enabled one when absent.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
       "title": "SecurityScanParams",
       "type": "object"
     },
     "name": "security_scan"
   },
   {
-    "description": "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Also the consent state: the scanners consented to, and the ones the next scan will ask for.",
+    "description": "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Also the consent state: the scanners consented to, and the ones the next scan will ask for.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {

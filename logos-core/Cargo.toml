@@ -36,6 +36,11 @@ libc = { workspace = true }
 # and the human-editable checked-in policy files (S-006, ADR-15). Pure parser
 # with no socket/HTTP surface; does not weaken the no-network invariant (NFR-SE-01).
 toml = { workspace = true }
+# `sha2` verifies every artifact the tool installer fetches against the SHA-256
+# pinned in its manifest, before anything is unpacked (S-743, NFR-SE-10). A
+# pure hash crate with no socket surface (NFR-SE-01), MIT/Apache-2.0, and
+# already in the tree through `rust-embed`, so this adds no new crate.
+sha2 = "0.10"
 
 # ── Plugin substrate / tree-sitter grammars (S-004, ADR-09) ──────────────────
 # `tree-sitter` provides the parser runtime and the `Language`/`Query` types and

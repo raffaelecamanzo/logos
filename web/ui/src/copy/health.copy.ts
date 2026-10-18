@@ -1,8 +1,8 @@
 /*
  * The Health view's copy catalogue (S-615, CR-203 items 12–20, FR-UI-43).
  *
- * Every sentence Health renders lives here: the Gate, Quality signal, ten
- * dimension and Signal trend widgets (`CopyEntry`s, held to the FR-UI-39 message
+ * Every sentence Health renders lives here: the Gate, Quality signal, Where to
+ * start, ten dimension and Signal trend widgets (`CopyEntry`s, held to the FR-UI-39 message
  * standard), and the figure, absence and disclosure text those widgets carry.
  * `HealthView` writes no widget sentence of its own (only the "n/a" / "not
  * applicable" badges), so a wording change edits this file alone. An absent or
@@ -141,6 +141,9 @@ export interface DimensionCopy extends CopyEntry {
    *  does not list: Modularity, which scores the directory layout as a whole
    *  (CR-209). */
   readonly unlisted?: string;
+  /** Present exactly for a dimension whose units never carry points in the Where
+   *  to start card: it says why (S-505, FR-QM-17). */
+  readonly unranked?: string;
 }
 
 /** A share of a population, to one decimal place. A share that is not zero never
@@ -164,18 +167,24 @@ export const acyclicity: DimensionCopy = {
   what: "Are there dependency cycles? This counts the groups of units that depend on each other in a loop.",
   why: "A unit in a cycle cannot be changed, tested or released without the others in it.",
   raw: (raw) => `${raw} dependency ${raw === 1 ? "cycle" : "cycles"}`,
+  unranked:
+    "Not ranked in Where to start: a cycle can be broken in several ways and each leaves a different graph, so it has no single result and no stated points.",
 };
 
 export const depth: DimensionCopy = {
   what: "How long are dependency chains? This measures the longest chain of units that depend on one another, counting each cycle as one unit.",
   why: "In a long chain, a change at the bottom can ripple through every layer above it.",
   raw: (raw) => `longest chain of ${raw} ${raw === 1 ? "unit" : "units"}, each cycle counted as one`,
+  unranked:
+    "Not ranked in Where to start: splitting a module has no single result, so a chain has no stated points.",
 };
 
 export const equality: DimensionCopy = {
   what: "Is complexity evenly spread? This measures how unevenly branching logic is spread across functions.",
   why: "Complexity piled into a few functions makes those functions the riskiest to change.",
   raw: (raw) => [gloss("gini"), ` ${raw.toFixed(2)} of function complexity (0 is even)`],
+  unranked:
+    "Not ranked in Where to start: splitting a function has no single result, so these functions have no stated points.",
 };
 
 export const redundancy: DimensionCopy = {
@@ -273,6 +282,58 @@ export function offenderBadge(state: DimensionOffenderState, listed: number): st
       return null;
   }
 }
+
+/** The Acyclicity link's sentence (S-505, FR-QM-17), drawn only while the
+ *  Architecture view is shown, so it never points at a page that lands elsewhere.
+ *  While the view's cycle list is shown the link names it (`cycles`); while that
+ *  list stays hidden the target is the dependency matrix, whose cycle cells stay
+ *  outlined (FR-UI-05, CR-203). The label is the link text. */
+export const CYCLES_LINK = {
+  cycles: { before: "See these cycles in the ", label: "Architecture / Cycles", after: " view." },
+  matrix: { before: "See these cycles outlined in the ", label: "Architecture dependency matrix", after: "." },
+} as const;
+
+// ── Where to start (S-505, FR-QM-17) ─────────────────────────────────────────
+
+export const whereToStart: CopyEntry = {
+  what: "The single fixes that would raise the quality signal most: functions, classes and duplicate groups, ranked by the points that fixing each one would recover.",
+  why: "It names the first change worth making, so you do not have to read ten dimension tables to choose one.",
+};
+
+/** The Where to start figure: how many units the snapshot ranked. */
+export function whereToStartFigure(units: number): string {
+  return `${units} ${units === 1 ? "unit" : "units"} ranked by estimated points, most first`;
+}
+
+/** The line under the Where to start table that says what the payload's own
+ *  `basis` sentence is for: the figures in its Est. points column. */
+export function whereToStartBasis(basis: string): string {
+  return `Est. points: ${basis}.`;
+}
+
+/** The table's visible caption: the estimates never move the signal or the gate. */
+export const WHERE_TO_START_CAPTION =
+  "Estimated points are advisory and never gate: they do not change the quality signal, the gate or any check.";
+
+/** The evidence statement for each Where to start state that has no table. An
+ *  empty recorded ranking is never worded as clean ("no single unit recovers a
+ *  whole point"), and an unrecorded one names the command that records it. */
+export const WHERE_TO_START_STATEMENT = {
+  "not-recorded": "A ranking was not recorded for this snapshot; run logos scan to record it.",
+  "no-whole-point": "No single unit recovers a whole point, so none is ranked.",
+} as const;
+
+/** What the Outlier column names for each per-unit measure the engine labels on.
+ *  An LCOM4 label is glossed where it renders. */
+export const OUTLIER_MEASURE: Readonly<Record<string, CopyText>> = {
+  lcom4: [gloss("lcom4")],
+  methods: "Methods",
+  span: "Span",
+  cc: "CC",
+  nesting: "Nesting",
+  duplicate_mass: "Duplicate mass",
+  clone_mass: "Clone mass",
+};
 
 // ── Signal trend ─────────────────────────────────────────────────────────────
 
