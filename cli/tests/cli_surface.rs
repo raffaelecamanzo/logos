@@ -27,8 +27,27 @@ mod composition;
 
 /// Run the built `logos` binary with `args` against `project` via the global
 /// `--project` flag (so tests never depend on the harness cwd).
+///
+/// The user's Claude Code directory is pointed at a path that does not exist,
+/// so a developer who enabled the Logos plugin for themselves does not turn
+/// every `init -i` here into the plugin-aware one (FR-IN-12).
 fn logos(project: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_logos"))
+        .env("CLAUDE_CONFIG_DIR", project.join(".no-claude-config"))
+        .arg("--project")
+        .arg(project)
+        .args(args)
+        .output()
+        .expect("the logos binary runs")
+}
+
+/// [`logos`] with the user's Claude Code directory (`CLAUDE_CONFIG_DIR`) at
+/// `claude_dir`, and git discovery stopped at `project`'s parent so the
+/// fixture is never taken for part of an enclosing repository.
+fn logos_with_claude(project: &Path, claude_dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_logos"))
+        .env("CLAUDE_CONFIG_DIR", claude_dir)
+        .env("GIT_CEILING_DIRECTORIES", project.parent().unwrap_or(project))
         .arg("--project")
         .arg(project)
         .args(args)
@@ -71,6 +90,7 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["init"],
     &["init", "-i", "--hooks"],
     &["init", "--workspace", "--yes", "--exclude", "nope-*"],
+    &["init", "--uninstall"],
     &["index"],
     &["sync", "src/lib.rs"],
     &["status"],
@@ -131,6 +151,7 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["dsm"],
     &["hotspots", "--untested"],
     &["hotspots", "--production-scope"],
+    &["hotspots", "--with-findings"],
     &["coverage", "status"],
     &["coverage", "ingest", "coverage.lcov", "--format", "lcov"],
     &["coverage", "refresh"],
@@ -796,15 +817,17 @@ fn scan_on_an_indexed_fixture_succeeds_with_a_freshness_line() {
     assert!(json["signal"].is_u64(), "a non-empty fixture has a signal");
 }
 
-/// `scan --json` and `quality-report --json` both render a Modularity that is
-/// not applicable ([CR-156]): the fixture's few edges sit below the five
-/// Modularity needs, and each surface carries the reason with the m-of-5 count,
-/// `m` being the very `edge_count` the scan scored — while the computed
-/// Modularity pair is still present beside it.
+/// `scan --json` and `quality-report --json` both render the graph dimensions
+/// as not applicable ([FR-QM-18], [CR-156]): the fixture's three files share one
+/// directory, so none of its edges crosses a module and the five cross-module
+/// edges Modularity, Acyclicity and Depth need are absent. Each surface carries
+/// the reason with the n-of-5 count, `n` being the very `cross_module_edge_count`
+/// the scan scored — while the computed pairs are still present beside it.
 ///
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
 /// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 #[test]
-fn scan_and_quality_report_render_a_not_applicable_modularity() {
+fn scan_and_quality_report_render_not_applicable_graph_dimensions() {
     let tmp = fixture();
     logos(tmp.path(), &["index", "--quiet"]);
 
@@ -812,23 +835,64 @@ fn scan_and_quality_report_render_a_not_applicable_modularity() {
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let scan: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     let metrics = &scan["metrics"];
-    let m = metrics["edge_count"].as_u64().expect("edge_count");
-    assert!(m < 5, "the three-file chain has m = {m} < 5 edges");
+    let n = metrics["cross_module_edge_count"].as_u64().expect("cross_module_edge_count");
+    assert!(metrics["edge_count"].as_u64().expect("edge_count") > n, "intra-module edges exist and do not count");
+    assert_eq!(n, 0, "the three files share one directory");
     let expected = serde_json::json!({
-        "edges": m,
+        "edges": n,
         "min_edges": 5,
-        "reason": format!("{m} of 5 dependency edges — too few for community structure"),
+        "reason": format!("{n} of 5 cross-module edges — too few to measure module structure"),
     });
-    assert_eq!(metrics["modularity_not_applicable"], expected, "scan --json");
-    assert!(
-        metrics["modularity"]["normalized"].is_f64(),
-        "the computed Modularity pair is still reported"
-    );
+    for dimension in ["modularity", "acyclicity", "depth"] {
+        assert_eq!(metrics[format!("{dimension}_not_applicable")], expected, "scan --json: {dimension}");
+        assert!(
+            metrics[dimension]["normalized"].is_f64(),
+            "the computed {dimension} pair is still reported"
+        );
+    }
 
     let out = logos(tmp.path(), &["quality-report", "--json"]);
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let readout: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
-    assert_eq!(readout["modularity_not_applicable"], expected, "quality-report --json");
+    for dimension in ["modularity", "acyclicity", "depth"] {
+        assert_eq!(readout[format!("{dimension}_not_applicable")], expected, "quality-report --json: {dimension}");
+    }
+}
+
+/// On a project whose one language binds same-file only (C), `scan --json`,
+/// `gate --json` and `session-start --json` each carry exactly one coverage
+/// warning, the same text on all three, naming `c` and its share ([FR-QM-18]) —
+/// and each exits as it did before the warning existed: 0 for the scan, the
+/// first gate's informational pass and the session start.
+///
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn the_coverage_warning_rides_scan_gate_and_session_start_without_moving_an_exit_code() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/core/core.c", "int helper(int x) { return x + 1; }
+int step(int x) { return helper(x); }
+");
+    write(tmp.path(), "src/net/net.c", "int step(int x);
+int send(int x) { return step(x); }
+");
+    logos(tmp.path(), &["index", "--quiet"]);
+
+    let mut seen = Vec::new();
+    for args in [&["scan", "--json"][..], &["gate", "--json"], &["session-start", "--json"]] {
+        let out = logos(tmp.path(), args);
+        assert_eq!(exit_code(&out), 0, "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+        let mut coverage: Vec<String> = json["warnings"]
+            .as_array()
+            .expect("a warnings array")
+            .iter()
+            .filter_map(|w| w.as_str().filter(|w| w.starts_with("coverage: ")).map(str::to_owned))
+            .collect();
+        assert_eq!(coverage.len(), 1, "{args:?}: {coverage:?}");
+        assert!(coverage[0].starts_with("coverage: c is 100% of production callables"), "{}", coverage[0]);
+        seen.push(coverage.remove(0));
+    }
+    assert!(seen.windows(2).all(|pair| pair[0] == pair[1]), "one text on every surface: {seen:?}");
 }
 
 #[test]
@@ -857,6 +921,7 @@ fn non_stub_subcommands_emit_valid_json_with_json_flag() {
         &["hotspots", "--json"],
         &["hotspots", "--untested", "--json"],
         &["hotspots", "--production-scope", "--json"],
+        &["hotspots", "--with-findings", "--json"],
         &["coverage", "status", "--json"],
     ] {
         let out = logos(tmp.path(), args);
@@ -1044,6 +1109,57 @@ fn hotspots_production_scope_flag_excludes_whole_test_files() {
         ["src/hot.rs"],
         "only the production file remains: {paths:?}"
     );
+}
+
+// ── FR-SC-14: `--with-findings` end-to-end through the binary ──────────────
+
+/// `logos hotspots` carries a findings column only once a scan is stored, and
+/// `--with-findings` ranks the file with a fresh high finding above an
+/// otherwise identical one ([FR-SC-14]).
+#[test]
+fn hotspots_with_findings_flag_ranks_the_file_with_a_fresh_finding_first() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+    let branchy = |n: usize| -> String {
+        let body: String = (0..4).map(|i| format!("    if x == {i} {{ return {i}; }}\n")).collect();
+        format!("pub fn f(x: i64) -> i64 {{\n{body}    x\n}}\n// rev {n}\n")
+    };
+    for name in ["a", "z"] {
+        for n in 0..2 {
+            git_commit(repo, &format!("src/{name}.rs"), &branchy(n), &format!("{name} v{n}"));
+        }
+    }
+    assert_eq!(exit_code(&logos(repo, &["index", "--quiet"])), 0);
+    let paths_of = |json: &serde_json::Value| -> Vec<String> {
+        json["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_string()).collect()
+    };
+
+    // Nothing scanned: no column, and the filter has nothing to prefer.
+    let bare = json_of(&logos(repo, &["hotspots", "--with-findings", "--json"]));
+    assert!(bare["files"][0].get("findings").is_none(), "no scan, no column: {bare}");
+    assert!(bare.get("with_findings").is_none(), "{bare}");
+    assert_eq!(paths_of(&bare), ["src/a.rs", "src/z.rs"]);
+
+    let report = repo.join(".logos/z.sarif");
+    std::fs::write(
+        &report,
+        r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0","rules":[]}},
+        "results":[{"ruleId":"r","level":"error","message":{"text":"m"},"locations":[{"physicalLocation":
+        {"artifactLocation":{"uri":"src/z.rs"},"region":{"startLine":1}}}]}]}]}"#,
+    )
+    .unwrap();
+    let ingested = logos(repo, &["security", "ingest", report.to_str().unwrap()]);
+    assert_eq!(exit_code(&ingested), 0, "{}", String::from_utf8_lossy(&ingested.stderr));
+
+    let plain = json_of(&logos(repo, &["hotspots", "--json"]));
+    assert_eq!(paths_of(&plain), ["src/a.rs", "src/z.rs"], "the column alone moves nothing");
+    assert_eq!(plain["files"][1]["findings"]["count"], 1, "{plain}");
+    assert_eq!(plain["files"][1]["findings"]["highest"], "high", "{plain}");
+
+    let filtered = json_of(&logos(repo, &["hotspots", "--with-findings", "--json"]));
+    assert_eq!(paths_of(&filtered), ["src/z.rs", "src/a.rs"], "{filtered}");
+    assert_eq!(filtered["with_findings"], true);
 }
 
 // ── FR-IN-01 (minimal contract): `init` bootstraps the store ───────────────
@@ -2362,4 +2478,249 @@ fn the_other_navigation_tools_on_a_bare_name_resolve_the_class_and_name_the_modu
         assert_eq!(by_symbol[anchor]["kind"], "module", "{tool}: {by_symbol}");
         assert!(by_symbol.get("alternatives").is_none(), "{tool}: {by_symbol}");
     }
+}
+
+/// S-507 / FR-GV-23 through the real binary: `check` against a ratchet budget
+/// with no blessed set exits 1 and writes nothing; `check --bless` writes
+/// `.logos/rules-baseline.json` and exits 0; a plain `check` then passes on the
+/// blessed debt and leaves the file as it was.
+#[test]
+fn check_bless_writes_the_blessed_set_and_check_then_passes() {
+    let tmp = fixture();
+    write(
+        tmp.path(),
+        ".logos/rules.toml",
+        "[constraints]\nmax_fn_lines = { max = 1, ratchet = true }\n",
+    );
+    let blessed = tmp.path().join(".logos/rules-baseline.json");
+    logos(tmp.path(), &["index", "--quiet"]);
+
+    let out = logos(tmp.path(), &["check", "--json"]);
+    assert_eq!(exit_code(&out), 1, "unblessed ratchet debt fails: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!blessed.exists(), "a plain check never writes the blessed set");
+
+    let out = logos(tmp.path(), &["check", "--bless", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert!(json["ratchet"]["written"].as_u64().is_some_and(|n| n > 0), "{json}");
+    let bytes = fs::read(&blessed).expect("--bless wrote the blessed set");
+
+    let out = logos(tmp.path(), &["check", "--json"]);
+    assert_eq!(exit_code(&out), 0, "blessed debt passes: {}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(fs::read(&blessed).unwrap(), bytes, "check left the blessed set as it was");
+}
+
+// ── FR-IN-12: plugin-aware `init -i`, `init --uninstall`, doctor findings ────
+
+/// The pinned plugin-absent `init -i` output: captured from the binary built
+/// at the commit before FR-IN-12 landed (`cli/tests/fixtures/init_plugin_absent`).
+const ABSENT_GOLDEN: &[(&str, &str)] = &[
+    (".mcp.json", include_str!("fixtures/init_plugin_absent/mcp.json.golden")),
+    ("CLAUDE.md", include_str!("fixtures/init_plugin_absent/CLAUDE.md.golden")),
+    (".claude/settings.json", include_str!("fixtures/init_plugin_absent/settings.json.golden")),
+    (
+        ".claude/hooks/logos-quality-open.sh",
+        include_str!("fixtures/init_plugin_absent/logos-quality-open.sh.golden"),
+    ),
+    (".logos/config.toml", include_str!("fixtures/init_plugin_absent/config.toml.golden")),
+    (".logos/rules.toml", include_str!("fixtures/init_plugin_absent/rules.toml.golden")),
+    (".logos/.gitignore", include_str!("fixtures/init_plugin_absent/gitignore.golden")),
+];
+
+/// Every file and directory (with a trailing `/`) under `root` outside
+/// `.logos/` and `.git/`, sorted.
+fn files_outside_logos(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if rel == ".logos" || rel == ".git" {
+                continue;
+            }
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                out.push(format!("{rel}/"));
+                walk(root, &path, out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// ADR-81's fitness function: with the plugin absent, `init -i` and its
+/// re-run print, and write, exactly what they did before FR-IN-12.
+#[test]
+fn plugin_absent_init_i_output_is_byte_identical_to_the_pinned_golden() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("fixture-repo");
+    let claude = tmp.path().join("claude");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&claude).unwrap();
+    let shown = root.display().to_string();
+
+    let first = logos_with_claude(&root, &claude, &["init", "-i", "--json"]);
+    assert_eq!(exit_code(&first), 0, "{}", String::from_utf8_lossy(&first.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout).replace(&shown, "{ROOT}"),
+        include_str!("fixtures/init_plugin_absent/stdout.json")
+    );
+    for (rel, golden) in ABSENT_GOLDEN {
+        assert_eq!(&fs::read_to_string(root.join(rel)).unwrap(), golden, "{rel} differs from the pinned bytes");
+    }
+    let mut written: Vec<&str> = ABSENT_GOLDEN.iter().map(|(rel, _)| *rel).filter(|r| !r.starts_with(".logos")).collect();
+    written.extend([".claude/", ".claude/hooks/"]);
+    written.sort_unstable();
+    assert_eq!(files_outside_logos(&root), written, "and nothing else is written, not even a directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(root.join(".claude/hooks/logos-quality-open.sh")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "the readout script stays executable");
+    }
+
+    let again = logos_with_claude(&root, &claude, &["init", "-i", "--json"]);
+    assert_eq!(
+        String::from_utf8_lossy(&again.stdout).replace(&shown, "{ROOT}"),
+        include_str!("fixtures/init_plugin_absent/rerun.json")
+    );
+}
+
+/// A committed repository with foreign content in every file `init -i`
+/// touches — JSON already in the pretty shape `init` writes, so the tree can
+/// be compared byte for byte after an uninstall.
+fn repo_with_foreign_content(root: &Path) {
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(root.join("CLAUDE.md"), "# Team notes\n\nKeep this.\n").unwrap();
+    fs::write(root.join(".claude/settings.json"), "{\n  \"model\": \"team-model\"\n}\n").unwrap();
+    fs::write(
+        root.join(".mcp.json"),
+        "{\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"other\"\n    }\n  }\n}\n",
+    )
+    .unwrap();
+    sh_git(root, &["init", "-q", "-b", "main"]);
+    sh_git(root, &["add", "-A"]);
+    sh_git(root, &["commit", "-q", "-m", "foreign content"]);
+}
+
+fn git_status(root: &Path) -> String {
+    let out = Command::new("git").arg("-C").arg(root).args(["status", "--porcelain"]).output().unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn json_of(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)))
+}
+
+/// The acceptance path through the binary: a repository set up by today's
+/// `init -i`, the plugin enabled at user scope, then `init -i` again — no
+/// legacy entry, script or hook is left and `doctor` reports nothing. Before
+/// the migration, `doctor` names the duplicate.
+#[test]
+fn plugin_enabled_init_i_migrates_a_legacy_repository_and_doctor_is_clean() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    let claude = tmp.path().join("claude");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&claude).unwrap();
+    repo_with_foreign_content(&root);
+    assert_eq!(exit_code(&logos_with_claude(&root, &claude, &["init", "-i", "--json"])), 0);
+
+    fs::write(claude.join("settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
+    let doctor = logos_with_claude(&root, &claude, &["doctor", "--json"]);
+    assert_eq!(exit_code(&doctor), 0, "a finding is diagnostic, not a failure");
+    let warnings = json_of(&doctor)["plugin_warnings"].clone();
+    assert_eq!(warnings.as_array().map(Vec::len), Some(1), "{warnings}");
+    assert!(warnings[0].as_str().unwrap().starts_with("duplicate registration"), "{warnings}");
+
+    let migrated = logos_with_claude(&root, &claude, &["init", "-i", "--json"]);
+    assert_eq!(exit_code(&migrated), 0, "{}", String::from_utf8_lossy(&migrated.stderr));
+    let mcp: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join(".mcp.json")).unwrap()).unwrap();
+    assert!(mcp["mcpServers"].get("logos").is_none() && mcp["mcpServers"].get("other").is_some(), "{mcp}");
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap()).unwrap();
+    assert!(settings.get("hooks").is_none(), "no readout entry: {settings}");
+    assert_eq!(settings["enabledPlugins"]["logos@logos"], true, "{settings}");
+    assert_eq!(settings["model"], "team-model");
+    assert!(!root.join(".claude/hooks").exists(), "no readout script");
+
+    let doctor = json_of(&logos_with_claude(&root, &claude, &["doctor", "--json"]));
+    assert_eq!(doctor["plugin_warnings"], serde_json::json!([]), "{doctor}");
+    assert_eq!(doctor["hook_warnings"], serde_json::json!([]), "{doctor}");
+}
+
+/// `init --uninstall` leaves only the foreign content and `.logos/` — after
+/// today's `init -i --hooks` and after a plugin-enabled one — and a second
+/// run, spelled as the manual spells it (`--hooks --uninstall`), changes
+/// nothing. `core.hooksPath` is unset.
+#[test]
+fn init_uninstall_leaves_only_foreign_content_and_a_second_run_is_a_no_op() {
+    for plugin in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let claude = tmp.path().join("claude");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&claude).unwrap();
+        if plugin {
+            fs::write(claude.join("settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
+        }
+        repo_with_foreign_content(&root);
+        assert_eq!(exit_code(&logos_with_claude(&root, &claude, &["init", "-i", "--hooks", "--json"])), 0);
+        assert_ne!(git_status(&root), "?? .logos/\n", "init wrote into tracked files");
+
+        let first = logos_with_claude(&root, &claude, &["init", "--uninstall", "--json"]);
+        assert_eq!(exit_code(&first), 0, "{}", String::from_utf8_lossy(&first.stderr));
+        assert_eq!(git_status(&root), "?? .logos/\n", "plugin={plugin}: {}", String::from_utf8_lossy(&first.stdout));
+        assert!(root.join(".logos/logos.db").is_file(), ".logos/ data stays");
+        let hooks_path = Command::new("git").arg("-C").arg(&root).args(["config", "core.hooksPath"]).output().unwrap();
+        assert!(!hooks_path.status.success(), "core.hooksPath unset");
+
+        let second = logos_with_claude(&root, &claude, &["init", "--hooks", "--uninstall", "--json"]);
+        assert_eq!(exit_code(&second), 0);
+        let steps = json_of(&second)["steps"].clone();
+        assert!(
+            steps.as_array().unwrap().iter().all(|s| s["action"] == "unchanged"),
+            "a second run is a no-op: {steps}"
+        );
+        assert_eq!(git_status(&root), "?? .logos/\n");
+    }
+}
+
+#[test]
+fn init_uninstall_conflicts_with_workspace() {
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(exit_code(&logos(tmp.path(), &["init", "--uninstall", "--workspace"])), 2);
+}
+
+/// With the plugin enabled for the project, `doctor` names both findings: the
+/// `.mcp.json` duplicate and a binary older than the plugin's declared minimum
+/// (read from `plugins/logos/.claude-plugin/plugin.json`) — and still exits 0.
+#[test]
+fn doctor_names_a_duplicate_registration_and_a_version_skew() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    assert_eq!(exit_code(&logos(&root, &["init"])), 0);
+    write(&root, ".claude/settings.json", r#"{"enabledPlugins":{"logos@logos":true}}"#);
+    write(&root, ".mcp.json", r#"{"mcpServers":{"logos":{"command":"logos","args":["serve","--mcp"]}}}"#);
+    write(
+        &root,
+        "plugins/logos/.claude-plugin/plugin.json",
+        r#"{"name":"logos","version":"999.0.0","metadata":{"minBinaryVersion":"999.0.0"}}"#,
+    );
+
+    let out = logos(&root, &["doctor", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let report = json_of(&out);
+    let warnings: Vec<&str> = report["plugin_warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].starts_with("duplicate registration"), "{warnings:?}");
+    assert!(
+        warnings[1].starts_with("version skew") && warnings[1].contains(env!("CARGO_PKG_VERSION")) && warnings[1].contains("999.0.0"),
+        "{warnings:?}"
+    );
+    assert_eq!(report["ok"], true, "the findings never move the verdict");
 }

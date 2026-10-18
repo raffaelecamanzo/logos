@@ -30,6 +30,14 @@ inherits_interface_bodies = true
 
 capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "properties"]
 
+# The optional member-access capability (S-523, CR-171, ADR-39): Cohesion
+# scores a class only in a language that declares it, so a class of a language
+# capturing no field access is not applicable rather than scored from calls alone.
+# Java's queries capture `this.x` own-field access as Accesses edges
+# (`queries/references.scm`, `@ref.access`), so its classes' LCOM4 has its
+# shared-field links. A bare implicit `x` is not captured yet.
+member_access = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
 

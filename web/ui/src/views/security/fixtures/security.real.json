@@ -1,0 +1,901 @@
+{
+  "status": {
+    "indexed": true,
+    "file_count": 1,
+    "node_count": 3,
+    "edge_count": 2,
+    "db_path": ".logos/logos.db",
+    "db_size_bytes": 1392568,
+    "last_full_index_at": "1792221798",
+    "project_id": "project",
+    "last_sync_at": "1792221798",
+    "graph_revision": 1,
+    "refs_total": 0,
+    "refs_resolved": 0,
+    "refs_unresolved": 0,
+    "resolution_coverage": 1.0,
+    "resolution_by_language": [
+      {
+        "language": "rust",
+        "files": 1,
+        "calls": {
+          "references": 0,
+          "bound": 0,
+          "same_file_edges": 0,
+          "cross_file_edges": null,
+          "cross_file_absence": {
+            "cause": "no-references-recorded"
+          }
+        },
+        "imports": {
+          "references": 0,
+          "bound": 0,
+          "same_file_edges": 0,
+          "cross_file_edges": null,
+          "cross_file_absence": {
+            "cause": "no-references-recorded"
+          }
+        },
+        "call_residue": {
+          "unbound": 0,
+          "reasons": {
+            "external-type": 0,
+            "name-not-in-scope": 0,
+            "no-applicable-overload": 0,
+            "no-receiver-evidence": 0,
+            "not-a-callable": 0,
+            "overload-ambiguous": 0,
+            "supertype-unreached": 0,
+            "type-ambiguous": 0
+          },
+          "unclassified": 0,
+          "scope": "repository"
+        }
+      }
+    ],
+    "total_line_count": 6,
+    "source_line_count": 6,
+    "test_line_count": 0,
+    "freshness": "best-effort fresh (ADR-11): navigation serves the latest committed snapshot and never reconciles per call (FR-RC-05); evaluation tools reconcile-then-score",
+    "warnings": []
+  },
+  "security": {
+    "status": {
+      "head_sha": "8cbb2530b46c3fe01308909764409b8b70dbc6ee",
+      "consent": {
+        "consented": [],
+        "pending": [
+          "bandit"
+        ]
+      },
+      "scanners": [
+        {
+          "scanner": "semgrep",
+          "driver": "Semgrep OSS",
+          "state": "fresh",
+          "snapshot_head": "8cbb2530b46c3fe01308909764409b8b70dbc6ee",
+          "version": "1.85.0",
+          "findings": 2,
+          "suppressed": 0,
+          "installed": null,
+          "install": null,
+          "last_failure": null
+        },
+        {
+          "scanner": "trivy",
+          "driver": "Trivy",
+          "state": "not_installed",
+          "installed": null,
+          "install": "logos security install trivy",
+          "last_failure": null
+        },
+        {
+          "scanner": "gitleaks",
+          "driver": "gitleaks",
+          "state": "not_installed",
+          "installed": null,
+          "install": "logos security install gitleaks",
+          "last_failure": null
+        },
+        {
+          "scanner": "osv-scanner",
+          "driver": "osv-scanner",
+          "state": "not_installed",
+          "installed": null,
+          "install": "logos security install osv-scanner",
+          "last_failure": null
+        },
+        {
+          "scanner": "bandit",
+          "driver": "Bandit",
+          "state": "never_run",
+          "installed": {
+            "copy": "path",
+            "binary": "/stub/bin/bandit",
+            "version": "1.7.10",
+            "update_available": null
+          },
+          "install": null,
+          "last_failure": null
+        },
+        {
+          "scanner": "gosec",
+          "driver": "gosec",
+          "state": "not_installed",
+          "installed": null,
+          "install": "logos security install gosec",
+          "last_failure": null
+        },
+        {
+          "scanner": "checkov",
+          "driver": "Checkov",
+          "state": "not_installed",
+          "installed": null,
+          "install": null,
+          "last_failure": null
+        },
+        {
+          "scanner": "codeql",
+          "driver": "CodeQL",
+          "state": "not_installed",
+          "installed": null,
+          "install": null,
+          "last_failure": null
+        },
+        {
+          "scanner": "dependency-check",
+          "driver": "dependency-check",
+          "state": "not_installed",
+          "installed": null,
+          "install": null,
+          "last_failure": null
+        }
+      ],
+      "other_reports": []
+    },
+    "findings": {
+      "edition": "2025",
+      "as_of": "2026-10-17",
+      "scanned": [
+        {
+          "driver": "Semgrep OSS",
+          "version": "1.85.0",
+          "head_sha": "8cbb2530b46c3fe01308909764409b8b70dbc6ee",
+          "findings": 2
+        }
+      ],
+      "never_run": [
+        "bandit"
+      ],
+      "notice": null,
+      "total": 2,
+      "findings": [
+        {
+          "scanner_name": "Semgrep OSS",
+          "scanner_version": "1.85.0",
+          "head_sha": "8cbb2530b46c3fe01308909764409b8b70dbc6ee",
+          "fingerprint": "7634d84d3aa840445f09ea53bca57159d2d6feed57100c847068db6708f65870",
+          "rule_id": "rust.lang.security.formatted-sql",
+          "severity": "high",
+          "cwes": [
+            "CWE-89"
+          ],
+          "message": "Formatted SQL query.",
+          "redacted": false,
+          "binding": "bound",
+          "report_path": "src/lib.rs",
+          "path": "src/lib.rs",
+          "start_line": 3,
+          "start_column": null,
+          "end_line": null,
+          "end_column": null,
+          "freshness": "fresh",
+          "owasp": [
+            "A05:2025"
+          ],
+          "unclassified": null,
+          "suppression": null,
+          "context": {
+            "line": 3,
+            "enclosing": {
+              "confidence": "resolved",
+              "symbol": {
+                "symbol": "logos . project . src/`lib.rs`/find().",
+                "name": "find",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "line": 2
+              },
+              "unbound_because": null
+            },
+            "reachability": {
+              "confidence": "unresolved",
+              "verdict": "unknown",
+              "route": null,
+              "unresolved_because": "language"
+            },
+            "blast_radius": {
+              "confidence": "unresolved",
+              "depth": 3,
+              "upstream": 0,
+              "downstream": 0,
+              "docs": 0
+            },
+            "resolution": {
+              "language": "rust",
+              "calls": {
+                "references": 0,
+                "bound": 0,
+                "same_file_edges": 0,
+                "cross_file_edges": null,
+                "cross_file_absence": {
+                  "cause": "no-references-recorded"
+                }
+              }
+            }
+          }
+        },
+        {
+          "scanner_name": "Semgrep OSS",
+          "scanner_version": "1.85.0",
+          "head_sha": "8cbb2530b46c3fe01308909764409b8b70dbc6ee",
+          "fingerprint": "1d45b1ffbb864367204c682351813a0d751fd69067d95962dc4c8dc0470571d1",
+          "rule_id": "generic.secrets.hardcoded-key",
+          "severity": "high",
+          "cwes": [
+            "CWE-798"
+          ],
+          "message": "secret-class finding redacted: rule generic.secrets.hardcoded-key at src/lib.rs:6",
+          "redacted": true,
+          "binding": "bound",
+          "report_path": "src/lib.rs",
+          "path": "src/lib.rs",
+          "start_line": 6,
+          "start_column": null,
+          "end_line": null,
+          "end_column": null,
+          "freshness": "fresh",
+          "owasp": [
+            "A07:2025"
+          ],
+          "unclassified": null,
+          "suppression": null,
+          "context": {
+            "line": 6,
+            "enclosing": {
+              "confidence": "resolved",
+              "symbol": {
+                "symbol": "logos . project . src/`lib.rs`/KEY.",
+                "name": "KEY",
+                "kind": "constant",
+                "file": "src/lib.rs",
+                "line": 6
+              },
+              "unbound_because": null
+            },
+            "reachability": {
+              "confidence": "unresolved",
+              "verdict": "unknown",
+              "route": null,
+              "unresolved_because": "language"
+            },
+            "blast_radius": {
+              "confidence": "unresolved",
+              "depth": 3,
+              "upstream": 0,
+              "downstream": 0,
+              "docs": 0
+            },
+            "resolution": {
+              "language": "rust",
+              "calls": {
+                "references": 0,
+                "bound": 0,
+                "same_file_edges": 0,
+                "cross_file_edges": null,
+                "cross_file_absence": {
+                  "cause": "no-references-recorded"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "categories": [
+        {
+          "id": "A01:2025",
+          "name": "Broken Access Control",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "bandit",
+            "gosec",
+            "checkov"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        },
+        {
+          "id": "A02:2025",
+          "name": "Security Misconfiguration",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "bandit",
+            "gosec",
+            "checkov",
+            "trivy"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        },
+        {
+          "id": "A03:2025",
+          "name": "Software Supply Chain Failures",
+          "scanners": [
+            "trivy",
+            "osv-scanner",
+            "dependency-check",
+            "checkov"
+          ],
+          "enabled_scanners": [],
+          "state": {
+            "state": "not_covered"
+          }
+        },
+        {
+          "id": "A04:2025",
+          "name": "Cryptographic Failures",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "bandit",
+            "gosec",
+            "checkov",
+            "trivy"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        },
+        {
+          "id": "A05:2025",
+          "name": "Injection",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "bandit",
+            "gosec"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 1
+          }
+        },
+        {
+          "id": "A06:2025",
+          "name": "Insecure Design",
+          "scanners": [
+            "semgrep",
+            "codeql"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        },
+        {
+          "id": "A07:2025",
+          "name": "Authentication Failures",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "bandit",
+            "gosec",
+            "gitleaks",
+            "trivy"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 1
+          }
+        },
+        {
+          "id": "A08:2025",
+          "name": "Software or Data Integrity Failures",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "bandit"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        },
+        {
+          "id": "A09:2025",
+          "name": "Security Logging and Alerting Failures",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "checkov"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        },
+        {
+          "id": "A10:2025",
+          "name": "Mishandling of Exceptional Conditions",
+          "scanners": [
+            "semgrep",
+            "codeql",
+            "gosec"
+          ],
+          "enabled_scanners": [
+            "semgrep"
+          ],
+          "state": {
+            "state": "covered",
+            "findings": 0
+          }
+        }
+      ],
+      "suppressions": []
+    },
+    "editions": [
+      {
+        "edition": "2025",
+        "categories": [
+          {
+            "id": "A01:2025",
+            "name": "Broken Access Control",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "checkov"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A02:2025",
+            "name": "Security Misconfiguration",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "checkov",
+              "trivy"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A03:2025",
+            "name": "Software Supply Chain Failures",
+            "scanners": [
+              "trivy",
+              "osv-scanner",
+              "dependency-check",
+              "checkov"
+            ],
+            "enabled_scanners": [],
+            "state": {
+              "state": "not_covered"
+            }
+          },
+          {
+            "id": "A04:2025",
+            "name": "Cryptographic Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "checkov",
+              "trivy"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A05:2025",
+            "name": "Injection",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 1
+            }
+          },
+          {
+            "id": "A06:2025",
+            "name": "Insecure Design",
+            "scanners": [
+              "semgrep",
+              "codeql"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A07:2025",
+            "name": "Authentication Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "gitleaks",
+              "trivy"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 1
+            }
+          },
+          {
+            "id": "A08:2025",
+            "name": "Software or Data Integrity Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A09:2025",
+            "name": "Security Logging and Alerting Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "checkov"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A10:2025",
+            "name": "Mishandling of Exceptional Conditions",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "gosec"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          }
+        ],
+        "findings": [
+          {
+            "scanner_name": "Semgrep OSS",
+            "fingerprint": "7634d84d3aa840445f09ea53bca57159d2d6feed57100c847068db6708f65870",
+            "categories": [
+              "A05:2025"
+            ],
+            "unclassified": null
+          },
+          {
+            "scanner_name": "Semgrep OSS",
+            "fingerprint": "1d45b1ffbb864367204c682351813a0d751fd69067d95962dc4c8dc0470571d1",
+            "categories": [
+              "A07:2025"
+            ],
+            "unclassified": null
+          }
+        ]
+      },
+      {
+        "edition": "2021",
+        "categories": [
+          {
+            "id": "A01:2021",
+            "name": "Broken Access Control",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "checkov"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A02:2021",
+            "name": "Cryptographic Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "checkov",
+              "trivy"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A03:2021",
+            "name": "Injection",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 1
+            }
+          },
+          {
+            "id": "A04:2021",
+            "name": "Insecure Design",
+            "scanners": [
+              "semgrep",
+              "codeql"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A05:2021",
+            "name": "Security Misconfiguration",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "checkov",
+              "trivy"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A06:2021",
+            "name": "Vulnerable and Outdated Components",
+            "scanners": [
+              "trivy",
+              "osv-scanner",
+              "dependency-check"
+            ],
+            "enabled_scanners": [],
+            "state": {
+              "state": "not_covered"
+            }
+          },
+          {
+            "id": "A07:2021",
+            "name": "Identification and Authentication Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec",
+              "gitleaks",
+              "trivy"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 1
+            }
+          },
+          {
+            "id": "A08:2021",
+            "name": "Software and Data Integrity Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A09:2021",
+            "name": "Security Logging and Monitoring Failures",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "checkov"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          },
+          {
+            "id": "A10:2021",
+            "name": "Server-Side Request Forgery",
+            "scanners": [
+              "semgrep",
+              "codeql",
+              "bandit",
+              "gosec"
+            ],
+            "enabled_scanners": [
+              "semgrep"
+            ],
+            "state": {
+              "state": "covered",
+              "findings": 0
+            }
+          }
+        ],
+        "findings": [
+          {
+            "scanner_name": "Semgrep OSS",
+            "fingerprint": "7634d84d3aa840445f09ea53bca57159d2d6feed57100c847068db6708f65870",
+            "categories": [
+              "A03:2021"
+            ],
+            "unclassified": null
+          },
+          {
+            "scanner_name": "Semgrep OSS",
+            "fingerprint": "1d45b1ffbb864367204c682351813a0d751fd69067d95962dc4c8dc0470571d1",
+            "categories": [
+              "A07:2021"
+            ],
+            "unclassified": null
+          }
+        ]
+      }
+    ],
+    "gate": null
+  },
+  "_comment": "GET /api/v1/security over web/tests/api_v1.rs's security fixture (S-670): a Semgrep report with a CWE-89 finding and a redacted secret-class one, Bandit installed but never run. The stub's temporary path is replaced by /stub/bin. `gate_band` is the same fixture's band under required_scanners = [\"bandit\"].",
+  "gate_band": {
+    "passed": false,
+    "checked_rules": 1,
+    "required_scanners": [
+      "bandit"
+    ],
+    "missing_scans": [
+      {
+        "scanner": "bandit",
+        "state": "never_run",
+        "message": "required scanner bandit has no fresh scan at HEAD: it is installed but has never run here \u2014 run `logos security scan`, or `logos security ingest <report>` for a report produced elsewhere"
+      }
+    ],
+    "violations": [
+      {
+        "rule": "security:ratchet",
+        "rule_type": "constraint",
+        "severity": "error",
+        "file": "src/lib.rs",
+        "node_id": null,
+        "message": "new high finding `rust.lang.security.formatted-sql` (Semgrep OSS) at src/lib.rs:3: no security baseline is recorded \u2014 run `logos gate --save` to accept the current findings, or fix it, or suppress it with a reason in .logos/security-ignore.toml (fingerprint 7634d84d3aa840445f09ea53bca57159d2d6feed57100c847068db6708f65870)"
+      },
+      {
+        "rule": "security:ratchet",
+        "rule_type": "constraint",
+        "severity": "error",
+        "file": "src/lib.rs",
+        "node_id": null,
+        "message": "new high finding `generic.secrets.hardcoded-key` (Semgrep OSS) at src/lib.rs:6: no security baseline is recorded \u2014 run `logos gate --save` to accept the current findings, or fix it, or suppress it with a reason in .logos/security-ignore.toml (fingerprint 1d45b1ffbb864367204c682351813a0d751fd69067d95962dc4c8dc0470571d1)"
+      }
+    ],
+    "notes": [
+      "no security baseline is recorded: every unsuppressed high finding or worse is new \u2014 run `logos gate --save` to record the current findings"
+    ]
+  }
+}

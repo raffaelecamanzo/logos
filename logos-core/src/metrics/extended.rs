@@ -30,7 +30,8 @@
 //! (every function deeply nested, say) floors at 0.01 rather than 0, so a new
 //! dimension drags the aggregate hard but can never *alone* collapse it. The
 //! original five keep their [ADR-12] zero short-circuit while they apply (a
-//! Modularity dropped out below five edges does not, CR-156) — the asymmetry is
+//! graph dimension dropped out below five cross-module edges does not,
+//! FR-QM-18) — the asymmetry is
 //! deliberate ([ADR-21]: systemic pathologies vs ratio heuristics).
 //!
 //! # Applicability ([ADR-21] drop-out)
@@ -46,6 +47,18 @@
 //! `Struct`), and Focus scopes to `Class ∪ Struct` (the class-like containers of
 //! [FR-QM-12]). No core change per language and no separate manifest field is
 //! needed — the kind a construct extracts to *is* its declared applicability.
+//!
+//! Cohesion has one more gate (metric-semantics v8, [CR-171]): a `Class` counts
+//! only when its language's plugin declares the **`member_access`** capability
+//! ([`LanguageRegistry::member_access_extensions`]) — that its queries capture
+//! idiomatic field access, so LCOM4's shared-field links exist. A class of any
+//! other language would be scored from its intra-class calls alone, which is
+//! not cohesion, so it is not scoreable; a repository with no scoreable class
+//! drops Cohesion out exactly as a class-less one does. Focus is not gated: it
+//! counts methods and spans, which every language records.
+//!
+//! [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+//! [`LanguageRegistry::member_access_extensions`]: crate::plugin::LanguageRegistry::member_access_extensions
 //!
 //! # Determinism ([NFR-RA-06], [ADR-08])
 //!
@@ -82,6 +95,13 @@ use crate::models::quality::MetricValue;
 /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
 /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
 pub(super) const DIMENSION_FLOOR: f64 = 0.01;
+
+/// The LCOM4 at which a class is a low-cohesion offender ([FR-QM-11]): the
+/// bound the Cohesion offender list applies and the detection threshold of the
+/// "where to start" `lcom4` outlier measure.
+///
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+pub(super) const LOW_COHESION_LCOM4: u64 = 2;
 
 /// The effective detection-threshold set the new dimensions read ([FR-QM-09]..
 /// [FR-QM-13], [FR-QM-14]).
@@ -183,7 +203,7 @@ impl Thresholds {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     /// [CR-013]: ../../../docs/requests/CR-013-tunable-near-clone-thresholds.md
     /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
-    pub(super) fn hash(&self) -> String {
+    pub(crate) fn hash(&self) -> String {
         // Fixed key order → a stable canonical form independent of struct layout.
         let mut canonical = format!(
             "t_nest={};t_cc={};t_loc={};t_bn={};t_m={};t_span={}",
@@ -221,7 +241,10 @@ impl Thresholds {
 /// Normalize a "bad ratio" dimension into `[FLOOR, 1]`: `(1 − ratio)` floored.
 /// `raw` carries the unfloored ratio so evolution shows which dimension moved
 /// ([FR-QM-07]).
-fn from_ratio(redundant: usize, total: usize) -> MetricValue {
+///
+/// Shared with the "where to start" counterfactual ([`super::insight`]), so a
+/// ratio dimension recomputed with one unit removed is this very reduction.
+pub(super) fn from_ratio(redundant: usize, total: usize) -> MetricValue {
     if total == 0 {
         // No production functions: nothing to flag → the dimension is a clean
         // 1.0 (FR-QM-09/10/13 "zero production functions → 1.0").
@@ -247,11 +270,29 @@ fn from_ratio(redundant: usize, total: usize) -> MetricValue {
 /// [FR-QM-09]: ../../../docs/specs/requirements/FR-QM-09.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(super) fn nesting(production: &[&FunctionMetricRow], t: &Thresholds) -> MetricValue {
-    let deep = production
-        .iter()
-        .filter(|f| f.max_nesting_depth.is_some_and(|d| d >= t.nest))
-        .count();
+    let deep = production.iter().filter(|f| is_deep(f, t)).count();
     from_ratio(deep, production.len())
+}
+
+/// Whether a function counts as deeply nested ([FR-QM-09]): a recorded
+/// `max_nesting_depth ≥ T_nest`. The one predicate [`nesting`] counts, the
+/// Nesting offender list lists and the "where to start" counterfactual removes.
+///
+/// [FR-QM-09]: ../../../docs/specs/requirements/FR-QM-09.md
+pub(super) fn is_deep(f: &FunctionMetricRow, t: &Thresholds) -> bool {
+    f.max_nesting_depth.is_some_and(|d| d >= t.nest)
+}
+
+/// Whether a function is a brain method ([FR-QM-10]): all three of CC ≥
+/// `T_cc`, LOC ≥ `T_loc` and nesting ≥ `T_bn`, each recorded. The one
+/// predicate [`conciseness`] counts, the Conciseness offender list lists and the
+/// "where to start" counterfactual removes.
+///
+/// [FR-QM-10]: ../../../docs/specs/requirements/FR-QM-10.md
+pub(super) fn is_brain(f: &FunctionMetricRow, t: &Thresholds) -> bool {
+    f.cyclomatic_complexity.is_some_and(|c| c >= t.brain_cc)
+        && f.line_count.is_some_and(|l| l >= t.brain_loc)
+        && f.max_nesting_depth.is_some_and(|d| d >= t.brain_nest)
 }
 
 /// Conciseness ([FR-QM-10]) — `1 − brain-method ratio`, floored.
@@ -262,14 +303,7 @@ pub(super) fn nesting(production: &[&FunctionMetricRow], t: &Thresholds) -> Metr
 /// [FR-QM-10]: ../../../docs/specs/requirements/FR-QM-10.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(super) fn conciseness(production: &[&FunctionMetricRow], t: &Thresholds) -> MetricValue {
-    let brain = production
-        .iter()
-        .filter(|f| {
-            f.cyclomatic_complexity.is_some_and(|c| c >= t.brain_cc)
-                && f.line_count.is_some_and(|l| l >= t.brain_loc)
-                && f.max_nesting_depth.is_some_and(|d| d >= t.brain_nest)
-        })
-        .count();
+    let brain = production.iter().filter(|f| is_brain(f, t)).count();
     from_ratio(brain, production.len())
 }
 
@@ -345,6 +379,11 @@ struct Container {
     declarations: Vec<NodeId>,
     /// 1-based line span `end − start + 1`, or 0 when either line is unrecorded.
     span: i64,
+    /// The defining file — what decides whether its language declares the
+    /// `member_access` capability Cohesion is gated on ([CR-171]).
+    ///
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    file: Option<String>,
 }
 
 /// A class-like container flagged as a **god container** ([FR-QM-12]): its
@@ -364,6 +403,61 @@ pub struct GodContainer {
     pub method_count: u64,
     /// 1-based line span.
     pub span: i64,
+}
+
+/// One class-like container's per-unit facts, as Cohesion and Focus score them
+/// — what the "where to start" ranking and its outlier measures read
+/// ([`super::insight`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ContainerFacts {
+    /// The container node's storage id.
+    pub(super) id: NodeId,
+    /// Production **bodied** member-method count (metric-semantics v7).
+    pub(super) methods: u64,
+    /// 1-based line span, 0 when either line is unrecorded.
+    pub(super) span: i64,
+    /// LCOM4 when the container is a Cohesion-scoreable class (a `Class` with
+    /// at least one bodied method, in a `member_access` language); `None`
+    /// otherwise.
+    pub(super) lcom4: Option<u64>,
+}
+
+/// Whether a container is a god container ([FR-QM-12]): bodied methods ≥ `T_m`
+/// **or** span ≥ `T_span`. The one predicate Focus, the god list and the
+/// "where to start" counterfactual share.
+///
+/// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
+pub(super) fn is_god(methods: u64, span: i64, t: &Thresholds) -> bool {
+    methods as i64 >= t.god_methods || span >= t.god_span
+}
+
+/// Cohesion's reduction ([FR-QM-11]): the mean of `1/LCOM4` over the scoreable
+/// classes' LCOM4 values **in container id order**, floored; `None` (the n/a
+/// drop-out) when there are none. Shared by [`ContainerIndex::cohesion`] and
+/// the "where to start" counterfactual, so a class whose `1/LCOM4` becomes 1
+/// is scored by this very float reduction, in the same order.
+///
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+pub(super) fn cohesion_of(lcom4s: impl IntoIterator<Item = u64>) -> Option<MetricValue> {
+    let mut sum = 0.0_f64;
+    let mut classes = 0_u64;
+    for lcom4 in lcom4s {
+        sum += 1.0 / lcom4 as f64;
+        classes += 1;
+    }
+    if classes == 0 {
+        return None; // n/a drop-out: no scoreable class construct (ADR-21).
+    }
+    let mean = sum / classes as f64;
+    // Cohesion is defined directly as the goodness mean `mean(1/LCOM4)`
+    // ([FR-QM-11]) — unlike the ratio dimensions there is no separate
+    // "bad ratio" pre-image. `raw` is the unfloored mean (the full-precision
+    // signal evolution tracks); `normalized` is the same value after the only
+    // normalization step, the [ADR-21] floor.
+    Some(MetricValue {
+        raw: mean,
+        normalized: mean.max(DIMENSION_FLOOR),
+    })
 }
 
 impl ContainerIndex {
@@ -417,6 +511,7 @@ impl ContainerIndex {
                     methods: Vec::new(),
                     declarations: Vec::new(),
                     span,
+                    file: n.file_path.clone(),
                 });
             }
         }
@@ -473,38 +568,52 @@ impl ContainerIndex {
     /// LCOM4 is the number of connected components of a class's **bodied**
     /// methods linked by shared field access ([`EdgeKind::Accesses`]) or
     /// intra-class [`EdgeKind::Calls`] ([FR-QM-11], metric-semantics v7). A class
-    /// with no bodied production method is not scoreable (LCOM4 undefined) and is
-    /// excluded; a repo with zero scoreable classes drops Cohesion out of the
-    /// aggregate denominator ([ADR-21]).
+    /// with no bodied production method is not scoreable (LCOM4 undefined), nor
+    /// is one whose language is not in `member_access` (metric-semantics v8,
+    /// [CR-171]); both are excluded, and a repo with zero scoreable classes
+    /// drops Cohesion out of the aggregate denominator ([ADR-21]).
     ///
     /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
     /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
-    pub(super) fn cohesion(&self) -> Option<MetricValue> {
-        let mut sum = 0.0_f64;
-        let mut classes = 0_u64;
-        for c in &self.containers {
-            // Cohesion applies to Class only (Rust/Go aggregates are Struct —
-            // LCOM4's field-sharing premise is contested there, FR-QM-11).
-            if c.kind != NodeKind::Class || c.methods.is_empty() {
-                continue;
-            }
-            let lcom4 = self.lcom4(c);
-            sum += 1.0 / lcom4 as f64;
-            classes += 1;
-        }
-        if classes == 0 {
-            return None; // n/a drop-out: no scoreable class construct (ADR-21).
-        }
-        let mean = sum / classes as f64;
-        // Cohesion is defined directly as the goodness mean `mean(1/LCOM4)`
-        // ([FR-QM-11]) — unlike the ratio dimensions there is no separate
-        // "bad ratio" pre-image. `raw` is the unfloored mean (the full-precision
-        // signal evolution tracks); `normalized` is the same value after the only
-        // normalization step, the [ADR-21] floor.
-        Some(MetricValue {
-            raw: mean,
-            normalized: mean.max(DIMENSION_FLOOR),
-        })
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    pub(super) fn cohesion(&self, member_access: &HashSet<String>) -> Option<MetricValue> {
+        // Cohesion applies to Class only (Rust/Go aggregates are Struct —
+        // LCOM4's field-sharing premise is contested there, FR-QM-11).
+        cohesion_of(
+            self.containers
+                .iter()
+                .filter(|c| Self::cohesion_scoreable(c, member_access))
+                .map(|c| self.lcom4(c)),
+        )
+    }
+
+    /// Whether Cohesion scores a container: a `Class` with at least one bodied
+    /// production method (LCOM4 is undefined otherwise, [FR-QM-11]), defined in
+    /// a language whose plugin declares `member_access` ([CR-171]) — the one
+    /// predicate the dimension, its offender list and the "where to start"
+    /// facts share.
+    ///
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    fn cohesion_scoreable(c: &Container, member_access: &HashSet<String>) -> bool {
+        c.kind == NodeKind::Class
+            && !c.methods.is_empty()
+            && crate::plugin::registry::declares_by_extension(c.file.as_deref(), member_access)
+    }
+
+    /// Every container's per-unit facts, in container id order — the same
+    /// order [`cohesion`](Self::cohesion) reduces in, under the same
+    /// `member_access` gate.
+    pub(super) fn facts(&self, member_access: &HashSet<String>) -> Vec<ContainerFacts> {
+        self.containers
+            .iter()
+            .map(|c| ContainerFacts {
+                id: c.id,
+                methods: c.methods.len() as u64,
+                span: c.span,
+                lcom4: Self::cohesion_scoreable(c, member_access).then(|| self.lcom4(c)),
+            })
+            .collect()
     }
 
     /// Focus ([FR-QM-12]) — `1 − god-container ratio` over class-like containers,
@@ -527,7 +636,7 @@ impl ContainerIndex {
         let god = self
             .containers
             .iter()
-            .filter(|c| c.methods.len() as i64 >= t.god_methods || c.span >= t.god_span)
+            .filter(|c| is_god(c.methods.len() as u64, c.span, t))
             .count();
         Some(from_ratio(god, total))
     }
@@ -544,7 +653,7 @@ impl ContainerIndex {
     pub(super) fn god_containers(&self, t: &Thresholds) -> Vec<GodContainer> {
         self.containers
             .iter()
-            .filter(|c| c.methods.len() as i64 >= t.god_methods || c.span >= t.god_span)
+            .filter(|c| is_god(c.methods.len() as u64, c.span, t))
             .map(|c| GodContainer {
                 id: c.id,
                 method_count: c.methods.len() as u64,
@@ -556,19 +665,20 @@ impl ContainerIndex {
     /// The production **classes** whose LCOM4 ≥ 2 — the low-cohesion offenders the
     /// Cohesion worst-offender list reports ([FR-QM-11], [UAT-QM-13]/[CR-005]
     /// review detail). Same scope as [`cohesion`](Self::cohesion) (Class with
-    /// bodied production methods); returns `(class id, LCOM4)` in node-id order, so the
+    /// bodied production methods, in a `member_access` language); returns
+    /// `(class id, LCOM4)` in node-id order, so the
     /// report agrees with the dimension and is deterministic ([NFR-RA-06]).
     ///
     /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    pub(super) fn low_cohesion_classes(&self) -> Vec<(NodeId, u64)> {
+    pub(super) fn low_cohesion_classes(&self, member_access: &HashSet<String>) -> Vec<(NodeId, u64)> {
         let mut offenders: Vec<(NodeId, u64)> = self
             .containers
             .iter()
-            .filter(|c| c.kind == NodeKind::Class && !c.methods.is_empty())
+            .filter(|c| Self::cohesion_scoreable(c, member_access))
             .filter_map(|c| {
                 let lcom4 = self.lcom4(c);
-                (lcom4 >= 2).then_some((c.id, lcom4))
+                (lcom4 >= LOW_COHESION_LCOM4).then_some((c.id, lcom4))
             })
             .collect();
         // `containers` is id-ordered, so `offenders` is already id-ascending; the

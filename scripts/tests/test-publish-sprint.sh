@@ -54,17 +54,20 @@ sha "$WORD" >"$TERMS"
 ALLOW="$WORK/empty.allow"
 : >"$ALLOW"
 
-# The fake gh: records one line per call, fails when GH_FAIL is set.
+# The fake gh: records one line per call and what it read on stdin (the pull
+# request body, HF-9), fails when GH_FAIL is set.
 FAKEBIN="$WORK/bin"
 GH_LOG="$WORK/gh.log"
+GH_STDIN="$WORK/gh.stdin"
 mkdir -p "$FAKEBIN"
 cat >"$FAKEBIN/gh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$GH_LOG"
+cat >"$GH_STDIN"
 [ -z "${GH_FAIL:-}" ]
 EOF
 chmod +x "$FAKEBIN/gh"
-export GH_LOG
+export GH_LOG GH_STDIN
 
 PASS=0
 FAIL=0
@@ -246,6 +249,13 @@ expect() {
 
 squash_of() { printf '%s\n' "$OUT" | sed -n 's/^  squash   \([0-9a-f]*\)$/\1/p'; }
 message_of() { git -C "$CLONE" log -1 --format=%B "$1"; }
+# The pull request command as the script prints it: titled with the commit's
+# subject, the body on stdin, never `--fill` (HF-9).
+pr_cmd_of() {
+    local q
+    q="$(printf '%q ' gh pr create --base main --head sprint/7 --title "$(git -C "$CLONE" log -1 --format=%s "$1")" --body-file -)"
+    printf '%s\n' "${q% }"
+}
 
 echo "test-publish-sprint.sh"
 echo "  work $WORK"
@@ -274,7 +284,7 @@ else
     fail "the commit is not the one specified"
 fi
 if printf '%s\n' "$OUT" | grep -qxF "push: git push origin $S:refs/heads/sprint/7" &&
-    printf '%s\n' "$OUT" | grep -qxF "pr:   gh pr create --base main --head sprint/7 --fill"; then
+    printf '%s\n' "$OUT" | grep -qxF "pr:   $(pr_cmd_of "$S")"; then
     ok "it prints the exact push and pull request commands"
 else
     fail "the printed push or pull request command is not the expected one"
@@ -577,9 +587,14 @@ elif [ "$(refs "$MIRROR")" != "$BEFORE_MIRROR" ]; then
     fail "--push: the mirror moved"
 elif [ "$(git -C "$ORIGIN" for-each-ref refs/tags | wc -l | tr -d ' ')" -ne 0 ]; then
     fail "--push: a tag was pushed"
-elif [ "$(cat "$GH_LOG")" != "pr create --base main --head sprint/7 --fill" ]; then
+elif [ "$(cat "$GH_LOG")" != "pr create --base main --head sprint/7 --title $(git -C "$CLONE" log -1 --format=%s "$S") --body-file -" ]; then
     OUT="$(cat "$GH_LOG")"
     fail "--push: gh was not called exactly once with the printed arguments"
+elif [ "$(cat "$GH_STDIN")" != "$(git -C "$CLONE" log -1 --format=%b "$S")" ]; then
+    OUT="$(cat "$GH_STDIN")"
+    fail "--push: the pull request body is not the commit's body"
+elif grep -q 'sprint work' "$GH_LOG" "$GH_STDIN"; then
+    fail "--push: the local sprint/7 branch's raw history reached the pull request (HF-9)"
 else
     ok "--push pushes the commit to sprint/7 on origin, never main, and opens one pull request"
 fi

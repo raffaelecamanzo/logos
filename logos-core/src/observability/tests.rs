@@ -35,6 +35,7 @@ fn record(tool: &str, duration_ms: u64, ok: bool, at: i64) -> EventRecord {
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     }
 }
 
@@ -66,7 +67,7 @@ fn telemetry_schema_migrates_and_is_idempotent() {
     let versions: i64 = conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(versions, 4, "each ledger migration recorded exactly once");
+    assert_eq!(versions, 5, "each ledger migration recorded exactly once");
     // The v2 `origin` column is present on the events table.
     let has_origin: i64 = conn
         .query_row(
@@ -85,6 +86,15 @@ fn telemetry_schema_migrates_and_is_idempotent() {
         )
         .unwrap();
     assert_eq!(has_session_id, 1, "v3 added the nullable session_id column");
+    // The v5 `invoker` column is present on the events table (FR-OB-15).
+    let has_invoker: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'invoker'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_invoker, 1, "v5 added the nullable invoker column");
 }
 
 /// A batch lands atomically with every field intact.
@@ -147,6 +157,7 @@ fn write_batch_persists_the_origin_stamp() {
             origin: "sprint-40-I2-S1".to_string(),
             session_id: "test-session".to_string(),
             outcome: None,
+            invoker: None,
         }],
     )
     .expect("batch commits");
@@ -185,7 +196,7 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "the store advanced to the ledger head");
+    assert_eq!(version, 5, "the store advanced to the ledger head");
 
     // The legacy row is intact and its NULL origin reads as 'main'.
     let (legacy_origin, coalesced): (Option<String>, String) = conn
@@ -210,6 +221,7 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
             origin: "feature".to_string(),
             session_id: "test-session".to_string(),
             outcome: None,
+            invoker: None,
         }],
     )
     .expect("post-migration write");
@@ -238,6 +250,7 @@ fn write_batch_persists_the_session_id_stamp() {
             origin: "sprint-40-I2-S1".to_string(),
             session_id: "a1b2c3d4e5f60718".to_string(),
             outcome: None,
+            invoker: None,
         }],
     )
     .expect("batch commits");
@@ -284,7 +297,7 @@ fn v3_migration_over_a_v2_store_reads_legacy_rows_as_unattributed() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "the store advanced through v3 to the ledger head");
+    assert_eq!(version, 5, "the store advanced through v3 to the ledger head");
 
     // The legacy row is intact, its NULL session_id is never coalesced into a
     // real session, and `COALESCE(session_id, 'unattributed')` is how a reader
@@ -319,6 +332,7 @@ fn v3_migration_over_a_v2_store_reads_legacy_rows_as_unattributed() {
             origin: "main".to_string(),
             session_id: "freshly-generated".to_string(),
             outcome: None,
+            invoker: None,
         }],
     )
     .expect("post-migration write");
@@ -1187,6 +1201,7 @@ fn spa_navigation_counts_while_self_referential_reads_do_not() {
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -1277,6 +1292,7 @@ fn shell_chrome_is_excluded_by_the_surface_arm_of_the_classification() {
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -1489,6 +1505,7 @@ fn the_exclusion_applies_to_every_stats_query() {
             origin: "some-worktree-branch".to_string(),
             session_id: "test-session".to_string(),
             outcome: None,
+            invoker: None,
         })
         .collect();
     db::write_batch(&mut conn, &noise).unwrap();
@@ -1578,6 +1595,7 @@ fn a_historical_window_reports_the_navigation_the_store_holds() {
                 origin: "main".to_string(),
                 session_id: "test-session".to_string(),
                 outcome: None,
+                invoker: None,
             })
             .collect()
     };
@@ -1875,6 +1893,7 @@ fn chat_surface_calls_are_separable_from_web_and_mcp() {
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     });
     db::write_batch(&mut conn, &rows).unwrap();
     let info = stats_from(&conn, 7, NOW).unwrap();
@@ -1965,6 +1984,7 @@ fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_wi
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     });
     #[cfg(feature = "agents")]
     {
@@ -1978,6 +1998,7 @@ fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_wi
             origin: "main".to_string(),
             session_id: "test-session".to_string(),
             outcome: None,
+            invoker: None,
         });
     }
     db::write_batch(&mut conn, &rows).unwrap();
@@ -2030,8 +2051,8 @@ fn stats_respects_the_window() {
         &mut conn,
         &[
             record("search", 10, true, NOW - 60), // inside, origin "main"
-            // Outside 7d and a *distinct* origin: if either the by-day or the
-            // origin query lost its window predicate, this would leak in.
+            // Outside 7d with a *distinct* origin and invoker: if the by-day, the
+            // origin or the invoker query lost its window predicate, this would leak in.
             EventRecord {
                 at: NOW - 10 * 86_400,
                 surface: "cli",
@@ -2041,6 +2062,7 @@ fn stats_respects_the_window() {
                 origin: "feature".to_string(),
                 session_id: "test-session".to_string(),
                 outcome: None,
+                invoker: Some("hook:stop".to_string()),
             },
         ],
     )
@@ -2089,6 +2111,13 @@ fn stats_respects_the_window() {
         .map(|c| (c.class.as_str(), c.origin.as_str(), c.calls))
         .collect();
     assert_eq!(by_class, vec![("navigation", "main", 1)]);
+    // And the FR-OB-15 cross-tab: a dropped predicate would surface a whole extra
+    // `("search", Some("hook:stop"))` cell.
+    assert_eq!(
+        invoker_cells(&info),
+        [("search".to_string(), None, 1)],
+        "the out-of-window hook:stop call is excluded from the invoker cross-tab"
+    );
 }
 
 /// An empty store yields a zeroed read-model, not an error — including the
@@ -2136,6 +2165,7 @@ fn stats_reports_daily_activity_and_origin_breakdown() {
         origin: "feature".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -2256,6 +2286,7 @@ fn origin_breakdown_collapses_all_branches_into_dev() {
         origin: branch.to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -2402,7 +2433,7 @@ fn stats_without_a_telemetry_db_degrades_with_a_warning() {
     assert!(info.attribution_coverage.legacy_null_origin_folds_into_main);
     assert_eq!(info.attribution_coverage.requested_window_days, 7);
     assert_eq!(info.attribution_coverage.covered_window_days, 7);
-    assert_eq!(info.attribution_coverage.notes.len(), 4);
+    assert_eq!(info.attribution_coverage.notes.len(), 6);
 }
 
 // ── Shared telemetry-store resolution (ADR-50, FR-OB-07) ───────────────────
@@ -2679,6 +2710,7 @@ fn fraction_of_sessions_with_a_navigation_call_is_derivable() {
         origin: "main".to_string(),
         session_id: session.to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -2770,6 +2802,7 @@ fn the_cross_tab_splits_each_tool_by_dev_and_main_origin() {
         origin: branch.to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -2899,6 +2932,7 @@ fn the_class_breakdown_is_the_dogfood_table() {
         origin: branch.to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -3034,7 +3068,7 @@ fn a_window_past_retention_reports_the_window_it_actually_covers() {
 
     // A window inside retention says so without the extra caveat.
     let inside = stats_from(&conn, 7, NOW).unwrap().attribution_coverage;
-    assert_eq!(inside.notes.len(), 4, "no truncation note: {:?}", inside.notes);
+    assert_eq!(inside.notes.len(), 6, "no truncation note: {:?}", inside.notes);
 }
 
 /// Legacy `NULL` origins fold into `"main"` in the cross-tab exactly as they do
@@ -3138,6 +3172,7 @@ fn the_exclusion_reaches_the_cross_tab_and_the_class_breakdown() {
         origin: "some-worktree-branch".to_string(),
         session_id: "test-session".to_string(),
         outcome: None,
+        invoker: None,
     };
     db::write_batch(
         &mut conn,
@@ -3186,16 +3221,18 @@ fn a_degraded_read_model_still_states_its_coverage_limits() {
     assert!(coverage.legacy_null_origin_folds_into_main);
     assert_eq!(coverage.requested_window_days, 30);
     assert_eq!(coverage.covered_window_days, 30);
-    assert_eq!(coverage.notes.len(), 4, "the prose survives degradation");
+    assert_eq!(coverage.notes.len(), 6, "the prose survives degradation");
 
     // The `Default` backstop: `Engine::stats` builds its fallback with
     // `..StatsInfo::default()`, so a derived `Default` would answer
     // `raw_events_only: false` — a *claim* about the schema, not an absence,
     // which is the failure NFR-CC-04 names. Zeroed windows are correct there
-    // (no window was covered); the two structural booleans are not.
+    // (no window was covered); the three structural booleans are not.
     let zeroed = crate::models::quality::AttributionCoverage::default();
     assert!(
-        zeroed.raw_events_only && zeroed.legacy_null_origin_folds_into_main,
+        zeroed.raw_events_only
+            && zeroed.legacy_null_origin_folds_into_main
+            && zeroed.null_invoker_includes_pre_stamp_rows,
         "a zeroed coverage struct states an absence, never `raw_events_only: false`"
     );
     assert_eq!((zeroed.requested_window_days, zeroed.covered_window_days), (0, 0));
@@ -3546,7 +3583,7 @@ fn v4_migration_over_a_v3_store_leaves_legacy_rows_unclassified() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "the store advanced to v4");
+    assert_eq!(version, 5, "the store advanced through v4 to the ledger head");
     assert_eq!(stored_outcomes(&conn), [None], "the legacy event stays NULL");
     let legacy_day: (i64, i64, i64) = conn
         .query_row(
@@ -4006,4 +4043,292 @@ fn every_wire_name_shape_is_judged_by_its_first_and_later_characters() {
         });
         assert!(caught.is_err(), "{bad:?} must be refused");
     }
+}
+
+// ── The invoker stamp (FR-OB-15) ───────────────────────────────────────────
+
+/// An event `record` declared by `invoker` (`None`: declared by nobody).
+fn invoked(tool: &str, invoker: Option<&str>, at: i64) -> EventRecord {
+    EventRecord {
+        invoker: invoker.map(str::to_string),
+        ..record(tool, 5, true, at)
+    }
+}
+
+/// `SELECT invoker FROM events` in insertion order, as stored.
+fn stored_invokers(conn: &rusqlite::Connection) -> Vec<Option<String>> {
+    let mut stmt = conn
+        .prepare("SELECT invoker FROM events ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, Option<String>>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The cross-tab as `(tool, invoker, calls)` triples, in payload order.
+fn invoker_cells(info: &crate::models::quality::StatsInfo) -> Vec<(String, Option<String>, u64)> {
+    info.calls_by_tool_invoker
+        .iter()
+        .map(|c| (c.tool.clone(), c.invoker.clone(), c.calls))
+        .collect()
+}
+
+/// The five names the plugin declares are taken as written; everything else —
+/// a near miss on every rule of the shape — records no invoker, never a
+/// corrected one.
+#[test]
+fn a_declared_invoker_is_taken_only_in_the_hook_or_skill_shape() {
+    for name in [
+        "hook:stop",
+        "hook:pre-tool-use",
+        "hook:session-start",
+        "skill:logos-review",
+        "skill:logos-sec-review",
+    ] {
+        assert_eq!(super::declared_invoker(Some(name)).as_deref(), Some(name));
+    }
+    let longest = format!("skill:{}", "a".repeat(64));
+    assert_eq!(super::declared_invoker(Some(&longest)), Some(longest.clone()));
+
+    let too_long = format!("skill:{}", "a".repeat(65));
+    for stranger in [
+        "",
+        "hook",
+        "hook:",
+        ":stop",
+        "Hook:stop",
+        "hook:Stop",
+        "hooks:stop",
+        "cli:stop",
+        "hook:stop ",
+        " hook:stop",
+        "hook:-stop",
+        "hook:stop-",
+        "hook:stop:twice",
+        "skill:logos_review",
+        "skill:logos/review",
+        "skill:../../etc",
+        too_long.as_str(),
+    ] {
+        assert_eq!(super::declared_invoker(Some(stranger)), None, "{stranger:?}");
+    }
+    assert_eq!(super::declared_invoker(None), None, "an unset variable declares nothing");
+}
+
+/// The layer copies its per-process invoker onto every record, and a layer that
+/// was given none records none — the direct-call case.
+#[test]
+fn the_layer_stamps_its_invoker_on_every_record_and_none_without_one() {
+    let (sink, rx) = TelemetrySink::with_capacity(16);
+    let stamped = tracing_subscriber::registry().with(
+        TelemetryLayer::new(Surface::Cli, "main".to_string(), "s".to_string(), sink)
+            .with_invoker(Some("hook:stop".to_string())),
+    );
+    tracing::subscriber::with_default(stamped, || {
+        traced(Tool::Callers, || Ok(())).unwrap();
+        let _ = traced(Tool::Impact, || Err::<(), _>(anyhow::anyhow!("boom")));
+    });
+    let invokers: Vec<Option<String>> = rx.try_iter().map(|r| r.invoker).collect();
+    assert_eq!(invokers, [Some("hook:stop".to_string()), Some("hook:stop".to_string())]);
+
+    let (sink, rx) = TelemetrySink::with_capacity(16);
+    let direct = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Cli,
+        "main".to_string(),
+        "s".to_string(),
+        sink,
+    ));
+    tracing::subscriber::with_default(direct, || {
+        traced(Tool::Callers, || Ok(())).unwrap();
+    });
+    let invokers: Vec<Option<String>> = rx.try_iter().map(|r| r.invoker).collect();
+    assert_eq!(invokers, [None], "a process that declared nothing records nothing");
+}
+
+/// The cross-tab counts each declared invoker apart from the undeclared calls,
+/// orders tool-then-invoker with `None` first, classes every cell, carries the
+/// outcome counts, and applies the self-referential exclusion like every other
+/// projection.
+#[test]
+fn the_invoker_cross_tab_splits_each_tool_by_its_declared_invoker() {
+    let mut conn = db::open_in_memory();
+    let at = NOW - 60;
+    db::write_batch(
+        &mut conn,
+        &[
+            invoked("check", Some("hook:stop"), at),
+            invoked("check", Some("hook:stop"), at),
+            // The one failed call: without it `ok_calls` equals `calls` everywhere
+            // and a cell reading `calls` for `ok_calls` would pass.
+            EventRecord {
+                ok: false,
+                ..invoked("check", Some("hook:stop"), at)
+            },
+            invoked("review", Some("hook:stop"), at),
+            invoked("review", Some("skill:logos-review"), at),
+            invoked("review", None, at),
+            invoked("callers", None, at),
+            EventRecord {
+                outcome: Some(Outcome::Answered),
+                ..invoked("callers", Some("skill:logos-review"), at)
+            },
+            // Self-referential: excluded from every figure, this one included.
+            invoked("stats", Some("hook:stop"), at),
+        ],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    let s = |v: &str| Some(v.to_string());
+    assert_eq!(
+        invoker_cells(&info),
+        [
+            ("callers".to_string(), None, 1),
+            ("callers".to_string(), s("skill:logos-review"), 1),
+            ("check".to_string(), s("hook:stop"), 3),
+            ("review".to_string(), None, 1),
+            ("review".to_string(), s("hook:stop"), 1),
+            ("review".to_string(), s("skill:logos-review"), 1),
+        ]
+    );
+    let cell = |tool: &str, invoker: Option<&str>| {
+        info.calls_by_tool_invoker
+            .iter()
+            .find(|c| c.tool == tool && c.invoker.as_deref() == invoker)
+            .unwrap()
+    };
+    let check = cell("check", Some("hook:stop"));
+    assert_eq!((check.calls, check.ok_calls), (3, 2), "ok_calls counts the successes");
+    assert_eq!(cell("callers", Some("skill:logos-review")).class, "navigation");
+    assert_eq!(
+        cell("callers", Some("skill:logos-review")).outcomes,
+        OutcomeCounts {
+            answered_calls: 1,
+            classified_calls: 1
+        }
+    );
+    // The cross-tab is a split of the raw calls, not a second count of them.
+    let split: u64 = info.calls_by_tool_invoker.iter().map(|c| c.calls).sum();
+    assert_eq!(split, info.calls_total, "every counted call sits in exactly one cell");
+
+    // Serialised, an undeclared cell is `null` — not a spelled placeholder.
+    let json = serde_json::to_value(&info).unwrap();
+    assert_eq!(json["calls_by_tool_invoker"][0]["invoker"], serde_json::Value::Null);
+    assert_eq!(json["calls_by_tool_invoker"][1]["invoker"], "skill:logos-review");
+}
+
+/// Raw events only: a rolled-up day still counts in the totals and is absent
+/// from the invoker cross-tab, rather than attributed to anyone.
+#[test]
+fn a_rolled_up_day_is_absent_from_the_invoker_cross_tab() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(
+        &mut conn,
+        &[
+            invoked("check", Some("hook:stop"), NOW - 100 * 86_400),
+            invoked("check", Some("hook:stop"), NOW - 60),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+
+    let info = stats_from(&conn, 365, NOW).unwrap();
+    assert_eq!(info.calls_total, 2, "the rolled-up day still counts");
+    assert_eq!(
+        invoker_cells(&info),
+        [("check".to_string(), Some("hook:stop".to_string()), 1)],
+        "only the raw event is attributed"
+    );
+}
+
+/// The v5 forward migration over a seeded **v4** store leaves the legacy event
+/// with no invoker — never imputed one — while a post-migration write carries
+/// its own.
+#[test]
+fn v5_migration_over_a_v4_store_leaves_legacy_rows_without_an_invoker() {
+    let mut conn = db::open_in_memory_v4();
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id, outcome)
+         VALUES (?1, 'cli', 'review', 12, 1, 'main', 'legacy', NULL)",
+        [NOW - 120],
+    )
+    .expect("legacy v4 event");
+
+    db::migrate(&mut conn).expect("v5 applies over a v4 store");
+    assert_eq!(db::user_version(&conn).unwrap(), 5, "the store advanced to v5");
+    assert_eq!(stored_invokers(&conn), [None], "the legacy event stays NULL");
+
+    db::write_batch(&mut conn, &[invoked("review", Some("hook:stop"), NOW - 60)]).unwrap();
+    assert_eq!(stored_invokers(&conn), [None, Some("hook:stop".to_string())]);
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    assert_eq!(
+        invoker_cells(&info),
+        [
+            ("review".to_string(), None, 1),
+            ("review".to_string(), Some("hook:stop".to_string()), 1),
+        ]
+    );
+}
+
+/// The version the read-model gates the invoker column on is the ledger entry
+/// that adds it.
+#[test]
+fn the_invoker_version_is_the_migration_that_adds_the_column() {
+    let has_invoker = |conn: &rusqlite::Connection| -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'invoker'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    };
+    let mut conn = db::open_in_memory_v4();
+    assert!(db::user_version(&conn).unwrap() < db::INVOKER_VERSION);
+    assert!(!has_invoker(&conn), "v4 carries no invoker column");
+    db::migrate(&mut conn).unwrap();
+    assert!(db::user_version(&conn).unwrap() >= db::INVOKER_VERSION);
+    assert!(has_invoker(&conn), "the gated version carries it");
+}
+
+/// **A pre-v5 store is read, not refused** — the old-reader gate. The read-only
+/// reader never migrates, so a v4 store reaches `stats_from` as it is: every call
+/// sits in the undeclared cell, and the rest of the read-model is untouched.
+#[test]
+fn a_pre_invoker_store_reads_every_call_as_undeclared_not_unreadable() {
+    let conn = db::open_in_memory_v4();
+    for tool in ["review", "review", "check"] {
+        conn.execute(
+            "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id, outcome)
+             VALUES (?1, 'cli', ?2, 12, 1, 'main', 'legacy', NULL)",
+            rusqlite::params![NOW - 60, tool],
+        )
+        .unwrap();
+    }
+
+    let info = stats_from(&conn, 7, NOW).expect("a v4 store reads");
+    assert_eq!(
+        invoker_cells(&info),
+        [("check".to_string(), None, 1), ("review".to_string(), None, 2)]
+    );
+    assert_eq!(info.calls_total, 3);
+}
+
+/// The payload states the cross-tab's limits: raw events only, and a `null`
+/// invoker that includes pre-stamp rows — as a flag and as prose naming the
+/// variable a script declares through.
+#[test]
+fn the_coverage_states_the_invoker_cross_tabs_limits() {
+    let coverage = super::attribution_coverage(7);
+    assert!(coverage.raw_events_only);
+    assert!(coverage.null_invoker_includes_pre_stamp_rows);
+    let notes = coverage.notes.join("\n");
+    for needle in ["`calls_by_tool_invoker`", super::INVOKER_ENV, "never imputed"] {
+        assert!(notes.contains(needle), "the notes name {needle:?}: {notes}");
+    }
+    // A degraded read-model still makes the claim, never the opposite one.
+    let zeroed = crate::models::quality::AttributionCoverage::default();
+    assert!(zeroed.null_invoker_includes_pre_stamp_rows);
 }

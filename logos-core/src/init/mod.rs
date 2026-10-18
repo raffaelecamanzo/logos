@@ -21,7 +21,12 @@
 //! - no skill of its own: a skill an extension ships is materialized by the
 //!   step that extension contributes as an [`InitContribution`] (S-644), which
 //!   reads [`InitOptions::materialize_skill`] ([FR-IN-02] as modified by
-//!   CR-008).
+//!   CR-008);
+//! - with the Claude Code plugin enabled ([`ClaudePlugin`]), the plugin
+//!   enrolment in place of the `.mcp.json` entry and the readout hook, and the
+//!   removal of those legacy files ([FR-IN-12], [`plugin`], [`retire`]);
+//! - `init --uninstall`, which takes all of the above back out and leaves
+//!   `.logos/` ([`retire::uninstall`]).
 //!
 //! Failure posture (DL-06): a host-integration target we cannot *safely*
 //! touch (malformed `.mcp.json`, a foreign `core.hooksPath`, a non-managed
@@ -34,6 +39,7 @@
 //! [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 //! [FR-IN-09]: ../../../docs/specs/requirements/FR-IN-09.md
+//! [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
 //! [FR-SY-05]: ../../../docs/specs/requirements/FR-SY-05.md
 //! [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
 //! [MCP Host]: ../../../docs/specs/architecture/integrations/mcp-host.md
@@ -47,9 +53,18 @@ use serde_json::{json, Value};
 
 use crate::models::pipeline::{InitAction, InitStep};
 
+pub(crate) mod plugin;
+mod retire;
+
+pub use plugin::ClaudePlugin;
+// Re-exported rather than reached as `init::retire::uninstall`, so the engine's
+// call folds into its existing `init/mod.rs` edge: the engine sits at its
+// `max_fan_out` budget, which counts module files.
+pub(crate) use retire::uninstall;
+
 /// Which optional `init` steps to run (S-023, FR-IN-02/03).
 ///
-/// The default (all `false`) is the plain `logos init` contract: policy
+/// The default (every flag `false`) is the plain `logos init` contract: policy
 /// templates + managed `.gitignore` + store bootstrap only ([FR-IN-01]).
 /// The CLI's `-i` / `--hooks` flags enable the rest.
 ///
@@ -88,6 +103,18 @@ pub struct InitOptions {
     /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
     /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
     pub workspace_member: bool,
+    /// Whether the Claude Code plugin is enabled ([FR-IN-12]). When it is,
+    /// [`inject_mcp`](Self::inject_mcp) enrols the plugin in
+    /// `.claude/settings.json` and removes the legacy `logos` `.mcp.json`
+    /// entry instead of writing one,
+    /// [`install_quality_report_hook`](Self::install_quality_report_hook)
+    /// removes the legacy readout hook instead of installing it, and a skill
+    /// copy an earlier `init -i` materialized is removed unless
+    /// [`materialize_skill`](Self::materialize_skill) is asked for. The
+    /// default reads the Claude Code settings ([`ClaudePlugin::Detect`]).
+    ///
+    /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+    pub claude_plugin: ClaudePlugin,
 }
 
 /// An `init` step contributed from outside the core — by an extension, through
@@ -270,6 +297,8 @@ logs/
 security/
 # The chat API key (FR-CF-06, NFR-SE-07) — a secret, never committed.
 secrets.toml
+# The branch review's merge-base before-states, cached by commit (FR-GV-24).
+review-cache/
 # logos:managed:end
 ";
 
@@ -471,8 +500,23 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
         write_if_absent(root, ".logos/rules.toml", RULES_TEMPLATE)?,
         logos_dir_gitignore(root)?,
     ];
+    // FR-IN-12: read only when a step it changes was asked for, so a plain
+    // `init` never looks at the Claude Code settings.
+    let plugin = (options.inject_mcp || options.install_quality_report_hook)
+        && options.claude_plugin.is_enabled(root);
+    if options.inject_mcp && plugin {
+        steps.push(plugin::enrol(root)?);
+    }
+    // The legacy registrations are committed, so they go only once the
+    // committed settings enable the plugin: otherwise a teammate without it
+    // would be left with neither, and their next `init -i` would put them back.
+    let retire = plugin && plugin::committed(root);
     if options.inject_mcp {
-        steps.push(inject_mcp(root)?);
+        steps.push(match (plugin, retire) {
+            (false, _) => inject_mcp(root)?,
+            (true, true) => retire::mcp_entry(root)?,
+            (true, false) => plugin::legacy_kept(".mcp.json"),
+        });
     }
     if options.write_claude_md {
         steps.push(upsert_block_file(
@@ -488,7 +532,17 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
         steps.push(install_hooks(root)?);
     }
     if options.install_quality_report_hook {
-        steps.push(materialize_quality_report_hook(root)?);
+        steps.push(match (plugin, retire) {
+            (false, _) => materialize_quality_report_hook(root)?,
+            (true, true) => retire::readout_hook(root)?,
+            (true, false) => plugin::legacy_kept(crate::hooks::QUALITY_REPORT_HOOK_SCRIPT_REL),
+        });
+    }
+    // A composed extension that materializes skills owns them (FR-WK-08 as
+    // modified by CR-218), so only a run not asked to materialize one removes
+    // the copy an earlier core `init -i` wrote.
+    if retire && !options.materialize_skill {
+        steps.extend(retire::emitted_skills(root)?);
     }
     Ok(steps)
 }
@@ -753,27 +807,21 @@ enum Upsert {
 /// marker *prefix* at line start, so a begin line may carry a trailing
 /// human note.
 fn upsert_managed_block(existing: &str, begin: &str, end: &str, block: &str) -> Upsert {
-    let Some(begin_at) = find_marker(existing, begin) else {
-        if find_marker(existing, end).is_some() {
-            return Upsert::Malformed;
+    let (begin_at, span_end) = match managed_span(existing, begin, end) {
+        ManagedSpan::Malformed => return Upsert::Malformed,
+        ManagedSpan::At { begin_at, span_end } => (begin_at, span_end),
+        ManagedSpan::Absent => {
+            let mut out = existing.to_string();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(block);
+            return Upsert::Write(out);
         }
-        let mut out = existing.to_string();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(block);
-        return Upsert::Write(out);
     };
-    let Some(end_at) = find_marker(&existing[begin_at..], end).map(|i| begin_at + i) else {
-        return Upsert::Malformed;
-    };
-    // The span runs to the end of the end-marker's line (incl. its newline).
-    let span_end = existing[end_at..]
-        .find('\n')
-        .map_or(existing.len(), |i| end_at + i + 1);
     let current = &existing[begin_at..span_end];
     if current == block {
         return Upsert::Unchanged;
@@ -784,6 +832,37 @@ fn upsert_managed_block(existing: &str, begin: &str, end: &str, block: &str) -> 
         block,
         &existing[span_end..]
     ))
+}
+
+/// Where the `begin..end` managed block sits in `text` — the one reading both
+/// the writer ([`upsert_managed_block`]) and the remover
+/// ([`retire::claude_md_block`]) use, so they never disagree about which bytes
+/// are Logos's.
+#[derive(Debug, PartialEq, Eq)]
+enum ManagedSpan {
+    /// No markers at all.
+    Absent,
+    /// The block's byte range: from the begin marker to the end of the end
+    /// marker's line, its newline included.
+    At { begin_at: usize, span_end: usize },
+    /// A begin marker without its end marker, or the reverse: refuse to guess
+    /// (DL-07).
+    Malformed,
+}
+
+fn managed_span(text: &str, begin: &str, end: &str) -> ManagedSpan {
+    let Some(begin_at) = find_marker(text, begin) else {
+        return if find_marker(text, end).is_some() {
+            ManagedSpan::Malformed
+        } else {
+            ManagedSpan::Absent
+        };
+    };
+    let Some(end_at) = find_marker(&text[begin_at..], end).map(|i| begin_at + i) else {
+        return ManagedSpan::Malformed;
+    };
+    let span_end = text[end_at..].find('\n').map_or(text.len(), |i| end_at + i + 1);
+    ManagedSpan::At { begin_at, span_end }
 }
 
 /// Find a marker as a line *prefix* (start of content or right after `\n`).
@@ -1343,5 +1422,27 @@ mod tests {
                 "{target} is meant to travel, but the block ignores {name}"
             );
         }
+    }
+
+    /// The ratchet's blessed set ([FR-GV-23], [ADR-73]) is checked in: CI reads
+    /// it and blessing new debt must show up in review, so the generated block
+    /// must never ignore it ([FR-IN-04]). `init` does not write it — the bless
+    /// command does — so it is pinned here rather than in `COMMITTED_POLICY`.
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    /// [ADR-73]: ../../../docs/specs/architecture/decisions/ADR-73.md
+    /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+    #[test]
+    fn the_block_leaves_the_ratchet_blessed_set_tracked() {
+        let patterns: Vec<String> = ignored_state().into_iter().map(String::from).collect();
+        let ignored = crate::config::globs::compile(&patterns).expect("the block's globs compile");
+        // The near miss is live: the machine-local gate baseline one prefix
+        // away IS ignored, so the assertion below cannot pass vacuously.
+        assert!(ignored.is_match("baseline.json"), "the gate baseline is ignored");
+        assert!(
+            !ignored.is_match(crate::governance::ratchet::BLESSED_FILE),
+            "the block must not ignore {}",
+            crate::governance::ratchet::BLESSED_FILE_REL
+        );
     }
 }

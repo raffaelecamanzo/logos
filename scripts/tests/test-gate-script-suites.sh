@@ -9,15 +9,16 @@
 #      and the near misses that must not be read as one;
 #   2. scripts_changed — the fast tier's condition, over a throwaway git repository:
 #      a change under scripts/ (committed, uncommitted, non-ASCII, past the pipe
-#      buffer) runs the leg; none, or a sibling directory called scripts-old, does
+#      buffer) or under the plugin tree (plugins/, .claude-plugin/, S-678) runs the
+#      leg; none, or a sibling directory called scripts-old or plugins-old, does
 #      not; a base git cannot resolve fails closed;
 #   3. gate_script_suites — the leg's verdict, over fixture suites: a green suite
 #      passes; a red one, one that exits 0 having counted nothing, one that exits
 #      non-zero without counting a failure, one killed by a signal, and an empty
 #      roster each fail, and the unit counters say so;
 #   4. the tier block itself — `full` runs the leg always, `fast` exactly when
-#      scripts_changed says so, by running the real tier `case` with every gate
-#      replaced by a recorder.
+#      scripts_changed says so (a plugin-only change included), by running the
+#      real tier `case` with every gate replaced by a recorder.
 # CI runs this suite beside the others (.github/workflows/ci.yml), and the leg runs
 # it: the gate's own tests are guarded by the gate they test.
 #
@@ -212,6 +213,36 @@ reset_repo
 GB=no-such-ref
 changed "[condition] a base git cannot resolve fails closed: the leg runs" 0
 GB=base
+
+# The plugin tree (S-678): its scripts are tested by scripts/tests/test-plugin-*.sh,
+# so a change to the plugin ALONE must run the suites.
+commit_new() { # path -> commits a new file at it on top of base
+    mkdir -p "$REPO/$(dirname "$1")"
+    echo x >"$REPO/$1"
+    (cd "$REPO" && git add -A >/dev/null 2>&1 && git commit -qm "add $1" >/dev/null 2>&1)
+}
+reset_repo
+commit_new plugins/logos/hooks/session-start.sh
+changed "[condition] a COMMITTED plugin-only change under plugins/ runs the leg" 0
+echo more >>"$REPO/plugins/logos/hooks/session-start.sh"
+(cd "$REPO" && git add -A >/dev/null 2>&1 && git commit -qm base2 >/dev/null 2>&1 && git tag -f base2 >/dev/null 2>&1)
+echo more >>"$REPO/plugins/logos/hooks/session-start.sh"
+GB=base2
+changed "[condition] an UNCOMMITTED plugin-only change under plugins/ runs the leg" 0
+GB=base
+reset_repo
+commit_new .claude-plugin/marketplace.json
+changed "[condition] a change to .claude-plugin/ (the marketplace) runs the leg" 0
+reset_repo
+mkdir -p "$REPO/docs"
+echo d >"$REPO/docs/d.md"
+commit_new plugins/logos/.claude-plugin/plugin.json
+changed "[condition] plugins/ among other changed paths, not first, runs the leg" 0
+for near in plugins-old/x.sh src/plugins/x.sh .claude-plugins/x.json .claude/x.json docs/plugins.md; do
+    reset_repo
+    commit_new "$near"
+    changed "[condition] $near is not the plugin tree (near miss)" 1
+done
 
 # --- 3. the leg's verdict -----------------------------------------------------
 #
@@ -421,11 +452,15 @@ echo more >>"$REPO/src/b.rs"
 expect "[tiers] fast does not run the leg when scripts/ is unchanged" \
     "$(tiers fast | tr ' ' '\n' | grep -c '^gate_script_suites$')" "0"
 case "$(cat "$WORK/tier-notes")" in
-    *"script-suites: not run — scripts/ is unchanged against the base base"*) ok "[tiers] ... and says it did not run, naming the base" ;;
+    *"script-suites: not run — scripts/, plugins/ and .claude-plugin/ are unchanged against the base base"*) ok "[tiers] ... and says it did not run, naming the base" ;;
     *) bad "[tiers] fast skipped the leg silently: $(cat "$WORK/tier-notes")" ;;
 esac
 expect "[tiers] fast still runs its other legs when it skips the suites" \
     "$(tiers fast | tr ' ' '\n' | grep -c -E '^(gate_clippy|gate_arch|gate_public_terms)$')" "3"
+reset_repo
+commit_new plugins/logos/hooks/session-start.sh
+expect "[tiers] fast runs the leg when only the plugin tree changed" \
+    "$(tiers fast | tr ' ' '\n' | grep -c '^gate_script_suites$')" "1"
 
 echo
 echo "$PASS passed, $FAIL failed (of $((PASS + FAIL)))"

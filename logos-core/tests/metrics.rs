@@ -104,7 +104,7 @@ fn never_called() {}
     let rt = engine.runtime().unwrap();
     let metrics::RecordedSnapshot {
         id, metrics: model, ..
-    } = metrics::snapshot(rt, &view, Some("abc1234"), metrics::Thresholds::default())
+    } = metrics::snapshot(rt, &view, Some("abc1234"), metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs");
 
     let all = rows(rt);
@@ -155,7 +155,7 @@ fn empty_graph_snapshot_persists_the_na_sentinel() {
         .hydrate(Granularity::ExcludeContains)
         .expect("an empty store hydrates an empty view");
     let rt = engine.runtime().unwrap();
-    let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+    let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs")
         .metrics;
 
@@ -205,12 +205,12 @@ fn two() {}
         id: first_id,
         metrics: first,
         ..
-    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("first run");
+    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("first run");
     let metrics::RecordedSnapshot {
         id: second_id,
         metrics: second,
         ..
-    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("second run");
+    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("second run");
 
     assert_eq!(
         first.aggregate_signal, second.aggregate_signal,
@@ -341,7 +341,7 @@ fn covers_produce() {
         .expect("view hydrates");
     let metrics::RecordedSnapshot {
         id, metrics: model, ..
-    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("snapshot runs");
+    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("snapshot runs");
     assert_eq!(
         model.test_function_count, 1,
         "the one test function is excluded and counted"
@@ -588,106 +588,237 @@ See the [reference](reference.md) for details.
     assert_metrics_byte_identical(&base, &removed);
 }
 
-// ── CR-156: Modularity's applicability persists and reads back ───────────────
+// ── CR-156 / FR-QM-18: graph-dimension applicability persists and reads back ─
 
-/// The `modularity_applicable` column of the newest `metric_snapshots` row.
-fn latest_modularity_flag(root: &Path) -> Option<i64> {
+/// The newest `metric_snapshots` row's three graph-dimension flags and the
+/// cross-module edge count they were decided on (migrations 23 and 38).
+fn latest_graph_flags(root: &Path) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
     let conn = rusqlite::Connection::open(root.join(".logos/logos.db")).unwrap();
     conn.query_row(
-        "SELECT modularity_applicable FROM metric_snapshots ORDER BY id DESC LIMIT 1",
+        "SELECT modularity_applicable, acyclicity_applicable, depth_applicable, cross_module_edges \
+         FROM metric_snapshots ORDER BY id DESC LIMIT 1",
         [],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
     .unwrap()
 }
 
-/// A graph with fewer than five edges persists `modularity_applicable = 0`
-/// beside its computed Modularity pair, and the read-only accessor reads it back
-/// as not applicable with the same `m`; one with five or more persists `1` and
-/// reads back applicable. A row written before the flag existed (`NULL`) reads
-/// **applicable**, since it was scored when Modularity always applied
-/// ([CR-156], [FR-QM-07]).
+/// A graph whose edges never leave one file has no cross-module edge, so
+/// Modularity, Acyclicity and Depth each persist a `0` flag beside their
+/// computed pairs, with the count that decided it, and read back not applicable
+/// with that count; a graph with five or more cross-module edges persists `1`s
+/// and reads back applicable. A row written before migration 38 reads
+/// Acyclicity and Depth **applicable** (scored when they always applied) and a
+/// Modularity drop-out it recorded with the all-edges reason v6/v7 decided it
+/// on; a row written before migration 23 reads all three applicable ([CR-156],
+/// [FR-QM-18], [FR-QM-07]).
 ///
 /// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
 /// [FR-QM-07]: ../../docs/specs/requirements/FR-QM-07.md
 #[test]
-fn modularity_applicability_persists_and_a_pre_migration_row_reads_applicable() {
-    // Small: one call edge.
+fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable() {
+    // Thin: two calls, both inside one file.
     let small = TempDir::new().unwrap();
     write(
         small.path(),
         "src/lib.rs",
-        "pub fn a() -> u32 {\n    b()\n}\npub fn b() -> u32 {\n    1\n}\n",
+        "pub fn a() -> u32 {\n    b() + c()\n}\npub fn b() -> u32 {\n    c()\n}\npub fn c() -> u32 {\n    1\n}\n",
     );
     let engine = Engine::start(small.path()).expect("engine starts");
     assert!(engine.index().warnings.is_empty());
     let scanned = engine.scan(false).expect("scan runs").metrics;
     let m = scanned.edge_count;
-    assert!(
-        (1..metrics::MODULARITY_MIN_EDGES).contains(&m),
-        "fixture has 1 ≤ m = {m} < 5"
-    );
+    assert!(m >= 1, "the fixture has intra-file edges: m = {m}");
+    assert_eq!(scanned.cross_module_edge_count, Some(0), "none of them leaves its directory");
     let na = scanned
         .modularity_not_applicable
         .clone()
-        .expect("m < 5 → not applicable");
-    assert_eq!((na.edges, na.min_edges), (m, 5));
-    assert_eq!(latest_modularity_flag(small.path()), Some(0), "persisted as 0");
+        .expect("0 cross-module edges → not applicable");
+    assert_eq!((na.edges, na.min_edges), (0, metrics::MIN_CROSS_MODULE_EDGES));
+    assert_eq!(scanned.acyclicity_not_applicable, Some(na.clone()), "one decision for all three");
+    assert_eq!(scanned.depth_not_applicable, Some(na.clone()), "one decision for all three");
+    assert_eq!(latest_graph_flags(small.path()), (Some(0), Some(0), Some(0), Some(0)), "persisted as 0s");
     let read = engine.latest_metrics().unwrap().expect("a snapshot exists");
-    assert_eq!(read.modularity_not_applicable, Some(na), "read back not applicable");
     assert_eq!(
-        read.modularity.normalized.to_bits(),
-        scanned.modularity.normalized.to_bits(),
-        "the computed pair is persisted, not blanked"
+        (&read.modularity_not_applicable, &read.acyclicity_not_applicable, &read.depth_not_applicable),
+        (&Some(na.clone()), &Some(na.clone()), &Some(na.clone())),
+        "read back not applicable, with the count that decided it"
     );
+    assert_eq!(read.cross_module_edge_count, Some(0));
+    for (persisted, computed) in [
+        (&read.modularity, &scanned.modularity),
+        (&read.acyclicity, &scanned.acyclicity),
+        (&read.depth, &scanned.depth),
+    ] {
+        assert_eq!(
+            persisted.normalized.to_bits(),
+            computed.normalized.to_bits(),
+            "the computed pair is persisted, not blanked"
+        );
+    }
 
-    // A pre-migration row: the flag is NULL → applicable.
-    rusqlite::Connection::open(small.path().join(".logos/logos.db"))
-        .unwrap()
-        .execute("UPDATE metric_snapshots SET modularity_applicable = NULL", [])
-        .unwrap();
+    // A v6/v7 row (before migration 38): Modularity's recorded drop-out reads
+    // back on all edges, as it was decided; Acyclicity and Depth read applicable.
+    let conn = rusqlite::Connection::open(small.path().join(".logos/logos.db")).unwrap();
+    conn.execute(
+        "UPDATE metric_snapshots SET acyclicity_applicable = NULL, depth_applicable = NULL, \
+                                     cross_module_edges = NULL",
+        [],
+    )
+    .unwrap();
+    let v7 = engine.latest_metrics().unwrap().unwrap();
+    let legacy = v7.modularity_not_applicable.expect("the recorded v7 drop-out is kept");
+    assert_eq!(legacy.edges, m, "decided on every edge of that row's graph");
+    assert_eq!(legacy.reason, format!("{m} of 5 dependency edges — too few for community structure"));
+    assert_eq!((v7.acyclicity_not_applicable, v7.depth_not_applicable), (None, None));
+    assert_eq!(v7.cross_module_edge_count, None, "never re-derived");
+
+    // A row from before migration 23: every flag NULL → all three applicable.
+    conn.execute("UPDATE metric_snapshots SET modularity_applicable = NULL", []).unwrap();
     assert_eq!(
         engine.latest_metrics().unwrap().unwrap().modularity_not_applicable,
         None,
         "a NULL flag (scored under semantics ≤ 5) reads applicable"
     );
 
-    // Large: six call edges.
+    // Modular: five calls from one directory into another.
     let large = TempDir::new().unwrap();
+    write(large.path(), "src/lib.rs", "pub mod alpha;\npub mod beta;\n");
     write(
         large.path(),
-        "src/lib.rs",
-        "pub fn a() -> u32 {\n    b() + c() + d()\n}\n\
-         pub fn b() -> u32 {\n    c() + d() + e()\n}\n\
-         pub fn c() -> u32 {\n    1\n}\npub fn d() -> u32 {\n    2\n}\npub fn e() -> u32 {\n    3\n}\n",
+        "src/alpha/mod.rs",
+        "pub fn a() -> u32 {\n    crate::beta::p() + crate::beta::q() + crate::beta::r()\n}\n\
+         pub fn b() -> u32 {\n    crate::beta::s() + crate::beta::t()\n}\n",
+    );
+    write(
+        large.path(),
+        "src/beta/mod.rs",
+        "pub fn p() -> u32 {\n    1\n}\npub fn q() -> u32 {\n    2\n}\npub fn r() -> u32 {\n    3\n}\n\
+         pub fn s() -> u32 {\n    4\n}\npub fn t() -> u32 {\n    5\n}\n",
     );
     let engine = Engine::start(large.path()).expect("engine starts");
     assert!(engine.index().warnings.is_empty());
     let scanned = engine.scan(false).expect("scan runs").metrics;
-    assert!(
-        scanned.edge_count >= metrics::MODULARITY_MIN_EDGES,
-        "fixture has m = {} ≥ 5",
-        scanned.edge_count
+    let cross = scanned.cross_module_edge_count.expect("a v8 snapshot counts them");
+    assert!(cross >= metrics::MIN_CROSS_MODULE_EDGES, "fixture has {cross} ≥ 5 cross-module edges");
+    assert_eq!(
+        (&scanned.modularity_not_applicable, &scanned.acyclicity_not_applicable, &scanned.depth_not_applicable),
+        (&None, &None, &None)
     );
-    assert_eq!(scanned.modularity_not_applicable, None);
-    // The JSON contract the web UI types declare (`ModularityNotApplicable |
-    // null`): an applicable Modularity is a present `null`, never an omitted key,
+    // The JSON contract the web UI types declare (`GraphDimensionNotApplicable |
+    // null`): an applicable dimension is a present `null`, never an omitted key,
     // on both the snapshot (`scan --json`) and the readout (`quality-report --json`).
     let snapshot_json = serde_json::to_value(&scanned).unwrap();
-    assert_eq!(
-        snapshot_json.get("modularity_not_applicable"),
-        Some(&serde_json::Value::Null),
-        "scan --json carries an explicit null when Modularity applies"
-    );
     let readout_json = serde_json::to_value(engine.quality_readout().expect("readout")).unwrap();
+    for key in ["modularity_not_applicable", "acyclicity_not_applicable", "depth_not_applicable"] {
+        assert_eq!(snapshot_json.get(key), Some(&serde_json::Value::Null), "scan --json: {key} is null");
+        assert_eq!(readout_json.get(key), Some(&serde_json::Value::Null), "quality-report --json: {key} is null");
+    }
     assert_eq!(
-        readout_json.get("modularity_not_applicable"),
-        Some(&serde_json::Value::Null),
-        "quality-report --json carries an explicit null when Modularity applies"
+        latest_graph_flags(large.path()),
+        (Some(1), Some(1), Some(1), Some(cross as i64)),
+        "persisted as 1s beside the count"
     );
-    assert_eq!(latest_modularity_flag(large.path()), Some(1), "persisted as 1");
+    let read = engine.latest_metrics().unwrap().unwrap();
     assert_eq!(
-        engine.latest_metrics().unwrap().unwrap().modularity_not_applicable,
-        None
+        (read.modularity_not_applicable, read.acyclicity_not_applicable, read.depth_not_applicable),
+        (None, None, None)
     );
+}
+
+// ── FR-QM-18: one coverage warning, from one helper, on every scoring surface ─
+
+/// A C project whose calls cross files but cannot bind across them: C binds
+/// within a file only, so its call graph has no edge between `src/net` and
+/// `src/core`, and C is all of the production callables.
+fn same_file_only_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/core/core.c",
+        "int helper(int x) { return x + 1; }\nint core_step(int x) { return helper(x) * 2; }\n",
+    );
+    write(
+        tmp.path(),
+        "src/net/net.c",
+        "int core_step(int x);\nint send(int x) { return core_step(x); }\nint recv(int x) { return send(x) - 1; }\n",
+    );
+    tmp
+}
+
+/// The coverage warnings the shared helper computes for `engine`'s store —
+/// the text every surface must carry, word for word.
+fn helper_warnings(engine: &Engine) -> Vec<String> {
+    engine
+        .runtime()
+        .expect("a started engine has a runtime")
+        .submit_read(|store| logos_core::governance::thin_graph::ThinGraph::read(store))
+        .expect("the helper reads")
+        .warnings()
+}
+
+/// The `coverage:` entries of one surface's warnings.
+fn coverage_entries(warnings: &[String]) -> Vec<&String> {
+    warnings.iter().filter(|w| w.starts_with("coverage: ")).collect()
+}
+
+/// On a project whose dominant language binds same-file only, `scan`, `gate`,
+/// `session_start` and the session-start readout each carry **one** coverage
+/// warning naming the language and its share, and it is the shared helper's
+/// text exactly — no surface phrases it itself. The verdicts beside it are
+/// unchanged: the scan scores, the first gate passes informationally, the
+/// session start records its baseline ([FR-QM-18]).
+///
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn a_same_file_only_language_is_warned_once_from_one_helper_on_every_surface() {
+    let tmp = same_file_only_fixture();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+
+    let scan = engine.scan(false).expect("scan runs");
+    let expected = helper_warnings(&engine);
+    assert_eq!(expected.len(), 1, "one language qualifies: {expected:?}");
+    assert!(expected[0].starts_with("coverage: c is 100% of production callables"), "{}", expected[0]);
+
+    let gate = engine.gate(None, false, false).expect("gate runs");
+    let session = engine.session_start().expect("session start runs");
+    let readout = engine.quality_readout().expect("readout runs");
+    for (surface, warnings) in [
+        ("scan", &scan.warnings),
+        ("gate", &gate.warnings),
+        ("session_start", &session.warnings),
+        ("quality_readout", &readout.warnings),
+    ] {
+        assert_eq!(coverage_entries(warnings), vec![&expected[0]], "{surface} carries the helper's one warning");
+    }
+    // Advisory only: the verdicts are what they are without it.
+    assert!(scan.signal.is_some(), "the scan still scores");
+    assert!(gate.passed, "a first gate passes informationally: {}", gate.message);
+    assert!(session.message.starts_with("session started"), "{}", session.message);
+}
+
+/// A project whose language binds across files gets no coverage warning on any
+/// surface — this repository's own shape ([FR-QM-18] AC 3).
+///
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn a_language_binding_across_files_gets_no_coverage_warning() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", "pub mod alpha;\npub mod beta;\n");
+    write(tmp.path(), "src/alpha/mod.rs", "pub fn a() -> u32 {\n    crate::beta::b()\n}\n");
+    write(tmp.path(), "src/beta/mod.rs", "pub fn b() -> u32 {\n    1\n}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+    assert!(helper_warnings(&engine).is_empty());
+    let scan = engine.scan(false).expect("scan runs");
+    let gate = engine.gate(None, false, false).expect("gate runs");
+    let session = engine.session_start().expect("session start runs");
+    let readout = engine.quality_readout().expect("readout runs");
+    for warnings in [&scan.warnings, &gate.warnings, &session.warnings, &readout.warnings] {
+        assert!(coverage_entries(warnings).is_empty(), "{warnings:?}");
+    }
+    // An absent warning list leaves the session-start payload as it was.
+    assert!(serde_json::to_value(&session).unwrap().get("warnings").is_none());
 }

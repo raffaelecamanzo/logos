@@ -68,6 +68,9 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (33, MIGRATION_33),
     (34, MIGRATION_34),
     (35, MIGRATION_35),
+    (36, MIGRATION_36),
+    (37, MIGRATION_37),
+    (38, MIGRATION_38),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2183,7 +2186,8 @@ CREATE INDEX idx_build_artifacts_manifest ON build_artifacts(manifest_id);
 ///
 /// Metric-semantics v6 makes Modularity **not applicable** when the graph it is
 /// computed on has fewer than five edges
-/// ([`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES)): the dimension
+/// ([`MIN_CROSS_MODULE_EDGES`](crate::metrics::MIN_CROSS_MODULE_EDGES), counted over
+/// every edge until v8 — [migration 38](MIGRATION_38)): the dimension
 /// leaves the aggregate but its computed raw/normalized pair is still persisted,
 /// so the snapshot needs a flag to say which reading of that pair applies. Unlike
 /// the migration-12 Cohesion/Focus flags, the value columns stay populated when
@@ -2370,8 +2374,10 @@ UPDATE files SET content_hash = NULL;
 ///    to no file, the `violations.file` convention. Rows are append-only like
 ///    their snapshot; nothing updates or deletes them.
 ///
-/// `dimension` carries **no** `CHECK` list on purpose: [CR-164] reuses this
-/// table for further lists, and a `CHECK` would make each one a table rebuild.
+/// `dimension` carries **no** `CHECK` list on purpose: a further list may reuse
+/// this table, and a `CHECK` would make each one a table rebuild. ([CR-164]'s
+/// ranking did not: its rows need columns this table lacks, so
+/// [migration 36](MIGRATION_36) adds sibling tables.)
 /// The vocabulary is pinned in Rust instead
 /// ([`WorstOffenders::DIMENSIONS`](crate::models::quality::WorstOffenders::DIMENSIONS)),
 /// and the read path ignores a name outside it.
@@ -2910,6 +2916,220 @@ ALTER TABLE nodes ADD COLUMN uninherited INTEGER CHECK (uninherited = 1);
 -- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
 -- next scan like a modified one, filling the column.
 UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 36 — every metric snapshot persists its **"where to start"**
+/// ranking and per-member **outlier labels** (S-504, [CR-164], [FR-QM-17]).
+///
+/// Purely additive, the [migration-26](MIGRATION_26) shape: one nullable flag
+/// on `metric_snapshots` and three new tables, so every existing row crosses the
+/// boundary byte for byte and an upgraded store needs no re-index.
+///
+/// 1. **`metric_snapshots.insight_recorded`** — `1` on a snapshot whose ranking
+///    and labels were written with it, `NULL` on every earlier snapshot: the
+///    "not recorded" reading that separates an old snapshot from one that
+///    ranked nothing ([NFR-CC-04]). Only `1` is admitted.
+/// 2. **`metric_snapshot_fix_units`** — one row per ranked fix unit, keyed by
+///    snapshot and 1-based rank, naming the unit's `kind`, its `node_id` (the
+///    symbol a later story keys an offender by), its comma-joined
+///    `dimensions`, its recoverable `points` (≥ 1 — a unit recovering no whole
+///    point is not ranked) and its comma-joined `outliers` — the measures it is
+///    labelled an outlier on.
+/// 3. **`metric_snapshot_outlier_measures`** — one row per per-unit measure
+///    and snapshot: the member's distribution size `units` and its upper Tukey
+///    `fence`, `NULL` below the minimum size — so "no label" and "too few units
+///    to calibrate" stay distinct — the detection `threshold`, `NULL` for a
+///    group mass, and how many units it `labelled` in all.
+/// 4. **`metric_snapshot_outlier_labels`** — one row per listed label, keyed by
+///    snapshot, measure and 1-based rank (value descending, then node id),
+///    capped like an offender list; `labelled` above says what the cap left out.
+///
+/// A sibling of `metric_snapshot_offenders` rather than more of its rows
+/// ([CR-164] CRA-03 left this open): a ranked unit carries a node id, a kind,
+/// several dimensions and a points figure, none of which that table's key or
+/// columns hold. `kind`, `dimensions` and `measure` carry **no** `CHECK` list,
+/// as there: the vocabulary is pinned in Rust and the read path skips a name
+/// outside it. `node_id` is not a foreign key — a snapshot outlives the node
+/// rows of the graph it scored.
+///
+/// No back-fill: an old snapshot stays "not recorded" ([CR-162] §3.3).
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_36_adds_the_where_to_start_tables_and_old_snapshots_read_not_recorded`
+/// in [`super::migrate`].
+///
+/// [CR-162]: ../../../../docs/requests/CR-162-health-shows-the-worst-offenders-its-snapshot-computed.md
+/// [CR-164]: ../../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md
+/// [FR-QM-17]: ../../../../docs/specs/requirements/FR-QM-17.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_36: &str = "\
+-- 1. 1 = this snapshot's ranking and labels were written with it (possibly
+-- empty); NULL = written before they were persisted (not recorded).
+ALTER TABLE metric_snapshots ADD COLUMN insight_recorded INTEGER CHECK (insight_recorded = 1);
+
+-- 2. One row per ranked fix unit, in rank order.
+CREATE TABLE metric_snapshot_fix_units (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    rank        INTEGER NOT NULL CHECK (rank >= 1),
+    kind        TEXT NOT NULL,
+    node_id     INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    dimensions  TEXT NOT NULL,
+    points      INTEGER NOT NULL CHECK (points >= 1),
+    detail      TEXT NOT NULL,
+    outliers    TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, rank)
+) STRICT;
+
+-- 3. One row per per-unit measure: the member's own distribution size and
+-- upper fence (NULL below the minimum size), the detection threshold and the
+-- uncapped count of labelled units.
+CREATE TABLE metric_snapshot_outlier_measures (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    measure     TEXT NOT NULL,
+    units       INTEGER NOT NULL CHECK (units >= 0),
+    fence       REAL,
+    threshold   INTEGER,
+    labelled    INTEGER NOT NULL CHECK (labelled >= 0),
+    PRIMARY KEY (snapshot_id, measure)
+) STRICT;
+
+-- 4. One row per listed outlier label, in rank order (capped).
+CREATE TABLE metric_snapshot_outlier_labels (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    measure     TEXT NOT NULL,
+    rank        INTEGER NOT NULL CHECK (rank >= 1),
+    node_id     INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    value       INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_id, measure, rank)
+) STRICT;
+";
+
+/// Migration 37 — every offender carries its **symbol id**, a **numeric
+/// value** and the **threshold** it met, and every snapshot persists its
+/// **uncapped** offender list beside the capped display list (S-676,
+/// [CR-218], [FR-QM-19]).
+///
+/// Purely additive, the [migration-26](MIGRATION_26) shape: one nullable flag
+/// and four nullable columns added in place, and one new table, so every
+/// existing row crosses the boundary byte for byte and an upgraded store needs
+/// no re-index.
+///
+/// 1. **`metric_snapshots.offender_values_recorded`** — `1` on a snapshot whose
+///    offender rows carry the four columns below and whose uncapped list was
+///    written with it; `NULL` on every earlier snapshot. The new columns are
+///    legitimately `NULL` on a recorded row too (a Depth row names no symbol;
+///    five dimensions have no threshold), so only this flag tells "not
+///    recorded" from "none" ([NFR-CC-04]). Only `1` is admitted.
+/// 2. **`metric_snapshot_offenders`** gains `node_id` (the symbol id without
+///    its repository coordinate, the [FR-GV-23] identity), `measure` (what
+///    `value` counts), `value` and `threshold`. `NULL` on every pre-migration
+///    row, which keeps reading as before.
+/// 3. **`metric_snapshot_offenders_uncapped`** — the same row shape for
+///    **every** offender, keyed by snapshot, dimension and 1-based rank in the
+///    computed order, so the first rows of a dimension are its capped list.
+///    Kept beside the capped table rather than replacing it: the capped rows
+///    of every earlier snapshot stay where every reader finds them.
+///
+/// `measure` and `dimension` carry **no** `CHECK` list, as in migration 26:
+/// the vocabulary is pinned in Rust
+/// ([`Offender::MEASURES`](crate::models::quality::Offender::MEASURES)) and
+/// the read path skips a name outside it. `node_id` is text, not a foreign key:
+/// it outlives the graph it was measured on, and is compared across two.
+///
+/// No back-fill: an old snapshot stays "not recorded" ([CR-162] §3.3).
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_37_adds_offender_values_and_old_snapshots_read_not_recorded` in
+/// [`super::migrate`].
+///
+/// [CR-162]: ../../../../docs/requests/CR-162-health-shows-the-worst-offenders-its-snapshot-computed.md
+/// [CR-218]: ../../../../docs/requests/CR-218-agent-dev-kit-plugin-and-review.md
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+/// [FR-QM-19]: ../../../../docs/specs/requirements/FR-QM-19.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_37: &str = "\
+-- 1. 1 = this snapshot's offenders carry their id, measure, value and
+-- threshold, and its uncapped list was written with it; NULL = written before
+-- (not recorded).
+ALTER TABLE metric_snapshots ADD COLUMN offender_values_recorded INTEGER CHECK (offender_values_recorded = 1);
+
+-- 2. The capped display rows gain the four fields; NULL on earlier rows.
+ALTER TABLE metric_snapshot_offenders ADD COLUMN node_id TEXT;
+ALTER TABLE metric_snapshot_offenders ADD COLUMN measure TEXT;
+ALTER TABLE metric_snapshot_offenders ADD COLUMN value INTEGER;
+ALTER TABLE metric_snapshot_offenders ADD COLUMN threshold INTEGER;
+
+-- 3. Every offender, uncapped, in computed order.
+CREATE TABLE metric_snapshot_offenders_uncapped (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    dimension   TEXT NOT NULL,
+    rank        INTEGER NOT NULL CHECK (rank >= 1),
+    name        TEXT NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    detail      TEXT NOT NULL,
+    node_id     TEXT,
+    measure     TEXT,
+    value       INTEGER,
+    threshold   INTEGER,
+    PRIMARY KEY (snapshot_id, dimension, rank)
+) STRICT;
+";
+
+/// Migration 38 — Acyclicity's and Depth's applicability flags, and the
+/// cross-module edge count all three graph dimensions are decided on (S-523,
+/// [CR-171], [FR-QM-18], [FR-QM-07]).
+///
+/// Metric-semantics v8 makes Modularity, Acyclicity and Depth **not
+/// applicable** when the production metric graph has fewer than five
+/// cross-module edges
+/// ([`MIN_CROSS_MODULE_EDGES`](crate::metrics::MIN_CROSS_MODULE_EDGES)). As
+/// with [migration 23](MIGRATION_23)'s `modularity_applicable`, each dimension
+/// keeps its computed raw/normalized pair, so a flag says which reading of the
+/// pair applies:
+///
+/// 1. **`acyclicity_applicable`**, **`depth_applicable`** — `1` = applied, `0`
+///    = dropped out of the mean and the zero short-circuit, `NULL` = a row
+///    persisted before this migration, scored under semantics ≤ 7 when both
+///    always applied, so the read path takes `NULL` as applicable.
+/// 2. **`cross_module_edges`** — the count the three flags were decided on, so
+///    a read-back states the figure that established a drop-out ([NFR-CC-04])
+///    rather than re-deriving it from `edge_count`, which counts intra-module
+///    edges too. `NULL` on every earlier row: a v6/v7 Modularity drop-out reads
+///    back with the all-edges reason it was decided on.
+///
+/// **Purely additive**: three nullable `ALTER TABLE … ADD COLUMN`s on the
+/// append-only ledger. No table is rebuilt; every existing row and id is
+/// untouched, and nothing is back-filled ([FR-DB-04], [NFR-MA-06]) — asserted
+/// on a populated ledger by
+/// `migration_38_adds_the_graph_dimension_flags_and_old_rows_read_applicable`
+/// in [`super::migrate`].
+///
+/// [CR-171]: ../../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [FR-QM-07]: ../../../../docs/specs/requirements/FR-QM-07.md
+/// [FR-QM-18]: ../../../../docs/specs/requirements/FR-QM-18.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_38: &str = "\
+-- FR-QM-18 (metric-semantics v8): Acyclicity and Depth are not applicable below
+-- five cross-module edges, as Modularity is. 1 = applied, 0 = dropped out of the
+-- mean and the zero short-circuit (the raw/normalized pair is still stored),
+-- NULL = scored before these flags existed, when both always applied.
+ALTER TABLE metric_snapshots ADD COLUMN acyclicity_applicable INTEGER CHECK (acyclicity_applicable IN (0,1));
+ALTER TABLE metric_snapshots ADD COLUMN depth_applicable INTEGER CHECK (depth_applicable IN (0,1));
+-- The cross-module edge count the three flags were decided on; NULL before v8.
+ALTER TABLE metric_snapshots ADD COLUMN cross_module_edges INTEGER CHECK (cross_module_edges >= 0);
 ";
 
 #[cfg(test)]

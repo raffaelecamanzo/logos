@@ -9,12 +9,13 @@ use std::path::Path;
 use std::process::Command;
 
 use logos_core::config::{Config, Rules};
-use logos_core::init::InitOptions;
+use logos_core::init::{ClaudePlugin, InitOptions};
 use logos_core::models::pipeline::{InitAction, InitResult, InitStep};
 use logos_core::Engine;
 use tempfile::TempDir;
 
-/// The full `-i` step set minus hooks — the non-TTY `init -i` default.
+/// The full `-i` step set minus hooks — the non-TTY `init -i` default, with
+/// the Claude Code plugin absent so no developer's own settings reach the test.
 fn interactive() -> InitOptions {
     InitOptions {
         inject_mcp: true,
@@ -23,6 +24,7 @@ fn interactive() -> InitOptions {
         materialize_skill: true,
         install_quality_report_hook: true,
         workspace_member: false,
+        claude_plugin: ClaudePlugin::Absent,
     }
 }
 
@@ -257,6 +259,8 @@ fn gitignore_ignores_derived_state_and_keeps_policy_tracked() {
         // S-169 / FR-CF-06: the chat API key store is gitignored — the one
         // non-derived file that must never be committed (NFR-SE-07).
         "secrets.toml",
+        // S-677 / FR-GV-24: the branch review's cached merge-base before-states.
+        "review-cache/",
     ] {
         assert!(
             gitignore.contains(pattern),
@@ -283,6 +287,10 @@ fn gitignore_ignores_derived_state_and_keeps_policy_tracked() {
     assert!(check(".logos/history.db-wal"), "history sidecars ignored");
     // S-169 / FR-CF-06: the secret store is git-ignored, never committed.
     assert!(check(".logos/secrets.toml"), "secrets.toml ignored");
+    assert!(
+        check(".logos/review-cache/0123abcd.json"),
+        "the review cache is derived state, ignored"
+    );
     assert!(!check(".logos/config.toml"), "config.toml stays tracked");
     assert!(!check(".logos/rules.toml"), "rules.toml stays tracked");
     assert!(
@@ -1241,4 +1249,299 @@ fn init_records_the_coordinate_and_status_reports_it() {
     assert_eq!(status.project_id.as_deref(), Some("ledger"));
     let json = serde_json::to_value(&status).unwrap();
     assert_eq!(json["project_id"], "ledger");
+}
+
+// ── FR-IN-12: plugin-aware `init -i` and `init --uninstall` ───────────────
+
+/// `init -i` with the Claude Code plugin enabled, in a build composing no
+/// extension (no skill is materialized).
+fn plugin_enabled() -> InitOptions {
+    InitOptions {
+        materialize_skill: false,
+        claude_plugin: ClaudePlugin::Enabled,
+        ..interactive()
+    }
+}
+
+/// A skill copy and its pointer as a pre-extension `init -i` materialized
+/// them: `.agents/skills/<name>/SKILL.md` stamped with the emission header,
+/// and the relative `.claude/skills/<name>` symlink.
+fn plant_emitted_skill(root: &Path, name: &str) {
+    let dir = root.join(".agents/skills").join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\n---\n\n<!-- {name} skill — emitted from Logos v1.9.0. After a binary\n     upgrade, refresh. -->\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".claude/skills")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(format!("../../.agents/skills/{name}"), root.join(".claude/skills").join(name)).unwrap();
+}
+
+/// Every file under `root` outside `.logos/`, with its bytes.
+fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if rel == ".logos" || rel == ".git" {
+                continue;
+            }
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                out.push((format!("{rel}/"), Vec::new()));
+                walk(root, &path, out);
+            } else if meta.file_type().is_symlink() {
+                out.push((rel, fs::read_link(&path).unwrap().to_string_lossy().into_owned().into_bytes()));
+            } else {
+                out.push((rel, fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+fn rows(result: &InitResult) -> Vec<(&str, InitAction)> {
+    result.steps.iter().map(|s| (s.target.as_str(), s.action)).collect()
+}
+
+/// The acceptance path: a project set up by today's `init -i` (plus a skill
+/// copy an older `init -i` left), then `init -i` with the plugin enabled,
+/// leaves no legacy entry, script or skill copy, enrols the plugin, and a
+/// re-run changes nothing.
+#[test]
+fn plugin_enabled_init_i_migrates_a_legacy_setup() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    Engine::init_with(root, &interactive()).unwrap();
+    plant_emitted_skill(root, "gen");
+    assert!(root.join(".mcp.json").is_file() && root.join(".claude/hooks/logos-quality-open.sh").is_file());
+
+    let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+    let rows = rows(&result);
+    for expected in [
+        (".claude/settings.json", InitAction::Updated),
+        (".mcp.json", InitAction::Removed),
+        (".claude/hooks/logos-quality-open.sh", InitAction::Removed),
+        (".agents/skills/gen", InitAction::Removed),
+    ] {
+        assert!(rows.contains(&expected), "{expected:?} in {rows:?}");
+    }
+    assert!(!root.join(".mcp.json").exists(), "no legacy MCP entry, and no file it alone held");
+    assert!(!root.join(".claude/hooks").exists(), "no readout script, nor its directory");
+    assert!(!root.join(".agents").exists() && !root.join(".claude/skills").exists(), "no skill copy");
+    let settings: serde_json::Value = serde_json::from_str(&read(root, ".claude/settings.json")).unwrap();
+    assert_eq!(settings["enabledPlugins"]["logos@logos"], true);
+    assert_eq!(settings["extraKnownMarketplaces"]["logos"]["source"]["repo"], "raffaelecamanzo/logos");
+    assert!(settings.get("hooks").is_none(), "no legacy readout entry: {settings}");
+    assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Unchanged, "the CLAUDE.md block stays");
+
+    let before = tree(root);
+    let again = Engine::init_with(root, &plugin_enabled()).unwrap();
+    assert!(again.steps.iter().all(|s| s.action == InitAction::Unchanged), "{:?}", rows_of(&again));
+    assert_eq!(tree(root), before, "a re-run writes nothing");
+}
+
+fn rows_of(result: &InitResult) -> Vec<(String, InitAction)> {
+    result.steps.iter().map(|s| (s.target.clone(), s.action)).collect()
+}
+
+/// On a fresh project the plugin-enabled `init -i` writes no MCP entry and no
+/// readout hook — only the enrolment, beside the repository-side files.
+#[test]
+fn plugin_enabled_init_i_on_a_fresh_project_writes_no_mcp_entry() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+    assert_eq!(step(&result, ".claude/settings.json").action, InitAction::Created);
+    assert_eq!(step(&result, ".mcp.json").action, InitAction::Unchanged);
+    assert!(!root.join(".mcp.json").exists());
+    assert!(!root.join(".claude/hooks").exists());
+    assert!(root.join("CLAUDE.md").is_file(), "the repository side stays in init");
+}
+
+/// Detection reads the project's own settings: an enrolled project is
+/// plugin-mode, and a project that sets the plugin `false` is not, whatever
+/// the user's scope says (the project overrides it).
+#[test]
+fn detect_reads_the_project_scope_and_lets_it_override_the_user() {
+    let detect = InitOptions { claude_plugin: ClaudePlugin::Detect, ..plugin_enabled() };
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(root.join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
+    Engine::init_with(root, &detect).unwrap();
+    assert!(!root.join(".mcp.json").exists(), "an enrolled project gets no MCP entry");
+
+    let off = TempDir::new().unwrap();
+    fs::create_dir_all(off.path().join(".claude")).unwrap();
+    fs::write(off.path().join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":false}}"#).unwrap();
+    Engine::init_with(off.path(), &detect).unwrap();
+    assert!(off.path().join(".mcp.json").is_file(), "a project that disables the plugin gets today's files");
+}
+
+/// A run asked to materialize skills belongs to a build whose extension owns
+/// them, so the skill copy stays.
+#[test]
+fn a_run_asked_to_materialize_skills_keeps_the_skill_copy() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    plant_emitted_skill(root, "gen");
+    let result = Engine::init_with(root, &InitOptions { materialize_skill: true, ..plugin_enabled() }).unwrap();
+    assert!(result.steps.iter().all(|s| !s.target.starts_with(".agents")), "{:?}", rows_of(&result));
+    assert!(root.join(".agents/skills/gen/SKILL.md").is_file());
+}
+
+/// `init --uninstall` after today's `init -i` (and an older skill copy)
+/// leaves exactly the pre-init tree plus `.logos/`; a second run reports
+/// every row unchanged and writes nothing. Outside git, the hook row says so.
+#[test]
+fn uninstall_leaves_only_foreign_content_and_a_second_run_is_a_no_op() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("CLAUDE.md"), "# Mine\n\nnotes\n").unwrap();
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    // Already in the pretty shape `init` writes, so a byte comparison is fair:
+    // `init` re-serializes a JSON file it merges into.
+    fs::write(root.join(".claude/settings.json"), "{\n  \"model\": \"x\"\n}\n").unwrap();
+    let pristine = tree(root);
+
+    Engine::init_with(root, &interactive()).unwrap();
+    plant_emitted_skill(root, "gen");
+    let first = Engine::init_uninstall(root).unwrap();
+    assert_eq!(tree(root), pristine, "only foreign content is left: {:?}", first.steps);
+    assert!(root.join(".logos/logos.db").is_file(), ".logos/ data stays");
+    assert_eq!(step_of(&first.steps, ".logos/hooks").detail, "not a git repository — no git hooks");
+
+    let second = Engine::init_uninstall(root).unwrap();
+    assert!(second.steps.iter().all(|s| s.action == InitAction::Unchanged), "{:?}", second.steps);
+    assert_eq!(tree(root), pristine);
+}
+
+fn step_of<'a>(steps: &'a [InitStep], target: &str) -> &'a InitStep {
+    steps.iter().find(|s| s.target == target).unwrap_or_else(|| panic!("no {target}: {steps:?}"))
+}
+
+/// The plugin enrolment is Logos's too, and so are the git hooks: an
+/// uninstall after a plugin-enabled `init -i --hooks` in a repository removes
+/// both, unsetting `core.hooksPath`.
+#[test]
+fn uninstall_removes_the_enrolment_and_the_git_hooks() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git_init(root);
+    let pristine = tree(root);
+    Engine::init_with(root, &InitOptions { install_hooks: true, ..plugin_enabled() }).unwrap();
+    assert!(root.join(".claude/settings.json").is_file());
+
+    let result = Engine::init_uninstall(root).unwrap();
+    assert_eq!(step_of(&result.steps, ".claude/settings.json").action, InitAction::Removed);
+    assert_eq!(step_of(&result.steps, ".logos/hooks").action, InitAction::Removed);
+    assert!(!git(root, &["config", "core.hooksPath"]).status.success(), "core.hooksPath unset");
+    assert_eq!(tree(root), pristine);
+}
+
+/// An uninstall in a directory Logos never touched creates nothing — not
+/// even `.logos/`.
+#[test]
+fn uninstall_in_an_untouched_directory_creates_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let result = Engine::init_uninstall(tmp.path()).unwrap();
+    assert!(result.steps.iter().all(|s| s.action == InitAction::Unchanged), "{:?}", result.steps);
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0, "nothing created");
+    assert!(result.message.starts_with("nothing of Logos's to remove"), "{}", result.message);
+}
+
+/// The legacy registrations are committed, so they stay while the committed
+/// settings do not enable the plugin — whether the team set it `false`, or the
+/// settings file is one `init` cannot edit — however this developer enabled it.
+#[test]
+fn legacy_registrations_stay_until_the_committed_settings_enable_the_plugin() {
+    for settings in [r#"{"enabledPlugins":{"logos@logos":false}}"#, "[]"] {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        Engine::init_with(root, &interactive()).unwrap();
+        plant_emitted_skill(root, "gen");
+        fs::write(root.join(".claude/settings.json"), settings).unwrap();
+
+        let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+        assert_eq!(step(&result, ".mcp.json").action, InitAction::Skipped, "{settings}: {:?}", rows_of(&result));
+        assert_eq!(step(&result, ".claude/hooks/logos-quality-open.sh").action, InitAction::Skipped);
+        assert!(root.join(".mcp.json").is_file(), "{settings}: the committed MCP entry stays");
+        assert!(root.join(".claude/hooks/logos-quality-open.sh").is_file());
+        assert!(root.join(".agents/skills/gen/SKILL.md").is_file());
+        assert!(
+            !step(&result, ".claude/settings.json").detail.contains("enrolled ("),
+            "no enrolment is claimed: {:?}",
+            rows_of(&result)
+        );
+    }
+}
+
+/// `.claude/settings.json` is shared, not Logos-written: when it cannot be
+/// read, an uninstall reports that row `Skipped` and still finishes the rest.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_settings_file_does_not_stop_the_uninstall() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    Engine::init_with(root, &interactive()).unwrap();
+    let settings = root.join(".claude/settings.json");
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&settings).is_ok() {
+        return; // running as a user that reads anything; nothing to prove here
+    }
+
+    let result = Engine::init_uninstall(root);
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).unwrap();
+    let result = result.expect("an unreadable shared file is not a failure");
+    assert_eq!(step_of(&result.steps, ".claude/hooks/logos-quality-open.sh").action, InitAction::Skipped);
+    assert_eq!(step_of(&result.steps, ".claude/settings.json").action, InitAction::Skipped);
+    assert_eq!(step_of(&result.steps, ".logos/hooks").action, InitAction::Unchanged, "the last row still ran");
+    assert!(!root.join(".mcp.json").exists() && !root.join("CLAUDE.md").exists());
+}
+
+/// The git hooks are Logos's own: when git cannot unset `core.hooksPath` after
+/// the scripts went, the uninstall fails loud instead of reporting a skip
+/// (DL-06) — a half-removed installation must not read as nothing to do.
+#[cfg(unix)]
+#[test]
+fn a_git_failure_part_way_through_the_hook_removal_fails_loud() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git_init(root);
+    Engine::init_with(root, &hook_opts()).unwrap();
+    let git_dir = root.join(".git");
+    fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = Engine::init_uninstall(root);
+    fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    if git(root, &["config", "core.hooksPath"]).status.success() {
+        let err = result.expect_err("core.hooksPath could not be unset, so the uninstall fails");
+        assert!(format!("{err:#}").contains("core.hooksPath"), "{err:#}");
+    }
+}
+
+/// A plain `init` (or `init --hooks`) asks for no host-integration step, so it
+/// never reads the plugin settings and never migrates: a legacy skill copy
+/// stays even in a plugin-enabled project.
+#[test]
+fn a_plain_init_never_migrates_even_with_the_plugin_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    plant_emitted_skill(root, "gen");
+    // Enrolled and committed: everything a migration needs, except being asked.
+    fs::write(root.join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
+    let result = Engine::init_with(
+        root,
+        &InitOptions { claude_plugin: ClaudePlugin::Enabled, ..InitOptions::default() },
+    )
+    .unwrap();
+    assert!(result.steps.iter().all(|s| !s.target.starts_with(".agents")), "{:?}", rows_of(&result));
+    assert!(root.join(".agents/skills/gen/SKILL.md").is_file());
 }

@@ -19,6 +19,7 @@ import type {
   HotspotReport,
   TemporalReport,
 } from "../../api/types.ts";
+import { severityRank } from "../security/securityModel.ts";
 
 /** The muted `n/a` token — the single honest placeholder for a missing figure. */
 export const NA = "n/a";
@@ -63,6 +64,8 @@ export interface FileRiskRow {
   complexity: number;
   /** The per-file coverage cell. */
   coverage: Hotspot["coverage"];
+  /** The findings cell (FR-SC-14); `undefined` when nothing was ever scanned. */
+  findings: Hotspot["findings"];
 }
 
 /**
@@ -84,6 +87,7 @@ export function fileRiskRows(report: HotspotReport, temporal: TemporalReport): F
       defect: h.defect_commits,
       complexity: h.complexity,
       coverage: h.coverage,
+      findings: h.findings,
     };
   });
 }
@@ -94,4 +98,21 @@ export function ownershipRows(temporal: TemporalReport): FileTemporal[] {
   return temporal.files.filter(
     (f) => f.ownership_dispersion_bp > 0 || f.change_entropy_bp > 0,
   );
+}
+
+/** Whether the board carries the findings column: only once a scan is stored —
+ *  no scan shows no column rather than a column of zeros (FR-SC-14). */
+export function hasFindingsColumn(rows: readonly FileRiskRow[]): boolean {
+  return rows.some((r) => r.findings !== undefined);
+}
+
+/** The Security page filtered to one file (its `?path=` deep link, S-670). */
+export function securityHref(path: string): string {
+  return `/security?path=${encodeURIComponent(path)}`;
+}
+
+/** The findings column's sort key: highest severity first, then most findings;
+ *  a scanned file with none sorts below every file that has one. */
+export function findingsSortValue(f: NonNullable<FileRiskRow["findings"]>): number {
+  return f.highest ? severityRank(f.highest) * 100_000 + f.count : 0;
 }

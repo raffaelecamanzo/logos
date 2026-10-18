@@ -19,3 +19,13 @@ and a fix commit on the two files under the long `src/analysis/…/scoped/` path
 `logos hotspots`, so Files & Risk has churn to rank, ownership to disperse and a
 path long enough to abbreviate (S-616). Those two files are reached from
 `main.rs` through nested inline modules.
+
+`single.security.sarif` is a Semgrep report over the `single` copy's
+`src/main.rs`: `serve-fixture.sh` ingests it after indexing, so the Security
+page (S-670) renders findings in graph context, a redacted secret-class one
+among them. It sits beside the fixture rather than in it, so the indexed tree
+— and every other view's figures — stay as they were.
+
+`workspace.security.sarif` is a Semgrep report over the `workspace` copy's
+`api/src/main.rs`: `serve-fixture.sh` ingests it into `api` alone, so Workspace
+security (S-674) renders a scanned member beside a never-scanned one (`web`).

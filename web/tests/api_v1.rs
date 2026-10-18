@@ -188,6 +188,39 @@ async fn every_v1_endpoint_serves_json_under_self_only_csp() {
     }
 }
 
+/// S-505 ([FR-QM-17]): `GET /api/v1/health` carries the "where to start" list of
+/// the snapshot it displays as `scan.where_to_start` — the value
+/// `Engine::improvements` (the CLI `improvements` and the MCP tool) serves, field
+/// for field. The fixture holds one function nested six deep among eight shallow
+/// ones, so the list has a ranked unit and an outlier label to compare, not two
+/// empty lists agreeing.
+///
+/// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
+#[tokio::test]
+async fn health_carries_the_where_to_start_list_the_engine_serves() {
+    let tmp = TempDir::new().expect("temp root");
+    let mut source: String = (0..8)
+        .map(|i| format!("pub fn shallow_{i}(x: i32) -> i32 {{\n    if x > {i} {{\n        return x;\n    }}\n    0\n}}\n"))
+        .collect();
+    let open: String = (0..6).map(|i| format!("if x > {i} {{\n")).collect();
+    source.push_str(&format!("pub fn deep_one(x: i32) -> i32 {{\n{open}return x;\n{}0\n}}\n", "}\n".repeat(6)));
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(tmp.path().join("src/lib.rs"), source).unwrap();
+    let engine = Arc::new(Engine::start(tmp.path()).expect("engine starts"));
+    engine.index();
+    engine.scan(true).expect("scan persists a snapshot");
+
+    let router = web::router(Arc::clone(&engine));
+    let resp = router.oneshot(get("/api/v1/health")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let health: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
+
+    let served = serde_json::to_value(engine.improvements().expect("improvements reads")).unwrap();
+    assert_eq!(served["units"][0]["name"], "deep_one", "{served}");
+    assert_eq!(health["scan"]["where_to_start"], served, "Health and the engine's list are one value");
+}
+
 /// The composed bundles trace their fields to `Engine` read-models: spot-check the
 /// keys the SPA reads ([FR-UI-21], [NFR-RA-05]).
 #[tokio::test]
@@ -1090,6 +1123,52 @@ async fn files_production_scope_query_param_serves_the_filtered_board() {
     }
 }
 
+/// FR-SC-14: `/api/v1/files` carries the findings column the CLI and MCP carry —
+/// absent before any scan (no zeros), the same cell after one — and
+/// `?with_findings` is the filter. The `hotspots` value is compared whole with
+/// the engine payload both other surfaces serialise.
+#[tokio::test]
+async fn files_carries_the_findings_column_only_once_a_scan_is_stored() {
+    let (tmp, engine) = scanned_engine();
+    let router = web::router(Arc::clone(&engine));
+    let files = |uri: &'static str| {
+        let router = router.clone();
+        async move {
+            let (status, body, _h) = body_string(router.oneshot(get(uri)).await.unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            serde_json::from_str::<serde_json::Value>(&body).expect("valid JSON")
+        }
+    };
+
+    for uri in ["/api/v1/files", "/api/v1/files?with_findings"] {
+        let unscanned = files(uri).await;
+        assert!(unscanned["hotspots"]["files"][0].get("findings").is_none(), "no scan, no column: {unscanned}");
+        assert!(unscanned["hotspots"].get("with_findings").is_none(), "{unscanned}");
+    }
+
+    let report = tmp.path().join(".logos/lib.sarif");
+    std::fs::write(
+        &report,
+        r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0","rules":[]}},
+        "results":[{"ruleId":"r","level":"error","message":{"text":"m"},"locations":[{"physicalLocation":
+        {"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":1}}}]}]}]}"#,
+    )
+    .unwrap();
+    engine.security_ingest(&report).expect("the report ingests");
+
+    for (uri, with_findings) in [("/api/v1/files", false), ("/api/v1/files?with_findings", true)] {
+        let body = files(uri).await;
+        let cell = &body["hotspots"]["files"][0]["findings"];
+        assert_eq!((cell["count"].as_u64(), cell["highest"].as_str(), cell["stale"].as_u64()), (Some(1), Some("high"), Some(0)), "{body}");
+        let engine_payload = serde_json::to_value(
+            engine.latest_hotspots_with_findings(Some(50), false, false, with_findings).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["hotspots"], engine_payload, "web carries the engine payload: {uri}");
+        assert_eq!(body["hotspots"]["with_findings"].as_bool().unwrap_or(false), with_findings);
+    }
+}
+
 // ── Populated-graph: the graph/search endpoints reach real read-model fields ──
 
 /// Over an indexed graph the `/api/v1/graph` snapshot carries real nodes (a `layer`
@@ -1368,4 +1447,304 @@ fn urlencode(raw: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+// ── Security (S-670, [FR-SC-09]) ──────────────────────────────────────────────
+
+/// Planted in the secret-class finding's message and snippet; must reach no
+/// payload ([FR-SC-03]).
+const PLANTED_SECRET: &str = "lgs_pl4nted_S3cr3t_web_q7Vx9Rz2Kw";
+
+/// `src/lib.rs` for the security fixture: `find` encloses the SQL finding at
+/// line 3, and `KEY` the secret at line 6.
+const SECURITY_LIB_RS: &str = "/// Looks a user up.\npub fn find(id: &str) -> String {\n    format!(\"SELECT * FROM users WHERE id = {id}\")\n}\n\npub const KEY: &str = \"redacted-in-the-fixture\";\n";
+
+/// A Semgrep report over [`SECURITY_LIB_RS`]: a CWE-89 finding (Injection under
+/// both editions, at a different id in each) and a secret-class one, whose
+/// message and snippet carry [`PLANTED_SECRET`].
+fn security_sarif() -> String {
+    format!(
+        r#"{{"version":"2.1.0","runs":[{{"tool":{{"driver":{{"name":"Semgrep OSS","semanticVersion":"1.85.0","rules":[
+{{"id":"rust.lang.security.formatted-sql","properties":{{"tags":["CWE-89: SQL Injection","security"]}}}},
+{{"id":"generic.secrets.hardcoded-key","properties":{{"tags":["CWE-798: Hard-coded Credentials","security"]}}}}]}}}},
+"results":[
+{{"ruleId":"rust.lang.security.formatted-sql","level":"error","message":{{"text":"Formatted SQL query."}},
+"locations":[{{"physicalLocation":{{"artifactLocation":{{"uri":"src/lib.rs"}},"region":{{"startLine":3,"snippet":{{"text":"format!(SELECT)"}}}}}}}}]}},
+{{"ruleId":"generic.secrets.hardcoded-key","level":"error","message":{{"text":"Hard-coded key {PLANTED_SECRET}"}},
+"locations":[{{"physicalLocation":{{"artifactLocation":{{"uri":"src/lib.rs"}},"region":{{"startLine":6,"snippet":{{"text":"{PLANTED_SECRET}"}}}}}}}}]}}]}}]}}"#
+    )
+}
+
+/// A one-commit Rust repository with the report ingested, whose engine finds
+/// scanners only in a stub directory holding `bandit` — installed, never run —
+/// and consent in a temporary user directory, so no scanner on this machine is
+/// found and the process environment is never changed.
+#[cfg(unix)]
+fn security_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().expect("temp root");
+    let base = tmp.path().canonicalize().unwrap();
+    let (repo, bin, user) = (base.join("project"), base.join("bin"), base.join("user"));
+    for dir in [&repo, &bin, &user] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    sh_git(&repo, &["init", "-q", "-b", "main"]);
+    if let Some(rules_toml) = rules_toml {
+        std::fs::create_dir_all(repo.join(".logos")).unwrap();
+        std::fs::write(repo.join(".logos/rules.toml"), rules_toml).unwrap();
+    }
+    commit(&repo, "src/lib.rs", SECURITY_LIB_RS, "seed");
+    let stub = bin.join("bandit");
+    std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' 'bandit 1.7.10'\n").unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = base.join("semgrep.sarif");
+    std::fs::write(&report, security_sarif()).unwrap();
+
+    let env = logos_core::security::ScanEnvironment {
+        user_dir: Some(user),
+        search_path: Some(bin.into_os_string()),
+        tools_dir: None,
+    };
+    let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
+    engine.index();
+    engine.security_ingest(&report).expect("the report ingests");
+    (tmp, Arc::new(engine))
+}
+
+async fn security_payload(router: axum::Router) -> (String, serde_json::Value) {
+    let (status, body, headers) = body_string(router.oneshot(get("/api/v1/security")).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "/api/v1/security answers 200: {body}");
+    assert_json_self_only_csp(&headers, "/api/v1/security");
+    let payload = serde_json::from_str(&body).expect("json");
+    (body, payload)
+}
+
+/// The one scanner row named `name` in the status matrix.
+fn scanner_row<'a>(page: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    page["status"]["scanners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["scanner"] == name)
+        .unwrap_or_else(|| panic!("a status row for {name}"))
+}
+
+/// `GET /api/v1/security` ([FR-SC-09]) over a fixture with findings, a
+/// never-scanned scanner and an uncovered category: each absent state is in the
+/// payload with what fixes it, every finding carries its graph context, both
+/// OWASP editions classify the same findings, no snippet and no secret is
+/// served, and the read writes nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn security_page_states_findings_absent_scanners_and_uncovered_categories() {
+    let (tmp, engine) = security_engine(None);
+    let repo = tmp.path().canonicalize().unwrap().join("project");
+    let router = web::router(engine);
+    let history = repo.join(".logos/history.db");
+    let before = snapshot_count(&history, "security_snapshots");
+    let (body, payload) = security_payload(router.clone()).await;
+    let page = &payload["security"];
+
+    // The scanner matrix: one stored report, one installed scanner that never
+    // ran, and a registered scanner that is not installed here.
+    assert_eq!(scanner_row(page, "semgrep")["state"], "fresh");
+    assert_eq!(scanner_row(page, "semgrep")["findings"], 2);
+    assert_eq!(scanner_row(page, "bandit")["state"], "never_run");
+    assert_eq!(scanner_row(page, "trivy")["state"], "not_installed");
+    assert_eq!(page["findings"]["never_run"], serde_json::json!(["bandit"]));
+
+    // Every stored finding, unfiltered, each in graph context (S-669).
+    let findings = page["findings"]["findings"].as_array().unwrap();
+    assert_eq!((page["findings"]["total"].as_u64(), findings.len()), (Some(2), 2));
+    let sql = findings.iter().find(|f| f["rule_id"] == "rust.lang.security.formatted-sql").unwrap();
+    assert_eq!(sql["context"]["enclosing"]["symbol"]["name"], "find");
+    assert_eq!(sql["context"]["enclosing"]["confidence"], "resolved");
+    // No route exists, so nothing can be ruled out: unknown, never unreachable.
+    assert_eq!(sql["context"]["reachability"]["verdict"], "unknown");
+
+    // Redaction: the secret-class message is the stored fixed text, and neither
+    // the planted secret nor any snippet is served.
+    let secret = findings.iter().find(|f| f["rule_id"] == "generic.secrets.hardcoded-key").unwrap();
+    assert_eq!(secret["redacted"], true);
+    assert!(!body.contains(PLANTED_SECRET), "the planted secret is served: {body}");
+    assert!(!body.contains("snippet"), "a snippet is served: {body}");
+    assert!(!body.contains("format!(SELECT)"), "a snippet's text is served: {body}");
+
+    // Both editions over the same findings: the CWE-89 finding is Injection in
+    // each, under each edition's own id.
+    let editions = page["editions"].as_array().unwrap();
+    let years: Vec<&str> = editions.iter().map(|e| e["edition"].as_str().unwrap()).collect();
+    assert_eq!(years, ["2025", "2021"]);
+    let category_of = |edition: &serde_json::Value| {
+        edition["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["fingerprint"] == sql["fingerprint"])
+            .map(|c| c["categories"].clone())
+            .unwrap()
+    };
+    assert_eq!(category_of(&editions[0]), serde_json::json!(["A05:2025"]));
+    assert_eq!(category_of(&editions[1]), serde_json::json!(["A03:2021"]));
+    assert_eq!(editions[0]["findings"].as_array().unwrap().len(), 2, "every finding is classified");
+
+    // Not covered: only Semgrep's report is stored and Bandit never ran, so the
+    // supply-chain category no stored scanner can detect reads not covered —
+    // never a count of zero.
+    let supply_chain = editions[0]["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "A03:2025")
+        .unwrap();
+    assert_eq!(supply_chain["state"]["state"], "not_covered");
+    assert!(supply_chain["state"].get("findings").is_none(), "not covered carries no count: {supply_chain}");
+
+    // Without a `[security]` table there is no gate band.
+    assert!(page["gate"].is_null(), "no table, no band: {}", page["gate"]);
+
+    // Read-only: a second load stores nothing, and the route is GET-only.
+    security_payload(router.clone()).await;
+    assert_eq!(snapshot_count(&history, "security_snapshots"), before, "a GET stores no scan");
+    let post = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/security")
+        .header(header::HOST, "127.0.0.1:4983")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(router.oneshot(post).await.unwrap().status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// With a `rules.toml [security]` table, the band is the verdict `check`
+/// reaches on it ([FR-SC-10]). The fixture's findings are `high`, so a ratchet
+/// at `critical` fails on none of them: a required scanner that never ran is
+/// then the one reason the band fails, and a fresh one passes it.
+#[cfg(unix)]
+#[tokio::test]
+async fn security_page_carries_the_gate_band_when_a_security_table_is_configured() {
+    let table = |required: &str| format!("[security]\nrequired_scanners = [\"{required}\"]\nratchet_min_severity = \"critical\"\n");
+
+    let (_tmp, engine) = security_engine(Some(&table("bandit")));
+    let (_body, payload) = security_payload(web::router(engine)).await;
+    let band = &payload["security"]["gate"];
+    assert_eq!(band["violations"], serde_json::json!([]), "no rule fails on a high finding: {band}");
+    assert_eq!(band["passed"], false, "a missing required scan alone fails the band: {band}");
+    assert_eq!(band["required_scanners"], serde_json::json!(["bandit"]));
+    assert_eq!(band["missing_scans"][0]["scanner"], "bandit");
+    assert_eq!(band["missing_scans"][0]["state"], "never_run");
+    assert_eq!(band["checked_rules"], 1, "the ratchet, and no cap: {band}");
+
+    let (_tmp, engine) = security_engine(Some(&table("semgrep")));
+    let (_body, payload) = security_payload(web::router(engine)).await;
+    let band = &payload["security"]["gate"];
+    assert_eq!((band["passed"].as_bool(), band["missing_scans"].as_array().map(Vec::len)), (Some(true), Some(0)), "{band}");
+}
+
+/// A same-origin `POST` carrying `intent` and a JSON `body` — what the
+/// suppression dialog sends (S-672).
+fn triage_post(path: &str, intent: &web::IntentToken, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::HOST, "127.0.0.1:4983")
+        .header(header::ORIGIN, "http://127.0.0.1:4983")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(web::INTENT_HEADER, intent.as_str())
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Triage from the Security page ([FR-SC-12], S-672): a suppression posted with
+/// a reason is written to `.logos/security-ignore.toml` and the page then shows
+/// the finding suppressed **with that reason**; removing it restores the file
+/// byte for byte. A blank reason is `422` and a malformed body `400`, each with
+/// no write.
+///
+/// [FR-SC-12]: ../../docs/specs/requirements/FR-SC-12.md
+#[cfg(unix)]
+#[tokio::test]
+async fn a_suppression_from_the_page_shows_its_reason_and_removing_it_restores_the_file() {
+    let (tmp, engine) = security_engine(None);
+    let repo = tmp.path().canonicalize().unwrap().join("project");
+    let intent = web::IntentToken::generate();
+    let router = web::router_with_intent(engine, intent.clone());
+    let (_, payload) = security_payload(router.clone()).await;
+    let sql = payload["security"]["findings"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["rule_id"] == "rust.lang.security.formatted-sql")
+        .unwrap()
+        .clone();
+    let fingerprint = sql["fingerprint"].as_str().unwrap().to_string();
+    assert!(sql["suppression"].is_null(), "unsuppressed before triage: {sql}");
+
+    // A committed file already holding an unrelated entry, in canonical spelling.
+    let ignore = repo.join(".logos/security-ignore.toml");
+    let committed = format!("[[ignore]]\nfingerprint = \"{}\"\nreason = \"kept by hand\"\n", "f".repeat(64));
+    std::fs::write(&ignore, &committed).unwrap();
+
+    // Refusals write nothing.
+    for (body, status) in [
+        (format!(r#"{{"fingerprint":"{fingerprint}","reason":"   "}}"#), StatusCode::UNPROCESSABLE_ENTITY),
+        (format!(r#"{{"fingerprint":"{fingerprint}"}}"#), StatusCode::BAD_REQUEST),
+        (format!(r#"{{"fingerprint":"{fingerprint}","reason":"r","expires":"next week"}}"#), StatusCode::UNPROCESSABLE_ENTITY),
+        // An unknown key is refused, never ignored.
+        (format!(r#"{{"fingerprint":"{fingerprint}","reason":"r","scope":"all"}}"#), StatusCode::BAD_REQUEST),
+    ] {
+        let resp = router.clone().oneshot(triage_post("/api/v1/security/suppress", &intent, &body)).await.unwrap();
+        let (got, text, _) = body_string(resp).await;
+        assert_eq!(got, status, "{body}: {text}");
+        assert!(text.contains("\"error\""), "the refusal says why: {text}");
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), committed, "{body} wrote nothing");
+    }
+
+    for body in [format!(r#"{{"fp":"{fingerprint}"}}"#), format!(r#"{{"fingerprint":"{fingerprint}","reason":"r"}}"#)] {
+        let resp = router.clone().oneshot(triage_post("/api/v1/security/unsuppress", &intent, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "unsuppress {body}");
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), committed, "unsuppress {body} wrote nothing");
+    }
+
+    let body = format!(r#"{{"fingerprint":"{fingerprint}","reason":"query is built from a constant","expires":"2999-12-31"}}"#);
+    let resp = router.clone().oneshot(triage_post("/api/v1/security/suppress", &intent, &body)).await.unwrap();
+    let (status, text, _) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let written: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(written["file"], ".logos/security-ignore.toml");
+    assert_eq!(written["entries"], 2);
+    assert_eq!(written["entry"]["reason"], "query is built from a constant");
+
+    // The page labels the finding with the reason it was suppressed for.
+    let (_, payload) = security_payload(router.clone()).await;
+    let labelled = payload["security"]["findings"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["fingerprint"] == fingerprint.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(
+        labelled["suppression"],
+        serde_json::json!({"state": "suppressed", "reason": "query is built from a constant", "expires": "2999-12-31"})
+    );
+
+    let body = format!(r#"{{"fingerprint":"{fingerprint}"}}"#);
+    let resp = router.clone().oneshot(triage_post("/api/v1/security/unsuppress", &intent, &body)).await.unwrap();
+    let (status, text, _) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(std::fs::read(&ignore).unwrap(), committed.as_bytes(), "add-then-remove restores the file byte for byte");
+
+    // Removing it again: nothing suppresses it, so it is refused.
+    let resp = router.clone().oneshot(triage_post("/api/v1/security/unsuppress", &intent, &body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, payload) = security_payload(router).await;
+    let back = payload["security"]["findings"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["fingerprint"] == fingerprint.as_str())
+        .unwrap()
+        .clone();
+    assert!(back["suppression"].is_null(), "the finding counts again: {back}");
 }

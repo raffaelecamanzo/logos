@@ -12,7 +12,7 @@
   <a href="https://github.com/raffaelecamanzo/logos/releases/latest"><img src="https://img.shields.io/github/v/release/raffaelecamanzo/logos?color=da291c&label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3d3935" alt="Apache-2.0 license"></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-3d3935" alt="macOS and Linux">
-  <img src="https://img.shields.io/badge/MCP-30%20tools-3d3935" alt="30 MCP tools">
+  <img src="https://img.shields.io/badge/MCP-33%20tools-3d3935" alt="33 MCP tools">
   <img src="https://img.shields.io/badge/built%20with-Rust-3d3935" alt="Built with Rust">
 </p>
 
@@ -111,12 +111,26 @@ logos languages      # the compiled-in grammars
 From the root of any project:
 
 ```bash
-logos init -i        # set up .logos/, wire the MCP server into .mcp.json, add git hooks
+logos init -i        # set up .logos/, wire the MCP server into .mcp.json, write the CLAUDE.md block
 logos index          # build the graph
 ```
 
-Restart your agent. The `logos:*` tools appear on their own, and the git hooks keep
-the graph in sync as you commit, check out and merge.
+Restart your agent. The `logos:*` tools appear on their own. Add `--hooks` to
+`init` (`logos init -i --hooks`) to install the git hooks that keep the graph in
+sync as you commit, check out and merge; `init -i` alone does not install them.
+
+On Claude Code, install the plugin instead of the `.mcp.json` entry. It carries the
+MCP server and the session-start readout, and adds a check of each editing turn,
+a `/logos:review` skill and a guardrail that asks before an agent relaxes your
+quality contract. It needs `logos` 1.20.0 or newer:
+
+```text
+/plugin install logos --marketplace raffaelecamanzo/logos
+```
+
+Then run `logos init -i` once: with the plugin enabled it enrols the plugin for
+your teammates and removes the `.mcp.json` entry it wrote before. See
+[the plugin guide](docs/howto/plugin.md).
 
 Using a host other than Claude Code? Point any MCP client at the stdio server:
 

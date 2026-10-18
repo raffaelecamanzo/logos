@@ -21,6 +21,7 @@ const CASES: Record<string, ViewCase> = {
   "/files": { ready: "Files ranked by risk" },
   "/gaps": { ready: "Rule findings" },
   "/coverage": { ready: "Per-file coverage" },
+  "/security": { ready: "Scanners" },
   "/statistics": { ready: "Tool attribution by class" },
   "/config": { ready: "rules.toml" },
 };

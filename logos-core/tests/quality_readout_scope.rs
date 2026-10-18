@@ -458,15 +458,16 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
     );
 }
 
-/// `quality-report --json` carries Modularity's drop-out when the freshly
-/// computed graph has fewer than five edges: the reason, `m` and the threshold
-/// ride on the readout, so a signal that rose because Modularity left the mean
-/// says why ([CR-156], [NFR-CC-04]).
+/// `quality-report --json` carries the graph dimensions' drop-out when the
+/// freshly computed graph has fewer than five cross-module edges: the reason,
+/// the count and the threshold ride on the readout, so a signal that rose
+/// because they left the mean says why ([CR-156], [FR-QM-18], [NFR-CC-04]).
 ///
 /// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 #[test]
-fn the_readout_names_a_not_applicable_modularity_with_its_count() {
+fn the_readout_names_not_applicable_graph_dimensions_with_their_count() {
     let tmp = production_store();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let readout = engine.quality_readout().expect("readout");
@@ -474,17 +475,21 @@ fn the_readout_names_a_not_applicable_modularity_with_its_count() {
     let na = readout
         .modularity_not_applicable
         .as_ref()
-        .expect("one edge (a → b) is below the five Modularity needs");
-    assert_eq!((na.edges, na.min_edges), (1, 5));
+        .expect("one edge (a → b), inside one file: none of the five cross-module edges");
+    assert_eq!((na.edges, na.min_edges), (0, 5));
+    assert_eq!(readout.acyclicity_not_applicable.as_ref(), Some(na));
+    assert_eq!(readout.depth_not_applicable.as_ref(), Some(na));
 
     let json = serde_json::to_value(&readout).unwrap();
-    assert_eq!(
-        json["modularity_not_applicable"],
-        serde_json::json!({
-            "edges": 1,
-            "min_edges": 5,
-            "reason": "1 of 5 dependency edges — too few for community structure"
-        }),
-        "the JSON surface carries the reason and the m-of-5 count"
-    );
+    for key in ["modularity_not_applicable", "acyclicity_not_applicable", "depth_not_applicable"] {
+        assert_eq!(
+            json[key],
+            serde_json::json!({
+                "edges": 0,
+                "min_edges": 5,
+                "reason": "0 of 5 cross-module edges — too few to measure module structure"
+            }),
+            "the JSON surface carries {key}'s reason and the n-of-5 count"
+        );
+    }
 }

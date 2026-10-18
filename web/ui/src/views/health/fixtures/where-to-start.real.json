@@ -1,0 +1,170 @@
+{
+  "recorded": {
+    "recorded": true,
+    "basis": "estimate: the signal recomputed with this one unit's contribution removed and nothing else changed, minus the current signal; advisory, never gated",
+    "units": [
+      {
+        "kind": "clone_group",
+        "node_id": 11,
+        "name": "sum_left",
+        "file": "src/lib.rs",
+        "line": 65,
+        "dimensions": [
+          "uniqueness"
+        ],
+        "points": 377,
+        "detail": "clone group #11 \u00b7 3 members \u00d7 11 lines",
+        "outliers": []
+      },
+      {
+        "kind": "function",
+        "node_id": 10,
+        "name": "deep_one",
+        "file": "src/lib.rs",
+        "line": 49,
+        "dimensions": [
+          "nesting"
+        ],
+        "points": 113,
+        "detail": "nesting depth 6",
+        "outliers": [
+          "nesting"
+        ]
+      }
+    ],
+    "outliers": [
+      {
+        "measure": "lcom4",
+        "units": 0,
+        "fence": null,
+        "threshold": 2,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "methods",
+        "units": 0,
+        "fence": null,
+        "threshold": 20,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "span",
+        "units": 0,
+        "fence": null,
+        "threshold": 500,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "cc",
+        "units": 12,
+        "fence": 7.0,
+        "threshold": 15,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "nesting",
+        "units": 12,
+        "fence": 3.5,
+        "threshold": 4,
+        "labelled": 1,
+        "labels": [
+          {
+            "node_id": 10,
+            "name": "deep_one",
+            "file": "src/lib.rs",
+            "line": 49,
+            "value": 6
+          }
+        ]
+      },
+      {
+        "measure": "duplicate_mass",
+        "units": 0,
+        "fence": null,
+        "threshold": null,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "clone_mass",
+        "units": 1,
+        "fence": null,
+        "threshold": null,
+        "labelled": 0,
+        "labels": []
+      }
+    ]
+  },
+  "recordedEmpty": {
+    "recorded": true,
+    "basis": "estimate: the signal recomputed with this one unit's contribution removed and nothing else changed, minus the current signal; advisory, never gated",
+    "units": [],
+    "outliers": [
+      {
+        "measure": "lcom4",
+        "units": 0,
+        "fence": null,
+        "threshold": 2,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "methods",
+        "units": 0,
+        "fence": null,
+        "threshold": 20,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "span",
+        "units": 0,
+        "fence": null,
+        "threshold": 500,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "cc",
+        "units": 1,
+        "fence": null,
+        "threshold": 15,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "nesting",
+        "units": 1,
+        "fence": null,
+        "threshold": 4,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "duplicate_mass",
+        "units": 0,
+        "fence": null,
+        "threshold": null,
+        "labelled": 0,
+        "labels": []
+      },
+      {
+        "measure": "clone_mass",
+        "units": 0,
+        "fence": null,
+        "threshold": null,
+        "labelled": 0,
+        "labels": []
+      }
+    ]
+  },
+  "notRecorded": {
+    "recorded": false,
+    "units": [],
+    "outliers": []
+  }
+}

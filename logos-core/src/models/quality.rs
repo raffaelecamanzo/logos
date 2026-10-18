@@ -98,13 +98,24 @@ pub struct QualityReadout {
     /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
     pub violations: Option<Vec<String>>,
     /// `Some` when the freshly computed snapshot found Modularity **not
-    /// applicable** ([CR-156]) — the same value as that snapshot's
+    /// applicable** ([CR-156], [FR-QM-18]) — the same value as that snapshot's
     /// [`MetricSnapshot::modularity_not_applicable`], carried here so the report
-    /// tier, which shows no per-dimension breakdown, still says why a small
-    /// graph's signal spans one dimension fewer. `None` = Modularity applied.
+    /// tier, which shows no per-dimension breakdown, still says why a thin
+    /// graph's signal spans fewer dimensions. `None` = Modularity applied.
     ///
     /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
-    pub modularity_not_applicable: Option<ModularityNotApplicable>,
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub modularity_not_applicable: Option<GraphDimensionNotApplicable>,
+    /// The snapshot's [`MetricSnapshot::acyclicity_not_applicable`], carried
+    /// for the same reason ([FR-QM-18]). `None` = Acyclicity applied.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub acyclicity_not_applicable: Option<GraphDimensionNotApplicable>,
+    /// The snapshot's [`MetricSnapshot::depth_not_applicable`], carried for the
+    /// same reason ([FR-QM-18]). `None` = Depth applied.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub depth_not_applicable: Option<GraphDimensionNotApplicable>,
     /// How many violations the last recorded run found in total, before any
     /// display cap — so a truncated list can say what it dropped.
     ///
@@ -833,6 +844,13 @@ pub struct ScanResult {
     ///
     /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     pub worst_offenders: WorstOffenders,
+    /// The advisory **"where to start"** ranking and per-member outlier labels
+    /// ([FR-QM-17]), persisted with the same snapshot as the lists above and
+    /// read back field for field; never gated ([BR-61]).
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    /// [BR-61]: ../../../docs/specs/software-spec.md#311-quality-metrics
+    pub where_to_start: WhereToStart,
     /// The **non-gated temporal tier** (CR-006, [FR-GH-07], [BR-26]): per-file
     /// churn / co-change / defect-heuristic columns, explicitly labeled as
     /// advisory so the two-tier boundary is visible, never implied
@@ -914,7 +932,7 @@ pub struct TemporalTier {
 /// would otherwise conflate: a list that is empty because nothing crossed a
 /// threshold, and a list that is empty because the snapshot was written before
 /// offenders were persisted ([NFR-CC-04]). The serialized shape is
-/// `{"recorded": bool, "nesting": [..], "conciseness": [..], "cohesion": [..],
+/// `{"recorded": bool, "values_recorded": bool, "nesting": [..], "conciseness": [..], "cohesion": [..],
 /// "focus": [..], "uniqueness": [..], "acyclicity": [..], "depth": [..],
 /// "equality": [..], "redundancy": [..]}`, plus `"unrecorded": [..]` only on a
 /// snapshot written before [CR-209]; with `recorded: false` every list is `[]`
@@ -934,6 +952,16 @@ pub struct WorstOffenders {
     ///
     /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     pub recorded: bool,
+    /// `true` when every entry's [`node_id`](Offender::node_id),
+    /// [`measure`](Offender::measure), [`value`](Offender::value) and
+    /// [`threshold`](Offender::threshold) were recorded with it ([FR-QM-19]).
+    /// `false` on a snapshot written before migration 37: those four fields
+    /// then read `null` and mean **"not recorded"** — never a zero, and never
+    /// "this dimension has no threshold" ([NFR-CC-04]).
+    ///
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub values_recorded: bool,
     /// Deeply-nested production functions (`max_nesting_depth ≥ T_nest`),
     /// deepest first (FR-QM-09).
     pub nesting: Vec<Offender>,
@@ -1042,6 +1070,22 @@ impl WorstOffenders {
             _ => None,
         }
     }
+
+    /// The display lists: each list's first `cap` entries, in computed order.
+    /// The lists are computed uncapped once ([FR-QM-19]) and capped by this, so
+    /// a capped list is always the head of its uncapped one.
+    ///
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    #[must_use]
+    pub fn capped(&self, cap: usize) -> Self {
+        let mut capped = self.clone();
+        for dimension in Self::DIMENSIONS {
+            if let Some(list) = capped.list_mut(dimension) {
+                list.truncate(cap);
+            }
+        }
+        capped
+    }
 }
 
 /// One worst-offender entry: the offending symbol and a deterministic,
@@ -1051,6 +1095,15 @@ impl WorstOffenders {
 /// `"LCOM4 4"`, `"23 methods · span 540"`) derived from integer facts, so it is
 /// byte-identical across runs and the four CI targets ([NFR-RA-06]).
 ///
+/// Since [FR-QM-19] the entry also carries its identity and the number it was
+/// judged on, so a review can prove one symbol improved: `node_id`, the
+/// `measure` its `value` counts, and the `threshold` that value met. All four
+/// are `None` on a snapshot whose
+/// [`values_recorded`](WorstOffenders::values_recorded) is `false` — "not
+/// recorded", never a zero ([NFR-CC-04]).
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Offender {
@@ -1062,6 +1115,713 @@ pub struct Offender {
     pub line: Option<i64>,
     /// A deterministic descriptor of the offending magnitude.
     pub detail: String,
+    /// The symbol's identity: its symbol id without the repository coordinate,
+    /// the one ratchet identity [FR-GV-23] keys a blessed entry by — stable
+    /// across re-indexing where the storage id is not. `None` for a Depth row,
+    /// which names a chain of directories rather than a symbol. An Acyclicity
+    /// row names its cycle by the member with the lowest **storage** id, so
+    /// its `node_id` is that member's identity: stable while the members keep
+    /// their ids, but a re-index can name the same cycle by another member. A
+    /// cycle is the same cycle by its members, not by this id.
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    pub node_id: Option<String>,
+    /// What [`value`](Self::value) counts — one of [`MEASURES`](Self::MEASURES).
+    /// Fixed per dimension except Focus, whose container is a god by its
+    /// bodied-method count or by its span, and names the one that crossed.
+    pub measure: Option<&'static str>,
+    /// The numeric measure: nesting depth, cyclomatic complexity, LCOM4,
+    /// bodied-method count or span, clone-group size, cycle size, chain length,
+    /// or the line count of a dead or duplicate function. `None` only where
+    /// that fact was never recorded for the symbol.
+    pub value: Option<i64>,
+    /// The effective detection threshold `value` was judged against, under the
+    /// snapshot's own threshold set; `value ≥ threshold` always holds. `None`
+    /// for a dimension with no per-unit threshold (Uniqueness, Acyclicity,
+    /// Depth, Equality, Redundancy).
+    pub threshold: Option<i64>,
+}
+
+impl Offender {
+    /// The [`measure`](Self::measure) vocabulary — the persisted spelling. A
+    /// persisted name outside it reads back as `None`, never invented.
+    pub const MEASURES: [&'static str; 9] = [
+        "nesting_depth",
+        "cyclomatic_complexity",
+        "lcom4",
+        "methods",
+        "span",
+        "clone_group_size",
+        "cycle_size",
+        "chain_length",
+        "line_count",
+    ];
+}
+
+/// What `logos offenders` and its MCP twin return ([FR-QM-19]): **every**
+/// offender the last snapshot recorded, uncapped, narrowed by path and
+/// dimension, in the order the capped lists use — dimension in
+/// [`WorstOffenders::DIMENSIONS`] order, then each list's computed order
+/// ([NFR-RA-06]). Read-only: it computes and persists nothing.
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OffenderListing {
+    /// `true` when the last snapshot recorded its uncapped list. `false` when
+    /// there is no snapshot, or it predates migration 37: `offenders` is then
+    /// `[]` and means nothing — never "clean" ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub recorded: bool,
+    /// Why nothing is recorded — [`NEVER_SCANNED`](Self::NEVER_SCANNED) or
+    /// [`PREDATES_UNCAPPED`](Self::PREDATES_UNCAPPED); `None` when recorded.
+    pub not_recorded_because: Option<&'static str>,
+    /// The `--path` glob the list was narrowed by, normalised (`\` as `/`,
+    /// no leading `./` or trailing `/`); `None` when there is none.
+    pub path: Option<String>,
+    /// The `--dimension` the list was narrowed by.
+    pub dimension: Option<&'static str>,
+    /// The matching offenders, uncapped.
+    pub offenders: Vec<ListedOffender>,
+}
+
+impl OffenderListing {
+    /// `not_recorded_because`: no metric snapshot was ever recorded.
+    pub const NEVER_SCANNED: &'static str = "never_scanned";
+    /// `not_recorded_because`: the last snapshot was written before the
+    /// uncapped list was persisted (migration 37).
+    pub const PREDATES_UNCAPPED: &'static str = "snapshot_predates_uncapped_offenders";
+}
+
+/// One entry of an [`OffenderListing`]: its dimension and the offender.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ListedOffender {
+    /// One of [`WorstOffenders::DIMENSIONS`].
+    pub dimension: &'static str,
+    /// The entry, field for field as the capped lists carry it.
+    #[serde(flatten)]
+    pub offender: Offender,
+}
+
+/// What `logos review --base` and its MCP twin return ([FR-GV-24], S-677):
+/// every offender ([FR-QM-19]) and every `check` violation of the working
+/// tree, classified per symbol against the **merge-base** of `HEAD` and the
+/// base ref ([ADR-82]).
+///
+/// Advisory: it never moves an exit code of `check` or `gate`. With
+/// `measured: false` nothing is classified — every list is `[]` and means
+/// nothing, and `not_measured_because` says why ([NFR-CC-04]). A rerun over an
+/// unchanged tree and store is byte-identical ([NFR-RA-06]): no field carries
+/// a time or a storage id, and every list is ordered by identity.
+///
+/// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+/// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BranchReview {
+    /// The ref the branch is compared against, as stated or as the default
+    /// branch resolved to.
+    pub base: String,
+    /// Where `base` came from: [`STATED`](Self::STATED) or
+    /// [`DEFAULT_BRANCH`](Self::DEFAULT_BRANCH).
+    pub base_origin: &'static str,
+    /// `HEAD`'s commit, when it resolves.
+    pub head: Option<String>,
+    /// The merge-base of `HEAD` and `base` — the only commit ever compared.
+    pub merge_base: Option<String>,
+    /// `true` when a before-state was produced and the lists classify against it.
+    pub measured: bool,
+    /// Why nothing was classified; `None` when `measured`.
+    pub not_measured_because: Option<String>,
+    /// Where the before-state came from: [`RECORDED_SNAPSHOT`](Self::RECORDED_SNAPSHOT)
+    /// or [`SHADOW_INDEX`](Self::SHADOW_INDEX); `None` when not measured.
+    pub before_state: Option<&'static str>,
+    /// Every offender before or after that the branch changed — `new`,
+    /// `worsened`, `improved` or `resolved` — dimension in
+    /// [`WorstOffenders::DIMENSIONS`] order, then status, file, line and name.
+    /// An `unchanged` one is counted in `offender_counts`, not listed.
+    pub offenders: Vec<ReviewedOffender>,
+    /// How many offenders fell in each class, `unchanged` included.
+    pub offender_counts: ReviewCounts,
+    /// Every `check` violation before or after that the branch changed, by
+    /// rule, then status and subject; `unchanged` ones are counted only.
+    pub violations: Vec<ReviewedViolation>,
+    /// How many violations fell in each class, `unchanged` included.
+    pub violation_counts: ReviewCounts,
+    /// The near-clone groups that exist only after the change: no group of the
+    /// before-state has the same members.
+    pub introduced_clone_groups: Vec<IntroducedCloneGroup>,
+    /// Indexed files whose content on disk no longer matches the graph (an
+    /// unsynced edit, or a deleted file); every entry in one reads `stale`.
+    pub stale_files: Vec<String>,
+    /// Further delta sections, one field per section. Empty today; the
+    /// security delta ([FR-SC-18], S-686) lands here.
+    ///
+    /// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+    pub sections: ReviewSections,
+    /// Advisory notes on how the answer was produced.
+    pub notes: Vec<String>,
+    /// Whether this run built the shadow before-state, reused the cached one,
+    /// or used neither. Not serialized, so a cached rerun is byte-identical
+    /// to the run that built the cache.
+    #[serde(skip)]
+    pub before_state_cache: BeforeStateCache,
+}
+
+impl BranchReview {
+    /// `base_origin`: the caller named the ref.
+    pub const STATED: &'static str = "stated";
+    /// `base_origin`: no ref was named, so the repository's default branch was used.
+    pub const DEFAULT_BRANCH: &'static str = "default-branch";
+    /// `before_state`: the snapshot recorded at the merge-base commit.
+    pub const RECORDED_SNAPSHOT: &'static str = "recorded-snapshot";
+    /// `before_state`: a shadow index of the merge-base tree, cached by commit.
+    pub const SHADOW_INDEX: &'static str = "shadow-index";
+    /// `trust`: the language binds its relations across files and the file is
+    /// indexed as it stands.
+    pub const TRUST_RESOLVED: &'static str = "resolved";
+    /// `trust`: the file changed on disk since it was indexed.
+    pub const TRUST_STALE: &'static str = "stale";
+}
+
+/// How a run came by its before-state — test and CLI evidence for the
+/// [ADR-82] cache, never part of the payload.
+///
+/// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BeforeStateCache {
+    /// No shadow before-state was involved: not measured, or the recorded
+    /// snapshot was used.
+    #[default]
+    NotUsed,
+    /// The merge-base tree was shadow-indexed and the result cached.
+    Built,
+    /// The cached shadow before-state for the merge-base was read back.
+    Reused,
+}
+
+impl BeforeStateCache {
+    /// The one-line account a surface prints beside the answer (the CLI, on
+    /// stderr), or `None` when there is nothing to say.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Self::NotUsed => None,
+            Self::Built => Some("merge-base shadow index built and cached"),
+            Self::Reused => Some("merge-base before-state read from the cache"),
+        }
+    }
+}
+
+/// The class of one reviewed entry ([FR-GV-24]).
+///
+/// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewStatus {
+    /// Absent before.
+    New,
+    /// Present before, with a higher value now.
+    Worsened,
+    /// Present before, with a lower value now, and still at or over its threshold.
+    Improved,
+    /// Present before and absent now.
+    Resolved,
+    /// Present before and now, with the same value — or with no value to compare.
+    Unchanged,
+}
+
+/// How many entries fell in each [`ReviewStatus`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ReviewCounts {
+    pub new: u64,
+    pub worsened: u64,
+    pub improved: u64,
+    pub resolved: u64,
+    pub unchanged: u64,
+}
+
+impl ReviewCounts {
+    /// Count `status` once.
+    pub fn add(&mut self, status: ReviewStatus) {
+        let slot = match status {
+            ReviewStatus::New => &mut self.new,
+            ReviewStatus::Worsened => &mut self.worsened,
+            ReviewStatus::Improved => &mut self.improved,
+            ReviewStatus::Resolved => &mut self.resolved,
+            ReviewStatus::Unchanged => &mut self.unchanged,
+        };
+        *slot += 1;
+    }
+}
+
+/// One offender of the branch review: the symbol, its class, and the value it
+/// was judged on before and after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewedOffender {
+    /// One of [`WorstOffenders::DIMENSIONS`].
+    pub dimension: String,
+    pub status: ReviewStatus,
+    /// The symbol id without its repository coordinate ([`Offender::node_id`]);
+    /// `None` for a Depth chain.
+    pub node_id: Option<String>,
+    pub name: String,
+    /// The defining file; empty for a Depth chain.
+    pub file: String,
+    pub line: Option<i64>,
+    /// What `before` and `after` count — one of [`Offender::MEASURES`]. An
+    /// entry is matched within one measure, so a Focus container that crosses
+    /// on its span instead of its methods reads as one entry resolved and
+    /// another new.
+    pub measure: Option<String>,
+    /// The value before the change; `None` when the entry is new.
+    pub before: Option<i64>,
+    /// The value now; `None` when the entry is resolved.
+    pub after: Option<i64>,
+    /// The threshold the value is judged against; `None` where the dimension
+    /// has no per-unit threshold.
+    pub threshold: Option<i64>,
+    /// The magnitude descriptor, as it reads now (as it read before, when resolved).
+    pub detail: String,
+    /// The trust its language and file earn: [`BranchReview::TRUST_RESOLVED`],
+    /// [`BranchReview::TRUST_STALE`], or the [`CrossFileAbsence`] tag of a
+    /// language the graph binds within files only ([FR-QM-18]).
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub trust: String,
+}
+
+/// One `check` violation of the branch review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewedViolation {
+    /// The rule key, as [`Violation::rule`].
+    pub rule: String,
+    pub rule_type: String,
+    pub status: ReviewStatus,
+    /// What the violation is about: the symbol id without its coordinate, a
+    /// file, a module key, or empty for a project-wide count.
+    pub subject: String,
+    pub file: String,
+    /// The measured value before; `None` when new, or when the rule states no
+    /// per-subject value (a layer or boundary edge, a project-wide count).
+    pub before: Option<u64>,
+    /// The measured value now; `None` when resolved, or as for `before`.
+    pub after: Option<u64>,
+    /// The budget the value is held to, where the rule declares one.
+    pub threshold: Option<u64>,
+    /// The violation's message, as it reads now (as it read before, when resolved).
+    pub message: String,
+    /// As [`ReviewedOffender::trust`].
+    pub trust: String,
+}
+
+/// A near-clone group the branch introduced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IntroducedCloneGroup {
+    /// Production members in the group.
+    pub size: u64,
+    /// The members, ordered by file, line and name.
+    pub members: Vec<CloneGroupMember>,
+}
+
+/// One member of an [`IntroducedCloneGroup`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CloneGroupMember {
+    pub node_id: Option<String>,
+    pub name: String,
+    pub file: String,
+    pub line: Option<i64>,
+    /// `true` when the member was in no near-clone group before.
+    pub newly_duplicated: bool,
+    /// As [`ReviewedOffender::trust`].
+    pub trust: String,
+}
+
+/// The section seam of a [`BranchReview`]: one optional field per further
+/// delta. The security delta of [FR-SC-18] (S-686) is the first to land here.
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ReviewSections {
+    /// The security findings the branch introduced, touched or resolved.
+    /// Absent only when the review itself was not measured; a project never
+    /// scanned carries the section with `measured: false`, never an empty
+    /// "clean" one ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecurityDelta>,
+}
+
+/// The branch security delta ([FR-SC-18], S-686): every stored finding of each
+/// scanner's latest report, classified against the merge-base, and every
+/// merge-base finding the latest re-scan no longer reports.
+///
+/// The merge-base tree is never scanned. A scanner whose report was recorded
+/// at the merge-base commit is compared by fingerprint
+/// ([`METHOD_FINGERPRINT`](Self::METHOD_FINGERPRINT)); any other by the hunks
+/// the branch changed ([`METHOD_HUNK`](Self::METHOD_HUNK)). Messages are the
+/// stored ones, so a secret-class finding's is already redacted ([FR-SC-03])
+/// and no snippet exists to emit. Ordered by identity, so a rerun over an
+/// unchanged tree and store is byte-identical ([NFR-RA-06]).
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+/// [FR-SC-03]: ../../../docs/specs/requirements/FR-SC-03.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SecurityDelta {
+    /// `false` when no security report is stored, the findings could not be
+    /// read, or the branch's diff could not be read: every list is then `[]`
+    /// and means nothing.
+    pub measured: bool,
+    /// Why nothing was classified; `None` when `measured`.
+    pub not_measured_because: Option<String>,
+    /// How each scanner with a stored report was compared, by name.
+    pub scanners: Vec<SecurityDeltaScanner>,
+    /// Every unsuppressed finding, by status in [`SecurityDeltaStatus`]
+    /// order, then path, line, scanner, rule and fingerprint.
+    pub findings: Vec<SecurityDeltaEntry>,
+    /// How many findings fell in each status, the suppressed ones apart.
+    pub counts: SecurityDeltaCounts,
+    /// The findings an unexpired ignore entry suppresses, listed apart with
+    /// their reason and expiry, each with the status it would otherwise have.
+    pub suppressed: Vec<SuppressedDeltaEntry>,
+    /// Advisory notes on how the answer was produced.
+    pub notes: Vec<String>,
+}
+
+impl SecurityDelta {
+    /// `method`: the scanner's report recorded at the merge-base names the
+    /// fingerprints that existed before the branch.
+    pub const METHOD_FINGERPRINT: &'static str = "fingerprint";
+    /// `method`: no report was recorded at the merge-base, so a finding inside
+    /// a hunk the branch changed counts as the branch's.
+    pub const METHOD_HUNK: &'static str = "hunk";
+}
+
+/// How one scanner's findings were compared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecurityDeltaScanner {
+    /// The scanner's driver name.
+    pub scanner: String,
+    /// [`SecurityDelta::METHOD_FINGERPRINT`] or [`SecurityDelta::METHOD_HUNK`].
+    pub method: &'static str,
+    /// The commit its latest report is anchored to.
+    pub latest_head: String,
+}
+
+/// The class of one finding in the branch security delta ([FR-SC-18]).
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecurityDeltaStatus {
+    /// Absent from the merge-base report (`fingerprint`), or inside a changed
+    /// hunk when there is none (`hunk`).
+    Introduced,
+    /// In the merge-base report, and inside a hunk the branch changed.
+    Touched,
+    /// In the merge-base report, absent from the latest one, on a file that
+    /// report saw as it stands now.
+    Resolved,
+    /// In the merge-base report and absent from the latest one, on a file
+    /// edited since that report: never claimed resolved. A finding the latest
+    /// report still carries is never `stale`: it keeps its class, and its
+    /// `freshness` reads `stale` when its file was edited since that report.
+    Stale,
+    /// Neither introduced nor touched.
+    PreExisting,
+}
+
+/// How many findings fell in each [`SecurityDeltaStatus`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SecurityDeltaCounts {
+    pub introduced: u64,
+    pub touched: u64,
+    pub resolved: u64,
+    pub stale: u64,
+    pub pre_existing: u64,
+    /// Suppressed findings, whatever their status.
+    pub suppressed: u64,
+}
+
+impl SecurityDeltaCounts {
+    /// Count `status` once.
+    pub fn add(&mut self, status: SecurityDeltaStatus) {
+        let slot = match status {
+            SecurityDeltaStatus::Introduced => &mut self.introduced,
+            SecurityDeltaStatus::Touched => &mut self.touched,
+            SecurityDeltaStatus::Resolved => &mut self.resolved,
+            SecurityDeltaStatus::Stale => &mut self.stale,
+            SecurityDeltaStatus::PreExisting => &mut self.pre_existing,
+        };
+        *slot += 1;
+    }
+}
+
+/// One finding of the branch security delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecurityDeltaEntry {
+    pub status: SecurityDeltaStatus,
+    /// How the status was decided: [`SecurityDelta::METHOD_FINGERPRINT`] or
+    /// [`SecurityDelta::METHOD_HUNK`].
+    pub method: &'static str,
+    /// The scanner's driver name.
+    pub scanner: String,
+    /// The stored fingerprint — the key an ignore entry names.
+    pub fingerprint: String,
+    pub rule_id: String,
+    pub severity: crate::model::Severity,
+    /// Its OWASP categories under the review's edition, in OWASP's order.
+    pub owasp: Vec<String>,
+    /// The stored message: fixed redacted text for a secret-class finding.
+    pub message: String,
+    /// `true` for a secret-class finding whose message was redacted at ingest.
+    pub redacted: bool,
+    /// The bound repo-relative path; `None` when the finding bound to no file.
+    pub path: Option<String>,
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+    /// `fresh`, `stale` or `n/a`, as the findings read-model decides it. A
+    /// `resolved` or `stale` entry states whether its file is as the latest
+    /// report saw it.
+    pub freshness: String,
+    /// Whether a route reaches its enclosing symbol — `reachable`,
+    /// `unreachable` or `unknown` ([FR-SC-13]).
+    ///
+    /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
+    pub reachability: String,
+    /// The confidence label of that claim: `resolved`, `unresolved` or
+    /// `unbound` ([FR-SC-13]).
+    ///
+    /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
+    pub confidence: String,
+}
+
+/// A suppressed finding of the branch security delta: the entry, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SuppressedDeltaEntry {
+    #[serde(flatten)]
+    pub entry: SecurityDeltaEntry,
+    /// The ignore entry's reason.
+    pub reason: String,
+    /// The last day it suppresses (`YYYY-MM-DD`); `None` when it never expires.
+    pub expires: Option<String>,
+}
+
+/// The **"where to start"** read-model a snapshot persists ([FR-QM-17],
+/// [CR-164], S-504): at most ten fix units ranked by the signal points fixing
+/// each would recover, and the per-member outlier labels of each per-unit
+/// measure.
+///
+/// Advisory and never gated ([BR-61]): nothing here enters the aggregate, the
+/// gate verdict, `check` or any exit code. Each point figure is an
+/// **estimate** under a single-unit counterfactual — [`BASIS`](Self::BASIS)
+/// spells that once, and every recorded set carries it as `basis`.
+///
+/// Like [`WorstOffenders`], [`recorded`](Self::recorded) separates a snapshot
+/// that ranked nothing from one written before the ranking existed
+/// ([NFR-CC-04]): with `recorded: false` both lists are `[]` and mean nothing.
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+/// [CR-164]: ../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md
+/// [BR-61]: ../../../docs/specs/software-spec.md#311-quality-metrics
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WhereToStart {
+    /// `true` when these lists are the ones the snapshot's computation produced;
+    /// `false` (the default) is **"not recorded"**: a snapshot written before
+    /// migration 36, or no snapshot at all. Never inferred from empty lists.
+    pub recorded: bool,
+    /// What every `points` figure means — [`BASIS`](Self::BASIS) on a recorded
+    /// set, so the payload itself labels the figures an estimate ([FR-QM-17]);
+    /// empty, and elided, when not recorded.
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub basis: &'static str,
+    /// The ranked fix units: recoverable points descending, then dimension
+    /// canonical order, then node id; at most
+    /// [`WHERE_TO_START_CAP`](crate::metrics::insight::WHERE_TO_START_CAP).
+    pub units: Vec<FixUnit>,
+    /// One entry per per-unit measure, in
+    /// [`OutlierMeasure::MEASURES`] order, each with the labels its own
+    /// distribution produced.
+    pub outliers: Vec<OutlierMeasure>,
+}
+
+impl WhereToStart {
+    /// A recorded set holding nothing yet — what a computation or a read of a
+    /// recorded snapshot starts from.
+    pub fn recorded() -> Self {
+        Self {
+            recorded: true,
+            basis: Self::BASIS,
+            ..Self::default()
+        }
+    }
+
+    /// What a point figure means — the one spelling every surface shows.
+    pub const BASIS: &'static str = "estimate: the signal recomputed with this one unit's \
+         contribution removed and nothing else changed, minus the current signal; advisory, never gated";
+}
+
+/// What a [`FixUnit`] is: the unit one fix addresses ([FR-QM-17]).
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixUnitKind {
+    /// One class-like container (Cohesion, Focus).
+    Class,
+    /// One function or method (Nesting, Conciseness).
+    Function,
+    /// One exact-duplicate group (Redundancy).
+    DuplicateGroup,
+    /// One near-clone group (Uniqueness).
+    CloneGroup,
+}
+
+impl FixUnitKind {
+    /// The persisted `metric_snapshot_fix_units.kind` spelling, which is also
+    /// the serialized one.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Function => "function",
+            Self::DuplicateGroup => "duplicate_group",
+            Self::CloneGroup => "clone_group",
+        }
+    }
+
+    /// The kind a persisted spelling names, or `None` outside the four.
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            Self::Class,
+            Self::Function,
+            Self::DuplicateGroup,
+            Self::CloneGroup,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == s)
+    }
+}
+
+/// One ranked "where to start" entry ([FR-QM-17]).
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FixUnit {
+    /// What the unit is.
+    pub kind: FixUnitKind,
+    /// The unit's node id: the class's or function's own, or a group's lowest
+    /// production member — the symbol the entry is named by.
+    pub node_id: i64,
+    /// That node's name.
+    pub name: String,
+    /// That node's defining file, when bound to one.
+    pub file: String,
+    /// That node's 1-based declaration line, when recorded.
+    pub line: Option<i64>,
+    /// The dimension(s) the unit offends, in canonical order (a function can
+    /// be both deeply nested and a brain method; a class both low-cohesion and
+    /// god). Never Equality, Depth, Acyclicity or Modularity: those have no
+    /// unique single-unit counterfactual.
+    pub dimensions: Vec<&'static str>,
+    /// The recoverable signal points — always ≥ 1: a unit whose fix recovers no
+    /// whole point is not ranked. An estimate ([`WhereToStart::BASIS`]).
+    pub points: i64,
+    /// A deterministic descriptor of the offending magnitude.
+    pub detail: String,
+    /// The [`OutlierMeasure`]s whose label this unit carries, in
+    /// [`OutlierMeasure::MEASURES`] order; empty when none.
+    pub outliers: Vec<&'static str>,
+}
+
+impl FixUnit {
+    /// The ten quality dimensions in canonical order ([ADR-08]) — the ranking's
+    /// second sort key and the persisted `metric_snapshot_fix_units.dimensions`
+    /// vocabulary, spelled once beside the type, as
+    /// [`WorstOffenders::DIMENSIONS`] and [`OutlierMeasure::MEASURES`] are.
+    ///
+    /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
+    pub const DIMENSIONS: [&'static str; 10] = [
+        "modularity",
+        "acyclicity",
+        "depth",
+        "equality",
+        "redundancy",
+        "nesting",
+        "conciseness",
+        "cohesion",
+        "focus",
+        "uniqueness",
+    ];
+}
+
+/// One per-unit measure's per-member Tukey calibration and the units it labels
+/// outliers ([FR-QM-17], [BR-56]).
+///
+/// A unit is an outlier when its value is above the upper fence
+/// `Q3 + 1.5 × IQR` of **this member's own** production distribution **and**
+/// at or above the measure's detection threshold. With fewer than
+/// [`OUTLIER_MIN_UNITS`](crate::metrics::insight::OUTLIER_MIN_UNITS) units
+/// there is no fence and no label — `fence` is `None`, never a guess.
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+/// [BR-56]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OutlierMeasure {
+    /// The measure, one of [`MEASURES`](Self::MEASURES).
+    pub measure: &'static str,
+    /// How many units the member's distribution holds.
+    pub units: u64,
+    /// The upper fence `Q3 + 1.5 × IQR` (quartiles by linear interpolation);
+    /// `None` below the minimum distribution size.
+    pub fence: Option<f64>,
+    /// The detection threshold a label also needs; `None` for a group mass,
+    /// whose every unit is already a detected group.
+    pub threshold: Option<i64>,
+    /// How many units the measure labels, uncapped.
+    pub labelled: u64,
+    /// The labelled units, value descending, then node id, capped at
+    /// [`WORST_OFFENDER_CAP`](crate::metrics::WORST_OFFENDER_CAP); a ranked
+    /// [`FixUnit`] carries its own labels whatever the cap left out.
+    pub labels: Vec<OutlierLabel>,
+}
+
+impl OutlierMeasure {
+    /// The per-unit measures, in the order they are listed and persisted:
+    /// LCOM4, bodied method count and line span (classes), cyclomatic
+    /// complexity and nesting depth (functions), then the exact-duplicate and
+    /// near-clone group masses (members × the mean recorded line count rounded
+    /// half up, the `L` of the group descriptor).
+    pub const MEASURES: [&'static str; 7] = [
+        "lcom4",
+        "methods",
+        "span",
+        "cc",
+        "nesting",
+        "duplicate_mass",
+        "clone_mass",
+    ];
+}
+
+/// One unit labelled an outlier on one measure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutlierLabel {
+    /// The labelled unit's node id (a group's lowest production member).
+    pub node_id: i64,
+    /// That node's name.
+    pub name: String,
+    /// That node's defining file, when bound to one.
+    pub file: String,
+    /// That node's 1-based declaration line, when recorded.
+    pub line: Option<i64>,
+    /// The unit's value on the measure.
+    pub value: i64,
 }
 
 /// A single architecture-rule violation (FR-GV-02).
@@ -1078,8 +1838,9 @@ pub struct Violation {
     /// key disambiguates.
     pub rule_type: String,
     /// `"error"` or `"warning"`; `check` exits 1 on any error (FR-GV-03).
-    /// All `rules.toml` violations are errors in v1 — checked-in policy is
-    /// binding (ratified 2026-06-06).
+    /// `rules.toml` violations are errors — checked-in policy is binding
+    /// (ratified 2026-06-06) — except blessed ratchet debt, a `warning`
+    /// (FR-GV-23).
     pub severity: String,
     /// The offending file (empty for a project-wide violation, e.g.
     /// `max_cycles`).
@@ -1088,6 +1849,91 @@ pub struct Violation {
     /// (per-function constraints) — the `violations.node_id` column.
     pub node_id: Option<i64>,
     pub message: String,
+    /// The ratchet classification ([FR-GV-23]): present only on an offender of
+    /// a budget declared `ratchet = true`. Omitted from the serialised violation
+    /// otherwise, so a report with no ratchet budget is byte-identical to
+    /// before. Not persisted — the `violations` table carries the `severity` it
+    /// produced and the message that states it.
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratchet: Option<RatchetMark>,
+}
+
+/// One ratchet offender's identity and verdict ([FR-GV-23], [ADR-73]).
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+/// [ADR-73]: ../../../docs/specs/architecture/decisions/ADR-73.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RatchetMark {
+    /// The offender's identity: the symbol id without its repository
+    /// coordinate (the descriptor tail, so a checked-in blessed set matches in
+    /// a fork or a renamed clone) for a function or container, the file path
+    /// for `no_god_files`, the module key for `max_fan_in`/`max_fan_out`.
+    pub symbol: String,
+    /// The measured value (`1` for a member of a symbol set such as `max_dead`).
+    pub value: u64,
+    /// The blessed value, when the blessed set holds this offender.
+    pub blessed: Option<u64>,
+    /// The classification against the blessed set.
+    pub status: RatchetStatus,
+}
+
+/// How a ratchet offender compares with the blessed set ([FR-GV-23]).
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RatchetStatus {
+    /// In the blessed set at or below its blessed value — a `warning`.
+    Blessed,
+    /// In the blessed set but above its blessed value — an `error`.
+    Worsened,
+    /// Not in the blessed set (or no blessed set exists) — an `error`.
+    New,
+}
+
+/// A blessed entry that no longer violates ([FR-GV-23]) — reported so the
+/// blessed set can be tightened by re-blessing.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RatchetFixed {
+    /// The constraint key (`max_cc`, `max_dead`, …).
+    pub rule: String,
+    /// The blessed offender's identity.
+    pub symbol: String,
+    /// The value it was blessed at.
+    pub blessed: u64,
+}
+
+/// The ratchet half of a `check` report ([FR-GV-23]): which blessed set the run
+/// read, what it found, and how to bless. Present only when a constraint
+/// declares `ratchet = true`.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RatchetReport {
+    /// Root-relative path of the blessed set (`.logos/rules-baseline.json`).
+    pub blessed_file: String,
+    /// `false` when the file does not exist: every ratchet offender is then new.
+    pub blessed_file_present: bool,
+    /// The command that writes the blessed set (`logos check --bless`).
+    pub bless_command: String,
+    /// The constraints evaluated under ratchet, in canonical order.
+    pub rules: Vec<String>,
+    /// Offenders held in the blessed set at or below their blessed value.
+    pub blessed: u32,
+    /// Offenders worse than their blessed value.
+    pub worsened: u32,
+    /// Offenders absent from the blessed set.
+    pub new: u32,
+    /// Blessed entries that no longer violate, sorted by rule then symbol.
+    pub fixed: Vec<RatchetFixed>,
+    /// Entries this run wrote to the blessed set — `Some` only on the bless
+    /// command, never on `check`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written: Option<u32>,
 }
 
 /// Snapshot of the five quality metrics — raw + normalized per metric, the
@@ -1106,34 +1952,66 @@ pub struct Violation {
 /// construct does not exist in the repo (no classes / no class-like
 /// containers), the snapshot persists NULL + a `false` applicability flag, and
 /// the dimension drops out of the geometric-mean denominator (a class-less repo
-/// gets a deterministic 9-dimension mean, FR-QM-11/12/14, UAT-QM-10). Modularity
-/// takes the same drop-out on a graph with fewer than five edges (CR-156) but
-/// keeps its computed pair — see
-/// [`modularity_not_applicable`](Self::modularity_not_applicable) — and so
-/// leaves the short-circuit as well as the mean.
-#[derive(Debug, Default, Serialize)]
+/// gets a deterministic 9-dimension mean, FR-QM-11/12/14, UAT-QM-10). The three
+/// graph dimensions — Modularity, Acyclicity and Depth — take the same drop-out
+/// on a graph with fewer than five cross-module edges (FR-QM-18, metric
+/// semantics v8; Modularity alone, on all edges, since CR-156) but keep their
+/// computed pairs — see the three `*_not_applicable` fields — and so leave the
+/// short-circuit as well as the mean.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MetricSnapshot {
     /// Newman Q on the directory partition (FR-QM-01). Always the computed
     /// pair, including when Modularity is not applicable — see
     /// [`modularity_not_applicable`](Self::modularity_not_applicable).
     pub modularity: MetricValue,
-    /// `Some` when Modularity is **not applicable** ([CR-156]): the graph it is
-    /// computed on has fewer than [`MODULARITY_MIN_EDGES`] edges, too few for
-    /// community structure. Modularity then leaves both the geometric mean and
-    /// the [ADR-12] zero short-circuit — the [ADR-21] rule-2 drop-out Cohesion
-    /// and Focus take — while [`modularity`](Self::modularity) keeps its
-    /// computed values. `None` = applicable, which is also how a snapshot
-    /// persisted before the flag existed reads.
+    /// `Some` when Modularity is **not applicable** ([FR-QM-18], [CR-156]):
+    /// the production metric graph has fewer than [`MIN_CROSS_MODULE_EDGES`]
+    /// cross-module edges, too few for module structure. Modularity then leaves
+    /// both the geometric mean and the [ADR-12] zero short-circuit — the
+    /// [ADR-21] rule-2 drop-out Cohesion and Focus take — while
+    /// [`modularity`](Self::modularity) keeps its computed values. `None` =
+    /// applicable, which is also how a snapshot persisted before the flag
+    /// existed reads.
     ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
     /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
     /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
-    /// [`MODULARITY_MIN_EDGES`]: crate::metrics::MODULARITY_MIN_EDGES
-    pub modularity_not_applicable: Option<ModularityNotApplicable>,
-    /// Cycle count via `tarjan_scc` (FR-QM-02).
+    /// [`MIN_CROSS_MODULE_EDGES`]: crate::metrics::MIN_CROSS_MODULE_EDGES
+    pub modularity_not_applicable: Option<GraphDimensionNotApplicable>,
+    /// Cross-module cycle count via `tarjan_scc` (FR-QM-02). Always the
+    /// computed pair — see
+    /// [`acyclicity_not_applicable`](Self::acyclicity_not_applicable).
     pub acyclicity: MetricValue,
-    /// Longest path over the condensation (FR-QM-03).
+    /// `Some` when Acyclicity is **not applicable** ([FR-QM-18]): the same
+    /// condition, and the same value, as
+    /// [`modularity_not_applicable`](Self::modularity_not_applicable) on every
+    /// v8 snapshot. Below that line the dimension leaves the signal whatever it
+    /// computed — usually a `1.0` that measures nothing, but a real cycle over
+    /// two crossing edges leaves too; [`acyclicity`](Self::acyclicity) still
+    /// records it, and the `max_cycles` budget still reads it. `None` =
+    /// applicable, which is how every snapshot persisted before metric
+    /// semantics v8 reads.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub acyclicity_not_applicable: Option<GraphDimensionNotApplicable>,
+    /// Longest path over the module-rollup condensation (FR-QM-03). Always the
+    /// computed pair — see [`depth_not_applicable`](Self::depth_not_applicable).
     pub depth: MetricValue,
+    /// `Some` when Depth is **not applicable** ([FR-QM-18]) — the condition
+    /// [`acyclicity_not_applicable`](Self::acyclicity_not_applicable) records,
+    /// on the same terms: a chain the few crossing edges do form leaves the
+    /// signal with the rest, and [`depth`](Self::depth) still records it.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub depth_not_applicable: Option<GraphDimensionNotApplicable>,
+    /// Edges of the production metric graph whose two endpoints lie in
+    /// different modules (directories) — the figure the three graph
+    /// dimensions' applicability is decided on ([FR-QM-18]). `None` on a
+    /// snapshot persisted before metric semantics v8, which did not record it.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub cross_module_edge_count: Option<u64>,
     /// `1 − Gini` of per-function cyclomatic complexity (FR-QM-04).
     pub equality: MetricValue,
     /// `1 − dead/duplicate function ratio` (FR-QM-05).
@@ -1198,32 +2076,65 @@ pub struct MetricSnapshot {
     pub aggregate_signal: Option<u32>,
 }
 
-/// Why Modularity is not applicable on a snapshot ([CR-156]), carrying the
-/// figures that establish it: the edge count `m` of the graph Modularity was
-/// computed on and the fixed threshold it fell short of.
+/// Why a graph dimension — Modularity, Acyclicity or Depth — is not applicable
+/// on a snapshot ([FR-QM-18], [CR-171]; Modularity alone since [CR-156]),
+/// carrying the figures that establish it: the edge count the threshold was
+/// compared against and the fixed threshold it fell short of.
 ///
-/// Built only by [`for_edges`](Self::for_edges), so the reason has one
-/// spelling on every surface that renders it (`scan --json`,
+/// Since metric-semantics v8 the count is the production metric graph's
+/// **cross-module** edges ([`for_cross_module_edges`](Self::for_cross_module_edges)),
+/// one condition for all three dimensions. A Modularity drop-out a v6/v7
+/// snapshot recorded was decided on **every** edge of that graph; it reads back
+/// through [`for_edges`](Self::for_edges) with the reason that rule gave.
+/// Those two constructors are the only ones, so the reason has one spelling per
+/// rule on every surface that renders it (`scan --json`,
 /// `quality-report --json`, the dashboard).
 ///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ModularityNotApplicable {
-    /// `m` — the edges of the production metric graph Modularity was computed on.
+pub struct GraphDimensionNotApplicable {
+    /// The edges counted against the threshold: the production metric graph's
+    /// cross-module edges (v8), or all of its edges on a v6/v7 Modularity
+    /// drop-out.
     pub edges: u64,
-    /// The fixed threshold, [`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES).
+    /// The fixed threshold, [`MIN_CROSS_MODULE_EDGES`](crate::metrics::MIN_CROSS_MODULE_EDGES).
     pub min_edges: u64,
-    /// The rendered reason: `"<m> of <min_edges> dependency edges — too few for
-    /// community structure"`.
+    /// The rendered reason: `"<n> of <min_edges> cross-module edges — too few
+    /// to measure module structure"`, or the v6/v7 `"<m> of <min_edges>
+    /// dependency edges — too few for community structure"`.
     pub reason: String,
 }
 
-impl ModularityNotApplicable {
-    /// The drop-out for a graph of `edges` edges, or `None` when it has at
-    /// least [`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES) and
-    /// Modularity applies. The single place the threshold is compared.
+impl GraphDimensionNotApplicable {
+    /// The drop-out for a production metric graph with `cross_module_edges`
+    /// edges between distinct modules, or `None` when it has at least
+    /// [`MIN_CROSS_MODULE_EDGES`](crate::metrics::MIN_CROSS_MODULE_EDGES) and
+    /// the graph dimensions apply ([FR-QM-18]). The single place the v8
+    /// threshold is compared.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub fn for_cross_module_edges(cross_module_edges: u64) -> Option<Self> {
+        let min_edges = crate::metrics::MIN_CROSS_MODULE_EDGES;
+        (cross_module_edges < min_edges).then(|| Self {
+            edges: cross_module_edges,
+            min_edges,
+            reason: format!(
+                "{cross_module_edges} of {min_edges} cross-module edges — too few to measure \
+                 module structure"
+            ),
+        })
+    }
+
+    /// The Modularity drop-out a v6/v7 snapshot recorded ([CR-156]): decided on
+    /// all `edges` of its graph, intra-module ones included. Read-back only —
+    /// a fresh computation decides through
+    /// [`for_cross_module_edges`](Self::for_cross_module_edges).
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
     pub fn for_edges(edges: u64) -> Option<Self> {
-        let min_edges = crate::metrics::MODULARITY_MIN_EDGES;
+        let min_edges = crate::metrics::MIN_CROSS_MODULE_EDGES;
         (edges < min_edges).then(|| Self {
             edges,
             min_edges,
@@ -1239,7 +2150,7 @@ impl ModularityNotApplicable {
 /// `raw` is the pre-normalization quantity (Q, cycle count, depth, Gini,
 /// redundant ratio) so evolution can show *which* dimension moved; `normalized`
 /// is the [0,1] value entering the geometric mean.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct MetricValue {
     pub raw: f64,
     pub normalized: f64,
@@ -1306,6 +2217,63 @@ pub struct GateResult {
     /// empty, so a run with nothing to note renders byte-identical to before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The `rules.toml [security]` violations ([FR-SC-10]): a new finding past
+    /// the ratchet, or one a cap names. Any entry fails the gate (exit 1).
+    /// Empty — and elided, so the report is byte-identical to before — without
+    /// a `[security]` table.
+    ///
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub security_violations: Vec<Violation>,
+    /// Required scanners with no fresh scan at HEAD ([FR-SC-10]): any entry is
+    /// exit **5** ([FR-CL-03]). Empty and elided without a `[security]` table.
+    ///
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+    /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_scans: Vec<MissingScan>,
+}
+
+impl GateResult {
+    /// The `gate` exit-code projection ([FR-CL-03]): 5 when a required scan is
+    /// missing ([FR-SC-10]) — it outranks a verdict, since a gate over missing
+    /// evidence has none — else 0 on a pass and 1 on a failure.
+    ///
+    /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+    pub fn exit_code(&self) -> i32 {
+        if !self.missing_scans.is_empty() {
+            EXIT_MISSING_SCAN
+        } else if self.passed {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+/// The exit code for a `[security]` table whose required scanner has no fresh
+/// scan at HEAD ([FR-CL-03], [FR-SC-10]). Exit 4 (no rules contract) outranks
+/// it.
+///
+/// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+pub const EXIT_MISSING_SCAN: i32 = 5;
+
+/// One required scanner with no fresh scan at HEAD ([FR-SC-10]). The gate never
+/// runs a scanner: the message names the command that produces the scan.
+///
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MissingScan {
+    /// The scanner as `required_scanners` names it.
+    pub scanner: String,
+    /// Why there is no fresh scan: `never_run`, `stale`, `not_installed`,
+    /// `disabled`, or `unknown` (no registered scanner or stored report has
+    /// that name).
+    pub state: &'static str,
+    /// The human sentence: the scanner, the state, and what to run.
+    pub message: String,
 }
 
 /// The Health bundle's snapshot-derived pair ([FR-UI-04]): the read-only gate
@@ -1366,11 +2334,14 @@ pub struct RulesReport {
     /// fired either — a verdict over an empty evaluated set is not a verdict
     /// ([FR-GV-22], [NFR-CC-04]). The CLI's three-state `check` exit-code
     /// discriminator: `Some(true)` → 0, `Some(false)` → 1, `None` → 4 (`4`
-    /// collapses to `0` under its `--allow-no-rules` opt-out).
+    /// collapses to `0` under its `--allow-no-rules` opt-out) — except that a
+    /// non-empty [`missing_scans`](Self::missing_scans) makes it `Some(false)`
+    /// and exit 5 ([FR-SC-10]).
     pub passed: Option<bool>,
     /// Active rules evaluated: set constraints + layer ordering (when layers
     /// are declared) + one per boundary + one per forbidden-import + one per
-    /// require-tested contract + one per require-documented contract.
+    /// require-tested contract + one per require-documented contract + the
+    /// `[security]` table's ratchet and each cap it sets (FR-SC-10).
     pub checked_rules: u32,
     /// `true` when a `rules.toml` contract was loaded; `false` when none exists
     /// (the default `<root>/.logos/rules.toml` is absent and an empty contract
@@ -1406,18 +2377,37 @@ pub struct RulesReport {
     /// empty, so a run with nothing to note renders byte-identical to before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The ratchet classification summary ([FR-GV-23]) — `None`, and elided
+    /// from the serialised report, when no constraint declares `ratchet = true`,
+    /// so every other report renders byte-identical to before.
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratchet: Option<RatchetReport>,
+    /// Required scanners with no fresh scan at HEAD under a `rules.toml
+    /// [security]` table ([FR-SC-10]): any entry is exit **5**, and `passed` is
+    /// `Some(false)`. Empty and elided without the table, so the report is
+    /// byte-identical to before.
+    ///
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_scans: Vec<MissingScan>,
 }
 
 impl RulesReport {
-    /// The `check` exit-code projection (FR-GV-22 / FR-CL-03): 0/1/4,
-    /// collapsed to 0 by `allow_absent` for callers that have deliberately
-    /// authored no contract yet.
+    /// The `check` exit-code projection (FR-GV-22 / FR-CL-03): 0/1/4/5. Exit 4
+    /// (no contract) outranks exit 5 (a required scan missing, [FR-SC-10]),
+    /// which outranks a violation's 1; `allow_absent` collapses 4 to 0 for
+    /// callers that have deliberately authored no contract yet.
+    ///
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
     pub fn exit_code(&self, allow_absent: bool) -> i32 {
         match self.passed {
-            Some(true) => 0,
-            Some(false) => 1,
             None if allow_absent => 0,
             None => 4,
+            Some(_) if !self.missing_scans.is_empty() => EXIT_MISSING_SCAN,
+            Some(true) => 0,
+            Some(false) => 1,
         }
     }
 }
@@ -1462,16 +2452,18 @@ pub struct MetricDelta {
     /// This snapshot's normalized [0,1] value.
     pub normalized: f64,
     /// `normalized − previous.normalized`; `None` for the first point, and
-    /// for Modularity whenever it is not applicable at either point — a
-    /// dimension outside the signal has no movement of the signal to report.
+    /// for a graph dimension (Modularity, Acyclicity, Depth) whenever it is not
+    /// applicable at either point — a dimension outside the signal has no
+    /// movement of the signal to report.
     pub delta: Option<f64>,
-    /// `Some` on the Modularity entry of a snapshot where it was **not
-    /// applicable** ([CR-156]): the reason and the m-of-5 count, beside the
-    /// computed `normalized` value it still stores. `None` for every other
-    /// metric and for an applicable Modularity.
+    /// `Some` on the Modularity, Acyclicity or Depth entry of a snapshot where
+    /// that dimension was **not applicable** ([CR-156], [FR-QM-18]): the reason
+    /// and the n-of-5 count, beside the computed `normalized` value it still
+    /// stores. `None` for every other metric and for an applicable one.
     ///
     /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
-    pub not_applicable: Option<ModularityNotApplicable>,
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub not_applicable: Option<GraphDimensionNotApplicable>,
 }
 
 /// Dependency structure matrix (FR-GV-07).
@@ -1695,6 +2687,18 @@ pub struct DoctorReport {
     /// [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
     #[serde(default)]
     pub hook_warnings: Vec<String>,
+    /// Claude Code plugin findings for the project ([FR-IN-12]): a **duplicate
+    /// registration** (a `logos` server declared both by `.mcp.json` and by the
+    /// enabled plugin, so every tool is listed twice) and a **version skew**
+    /// (this binary older than a plugin manifest's `minBinaryVersion`), each
+    /// naming the remedy. Empty when the plugin is not enabled.
+    ///
+    /// Purely diagnostic, like [`hook_warnings`](Self::hook_warnings): it does
+    /// **not** affect [`ok`](Self::ok) or the exit status.
+    ///
+    /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+    #[serde(default)]
+    pub plugin_warnings: Vec<String>,
     pub message: String,
 }
 
@@ -1787,6 +2791,14 @@ pub struct SessionInfo {
     /// The FR-RC-03 freshness line.
     pub freshness: String,
     pub message: String,
+    /// Advisory notes that never change the outcome — today the [FR-QM-18]
+    /// coverage warning naming each language the graph cannot see across
+    /// files ([`crate::governance::thin_graph`]). Elided when empty, so a
+    /// session start with nothing to warn about serialises as before.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Observability stats — usage/perf telemetry from `telemetry.db`
@@ -1862,15 +2874,31 @@ pub struct StatsInfo {
     /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
     /// [NFR-OO-03]: ../../../docs/specs/requirements/NFR-OO-03.md
     pub calls_by_class: Vec<ClassUsage>,
-    /// What the two attribution projections above actually cover ([FR-OB-11]).
+    /// **Tool × invoker cross-tab** ([FR-OB-15]): per-tool call counts split by
+    /// who started the process — a plugin hook (`hook:stop`, …), a skill script
+    /// (`skill:logos-review`, …), or `null` when the process declared no
+    /// invoker. Sorted by tool, then invoker, `null` first ([NFR-RA-06]).
     ///
-    /// An unlabelled figure is what [NFR-CC-04] forbids, and these two carry
-    /// three limits a reader cannot infer from the numbers: they are
+    /// The figure that judges the agent kit by what it caused rather than by
+    /// call volume. **Raw events only**, like the origin cross-tab, and a `null`
+    /// cell is not "a direct call": it also holds every event written before the
+    /// invoker stamp existed. [`StatsInfo::attribution_coverage`] states both.
+    ///
+    /// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub calls_by_tool_invoker: Vec<ToolInvokerUsage>,
+    /// What the attribution projections above actually cover ([FR-OB-11],
+    /// [FR-OB-15]).
+    ///
+    /// An unlabelled figure is what [NFR-CC-04] forbids, and these three carry
+    /// four limits a reader cannot infer from the numbers: they are
     /// raw-events-only, they therefore cover at most the raw retention window
-    /// however long a window was asked for, and legacy `NULL` origins fold into
-    /// `"main"`. Stated in the payload, not in documentation.
+    /// however long a window was asked for, legacy `NULL` origins fold into
+    /// `"main"`, and a `null` invoker includes every event written before the
+    /// invoker stamp. Stated in the payload, not in documentation.
     ///
     /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+    /// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub attribution_coverage: AttributionCoverage,
     /// Degradations (e.g. no telemetry recorded yet), never an error.
@@ -1939,6 +2967,32 @@ pub struct ToolOriginUsage {
     pub outcomes: OutcomeCounts,
 }
 
+/// One cell of the tool × invoker cross-tab ([FR-OB-15]): a tool's calls made
+/// by processes that declared one invoker, or none. Raw events only — see
+/// [`StatsInfo::attribution_coverage`].
+///
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+#[derive(Debug, Default, Serialize)]
+pub struct ToolInvokerUsage {
+    /// Engine method or pipeline pass name.
+    pub tool: String,
+    /// The tool's class, as [`ToolUsage::class`].
+    pub class: String,
+    /// The declared invoker — `hook:stop`, `skill:logos-review`, … — or `None`
+    /// (`null`) for a process that declared none, and for every event written
+    /// before the stamp existed. Never a guessed value.
+    pub invoker: Option<String>,
+    pub calls: u64,
+    pub ok_calls: u64,
+    /// What these calls answered ([FR-OB-14]): `answered_calls` and
+    /// `classified_calls`, flattened into the cell beside `outcome_absence`.
+    /// Both counts ship and no rate does — see [`OutcomeCounts`].
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[serde(flatten)]
+    pub outcomes: OutcomeCounts,
+}
+
 /// One cell of the class × origin breakdown ([FR-OB-11]) — the cross-tab rolled
 /// up to [`ToolUsage::class`]. Raw events only, as the cross-tab it derives from.
 ///
@@ -1960,26 +3014,28 @@ pub struct ClassUsage {
     pub outcomes: OutcomeCounts,
 }
 
-/// What [`StatsInfo::calls_by_tool_origin`] and [`StatsInfo::calls_by_class`]
-/// actually cover ([FR-OB-11], [NFR-CC-04]).
+/// What [`StatsInfo::calls_by_tool_origin`], [`StatsInfo::calls_by_class`] and
+/// [`StatsInfo::calls_by_tool_invoker`] actually cover ([FR-OB-11], [FR-OB-15],
+/// [NFR-CC-04]).
 ///
 /// Every field is a statement the payload makes about itself, so a consumer
-/// rendering either projection can label it without consulting documentation —
+/// rendering any of the three projections can label it without consulting documentation —
 /// the honest-omission posture [FR-OB-08] already set for `calls_by_origin`.
 ///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 #[derive(Debug, Serialize)]
 pub struct AttributionCoverage {
     /// Always `true`: `daily_rollup` is keyed `(day, surface, tool)` and carries
-    /// no `origin` column, so a rolled-up day contributes to `calls_total` and
-    /// `activity_by_day` but is **absent** from both attribution projections
-    /// rather than mis-attributed.
+    /// neither an `origin` nor an `invoker` column, so a rolled-up day
+    /// contributes to `calls_total` and `activity_by_day` but is **absent** from
+    /// all three attribution projections rather than mis-attributed.
     pub raw_events_only: bool,
     /// The window the caller asked for, echoing [`StatsInfo::window_days`].
     pub requested_window_days: u32,
-    /// The window the two projections are **guaranteed** to cover:
+    /// The window the three projections are **guaranteed** to cover:
     /// `requested_window_days` capped at the raw-event retention horizon
     /// (~90 days, [NFR-OO-04]), past which raw rows become eligible to be folded
     /// into `daily_rollup` and deleted.
@@ -2004,6 +3060,13 @@ pub struct AttributionCoverage {
     ///
     /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
     pub legacy_null_origin_folds_into_main: bool,
+    /// Always `true`: a `null` invoker in [`StatsInfo::calls_by_tool_invoker`]
+    /// is "no invoker declared", which covers direct calls **and** every event
+    /// written before the [FR-OB-15] migration — those rows are never imputed an
+    /// invoker, so the historical `null` bucket holds hook and skill calls too.
+    ///
+    /// [FR-OB-15]: ../../../docs/specs/requirements/FR-OB-15.md
+    pub null_invoker_includes_pre_stamp_rows: bool,
     /// The same limits as display-ready prose, for a surface that renders the
     /// projections without re-deriving the wording ([NFR-CC-04]).
     ///
@@ -2011,7 +3074,7 @@ pub struct AttributionCoverage {
     pub notes: Vec<String>,
 }
 
-/// The two structural limits hold even on a zeroed read-model — a degraded
+/// The three structural limits hold even on a zeroed read-model — a degraded
 /// `stats` (unreadable store) must not answer `raw_events_only: false`, which
 /// would be a claim, not an absence ([NFR-CC-04]). The window figures are `0`
 /// there because no window was covered.
@@ -2025,6 +3088,7 @@ impl Default for AttributionCoverage {
             covered_window_days: 0,
             truncated_by_retention: false,
             legacy_null_origin_folds_into_main: true,
+            null_invoker_includes_pre_stamp_rows: true,
             notes: Vec::new(),
         }
     }
@@ -2170,5 +3234,32 @@ mod tests {
         assert_eq!(report(Some(false)).exit_code(true), 1);
         assert_eq!(report(None).exit_code(false), 4);
         assert_eq!(report(None).exit_code(true), 0);
+    }
+
+    /// Exit 5 ([FR-SC-10], [FR-CL-03]): a missing required scan outranks a
+    /// verdict, on `check` and on `gate`, and exit 4 outranks exit 5.
+    ///
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+    /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+    #[test]
+    fn a_missing_required_scan_exits_5_and_exit_4_takes_precedence() {
+        let missing = || {
+            vec![MissingScan {
+                scanner: "semgrep".to_string(),
+                state: "never_run",
+                message: String::new(),
+            }]
+        };
+        let check = |passed| RulesReport { passed, missing_scans: missing(), ..Default::default() };
+        assert_eq!(check(Some(false)).exit_code(false), 5);
+        assert_eq!(check(Some(true)).exit_code(false), 5);
+        assert_eq!(check(None).exit_code(false), 4, "no contract outranks a missing scan");
+        assert_eq!(check(None).exit_code(true), 0);
+
+        let gate = |passed, missing_scans| GateResult { passed, missing_scans, ..Default::default() };
+        assert_eq!(gate(true, Vec::new()).exit_code(), 0);
+        assert_eq!(gate(false, Vec::new()).exit_code(), 1);
+        assert_eq!(gate(false, missing()).exit_code(), 5);
+        assert_eq!(gate(true, missing()).exit_code(), 5);
     }
 }

@@ -71,6 +71,7 @@ use logos_core::federation::manifest::{self, ManifestDocument, ManifestSaveOutco
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::observability::Surface;
+use logos_core::security::SecurityPage;
 use logos_core::models::navigation::{
     BranchOverlapResult, GraphElements, GraphGranularity, ImpactIntersectionResult, ImpactResult,
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
@@ -282,6 +283,15 @@ pub(crate) struct HealthModel {
 /// [`HealthModel`] derived from the evolution report this handler already holds
 /// — no extra read, no change to the seam.
 ///
+/// # The "where to start" list ([FR-QM-17], S-505)
+///
+/// `scan` is the last snapshot's [`ScanResult`], so it already carries that
+/// snapshot's advisory ranking as `scan.where_to_start` — read from the same
+/// single `latest_health` read as the verdict and the offender lists, and the
+/// value [`Engine::improvements`] serves the CLI `improvements` and the MCP tool.
+/// No field was added here; `tests/api_v1.rs` pins the equality.
+///
+/// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
 /// [ADR-11]: ../../docs/specs/architecture/decisions/ADR-11.md
 /// [S-406]: ../../docs/planning/journal.md#s-406-a-readout-names-a-step-that-can-change-what-it-reports
 /// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
@@ -489,23 +499,30 @@ pub(crate) struct FilesModel {
     temporal: TemporalReport,
 }
 
-/// `GET /api/v1/files[?untested][?production_scope]` — the Files & Risk data
-/// ([FR-UI-21]). The `?untested` toggle scopes the board to files lacking fresh
-/// positive coverage, exactly as the server-rendered view's filter does; the
-/// `?production_scope` toggle drops whole test files from the candidate set
-/// before ranking ([FR-UI-05], [CR-076]) — the same optional filter the CLI
-/// `--production-scope` flag and MCP `production_scope` argument expose,
-/// reached through the same [`Engine::latest_hotspots`] call.
+/// `GET /api/v1/files[?untested][?production_scope][?with_findings]` — the
+/// Files & Risk data ([FR-UI-21]). The `?untested` toggle scopes the board to
+/// files lacking fresh positive coverage, exactly as the server-rendered view's
+/// filter does; the `?production_scope` toggle drops whole test files from the
+/// candidate set before ranking ([FR-UI-05], [CR-076]) — the same optional
+/// filter the CLI `--production-scope` flag and MCP `production_scope` argument
+/// expose, reached through the same [`Engine::latest_hotspots_with_findings`]
+/// call. `?with_findings` is the findings filter ([FR-SC-14]): hotspots with a
+/// fresh unsuppressed finding rank first, as the CLI `--with-findings` flag and
+/// the MCP `with_findings` argument do; the findings column rides every board
+/// once a scan is stored.
+///
+/// [FR-SC-14]: ../../docs/specs/requirements/FR-SC-14.md
 pub(crate) async fn files(
     MemberEngine(engine): MemberEngine,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let untested = wants_flag(&params, "untested");
     let production_scope = wants_flag(&params, "production_scope");
+    let with_findings = wants_flag(&params, "with_findings");
     let model = bridge(engine, "api_v1_files", Surface::Web, move |e| -> anyhow::Result<FilesModel> {
         Ok(FilesModel {
             status: e.status(),
-            hotspots: e.latest_hotspots(Some(50), untested, production_scope)?,
+            hotspots: e.latest_hotspots_with_findings(Some(50), untested, production_scope, with_findings)?,
             temporal: e.latest_temporal_report()?,
         })
     })
@@ -539,6 +556,35 @@ pub(crate) async fn coverage(MemberEngine(engine): MemberEngine) -> Response {
             coverage: e.coverage_status()?,
             untested: e.latest_hotspots(Some(20), true, false)?,
         })
+    })
+    .await;
+    respond(model)
+}
+
+// ── Security (S-670, [FR-SC-09]) ──────────────────────────────────────────────
+
+/// The Security bundle ([FR-SC-09]): the index status and the page's one
+/// read-model — scanner matrix, findings in graph context, both OWASP editions
+/// and, with a `rules.toml [security]` table, the gate band
+/// ([`Engine::security_page`]). Read-only: it runs no scan — only the version
+/// command of a scanner the project's scan consent names, once per process for
+/// each binary (HF-3) — and writes no store.
+///
+/// [FR-SC-09]: ../../docs/specs/requirements/FR-SC-09.md
+#[derive(Debug, Serialize)]
+pub(crate) struct SecurityModel {
+    status: StatusInfo,
+    security: SecurityPage,
+}
+
+/// `GET /api/v1/security` — the Security page data ([FR-SC-09]). Member-scoped
+/// through `?repo=` like every project view. Unfiltered: the page filters the
+/// listing and switches edition client-side, so neither refetches.
+///
+/// [FR-SC-09]: ../../docs/specs/requirements/FR-SC-09.md
+pub(crate) async fn security(MemberEngine(engine): MemberEngine) -> Response {
+    let model = bridge(engine, "api_v1_security", Surface::Web, |e| -> anyhow::Result<SecurityModel> {
+        Ok(SecurityModel { status: e.status(), security: e.security_page()? })
     })
     .await;
     respond(model)
@@ -1618,6 +1664,50 @@ pub(crate) async fn workspace_statistics_aggregate(
     .await
 }
 
+/// The `GET /api/v1/workspace/security` payload ([FR-SC-16]).
+///
+/// [FR-SC-16]: ../../docs/specs/requirements/FR-SC-16.md
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceSecurityAnswer {
+    /// The per-member roll-up and its totals
+    /// ([`WorkspaceSecurity`](fed_query::WorkspaceSecurity)).
+    security: fed_query::WorkspaceSecurity,
+    #[serde(flatten)]
+    completeness: AnswerCompleteness,
+}
+
+/// `GET /api/v1/workspace/security` — every member's scanner states and fresh,
+/// unsuppressed findings, summed with their denominators
+/// ([`workspace_security`](fed_query::workspace_security), [FR-SC-16]): the
+/// **`app`-scoped** roll-up of what [`security`] answers for one member.
+///
+/// A member never scanned reads `never_run`, never zero ([BR-66]); a member that
+/// could not be opened or read is a row with its `error` beside the others, and
+/// counts against `members_read` of `members_total`. The open-state roll-up
+/// (`complete`, `degraded_rollup`) names only the members that would not open
+/// ([FR-WS-16]), as on every workspace route: one that opened and then failed
+/// its security read is named by its row alone. Infallible at the surface for
+/// that reason, so this pairs `workspace_fan` with its plain (non-`try`) form,
+/// as [`workspace_statistics_aggregate`] does. Read-only: no scan starts, and
+/// each member pays only its consented scanners' version probes, once per
+/// process for each binary, as its own page does.
+/// Answers the same honest `404` under a single-root backing as every other
+/// `/api/v1/workspace/*` route.
+///
+/// [FR-SC-16]: ../../docs/specs/requirements/FR-SC-16.md
+/// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
+/// [BR-66]: ../../docs/specs/software-spec.md#328-security-findings
+pub(crate) async fn workspace_security(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan(backing, bridge, "api_v1_workspace_security", Surface::Web, |registry, _bridge| {
+        let security = fed_query::workspace_security(registry);
+        WorkspaceSecurityAnswer { security, completeness: AnswerCompleteness::after_reading(registry) }
+    })
+    .await
+}
+
 // ── Config-read (masked key only, [FR-UI-12]/[FR-CF-06]) ──────────────────────
 
 /// `GET /api/v1/config` — the config read-model ([FR-UI-12], [ADR-31]): the current
@@ -1971,9 +2061,10 @@ pub(crate) async fn workspace_manifest_save(
     }
 }
 
-/// Render a workspace-root write: the outcome on success, else the [`ApiError`]
-/// at the status the member routes map the same fault to — `422` for a
-/// validation fault, `500` for an I/O one ([`config_write_status`]).
+/// Render a workspace-root write or a security-triage write (S-672): the
+/// outcome on success, else the [`ApiError`] at the status the member config
+/// routes map the same fault to — `422` for a validation fault, `500` for an
+/// I/O one ([`config_write_status`]).
 fn written<T: Serialize>(outcome: anyhow::Result<T>) -> Response {
     match outcome {
         Ok(outcome) => ok(outcome),
@@ -2022,6 +2113,393 @@ pub(crate) async fn verify(MemberEngine(engine): MemberEngine) -> Response {
     })
     .await;
     respond(model)
+}
+
+// ── Security scan job (S-673, [FR-SC-15], [ADR-80] §6) ───────────────────────
+//
+// The Run scan button: a detached, single-flight scan per member on the core's
+// job runner, off the request path and off the writer task, so every other
+// route keeps answering while it runs. Start and cancel are intent-guarded
+// POSTs (`SECURITY_SCAN_POST_ROUTES`); the GET replays the job's per-scanner
+// events for the panel that follows it.
+//
+// [FR-SC-15]: ../../docs/specs/requirements/FR-SC-15.md
+// [ADR-80]: ../../docs/specs/architecture/decisions/ADR-80.md
+
+use axum::body::Bytes;
+use logos_core::jobs::{JobKind, JobSnapshot, JobState, ScanJobs, Started};
+
+/// What `POST /api/v1/security/scan` reads. An empty body is `{}`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanStartRequest {
+    /// The scanners the consent dialog showed and the user accepted
+    /// ([FR-SC-07]). Consent is recorded for these alone: a scanner pending
+    /// consent that the dialog did not show is asked for again (`409`).
+    ///
+    /// [FR-SC-07]: ../../docs/specs/requirements/FR-SC-07.md
+    #[serde(default)]
+    consent: Vec<String>,
+}
+
+/// The member's scan job, running or last run; `null` when none ran in this
+/// serve.
+#[derive(Debug, Serialize)]
+pub(crate) struct ScanJobModel {
+    job: Option<JobSnapshot>,
+}
+
+/// The `409` a start without consent answers while scanners lack it: the
+/// dialog lists exactly these.
+#[derive(Debug, Serialize)]
+pub(crate) struct ConsentRequired {
+    error: String,
+    consent_required: Vec<&'static str>,
+}
+
+/// What a start resolved to.
+enum ScanStart {
+    Started(Started),
+    ConsentRequired(Vec<&'static str>),
+    /// A `tool-install` job runs for the member (S-747): nothing started.
+    Busy,
+}
+
+/// `GET /api/v1/security/scan[?repo=]` — the member's scan job with every
+/// event it reported so far, oldest first. Reads memory only.
+pub(crate) async fn security_scan_job(
+    State(jobs): State<Arc<ScanJobs>>,
+    MemberEngine(engine): MemberEngine,
+) -> Response {
+    ok(ScanJobModel { job: jobs.snapshot(JobKind::SecurityScan, engine.root()) })
+}
+
+/// `POST /api/v1/security/scan[?repo=]` — start the member's scan, or join the
+/// one running (`joined: true`, the same job). Answers at once; the scan runs
+/// on its own thread. While an installed scanner is not in the project's
+/// consent record and `consent` does not name it, nothing starts and the
+/// answer is `409` naming every scanner still pending. Otherwise the pending
+/// scanners — each one the dialog showed — are recorded in the user-level
+/// consent file, never in the repository, and the scan runs.
+pub(crate) async fn security_scan_start(
+    State(jobs): State<Arc<ScanJobs>>,
+    MemberEngine(engine): MemberEngine,
+    body: Bytes,
+) -> Response {
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        ScanStartRequest::default()
+    } else {
+        match serde_json::from_slice::<ScanStartRequest>(&body) {
+            Ok(request) => request,
+            Err(e) => {
+                let error = format!("the scan request is not {{\"consent\": [scanner, …]}}: {e}");
+                return (StatusCode::BAD_REQUEST, Json(ApiError { error })).into_response();
+            }
+        }
+    };
+    let member = Arc::clone(&engine);
+    let started = bridge(engine, "api_v1_security_scan_start", Surface::Web, move |e| -> anyhow::Result<ScanStart> {
+        let root = e.root().to_path_buf();
+        // Refused before anything is recorded, as the install start is;
+        // `start_unless` below holds the same rule under the runner's lock.
+        if jobs
+            .snapshot(JobKind::ToolInstall, &root)
+            .is_some_and(|job| job.state == JobState::Running)
+        {
+            return Ok(ScanStart::Busy);
+        }
+        let running = jobs
+            .snapshot(JobKind::SecurityScan, &root)
+            .is_some_and(|job| job.state == JobState::Running);
+        if !running {
+            let pending = e.security_consent_pending()?;
+            if pending.iter().any(|s| !request.consent.iter().any(|accepted| accepted == s)) {
+                return Ok(ScanStart::ConsentRequired(pending));
+            }
+            if !pending.is_empty() {
+                e.security_record_consent(&pending)?;
+            }
+        }
+        // Consent is now recorded for every scanner the dialog showed; one
+        // installed since is refused by the scan itself, never consented to on
+        // the user's behalf.
+        // An install job (S-747) runs its own scan once it is done; a second
+        // scan beside it is refused, never run over the same store.
+        let started = jobs.start_unless(JobKind::SecurityScan, &root, &[JobKind::ToolInstall], move |job| {
+            logos_core::observability::in_surface(Surface::Web, || {
+                let summary = member.security_scan_reporting(false, |step| {
+                    job.emit(serde_json::to_value(step).unwrap_or_default());
+                })?;
+                Ok(serde_json::to_value(summary)?)
+            })
+        })?;
+        Ok(match started {
+            Ok(started) => ScanStart::Started(started),
+            Err(_) => ScanStart::Busy,
+        })
+    })
+    .await;
+    match started {
+        Ok(ScanStart::Started(started)) => ok(started),
+        Ok(ScanStart::Busy) => {
+            let error = "scanners are being installed for this project; wait for the install to finish or cancel it, then scan".to_string();
+            (StatusCode::CONFLICT, Json(ApiError { error })).into_response()
+        }
+        Ok(ScanStart::ConsentRequired(scanners)) => {
+            let error = format!(
+                "a scan needs consent first: {} may reach the network to refresh rules or vulnerability data",
+                scanners.join(", ")
+            );
+            (StatusCode::CONFLICT, Json(ConsentRequired { error, consent_required: scanners })).into_response()
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `POST /api/v1/security/scan/cancel[?repo=]` — cancel the member's running
+/// scan: every scanner process group is killed and no scanner starts after.
+/// Answers the job as it stands (still `running` until the scan notices, an
+/// instant later); a job that already ended is left as it is; `null` when
+/// none ran.
+pub(crate) async fn security_scan_cancel(
+    State(jobs): State<Arc<ScanJobs>>,
+    MemberEngine(engine): MemberEngine,
+) -> Response {
+    ok(ScanJobModel { job: jobs.cancel(JobKind::SecurityScan, engine.root()) })
+}
+
+// ── Scanner install (S-747, [FR-SC-24], [FR-SC-22]) ──────────────────────────
+//
+// A not-installed row's Install, an installed row's Update, and Install & scan:
+// a `tool-install` job per member on the same runner as Run scan, cancellable,
+// its per-tool steps (then the scan's per-scanner steps) replayed by the GET.
+// Start and cancel are intent-guarded POSTs (`SECURITY_INSTALL_POST_ROUTES`).
+// Nothing is downloaded until the one consent dialog has answered every line
+// the install needs; until then the start answers `409` with the plan the
+// dialog shows, and records nothing.
+//
+// [FR-SC-24]: ../../docs/specs/requirements/FR-SC-24.md
+// [FR-SC-22]: ../../docs/specs/requirements/FR-SC-22.md
+
+use logos_core::tools::surface::{InstallAdmission, InstallAsk, InstallPlan};
+
+/// What `POST /api/v1/security/install` reads. An empty body is `{}`: the
+/// default set, no scan, nothing answered.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallStartRequest {
+    /// The tools a row names; absent for Install & scan's default set.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    /// Replace an older managed copy with the pin (a row's Update).
+    #[serde(default)]
+    update: bool,
+    /// Scan once installed (Install & scan).
+    #[serde(default)]
+    scan: bool,
+    /// The offered opt-in tools the user ticked.
+    #[serde(default)]
+    opt_in: Vec<String>,
+    /// The `<tool> <version>` lines the dialog showed and the user accepted.
+    #[serde(default)]
+    consent: Vec<String>,
+    /// The tools whose licence line the user ticked.
+    #[serde(default)]
+    accept_licences: Vec<String>,
+    /// The scanners whose network consent the user accepted.
+    #[serde(default)]
+    scan_consent: Vec<String>,
+}
+
+/// The `409` of a start with a line still unanswered: the plan the consent
+/// dialog shows.
+#[derive(Debug, Serialize)]
+pub(crate) struct InstallConsentRequired {
+    error: String,
+    plan: InstallPlan,
+}
+
+/// What an install start resolved to.
+enum InstallStart {
+    Started(Started),
+    Ask(InstallPlan),
+    /// A job of this kind runs for the member — an install, or a scan:
+    /// nothing started.
+    Busy(JobKind),
+}
+
+/// `GET /api/v1/security/install[?repo=]` — the member's `tool-install` job,
+/// running or last run, with every step it reported so far. Reads memory only.
+pub(crate) async fn security_install_job(
+    State(jobs): State<Arc<ScanJobs>>,
+    MemberEngine(engine): MemberEngine,
+) -> Response {
+    ok(ScanJobModel { job: jobs.snapshot(JobKind::ToolInstall, engine.root()) })
+}
+
+/// `POST /api/v1/security/install[?repo=]` — start the member's install.
+/// While a line it needs is unanswered — an install consent, a licence, the
+/// project's network consent for the scan — nothing is recorded or fetched
+/// and the answer is `409` with the plan. Otherwise the project's network
+/// consent is recorded for the scanners the dialog showed, and the job
+/// installs (recording the install consent for exactly the lines accepted),
+/// then scans when asked. While an install or a scan runs for the member,
+/// `409` and nothing starts: unlike Run scan's, a second install is never
+/// joined, since its request may name other tools than the running one.
+pub(crate) async fn security_install_start(
+    State(jobs): State<Arc<ScanJobs>>,
+    MemberEngine(engine): MemberEngine,
+    body: Bytes,
+) -> Response {
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        InstallStartRequest::default()
+    } else {
+        match serde_json::from_slice::<InstallStartRequest>(&body) {
+            Ok(request) => request,
+            Err(e) => {
+                let error = format!("the install request is not a valid install: {e}");
+                return (StatusCode::BAD_REQUEST, Json(ApiError { error })).into_response();
+            }
+        }
+    };
+    let ask = InstallAsk {
+        tools: request.tools,
+        update: request.update,
+        scan: request.scan,
+        opt_in: request.opt_in,
+        consent: request.consent,
+        accept_licences: request.accept_licences,
+        scan_consent: request.scan_consent,
+    };
+    let member = Arc::clone(&engine);
+    let started = bridge(engine, "api_v1_security_install_start", Surface::Web, move |e| -> anyhow::Result<InstallStart> {
+        let root = e.root().to_path_buf();
+        // Refused before anything is recorded; `start_unless` below holds the
+        // same rule under the runner's lock.
+        let busy = [JobKind::ToolInstall, JobKind::SecurityScan]
+            .into_iter()
+            .find(|kind| jobs.snapshot(*kind, &root).is_some_and(|job| job.state == JobState::Running));
+        if let Some(kind) = busy {
+            return Ok(InstallStart::Busy(kind));
+        }
+        let (request, scan) = match e.security_install_admit(&ask)? {
+            InstallAdmission::Ask(plan) => return Ok(InstallStart::Ask(plan)),
+            InstallAdmission::Ready { request, scan, scan_consent } => {
+                if !scan_consent.is_empty() {
+                    let names: Vec<&str> = scan_consent.iter().map(String::as_str).collect();
+                    e.security_record_consent(&names)?;
+                }
+                (request, scan)
+            }
+        };
+        let excluded = [JobKind::ToolInstall, JobKind::SecurityScan];
+        let started = jobs.start_unless(JobKind::ToolInstall, &root, &excluded, move |job| {
+            logos_core::observability::in_surface(Surface::Web, || {
+                let done = member.security_install_job(&request, scan, |step| {
+                    job.emit(serde_json::to_value(step).unwrap_or_default());
+                })?;
+                Ok(serde_json::to_value(done)?)
+            })
+        })?;
+        Ok(match started {
+            Ok(started) => InstallStart::Started(started),
+            Err(running) => InstallStart::Busy(running.kind),
+        })
+    })
+    .await;
+    match started {
+        Ok(InstallStart::Started(started)) => ok(started),
+        Ok(InstallStart::Ask(plan)) => {
+            let error = "the install needs your consent first: each tool below is downloaded, verified and run on this machine".to_string();
+            (StatusCode::CONFLICT, Json(InstallConsentRequired { error, plan })).into_response()
+        }
+        Ok(InstallStart::Busy(kind)) => {
+            let error = match kind {
+                JobKind::ToolInstall => "an install is already running on this project; wait for it to finish or cancel it, then install again",
+                JobKind::SecurityScan => "a scan is running on this project; wait for it to finish or cancel it, then install",
+            }
+            .to_string();
+            (StatusCode::CONFLICT, Json(ApiError { error })).into_response()
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `POST /api/v1/security/install/cancel[?repo=]` — cancel the member's
+/// running install: the download, unpack or scanner running is killed, no
+/// partial tool is left, and the job's last step names the tools installed by
+/// then. Answers the job as it stands; `null` when none ran.
+pub(crate) async fn security_install_cancel(
+    State(jobs): State<Arc<ScanJobs>>,
+    MemberEngine(engine): MemberEngine,
+) -> Response {
+    ok(ScanJobModel { job: jobs.cancel(JobKind::ToolInstall, engine.root()) })
+}
+
+// ── Security triage (S-672, [FR-SC-12]) ──────────────────────────────────────
+//
+// The suppression dialog's two writes: add one entry to the committed
+// `.logos/security-ignore.toml`, and remove one. Both are intent-guarded POSTs
+// (`SECURITY_TRIAGE_POST_ROUTES`) scoped to the member (`?repo=`). A refused
+// entry or a hand-spelled file is `422` with the reason and no write; a failed
+// write is `500`.
+//
+// [FR-SC-12]: ../../docs/specs/requirements/FR-SC-12.md
+
+/// What `POST /api/v1/security/suppress` reads.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuppressRequest {
+    fingerprint: String,
+    reason: String,
+    /// `YYYY-MM-DD`, the last day the entry suppresses; absent or `null`
+    /// suppresses until removed.
+    #[serde(default)]
+    expires: Option<String>,
+}
+
+/// What `POST /api/v1/security/unsuppress` reads.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnsuppressRequest {
+    fingerprint: String,
+}
+
+/// A triage body, or the `400` that names the shape it should have had.
+fn triage_body<T: serde::de::DeserializeOwned>(body: &[u8], shape: &str) -> Result<T, (StatusCode, Json<ApiError>)> {
+    serde_json::from_slice(body).map_err(|e| {
+        let error = format!("the triage request is not {shape}: {e}");
+        (StatusCode::BAD_REQUEST, Json(ApiError { error }))
+    })
+}
+
+/// `POST /api/v1/security/suppress[?repo=]` — add a suppression for one
+/// finding: the written file, the entry and the file's entry count.
+pub(crate) async fn security_suppress(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
+    let request: SuppressRequest =
+        match triage_body(&body, r#"{"fingerprint": …, "reason": …, "expires": "YYYY-MM-DD" | null}"#) {
+            Ok(request) => request,
+            Err(refused) => return refused.into_response(),
+        };
+    let outcome = bridge(engine, "api_v1_security_suppress", Surface::Web, move |e| {
+        e.security_suppress(&request.fingerprint, &request.reason, request.expires.as_deref())
+    })
+    .await;
+    written(outcome)
+}
+
+/// `POST /api/v1/security/unsuppress[?repo=]` — remove the suppression for one
+/// finding: the written file, the entry removed and the entries left.
+pub(crate) async fn security_unsuppress(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
+    let request: UnsuppressRequest = match triage_body(&body, r#"{"fingerprint": …}"#) {
+        Ok(request) => request,
+        Err(refused) => return refused.into_response(),
+    };
+    let outcome = bridge(engine, "api_v1_security_unsuppress", Surface::Web, move |e| {
+        e.security_unsuppress(&request.fingerprint)
+    })
+    .await;
+    written(outcome)
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

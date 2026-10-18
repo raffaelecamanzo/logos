@@ -20,6 +20,7 @@ export {
   fetchImpact,
   fetchNode,
   fetchOverview,
+  fetchSecurity,
   fetchStatus,
   runQuery,
 } from "./client.ts";

@@ -14,10 +14,11 @@
 
 use super::*;
 use crate::config::{
-    Boundary, Constraints, ForbiddenImport, Layer, MaxDead, MaxDeadBaseline, RequireDocumented,
-    RequireTested,
+    Boundary, Budget, Constraints, CountBudget, ForbiddenImport, GodContainersBudget, Layer,
+    MaxDead, MaxDeadBaseline, RatioBudget, RequireDocumented, RequireTested,
 };
 use crate::graph_store::{AnnotationNodeRow, FunctionMetricRow};
+use crate::models::quality::{RatchetFixed, RatchetStatus};
 use crate::model::{LogosSymbol, NodeId};
 
 // ── Fixture builders ────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ fn layered_rules() -> CompiledRules {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -108,6 +110,7 @@ fn forbidden_import_rules() -> CompiledRules {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -326,10 +329,10 @@ fn boundary_crossing_is_reported_with_reason() {
 fn constraints_enforce_their_budgets() {
     let rules = Rules {
         constraints: Constraints {
-            max_cycles: Some(1),
-            max_cc: Some(10),
-            max_fn_lines: Some(50),
-            no_god_files: Some(2),
+            max_cycles: Some(CountBudget::Absolute(1)),
+            max_cc: Some(Budget::Absolute(10)),
+            max_fn_lines: Some(Budget::Absolute(50)),
+            no_god_files: Some(Budget::Absolute(2)),
             ..Constraints::default()
         },
         metric_thresholds: Default::default(),
@@ -340,6 +343,7 @@ fn constraints_enforce_their_budgets() {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     let compiled = CompiledRules::compile(rules, "test".to_string()).unwrap();
 
@@ -428,6 +432,7 @@ fn constraints_only(constraints: Constraints) -> CompiledRules {
             require_documented: Vec::new(),
             history: Default::default(),
             coverage: Default::default(),
+            security: None,
         },
         "test".to_string(),
     )
@@ -443,7 +448,7 @@ fn constraints_only(constraints: Constraints) -> CompiledRules {
 #[test]
 fn fan_in_over_budget_is_reported_with_count() {
     let compiled = constraints_only(Constraints {
-        max_fan_in: Some(2),
+        max_fan_in: Some(Budget::Absolute(2)),
         ..Constraints::default()
     });
     let nodes = [
@@ -484,7 +489,7 @@ fn fan_in_over_budget_is_reported_with_count() {
 #[test]
 fn fan_out_over_budget_is_reported_with_count() {
     let compiled = constraints_only(Constraints {
-        max_fan_out: Some(2),
+        max_fan_out: Some(Budget::Absolute(2)),
         ..Constraints::default()
     });
     let nodes = [
@@ -519,7 +524,7 @@ fn fan_out_over_budget_is_reported_with_count() {
 #[test]
 fn coupling_counts_distinct_neighbouring_modules_not_symbols() {
     let compiled = constraints_only(Constraints {
-        max_fan_in: Some(1),
+        max_fan_in: Some(Budget::Absolute(1)),
         ..Constraints::default()
     });
     let nodes = [
@@ -562,8 +567,8 @@ fn coupling_counts_distinct_neighbouring_modules_not_symbols() {
 #[test]
 fn coupling_excludes_test_only_module_before_rollup() {
     let compiled = constraints_only(Constraints {
-        max_fan_in: Some(0),
-        max_fan_out: Some(0),
+        max_fan_in: Some(Budget::Absolute(0)),
+        max_fan_out: Some(Budget::Absolute(0)),
         ..Constraints::default()
     });
     let nodes = [
@@ -591,7 +596,7 @@ fn coupling_excludes_test_only_module_before_rollup() {
 #[test]
 fn coupling_excludes_contains_accesses_and_forbidden_dependency_edges() {
     let compiled = constraints_only(Constraints {
-        max_fan_in: Some(0),
+        max_fan_in: Some(Budget::Absolute(0)),
         ..Constraints::default()
     });
     let nodes = [node(1, "hub", Some("src/hub.rs")), node(2, "a", Some("src/a.rs"))];
@@ -646,7 +651,7 @@ fn module_node(id: i64, name: &str, file: Option<&str>) -> NodeRow {
 #[test]
 fn coupling_violation_on_real_module_ancestor_has_file() {
     let compiled = constraints_only(Constraints {
-        max_fan_in: Some(0),
+        max_fan_in: Some(Budget::Absolute(0)),
         ..Constraints::default()
     });
     let nodes = [
@@ -681,7 +686,7 @@ fn coupling_violation_on_real_module_ancestor_has_file() {
 #[test]
 fn coupling_violations_are_ordered_by_module_key_not_insertion_order() {
     let compiled = constraints_only(Constraints {
-        max_fan_in: Some(0),
+        max_fan_in: Some(Budget::Absolute(0)),
         ..Constraints::default()
     });
     let nodes = [
@@ -718,7 +723,7 @@ fn redundancy_budgets_count_dead_and_duplicates_project_wide() {
     // max_dead = 2 fires (3 > 2); max_duplicates = 2 does NOT (2 is not > 2).
     let compiled = constraints_only(Constraints {
         max_dead: Some(MaxDead::Absolute(2)),
-        max_duplicates: Some(2),
+        max_duplicates: Some(Budget::Absolute(2)),
         ..Constraints::default()
     });
     let (violations, checked) = run_eval_redundancy(&compiled, &metrics);
@@ -737,7 +742,7 @@ fn redundancy_budgets_count_dead_and_duplicates_project_wide() {
     // A clean project (ceilings above the counts) passes.
     let lenient = constraints_only(Constraints {
         max_dead: Some(MaxDead::Absolute(5)),
-        max_duplicates: Some(5),
+        max_duplicates: Some(Budget::Absolute(5)),
         ..Constraints::default()
     });
     let (clean, checked) = run_eval_redundancy(&lenient, &metrics);
@@ -766,7 +771,7 @@ fn redundancy_budgets_exclude_test_functions_from_both_counts() {
 
     let compiled = constraints_only(Constraints {
         max_dead: Some(MaxDead::Absolute(1)),
-        max_duplicates: Some(0),
+        max_duplicates: Some(Budget::Absolute(0)),
         ..Constraints::default()
     });
     let (violations, checked) = run_eval_redundancy_scoped(&compiled, &metrics, &test_ids);
@@ -919,6 +924,7 @@ fn layer_assignment_is_first_glob_wins() {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     let compiled = CompiledRules::compile(rules, "test".to_string()).unwrap();
     let (name, order) = compiled.layer_of("src/sub/deep.rs").expect("assigned");
@@ -1003,8 +1009,11 @@ fn metric_regressions_report_real_drops_and_ignore_noise() {
         modularity_applicable: Some(true),
         acyclicity_raw: 0.0,
         acyclicity_normalized: 1.0,
+        acyclicity_applicable: Some(true),
         depth_raw: 2.0,
         depth_normalized: 0.8,
+        depth_applicable: Some(true),
+        cross_module_edges: Some(9),
         equality_raw: 0.0,
         equality_normalized: 1.0,
         redundancy_raw: 0.0,
@@ -1046,6 +1055,87 @@ fn metric_regressions_report_real_drops_and_ignore_noise() {
     assert!(regressions[0].delta < 0.0, "delta is signed (negative)");
 }
 
+/// A series row whose three graph dimensions all apply, over nine cross-module
+/// edges, with Acyclicity 1.0 and Depth 0.8.
+fn applicable_row(id: i64) -> MetricSnapshotRow {
+    MetricSnapshotRow {
+        id,
+        created_at: 100 * id,
+        commit_sha: None,
+        node_count: 10,
+        edge_count: 10,
+        function_count: 5,
+        test_function_count: 0,
+        metric_version: crate::metrics::METRIC_SEMANTICS_VERSION,
+        empty: false,
+        modularity_raw: 0.4,
+        modularity_normalized: 0.6,
+        modularity_applicable: Some(true),
+        acyclicity_raw: 0.0,
+        acyclicity_normalized: 1.0,
+        acyclicity_applicable: Some(true),
+        depth_raw: 2.0,
+        depth_normalized: 0.8,
+        depth_applicable: Some(true),
+        cross_module_edges: Some(9),
+        equality_raw: 0.0,
+        equality_normalized: 1.0,
+        redundancy_raw: 0.0,
+        redundancy_normalized: 1.0,
+        thresholds_hash: None,
+        aggregate_signal: Some(8000),
+    }
+}
+
+/// The same row with the three graph dimensions dropped out on three
+/// cross-module edges ([FR-QM-18]).
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+fn thin_row(id: i64) -> MetricSnapshotRow {
+    MetricSnapshotRow {
+        modularity_applicable: Some(false),
+        acyclicity_applicable: Some(false),
+        depth_applicable: Some(false),
+        cross_module_edges: Some(3),
+        ..applicable_row(id)
+    }
+}
+
+/// A graph dimension's drop is a regression of the signal only where it
+/// applies on **both** sides ([FR-QM-18], [NFR-CC-04]): a repository growing
+/// past five cross-module edges (thin baseline, applicable now) or falling
+/// below them (applicable baseline, thin now) moves Acyclicity and Depth
+/// without either having been in both signals, so neither is named. The same
+/// drop with both sides applicable is.
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn a_graph_dimension_drop_is_a_regression_only_where_it_applies_on_both_sides() {
+    use crate::models::quality::{GraphDimensionNotApplicable, MetricValue};
+    let mv = |normalized: f64| MetricValue { raw: 0.0, normalized };
+    let dropped = |thin: bool| {
+        let na = thin.then(|| GraphDimensionNotApplicable::for_cross_module_edges(3).expect("3 < 5"));
+        MetricSnapshot {
+            modularity: mv(0.6),
+            modularity_not_applicable: na.clone(),
+            acyclicity: mv(0.5),
+            acyclicity_not_applicable: na.clone(),
+            depth: mv(0.4),
+            depth_not_applicable: na,
+            equality: mv(1.0),
+            redundancy: mv(1.0),
+            ..MetricSnapshot::default()
+        }
+    };
+    let named = |base: &MetricSnapshotRow, current: &MetricSnapshot| -> Vec<String> {
+        metric_regressions(base, current).into_iter().map(|r| r.metric).collect()
+    };
+    assert_eq!(named(&applicable_row(1), &dropped(false)), ["acyclicity", "depth"], "both sides apply");
+    assert!(named(&thin_row(1), &dropped(false)).is_empty(), "thin baseline, applicable now");
+    assert!(named(&applicable_row(1), &dropped(true)).is_empty(), "applicable baseline, thin now");
+}
+
 // Test marking is not derived here: the `[[require_tested]]` contract reads the
 // persisted `is_test` annotation column ([FR-AN-05], CR-001), the single
 // source of truth the annotation pass computes. The marking predicate
@@ -1073,8 +1163,11 @@ fn evolution_points_carry_signal_and_metric_deltas() {
         modularity_applicable: Some(true),
         acyclicity_raw: 0.0,
         acyclicity_normalized: 1.0,
+        acyclicity_applicable: Some(true),
         depth_raw: 2.0,
         depth_normalized: 0.8,
+        depth_applicable: Some(true),
+        cross_module_edges: Some(9),
         equality_raw: 0.0,
         equality_normalized: 1.0,
         redundancy_raw: 0.0,
@@ -1104,6 +1197,32 @@ fn evolution_points_carry_signal_and_metric_deltas() {
         "per-metric delta: {:?}",
         modularity.delta
     );
+}
+
+/// No evolution delta crosses a point where a graph dimension was outside the
+/// signal — in either direction ([FR-QM-18]): a thin predecessor and an
+/// applicable successor report Depth's value with no movement, while
+/// Equality, which always applies, still reports its delta.
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn no_evolution_delta_crosses_a_point_where_a_graph_dimension_dropped_out() {
+    let thin = thin_row(1);
+    let mut grown = applicable_row(2);
+    grown.depth_normalized = 0.6;
+    grown.equality_normalized = 0.9;
+
+    let point = evolution_point(&grown, Some(&thin));
+    for delta in &point.metric_deltas[..3] {
+        assert_eq!(delta.delta, None, "{}: thin at the previous point, so no movement", delta.metric);
+        assert_eq!(delta.not_applicable, None, "{} applies at this point", delta.metric);
+    }
+    assert_eq!(point.metric_deltas[2].normalized, 0.6, "the value is still reported");
+    let equality = &point.metric_deltas[3];
+    assert!((equality.delta.expect("Equality always applies") - (-0.1)).abs() < 1e-9);
+
+    let back = evolution_point(&thin_row(3), Some(&grown));
+    assert!(back.metric_deltas[..3].iter().all(|d| d.delta.is_none() && d.not_applicable.is_some()));
 }
 
 // ── FR-GV-07: dsm granularity parsing ───────────────────────────────────────
@@ -1299,6 +1418,7 @@ fn require_tested_rules() -> CompiledRules {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -1544,6 +1664,7 @@ fn require_tested_rules_from(entries: Vec<RequireTested>) -> CompiledRules {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -1665,6 +1786,7 @@ fn require_documented_rules_from(entries: Vec<RequireDocumented>) -> CompiledRul
         require_documented: entries,
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -2100,7 +2222,7 @@ fn effective_thresholds_falls_back_to_defaults_for_omitted_keys() {
 #[test]
 fn max_nesting_depth_budget_flags_deep_production_functions() {
     let compiled = constraints_only(Constraints {
-        max_nesting_depth: Some(4),
+        max_nesting_depth: Some(Budget::Absolute(4)),
         ..Constraints::default()
     });
     let nodes = [
@@ -2134,7 +2256,7 @@ fn max_nesting_depth_budget_flags_deep_production_functions() {
 fn max_brain_methods_budget_counts_production_brain_methods() {
     // Default brain thresholds: CC≥15 ∧ LOC≥100 ∧ nesting≥3.
     let strict = constraints_only(Constraints {
-        max_brain_methods: Some(0),
+        max_brain_methods: Some(Budget::Absolute(0)),
         ..Constraints::default()
     });
     let metrics = [
@@ -2158,7 +2280,7 @@ fn max_brain_methods_budget_counts_production_brain_methods() {
 
     // Relaxed budget: the same one brain method is under the ceiling.
     let lenient = constraints_only(Constraints {
-        max_brain_methods: Some(5),
+        max_brain_methods: Some(Budget::Absolute(5)),
         ..Constraints::default()
     });
     let (clean, _) = run_eval_budgets(&lenient, &[], &[], &metrics, &[], Default::default());
@@ -2168,7 +2290,7 @@ fn max_brain_methods_budget_counts_production_brain_methods() {
 #[test]
 fn max_clone_ratio_budget_flags_a_near_clone_ratio_over_the_budget() {
     let strict = constraints_only(Constraints {
-        max_clone_ratio: Some(0.0),
+        max_clone_ratio: Some(RatioBudget::Absolute(0.0)),
         ..Constraints::default()
     });
     // 2 production functions, 1 in a clone group → ratio 0.5 > 0.0.
@@ -2189,7 +2311,7 @@ fn max_clone_ratio_budget_flags_a_near_clone_ratio_over_the_budget() {
 
     // Relaxed budget admits the ratio.
     let lenient = constraints_only(Constraints {
-        max_clone_ratio: Some(1.0),
+        max_clone_ratio: Some(RatioBudget::Absolute(1.0)),
         ..Constraints::default()
     });
     let (clean, _) = run_eval_budgets(&lenient, &[], &[], &metrics, &[], Default::default());
@@ -2202,7 +2324,7 @@ fn max_clone_ratio_budget_flags_a_near_clone_ratio_over_the_budget() {
 #[test]
 fn no_god_containers_budget_flags_a_god_container() {
     let compiled = constraints_only(Constraints {
-        no_god_containers: Some(true),
+        no_god_containers: Some(GodContainersBudget::Flag(true)),
         ..Constraints::default()
     });
     // 20 methods ≥ default T_m (20) → god.
@@ -2251,7 +2373,7 @@ fn no_god_containers_budget_flags_a_god_container() {
 
     // `false` / omitted is not enforced.
     let off = constraints_only(Constraints {
-        no_god_containers: Some(false),
+        no_god_containers: Some(GodContainersBudget::Flag(false)),
         ..Constraints::default()
     });
     let (none, checked_off) = run_eval_budgets(&off, &nodes, &edges, &[], &[], Default::default());
@@ -2267,7 +2389,7 @@ fn no_god_containers_budget_flags_a_god_container() {
 #[test]
 fn no_god_containers_excludes_test_scoped_methods() {
     let compiled = constraints_only(Constraints {
-        no_god_containers: Some(true),
+        no_god_containers: Some(GodContainersBudget::Flag(true)),
         ..Constraints::default()
     });
     // Class 1 + 20 methods (2..21), every method in the is_test set.
@@ -2294,7 +2416,7 @@ fn no_god_containers_excludes_test_scoped_methods() {
 #[test]
 fn no_god_containers_counts_bodied_methods_only() {
     let compiled = constraints_only(Constraints {
-        no_god_containers: Some(true),
+        no_god_containers: Some(GodContainersBudget::Flag(true)),
         ..Constraints::default()
     });
     // Class 1 + 23 methods (2..24): 2..18 are the 17 declarations.
@@ -2341,9 +2463,9 @@ fn no_god_containers_counts_bodied_methods_only() {
 fn cr005_budgets_are_production_scoped() {
     // A deep + brain + cloned function that is is_test must not trip any budget.
     let compiled = constraints_only(Constraints {
-        max_nesting_depth: Some(4),
-        max_brain_methods: Some(0),
-        max_clone_ratio: Some(0.0),
+        max_nesting_depth: Some(Budget::Absolute(4)),
+        max_brain_methods: Some(Budget::Absolute(0)),
+        max_clone_ratio: Some(RatioBudget::Absolute(0.0)),
         ..Constraints::default()
     });
     let nodes = [node(1, "test_fn", Some("tests/a.rs"))];
@@ -2372,10 +2494,10 @@ fn cr005_budgets_are_production_scoped() {
 #[test]
 fn cr005_budgets_report_four_violations_then_relaxed_passes() {
     let strict = constraints_only(Constraints {
-        max_nesting_depth: Some(4),
-        max_brain_methods: Some(0),
-        max_clone_ratio: Some(0.0),
-        no_god_containers: Some(true),
+        max_nesting_depth: Some(Budget::Absolute(4)),
+        max_brain_methods: Some(Budget::Absolute(0)),
+        max_clone_ratio: Some(RatioBudget::Absolute(0.0)),
+        no_god_containers: Some(GodContainersBudget::Flag(true)),
         ..Constraints::default()
     });
 
@@ -2419,10 +2541,10 @@ fn cr005_budgets_report_four_violations_then_relaxed_passes() {
 
     // Relax all four → the same fixture passes.
     let relaxed = constraints_only(Constraints {
-        max_nesting_depth: Some(100),
-        max_brain_methods: Some(100),
-        max_clone_ratio: Some(1.0),
-        no_god_containers: Some(false),
+        max_nesting_depth: Some(Budget::Absolute(100)),
+        max_brain_methods: Some(Budget::Absolute(100)),
+        max_clone_ratio: Some(RatioBudget::Absolute(1.0)),
+        no_god_containers: Some(GodContainersBudget::Flag(false)),
         ..Constraints::default()
     });
     let (clean, _) = run_eval_budgets(&relaxed, &nodes, &edges, &metrics, &[], Default::default());
@@ -2445,10 +2567,10 @@ fn cr005_budgets_report_four_violations_then_relaxed_passes() {
 fn evaluate_concatenates_sections_in_canonical_order() {
     let rules = Rules {
         constraints: Constraints {
-            max_cycles: Some(0),
-            max_fan_out: Some(1),
+            max_cycles: Some(CountBudget::Absolute(0)),
+            max_fan_out: Some(Budget::Absolute(1)),
             max_dead: Some(MaxDead::Absolute(0)),
-            max_nesting_depth: Some(0),
+            max_nesting_depth: Some(Budget::Absolute(0)),
             ..Constraints::default()
         },
         metric_thresholds: Default::default(),
@@ -2480,6 +2602,7 @@ fn evaluate_concatenates_sections_in_canonical_order() {
         }],
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     };
     let compiled = CompiledRules::compile(rules, "test".to_string()).unwrap();
 
@@ -2664,6 +2787,26 @@ fn doctor_report_builder_leaves_the_hook_warnings_empty() {
     assert!(report.ok, "clean census is ok");
 }
 
+// ── FR-IN-12: the Claude Code plugin findings are a `doctor` surface ─────────
+
+#[test]
+fn doctor_report_builder_leaves_the_plugin_warnings_empty() {
+    // The hook-reachability twin's discipline: `verify` embeds this builder's
+    // output, and the plugin's registration is a property of the host settings,
+    // not of the graph `verify` re-derives. The end-to-end proof that `doctor`
+    // populates it — a duplicate and a skew named, the exit code unmoved — is
+    // `doctor_names_a_duplicate_registration_and_a_version_skew` in
+    // `cli/tests/cli_surface.rs`, which runs the real binary.
+    let structural = StructuralReport {
+        node_count: 2,
+        distinct_symbol_ids: 2,
+        ..StructuralReport::default()
+    };
+    let report = doctor_report(structural, AdmissionCensus::default());
+    assert!(report.plugin_warnings.is_empty(), "builder does not populate the warning");
+    assert!(report.ok, "clean census is ok");
+}
+
 // ── CR-098 / S-320 / FR-IX-13: the zero-admission diagnostic is diagnostic ────
 
 #[test]
@@ -2688,3 +2831,778 @@ fn doctor_report_builder_leaves_the_zero_admission_warning_absent() {
 // where it can actually fail — `the_diagnostic_never_moves_doctors_exit_code` in
 // `logos-core/tests/indexing.rs`, which runs the real `doctor()` at a real
 // parent-of-repos root and asserts the warning is present AND `ok` holds.
+
+// ── FR-GV-23 / S-507: ratchet constraints over a checked-in blessed set ──────
+
+/// A function row for the `max_cc` ratchet tables: node `id`, named `name`,
+/// at cyclomatic complexity `cc`.
+fn cc_fn(id: i64, name: &str, cc: i64) -> FunctionConstraintRow {
+    FunctionConstraintRow {
+        id: NodeId(id),
+        name: name.to_string(),
+        file_path: Some(format!("src/{name}.rs")),
+        start_line: Some(1),
+        cyclomatic_complexity: Some(cc),
+        line_count: Some(1),
+    }
+}
+
+/// `max_cc = { max = 15, ratchet = true }` — the AC's contract.
+fn ratchet_cc_rules() -> CompiledRules {
+    constraints_only(Constraints {
+        max_cc: Some(Budget::Ratchet(crate::config::RatchetBudget {
+            max: 15,
+            ratchet: true,
+        })),
+        ..Constraints::default()
+    })
+}
+
+/// The id-ordered node set F (#1) and G (#2), so each offender resolves to
+/// its symbol id (`local 1`, `local 2`).
+fn f_and_g_nodes() -> [NodeRow; 2] {
+    [node(1, "f", Some("src/f.rs")), node(2, "g", Some("src/g.rs"))]
+}
+
+/// Evaluate `functions` under `compiled`, then classify against `blessed`
+/// exactly as `check_rules` does.
+fn eval_cc_classified(
+    compiled: &CompiledRules,
+    functions: &[FunctionConstraintRow],
+    blessed: Option<&ratchet::BlessedSet>,
+) -> (Vec<Violation>, RatchetReport) {
+    let nodes = f_and_g_nodes();
+    let (violations, _) = run_eval(compiled, &nodes, &[], functions, 0);
+    let (classified, report) = ratchet::classify(
+        violations,
+        &compiled.rules.constraints.ratchet_rules(),
+        blessed,
+    );
+    (classified, report.expect("max_cc is under ratchet"))
+}
+
+/// The blessed set a `check --bless` over F at CC 22 records.
+fn f_blessed_at_22(compiled: &CompiledRules) -> ratchet::BlessedSet {
+    let nodes = f_and_g_nodes();
+    let (violations, _) = run_eval(compiled, &nodes, &[], &[cc_fn(1, "f", 22)], 0);
+    let set = ratchet::BlessedSet::from_violations(
+        &violations,
+        &compiled.rules.constraints.ratchet_rules(),
+    );
+    assert_eq!(set.len(), 1, "F is the one blessed offender");
+    set
+}
+
+/// AC row 1: F blessed at 22 and still at 22 is a `warning` — blessed debt —
+/// and nothing is an error, so `check` passes (exit 0).
+#[test]
+fn ratchet_max_cc_offender_at_its_blessed_value_is_a_warning() {
+    let compiled = ratchet_cc_rules();
+    let blessed = f_blessed_at_22(&compiled);
+    let (violations, report) =
+        eval_cc_classified(&compiled, &[cc_fn(1, "f", 22)], Some(&blessed));
+
+    assert_eq!(violations.len(), 1);
+    let f = &violations[0];
+    assert_eq!(f.severity, "warning", "{}", f.message);
+    let mark = f.ratchet.as_ref().expect("a ratchet offender carries its mark");
+    assert_eq!((mark.symbol.as_str(), mark.value), ("local 1", 22));
+    assert_eq!(mark.blessed, Some(22));
+    assert_eq!(mark.status, RatchetStatus::Blessed);
+    assert!(f.message.contains("blessed debt (blessed at 22)"), "{}", f.message);
+    assert!(
+        !violations.iter().any(|v| v.severity == SEVERITY_ERROR),
+        "no error severity → check passes (exit 0)"
+    );
+    assert_eq!((report.blessed, report.worsened, report.new), (1, 0, 0));
+    assert!(report.fixed.is_empty());
+}
+
+/// AC row 2: F blessed at 22, now at 23, is an `error` (worsened).
+#[test]
+fn ratchet_max_cc_offender_worse_than_blessed_is_an_error() {
+    let compiled = ratchet_cc_rules();
+    let blessed = f_blessed_at_22(&compiled);
+    let (violations, report) =
+        eval_cc_classified(&compiled, &[cc_fn(1, "f", 23)], Some(&blessed));
+
+    assert_eq!(violations.len(), 1);
+    let f = &violations[0];
+    assert_eq!(f.severity, "error", "{}", f.message);
+    let mark = f.ratchet.as_ref().expect("mark");
+    assert_eq!((mark.value, mark.blessed), (23, Some(22)));
+    assert_eq!(mark.status, RatchetStatus::Worsened);
+    assert!(f.message.contains("worse than its blessed 22"), "{}", f.message);
+    assert_eq!((report.blessed, report.worsened, report.new), (0, 1, 0));
+}
+
+/// AC row 3: a new function G at 16 — absent from the blessed set — is an
+/// `error`, while F at its blessed value stays a warning.
+#[test]
+fn ratchet_max_cc_new_offender_is_an_error() {
+    let compiled = ratchet_cc_rules();
+    let blessed = f_blessed_at_22(&compiled);
+    let (violations, report) = eval_cc_classified(
+        &compiled,
+        &[cc_fn(1, "f", 22), cc_fn(2, "g", 16)],
+        Some(&blessed),
+    );
+
+    let severities: Vec<(&str, &str)> = violations
+        .iter()
+        .map(|v| (v.ratchet.as_ref().unwrap().symbol.as_str(), v.severity.as_str()))
+        .collect();
+    assert_eq!(severities, [("local 1", "warning"), ("local 2", "error")]);
+    let g = &violations[1];
+    assert_eq!(g.ratchet.as_ref().unwrap().status, RatchetStatus::New);
+    assert_eq!(g.ratchet.as_ref().unwrap().blessed, None);
+    assert!(
+        g.message.contains("new: not in .logos/rules-baseline.json"),
+        "{}",
+        g.message
+    );
+    assert_eq!((report.blessed, report.worsened, report.new), (1, 0, 1));
+}
+
+/// AC row 4: F reduced to 14 no longer violates `max = 15` and is reported
+/// fixed, with the value it was blessed at — so the set can be tightened.
+#[test]
+fn ratchet_max_cc_offender_reduced_under_max_is_reported_fixed() {
+    let compiled = ratchet_cc_rules();
+    let blessed = f_blessed_at_22(&compiled);
+    let (violations, report) =
+        eval_cc_classified(&compiled, &[cc_fn(1, "f", 14)], Some(&blessed));
+
+    assert!(violations.is_empty(), "14 is within max_cc = 15: {violations:?}");
+    assert_eq!(
+        report.fixed,
+        [RatchetFixed {
+            rule: "max_cc".to_string(),
+            symbol: "local 1".to_string(),
+            blessed: 22,
+        }]
+    );
+}
+
+/// No blessed file: every ratchet offender is an `error`, and its message
+/// names the bless command.
+#[test]
+fn ratchet_with_no_blessed_file_makes_every_offender_an_error_naming_bless() {
+    let compiled = ratchet_cc_rules();
+    let (violations, report) =
+        eval_cc_classified(&compiled, &[cc_fn(1, "f", 22), cc_fn(2, "g", 16)], None);
+
+    assert_eq!(violations.len(), 2);
+    for v in &violations {
+        assert_eq!(v.severity, "error", "{}", v.message);
+        assert!(v.message.contains(ratchet::BLESS_COMMAND), "{}", v.message);
+    }
+    assert!(!report.blessed_file_present);
+    assert_eq!(report.bless_command, "logos check --bless");
+    assert_eq!(report.new, 2);
+}
+
+/// Re-running the classification over the same inputs is byte-identical
+/// ([NFR-RA-06]), serialised form included.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[test]
+fn ratchet_classification_is_byte_identical_on_rerun() {
+    let compiled = ratchet_cc_rules();
+    let blessed = f_blessed_at_22(&compiled);
+    let functions = [cc_fn(1, "f", 23), cc_fn(2, "g", 16)];
+    let first = eval_cc_classified(&compiled, &functions, Some(&blessed));
+    let second = eval_cc_classified(&compiled, &functions, Some(&blessed));
+    assert_eq!(
+        serde_json::to_string(&first.0).unwrap(),
+        serde_json::to_string(&second.0).unwrap()
+    );
+    assert_eq!(first.1, second.1);
+}
+
+/// A scalar budget emits no ratchet mark, so its serialised violation has no
+/// `ratchet` key — every non-ratchet report stays byte-identical to before.
+#[test]
+fn a_scalar_budget_violation_serialises_without_a_ratchet_key() {
+    let compiled = constraints_only(Constraints {
+        max_cc: Some(Budget::Absolute(15)),
+        ..Constraints::default()
+    });
+    let nodes = f_and_g_nodes();
+    let (violations, _) = run_eval(&compiled, &nodes, &[], &[cc_fn(1, "f", 22)], 0);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].ratchet.is_none());
+    let json = serde_json::to_string(&violations[0]).unwrap();
+    assert!(!json.contains("ratchet"), "{json}");
+    assert_eq!(
+        violations[0].message,
+        "fn `f` has cyclomatic complexity 22 > max_cc = 15",
+        "the scalar message is the pre-ratchet one verbatim"
+    );
+}
+
+/// The symbol-set budgets name their members under ratchet: one row per
+/// dead (or duplicated) production function, each with its symbol and value 1.
+fn eval_set_classified(
+    compiled: &CompiledRules,
+    metrics: &[FunctionMetricRow],
+    blessed: Option<&ratchet::BlessedSet>,
+) -> (Vec<Violation>, RatchetReport) {
+    let nodes = f_and_g_nodes();
+    let (violations, _) = evaluate(&EvalInput {
+        compiled,
+        nodes: &nodes,
+        edges: &[],
+        functions: &[],
+        function_metrics: metrics,
+        annotations: &[],
+        test_node_ids: &[],
+        cycles: 0,
+        thresholds: crate::metrics::Thresholds::default(),
+    });
+    let (classified, report) = ratchet::classify(
+        violations,
+        &compiled.rules.constraints.ratchet_rules(),
+        blessed,
+    );
+    (classified, report.expect("a set budget is under ratchet"))
+}
+
+/// The AC's classification for a symbol set — blessed member → warning, new
+/// member → error, blessed member gone → fixed — asserted for one budget.
+/// `flag(id, on)` builds a metric row carrying the budget's verdict.
+fn assert_symbol_set_ratchet(
+    rule: &str,
+    compiled: &CompiledRules,
+    flag: fn(i64, bool) -> FunctionMetricRow,
+) {
+    // Bless the state where only F (#1) is a member.
+    let (blessing, _) = eval_set_classified(compiled, &[flag(1, true), flag(2, false)], None);
+    let blessed = ratchet::BlessedSet::from_violations(
+        &blessing,
+        &compiled.rules.constraints.ratchet_rules(),
+    );
+    assert_eq!(blessed.len(), 1, "{rule}: F is the one blessed member");
+
+    // F still a member → warning; check passes.
+    let (held, report) =
+        eval_set_classified(compiled, &[flag(1, true), flag(2, false)], Some(&blessed));
+    assert_eq!(held.len(), 1, "{rule}");
+    assert_eq!(held[0].rule, rule);
+    assert_eq!(held[0].severity, "warning", "{rule}: {}", held[0].message);
+    assert_eq!(held[0].node_id, Some(1), "{rule}: the member is named");
+    assert_eq!(held[0].ratchet.as_ref().unwrap().value, 1);
+    assert_eq!(report.blessed, 1);
+
+    // G joins the set → G is an error, F stays a warning.
+    let (grown, report) =
+        eval_set_classified(compiled, &[flag(1, true), flag(2, true)], Some(&blessed));
+    let verdicts: Vec<(Option<i64>, &str)> =
+        grown.iter().map(|v| (v.node_id, v.severity.as_str())).collect();
+    assert_eq!(verdicts, [(Some(1), "warning"), (Some(2), "error")], "{rule}");
+    assert_eq!(report.new, 1, "{rule}");
+
+    // F leaves the set → nothing violates, F is reported fixed.
+    let (fixed, report) =
+        eval_set_classified(compiled, &[flag(1, false), flag(2, false)], Some(&blessed));
+    assert!(fixed.is_empty(), "{rule}: {fixed:?}");
+    assert_eq!(
+        report.fixed,
+        [RatchetFixed {
+            rule: rule.to_string(),
+            symbol: "local 1".to_string(),
+            blessed: 1,
+        }],
+        "{rule}"
+    );
+}
+
+/// `max_dead = { max = 0, ratchet = true }` classifies the dead set member by
+/// member, exactly as the AC table does for `max_cc`.
+#[test]
+fn ratchet_max_dead_classifies_the_dead_set_per_symbol() {
+    let compiled = constraints_only(Constraints {
+        max_dead: Some(MaxDead::Ratchet(crate::config::RatchetBudget {
+            max: 0,
+            ratchet: true,
+        })),
+        ..Constraints::default()
+    });
+    assert_symbol_set_ratchet("max_dead", &compiled, |id, dead| metric_row(id, dead, false));
+}
+
+/// `max_duplicates = { max = 0, ratchet = true }` likewise.
+#[test]
+fn ratchet_max_duplicates_classifies_the_duplicate_set_per_symbol() {
+    let compiled = constraints_only(Constraints {
+        max_duplicates: Some(Budget::Ratchet(crate::config::RatchetBudget {
+            max: 0,
+            ratchet: true,
+        })),
+        ..Constraints::default()
+    });
+    assert_symbol_set_ratchet("max_duplicates", &compiled, |id, dup| {
+        metric_row(id, false, dup)
+    });
+}
+
+/// `max_cycles = { baseline = 2, delta = 0 }` passes at 2 cycles and fails at
+/// 3 — `max_dead`'s count-delta form generalised ([FR-GV-23]).
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+#[test]
+fn max_cycles_count_delta_form_passes_at_baseline_and_fails_above() {
+    let compiled = constraints_only(Constraints {
+        max_cycles: Some(CountBudget::Baseline(crate::config::CountBaseline {
+            baseline: 2,
+            delta: 0,
+        })),
+        ..Constraints::default()
+    });
+    let (held, checked) = run_eval(&compiled, &[], &[], &[], 2);
+    assert!(held.is_empty(), "2 cycles hold the blessed baseline 2: {held:?}");
+    assert_eq!(checked, 1);
+
+    let (caught, _) = run_eval(&compiled, &[], &[], &[], 3);
+    assert_eq!(caught.len(), 1);
+    assert_eq!(caught[0].rule, "max_cycles");
+    assert_eq!(caught[0].severity, "error");
+    assert_eq!(
+        caught[0].message,
+        "3 dependency cycles exceed the blessed max_cycles baseline 2 (+0 delta, ceiling 2)"
+    );
+
+    // The scalar form keeps its pre-ratchet message verbatim.
+    let scalar = constraints_only(Constraints {
+        max_cycles: Some(CountBudget::Absolute(2)),
+        ..Constraints::default()
+    });
+    let (caught, _) = run_eval(&scalar, &[], &[], &[], 3);
+    assert_eq!(caught[0].message, "3 dependency cycles exceed max_cycles = 2");
+}
+
+/// `max_clone_ratio = { baseline = 0.25, delta = 0 }` holds at the blessed
+/// ratio and fails above it.
+#[test]
+fn max_clone_ratio_count_delta_form_passes_at_baseline_and_fails_above() {
+    let compiled = constraints_only(Constraints {
+        max_clone_ratio: Some(RatioBudget::Baseline(crate::config::RatioBaseline {
+            baseline: 0.25,
+            delta: 0.0,
+        })),
+        ..Constraints::default()
+    });
+    let cloned = |id: i64, group: Option<i64>| FunctionMetricRow {
+        clone_group: group.map(NodeId),
+        ..metric_row(id, false, false)
+    };
+    let run = |metrics: &[FunctionMetricRow]| {
+        evaluate(&EvalInput {
+            compiled: &compiled,
+            nodes: &[],
+            edges: &[],
+            functions: &[],
+            function_metrics: metrics,
+            annotations: &[],
+            test_node_ids: &[],
+            cycles: 0,
+            thresholds: crate::metrics::Thresholds::default(),
+        })
+        .0
+    };
+    // 1 of 4 cloned = 0.25: at the baseline.
+    let held = run(&[cloned(1, Some(9)), cloned(2, None), cloned(3, None), cloned(4, None)]);
+    assert!(held.is_empty(), "{held:?}");
+    // 2 of 4 cloned = 0.5: above it.
+    let caught = run(&[cloned(1, Some(9)), cloned(2, Some(9)), cloned(3, None), cloned(4, None)]);
+    assert_eq!(caught.len(), 1);
+    assert!(
+        caught[0]
+            .message
+            .contains("exceed the blessed max_clone_ratio baseline 0.25 (+0 delta, ceiling 0.25)"),
+        "{}",
+        caught[0].message
+    );
+}
+
+/// Every per-symbol budget marks its offenders under ratchet with the
+/// identity the blessed set keys on: the symbol id for functions and
+/// containers, the path for `no_god_files`, the module key for coupling.
+#[test]
+fn every_per_symbol_ratchet_budget_marks_its_offenders() {
+    let on = |max| {
+        Some(Budget::Ratchet(crate::config::RatchetBudget {
+            max,
+            ratchet: true,
+        }))
+    };
+    let compiled = constraints_only(Constraints {
+        max_fn_lines: on(5),
+        no_god_files: on(0),
+        max_fan_in: on(0),
+        max_nesting_depth: on(1),
+        ..Constraints::default()
+    });
+    let nodes = [node(1, "f", Some("src/f.rs")), node(2, "g", Some("src/g.rs"))];
+    let functions = [FunctionConstraintRow {
+        line_count: Some(9),
+        ..cc_fn(1, "f", 1)
+    }];
+    let metrics = [FunctionMetricRow {
+        max_nesting_depth: Some(3),
+        ..metric_row(1, false, false)
+    }];
+    let (violations, _) = evaluate(&EvalInput {
+        compiled: &compiled,
+        nodes: &nodes,
+        edges: &[edge(2, 1)],
+        functions: &functions,
+        function_metrics: &metrics,
+        annotations: &[],
+        test_node_ids: &[],
+        cycles: 0,
+        thresholds: crate::metrics::Thresholds::default(),
+    });
+    let marks: Vec<(&str, &str, u64)> = violations
+        .iter()
+        .map(|v| {
+            let m = v.ratchet.as_ref().unwrap_or_else(|| panic!("{} unmarked", v.rule));
+            (v.rule.as_str(), m.symbol.as_str(), m.value)
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("max_fn_lines", "local 1", 9),
+            ("no_god_files", "src/f.rs", 1),
+            ("no_god_files", "src/g.rs", 1),
+            ("max_fan_in", "file:src/f.rs", 1),
+            ("max_nesting_depth", "local 1", 3),
+        ]
+    );
+}
+
+/// The ratchet identity drops the repository coordinate: the same declaration
+/// under two coordinates (a fork, a renamed repository) keys the same blessed
+/// entry, and the near miss — another declaration — does not.
+#[test]
+fn ratchet_identity_is_the_symbol_without_its_repository_coordinate() {
+    let global = |id: i64, raw: &str| NodeRow {
+        symbol: LogosSymbol::parse(raw).expect("test symbol"),
+        ..node(id, "f", Some("src/f.rs"))
+    };
+    let upstream = global(1, "logos . github.com/acme/app . src/`f.rs`/f().");
+    let fork = global(1, "logos . github.com/someone/app . src/`f.rs`/f().");
+    let other = global(1, "logos . github.com/acme/app . src/`f.rs`/g().");
+    let key = |n: &NodeRow| symbol_of(&HashMap::from([(n.id, n)]), n.id);
+
+    assert_eq!(key(&upstream), "src/`f.rs`/f().");
+    assert_eq!(key(&upstream), key(&fork), "a fork's checkout matches the blessed entry");
+    assert_ne!(key(&upstream), key(&other));
+}
+
+/// `max_brain_methods = { max = 0, ratchet = true }` classifies the brain-method
+/// set member by member, as `max_dead` and `max_duplicates` do.
+#[test]
+fn ratchet_max_brain_methods_classifies_the_brain_method_set_per_symbol() {
+    let compiled = constraints_only(Constraints {
+        max_brain_methods: Some(Budget::Ratchet(crate::config::RatchetBudget {
+            max: 0,
+            ratchet: true,
+        })),
+        ..Constraints::default()
+    });
+    // At the documented default brain floors (CC 15, 100 lines, nesting 3).
+    assert_symbol_set_ratchet("max_brain_methods", &compiled, |id, brain| FunctionMetricRow {
+        cyclomatic_complexity: Some(if brain { 15 } else { 2 }),
+        line_count: Some(100),
+        max_nesting_depth: Some(3),
+        ..metric_row(id, false, false)
+    });
+}
+
+/// `no_god_containers = { ratchet = true }` marks each god container with its
+/// symbol and member-method count, so a container that gains methods is worse
+/// than its blessed value.
+#[test]
+fn ratchet_no_god_containers_marks_each_container_by_method_count() {
+    let compiled = constraints_only(Constraints {
+        no_god_containers: Some(GodContainersBudget::Ratchet(crate::config::RatchetFlag {
+            ratchet: true,
+        })),
+        ..Constraints::default()
+    });
+    let rules = compiled.rules.constraints.ratchet_rules();
+    let run = |methods| {
+        let (nodes, edges) = god_container_fixture(1, methods);
+        run_eval_budgets(&compiled, &nodes, &edges, &[], &[], Default::default()).0
+    };
+
+    let blessing = run(20);
+    let mark = blessing[0].ratchet.as_ref().expect("a ratchet god container is marked");
+    assert_eq!((mark.symbol.as_str(), mark.value), ("local 1", 20));
+    let blessed = ratchet::BlessedSet::from_violations(&blessing, &rules);
+
+    let (held, _) = ratchet::classify(run(20), &rules, Some(&blessed));
+    assert_eq!(held[0].severity, "warning", "{}", held[0].message);
+    let (grown, _) = ratchet::classify(run(21), &rules, Some(&blessed));
+    assert_eq!(grown[0].severity, "error", "{}", grown[0].message);
+    assert_eq!(grown[0].ratchet.as_ref().unwrap().status, RatchetStatus::Worsened);
+}
+
+/// `max_fan_out` under ratchet marks the offending module by its module key,
+/// the twin of the `max_fan_in` mark.
+#[test]
+fn ratchet_max_fan_out_marks_the_module() {
+    let compiled = constraints_only(Constraints {
+        max_fan_out: Some(Budget::Ratchet(crate::config::RatchetBudget {
+            max: 0,
+            ratchet: true,
+        })),
+        ..Constraints::default()
+    });
+    let nodes = f_and_g_nodes();
+    let (violations, _) = run_eval(&compiled, &nodes, &[edge(1, 2)], &[], 0);
+    let marks: Vec<(&str, &str, u64)> = violations
+        .iter()
+        .map(|v| {
+            let m = v.ratchet.as_ref().expect("marked");
+            (v.rule.as_str(), m.symbol.as_str(), m.value)
+        })
+        .collect();
+    assert_eq!(marks, [("max_fan_out", "file:src/f.rs", 1)]);
+}
+
+// ── FR-SC-10 (S-668): the `[security]` gate, as a pure function ────────────
+
+mod security_gate {
+    use std::collections::BTreeSet;
+
+    use super::security::{
+        baseline_fingerprints, check_security, missing_scans, ScanFreshness, ScannerFreshness, SecuritySummary, SummaryFinding,
+        RULE_MAX_SEVERITY, RULE_RATCHET,
+    };
+    use crate::config::SecurityRules;
+    use crate::model::Severity;
+
+    fn finding(fingerprint: &str, rule_id: &str, severity: Severity, owasp: &[&str]) -> SummaryFinding {
+        SummaryFinding {
+            scanner: "Semgrep OSS".to_string(),
+            fingerprint: fingerprint.to_string(),
+            rule_id: rule_id.to_string(),
+            severity,
+            path: Some("app/db.py".to_string()),
+            line: Some(18),
+            owasp: owasp.iter().map(|c| (*c).to_string()).collect(),
+            suppressed: false,
+        }
+    }
+
+    fn row(scanner: &str, driver: &str, state: ScanFreshness, stored: bool) -> ScannerFreshness {
+        ScannerFreshness { scanner: scanner.to_string(), driver: driver.to_string(), state, stored }
+    }
+
+    /// A summary whose findings all come from a fresh Semgrep scan.
+    fn summary(findings: Vec<SummaryFinding>, baseline: Option<&[&str]>) -> SecuritySummary {
+        SecuritySummary {
+            scanners: vec![row("semgrep", "Semgrep OSS", ScanFreshness::Fresh, true)],
+            findings,
+            baseline: baseline.map(|b| b.iter().map(|f| (*f).to_string()).collect::<BTreeSet<_>>()),
+        }
+    }
+
+    fn rules_of(verdict: &super::security::SecurityVerdict) -> Vec<&str> {
+        verdict.violations.iter().map(|v| v.rule.as_str()).collect()
+    }
+
+    /// The ratchet fails on a new finding at or above its severity and names
+    /// it; a recorded one, a suppressed one and one below the severity pass.
+    #[test]
+    fn the_ratchet_fails_only_on_a_new_unsuppressed_finding_at_or_above_its_severity() {
+        let table = SecurityRules::default();
+        let mut suppressed = finding("c", "rule.suppressed", Severity::Critical, &[]);
+        suppressed.suppressed = true;
+        let findings = vec![
+            finding("a", "rule.recorded", Severity::High, &[]),
+            finding("b", "rule.new", Severity::High, &[]),
+            suppressed,
+            finding("d", "rule.medium", Severity::Medium, &[]),
+        ];
+        let verdict = check_security(&table, &summary(findings, Some(&["a"])));
+        assert_eq!(rules_of(&verdict), [RULE_RATCHET]);
+        let v = &verdict.violations[0];
+        assert!(v.message.contains("`rule.new`") && v.message.contains("app/db.py:18"), "{}", v.message);
+        assert!(v.message.contains("fingerprint b"), "the ignore-file key is printed: {}", v.message);
+        assert_eq!((v.severity.as_str(), v.file.as_str(), v.rule_type.as_str()), ("error", "app/db.py", "constraint"));
+        assert_eq!(verdict.checked, 1, "the ratchet alone");
+        assert!(verdict.notes.is_empty(), "{:?}", verdict.notes);
+
+        // A lower threshold reaches the medium finding; a higher one drops the high.
+        let medium = SecurityRules { ratchet_min_severity: Severity::Medium, ..SecurityRules::default() };
+        let findings = vec![finding("d", "rule.medium", Severity::Medium, &[])];
+        assert_eq!(rules_of(&check_security(&medium, &summary(findings.clone(), Some(&[])))), [RULE_RATCHET]);
+        assert!(check_security(&table, &summary(findings, Some(&[]))).violations.is_empty());
+        let critical = SecurityRules { ratchet_min_severity: Severity::Critical, ..SecurityRules::default() };
+        let high = vec![finding("b", "rule.new", Severity::High, &[])];
+        assert!(check_security(&critical, &summary(high, Some(&[]))).violations.is_empty());
+    }
+
+    /// With no recorded baseline every finding at or above the ratchet is new,
+    /// and the message and a note name the command that records one. An empty
+    /// recorded set is a different state: it carries no note.
+    #[test]
+    fn with_no_recorded_baseline_every_finding_is_new_and_the_save_command_is_named() {
+        let table = SecurityRules::default();
+        let verdict = check_security(&table, &summary(vec![finding("a", "rule.x", Severity::High, &[])], None));
+        assert_eq!(rules_of(&verdict), [RULE_RATCHET]);
+        assert!(verdict.violations[0].message.contains("logos gate --save"), "{}", verdict.violations[0].message);
+        assert!(verdict.notes.iter().any(|n| n.contains("no security baseline")), "{:?}", verdict.notes);
+
+        let recorded_empty = check_security(&table, &summary(Vec::new(), Some(&[])));
+        assert!(recorded_empty.violations.is_empty() && recorded_empty.notes.is_empty());
+    }
+
+    /// The caps ignore the baseline: `max_severity = "critical"` fails on a
+    /// recorded critical finding ([FR-SC-10] acceptance 4), not on a high one,
+    /// and `fail_on_owasp` fails on a recorded finding in a named category —
+    /// in either edition — but not one in a neighbouring category.
+    #[test]
+    fn the_caps_fail_whether_or_not_the_finding_was_recorded() {
+        let table = SecurityRules {
+            max_severity: Some(Severity::Critical),
+            fail_on_owasp: vec!["A05".to_string(), "A03:2021".to_string()],
+            ..SecurityRules::default()
+        };
+        let findings = vec![
+            finding("a", "rule.critical", Severity::Critical, &["A06:2025"]),
+            finding("b", "rule.high", Severity::High, &["A04:2025"]),
+            finding("c", "rule.injection", Severity::Low, &["A05:2025", "A03:2021"]),
+        ];
+        let verdict = check_security(&table, &summary(findings, Some(&["a", "b", "c"])));
+        assert_eq!(
+            rules_of(&verdict),
+            [RULE_MAX_SEVERITY, "security:fail_on_owasp:A05:2025", "security:fail_on_owasp:A03:2021"]
+        );
+        assert!(verdict.violations[0].message.contains("`rule.critical`"));
+        assert!(verdict.violations[1].message.contains("`rule.injection`"));
+        assert_eq!(verdict.checked, 4, "the ratchet, the severity cap and two categories");
+    }
+
+    fn required(names: &[&str]) -> SecurityRules {
+        SecurityRules { required_scanners: names.iter().map(|n| (*n).to_string()).collect(), ..SecurityRules::default() }
+    }
+
+    /// Every state a required scanner can be in ([FR-SC-10], [ADR-79] §7):
+    /// fresh is not missing; stale, never run, not installed, disabled and an
+    /// unknown name each are, under their own state and remedy. A registry or a
+    /// driver name matches in either case, a stored report of an unregistered
+    /// tool counts, and a scanner named twice is one row.
+    #[test]
+    fn a_required_scanner_is_missing_in_every_state_but_fresh() {
+        let summary = SecuritySummary {
+            scanners: vec![
+                row("semgrep", "Semgrep OSS", ScanFreshness::Fresh, true),
+                row("gitleaks", "gitleaks", ScanFreshness::Stale("HEAD moved since 0123456789ab".into()), true),
+                row("bandit", "Bandit", ScanFreshness::NeverRun, false),
+                row("trivy", "Trivy", ScanFreshness::NotInstalled, false),
+                row("gosec", "gosec", ScanFreshness::Disabled, true),
+                row("Snyk", "Snyk", ScanFreshness::Fresh, true),
+            ],
+            ..SecuritySummary::default()
+        };
+        let table = required(&[
+            "SEMGREP", "Semgrep OSS", "snyk", "gitleaks", "Bandit", "trivy", "gosec", "nosuch", " GITLEAKS ",
+        ]);
+        let missing = missing_scans(&table, &summary);
+        let rows: Vec<(&str, &str)> = missing.iter().map(|m| (m.scanner.as_str(), m.state)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("gitleaks", "stale"),
+                ("Bandit", "never_run"),
+                ("trivy", "not_installed"),
+                ("gosec", "disabled"),
+                ("nosuch", "unknown"),
+            ]
+        );
+        let message = |i: usize| missing[i].message.as_str();
+        assert!(message(0).contains("HEAD moved since 0123456789ab") && message(0).contains("logos security scan"));
+        assert!(message(1).contains("never run") && message(1).contains("logos security ingest"));
+        assert!(message(2).contains("install it") && !message(2).contains("security scan"), "{}", message(2));
+        assert!(message(3).contains("disabled in .logos/config.toml"));
+        assert!(message(4).contains("check its spelling"));
+        assert!(missing.iter().all(|m| m.message.starts_with(&format!("required scanner {} ", m.scanner))));
+
+        // The verdict carries the same rows: exit 5 is decided from them.
+        assert_eq!(check_security(&table, &summary).missing, missing);
+        assert!(missing_scans(&required(&[]), &summary).is_empty(), "a table that requires nothing never exits 5");
+    }
+
+    /// Only fresh scans are evaluated ([NFR-RA-05]): a stale scan's new high
+    /// finding fails nothing, and the note names exactly the stored scans that
+    /// are not fresh and not required — never a fresh one, never a required one
+    /// (that is exit 5 already), never one with nothing stored.
+    #[test]
+    fn a_stale_scan_is_not_evaluated_and_is_named_in_a_note() {
+        let mut stale = finding("s", "rule.stale", Severity::Critical, &["A05:2025"]);
+        stale.scanner = "Bandit".to_string();
+        let mut required_stale = finding("r", "rule.required", Severity::Critical, &[]);
+        required_stale.scanner = "gitleaks".to_string();
+        let mixed = SecuritySummary {
+            scanners: vec![
+                row("semgrep", "Semgrep OSS", ScanFreshness::Fresh, true),
+                row("bandit", "Bandit", ScanFreshness::Stale("a file it scanned changed".into()), true),
+                row("gitleaks", "gitleaks", ScanFreshness::Stale("HEAD moved".into()), true),
+                row("gosec", "gosec", ScanFreshness::Disabled, true),
+                row("trivy", "Trivy", ScanFreshness::NeverRun, false),
+            ],
+            findings: vec![stale, required_stale, finding("f", "rule.fresh", Severity::Low, &[])],
+            baseline: Some(BTreeSet::new()),
+        };
+        let table = SecurityRules {
+            max_severity: Some(Severity::High),
+            fail_on_owasp: vec!["A05".to_string()],
+            ..required(&["gitleaks"])
+        };
+        let verdict = check_security(&table, &mixed);
+        assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+        let notes = verdict.notes.join("\n");
+        assert!(notes.contains("not evaluated") && notes.contains("Bandit, gosec"), "{notes}");
+        assert!(!notes.contains("Semgrep") && !notes.contains("gitleaks") && !notes.contains("Trivy"), "{notes}");
+
+        let all_fresh = summary(vec![finding("f", "rule.fresh", Severity::Low, &[])], Some(&[]));
+        assert!(!check_security(&table, &all_fresh).notes.iter().any(|n| n.contains("not evaluated")));
+    }
+
+    /// `gate --save` records every unsuppressed stored finding at any severity —
+    /// a stale scan's too, so refreshing it reads nothing as new — and never a
+    /// suppressed one, so an expired suppression returns it to the ratchet
+    /// ([FR-SC-11]).
+    #[test]
+    fn the_baseline_records_every_unsuppressed_stored_finding() {
+        let mut suppressed = finding("s", "rule.suppressed", Severity::Critical, &[]);
+        suppressed.suppressed = true;
+        let mut stale = finding("t", "rule.stale", Severity::High, &[]);
+        stale.scanner = "Bandit".to_string();
+        let summary = SecuritySummary {
+            scanners: vec![
+                row("semgrep", "Semgrep OSS", ScanFreshness::Fresh, true),
+                row("bandit", "Bandit", ScanFreshness::Stale("HEAD moved".into()), true),
+            ],
+            findings: vec![finding("f", "rule.fresh", Severity::Info, &[]), suppressed, stale],
+            baseline: None,
+        };
+        assert_eq!(
+            baseline_fingerprints(&summary),
+            [("Semgrep OSS".to_string(), "f".to_string()), ("Bandit".to_string(), "t".to_string())]
+        );
+    }
+
+    /// [FR-SC-10] acceptance / [ADR-79] §8: the security gate is not a metric
+    /// dimension, so it moves no metric semantics and resets no baseline. The
+    /// version is v8 since S-523's graph-dimension applicability, not since it.
+    #[test]
+    fn the_security_gate_leaves_the_metric_semantics_version_unchanged() {
+        assert_eq!(crate::metrics::METRIC_SEMANTICS_VERSION, 8);
+    }
+}

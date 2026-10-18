@@ -1,0 +1,40 @@
+#!/bin/sh
+# logos:quality-report:managed — Claude Code SessionStart quality-report hook (FR-IN-07, ADR-49, CR-095).
+#
+# Launches the readout; it does not compute or format it. `logos
+# quality-report --hook-json` emits the whole payload as one JSON object on
+# stdout — systemMessage for the user, hookSpecificOutput.additionalContext for
+# the agent, hookEventName fixed to SessionStart — built with serde_json in the
+# binary. Nothing is parsed or escaped here, deliberately: a malformed payload
+# makes the host discard the readout entirely, and shell is the wrong tool for
+# JSON.
+#
+# Report-only: this script always exits 0, so a session is never blocked. The
+# command writes nothing — no metric snapshot, no graph write lock — so firing
+# at every session start, resume and /clear leaves the evolution series
+# untouched.
+#
+#   off-switch: export LOGOS_QUALITY_REPORT_DISABLE=1
+#
+# Regenerate with `logos hook --emit --force` (or re-run `logos init -i`).
+
+# Off-switch: disable the report without uninstalling the hook.
+[ "${LOGOS_QUALITY_REPORT_DISABLE:-0}" = "1" ] && exit 0
+
+# Best-effort: a missing binary is nothing to report.
+command -v logos >/dev/null 2>&1 || exit 0
+
+# Report on the project the host named; its own cwd is not dependable.
+cd "${CLAUDE_PROJECT_DIR:-$(pwd)}" 2>/dev/null || exit 0
+
+# Deliberately NOT `exec`: the hook script and the binary on PATH can be
+# different vintages (a script emitted by a new `logos hook --emit` while
+# an older release is still PATH-promoted, which is the normal state mid-
+# upgrade). An older binary does not know this subcommand and would exit 2 with
+# a clap usage error on stderr — which the host surfaces to the user as a failed
+# hook, turning a missing readout into a visible defect. Swallowing it keeps the
+# report tier's contract: it reports when it can and is silent when it cannot,
+# but it is never itself the problem.
+logos --json quality-report --hook-json 2>/dev/null || exit 0
+
+exit 0

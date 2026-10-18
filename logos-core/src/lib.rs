@@ -93,6 +93,10 @@ pub mod hydrate;
 /// `CLAUDE.md` usage steer, and the optional `core.hooksPath` git-hook
 /// installer. Idempotent, non-clobbering, managed blocks (DL-07).
 pub mod init;
+/// Detached jobs (S-673, ADR-80 §6): a long, child-process-backed analysis
+/// run off the request path, single-flight per kind and member, with replayed
+/// progress events and a cancel that kills every child's process group.
+pub mod jobs;
 /// The quality metrics engine (S-018): the five orthogonal metrics
 /// (modularity, acyclicity, depth, equality, redundancy) over the hydrated
 /// dependency view, combined by canonical-order geometric mean into the
@@ -148,6 +152,11 @@ pub mod runtime;
 /// through fixed argv templates no repository can change (FR-SC-05, NFR-SE-08).
 pub mod security;
 pub mod sqlite;
+/// The tool installer (S-743, ADR-88): the user-level tools directory, the
+/// compiled-in manifest of pinned, checksummed scanner binaries, and installs
+/// that verify the SHA-256 before anything is unpacked and move each tool into
+/// place atomically (FR-SC-21, NFR-SE-10).
+pub mod tools;
 /// The debounced filesystem watcher (S-022): `notify` + `notify-debouncer-full`
 /// hosted under `serve --mcp`, coalescing edit storms into one batched
 /// incremental sync per debounce window with drop-and-coalesce backpressure

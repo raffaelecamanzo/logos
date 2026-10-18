@@ -337,6 +337,7 @@ fn layered_rules() -> Rules {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     }
 }
 
@@ -357,6 +358,7 @@ fn forbidden_import_rules() -> Rules {
         require_documented: Vec::new(),
         history: Default::default(),
         coverage: Default::default(),
+        security: None,
     }
 }
 

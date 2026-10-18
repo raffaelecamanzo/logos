@@ -26,6 +26,13 @@ export const filesAbsence = {
 } as const;
 
 /**
+ * The line under the risk table when it carries the Findings column (FR-SC-14):
+ * what the count is, and how a stale finding reads.
+ */
+export const filesFindingsNote =
+  "Findings column: unsuppressed security findings in the file as last scanned, with the highest severity. A stale label counts findings in a file that changed since the scan; they are not in the count.";
+
+/**
  * A catalogue's own nothing-ranked absence — this one's or Coverage's — closed
  * with the command that ranks the files (CR-206). One spelling for both views
  * that rank files; a trailing full stop is folded into the joint so the sentence

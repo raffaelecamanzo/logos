@@ -22,7 +22,7 @@ Commands:
   implements           Code that implements a documentation node or requirement (FR-NV-10): the code symbols a doc node points at over doc→code edges
   referencing-docs     Documentation sections that reference a symbol (FR-NV-10): the docs a change to the symbol may oblige updating
   scan                 Full architecture-quality scan (reconcile-then-score)
-  check                Architecture-rules compliance check; error violations exit 1, no rules contract loaded exits 4 (FR-GV-22)
+  check                Architecture-rules compliance check; error violations exit 1, a missing required scan 5 (over 1), no rules contract loaded 4 (FR-GV-22)
   quality-report       Non-blocking quality readout for the report tier (FR-IN-07, CR-095): the freshly computed signal, the blessed baseline and their delta, plus the last recorded `check` findings — computed **without writing**, so it never appends to the evolution series or takes the graph write lock. Always exits 0; it reports, it never gates
   gate                 CI gate: regression vs the saved baseline (or under --threshold) exits 1
   health               ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift (FR-GV-18/FR-GV-20) and graph counts; an unhealthy graph exits 1. For INDEX freshness use `status`
@@ -33,6 +33,9 @@ Commands:
   evolution            Signal evolution over stored snapshots
   dsm                  Dependency structure matrix (module rollup by default)
   doc-gaps             Undocumented exported functions (static doc-gap analysis, FR-GV-14)
+  offenders            Every offender the last snapshot recorded, uncapped (FR-QM-19): each with its symbol id, value and threshold, narrowed by path and dimension. Reads the last `scan`; writes nothing
+  review               The branch delta (FR-GV-24): every offender and `check` violation classified new, worsened, improved, resolved or unchanged per symbol against the merge-base of HEAD and the base ref, with near-clone groups the branch introduced. Advisory: exits 0 when it classified, 1 when it could not measure; never moves `check` or `gate`
+  improvements         Where to start (FR-QM-17): the ranked fix units the last snapshot recorded, each with its estimated recoverable signal points, and the per-member outlier labels. Advisory, never gated. Reads the last `scan`; writes nothing
   hotspots             Hotspot ranking: files high in both churn and structural complexity (the non-gated temporal tier — never moves the gate, FR-GH-06/BR-26)
   coverage             Coverage evidence tier: ingest external reports and read freshness-checked status (the non-gated coverage tier — never moves the gate, BR-28)
   security             Security evidence tier: run the installed scanners, ingest SARIF, read per-scanner status and the classified findings (FR-SC-06..08)

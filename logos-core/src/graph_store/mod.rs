@@ -54,7 +54,9 @@ use serde::Serialize;
 
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm};
 use crate::models::navigation::LanguageCount;
-use crate::models::quality::{Offender, WorstOffenders};
+use crate::models::quality::{
+    FixUnit, FixUnitKind, Offender, OutlierLabel, OutlierMeasure, WhereToStart, WorstOffenders,
+};
 
 /// The `project_metadata` key under which the admission-config fingerprint is
 /// stored (CR-004, [ADR-20], [FR-SY-07]).
@@ -253,6 +255,24 @@ pub struct NodeRow {
     pub start_line: Option<i64>,
     /// 1-based end line of the declaration, when recorded.
     pub end_line: Option<i64>,
+}
+
+impl NodeRow {
+    /// The node's identity across re-indexing and checkouts ([FR-GV-23]): its
+    /// symbol id **without the repository coordinate** — the descriptor tail
+    /// ([ADR-85]). The storage id changes on every re-index, and the coordinate
+    /// with a fork, a renamed repository or a remote-less clone, so neither can
+    /// key a value compared across two measurements. A local symbol (no
+    /// coordinate slot) keeps its whole string. The one spelling a ratchet
+    /// blessed entry ([FR-GV-23]) and an offender ([FR-QM-19]) are keyed by.
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    /// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        self.symbol.descriptor_tail().unwrap_or(self.symbol.as_str())
+    }
 }
 
 /// An edge read back from the `edges` table, mapped to model types.
@@ -846,13 +866,15 @@ pub struct MetricSnapshotRow {
     ///
     /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
     pub modularity_normalized: f64,
-    /// `Some(false)` when Modularity was not applicable ([CR-156]: fewer than
-    /// five edges), `Some(true)` when it applied, `None` on a row persisted
-    /// before migration 23 (read as applicable). The gate's regression detail
+    /// `Some(false)` when Modularity was not applicable ([CR-156], [FR-QM-18]:
+    /// fewer than five edges on a v6/v7 row, five cross-module edges since
+    /// metric-semantics v8), `Some(true)` when it applied, `None` on a row
+    /// persisted before migration 23 (read as applicable). The gate's regression detail
     /// and the evolution series read it so a dimension outside the signal is
     /// never reported as a movement of the signal.
     ///
     /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     pub modularity_applicable: Option<bool>,
     /// Cycle count — multi-node SCCs (`len > 1`) only; self-recursion
     /// excluded ([FR-QM-02], metric-semantics v4).
@@ -861,12 +883,29 @@ pub struct MetricSnapshotRow {
     pub acyclicity_raw: f64,
     /// Normalized acyclicity `1/(1+cycles)`.
     pub acyclicity_normalized: f64,
+    /// `Some(false)` when Acyclicity was not applicable ([FR-QM-18]: fewer than
+    /// five cross-module edges, metric-semantics v8), `Some(true)` when it
+    /// applied, `None` on a row persisted before migration 38 (read as
+    /// applicable). Read like [`modularity_applicable`](Self::modularity_applicable).
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub acyclicity_applicable: Option<bool>,
     /// Longest path (vertex count) over the condensation ([FR-QM-03]).
     ///
     /// [FR-QM-03]: ../../../docs/specs/requirements/FR-QM-03.md
     pub depth_raw: f64,
     /// Normalized depth `1/(1+depth/8)`.
     pub depth_normalized: f64,
+    /// `Some(false)` when Depth was not applicable ([FR-QM-18]) — the condition
+    /// [`acyclicity_applicable`](Self::acyclicity_applicable) records; `None`
+    /// on a row persisted before migration 38 (read as applicable).
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub depth_applicable: Option<bool>,
+    /// The production metric graph's cross-module edges — the count the three
+    /// graph-dimension flags were decided on ([FR-QM-18]); `None` on a row
+    /// persisted before migration 38.
+    pub cross_module_edges: Option<i64>,
     /// Gini coefficient of per-function cyclomatic complexity ([FR-QM-04]).
     ///
     /// [FR-QM-04]: ../../../docs/specs/requirements/FR-QM-04.md
@@ -898,9 +937,10 @@ pub struct MetricSnapshotRow {
 }
 
 /// The most-recent persisted `metric_snapshots` row with the **full** CR-005
-/// dimension set — every persisted dimension (all ten) plus the three
-/// applicability flags: Cohesion's and Focus's ([FR-QM-09]..[FR-QM-14]) and
-/// Modularity's (migration 23, CR-156).
+/// dimension set — every persisted dimension (all ten) plus the five
+/// applicability flags: Cohesion's and Focus's ([FR-QM-09]..[FR-QM-14]),
+/// Modularity's (migration 23, CR-156), and Acyclicity's and Depth's with the
+/// cross-module edge count they were decided on (migration 38, FR-QM-18).
 ///
 /// Unlike [`MetricSnapshotRow`] — which deliberately surfaces only the original
 /// five for the gate/evolution series — this read model carries the structural
@@ -936,17 +976,30 @@ pub struct LatestMetricSnapshot {
     pub aggregate_signal: Option<i64>,
     pub modularity_raw: f64,
     pub modularity_normalized: f64,
-    /// `Some(false)` when Modularity was not applicable ([CR-156]: fewer than
-    /// five edges) — its value columns are still populated; `Some(true)` when it
+    /// `Some(false)` when Modularity was not applicable ([CR-156], [FR-QM-18]:
+    /// fewer than five edges on a v6/v7 row, five cross-module edges since
+    /// metric-semantics v8) — its value columns are still populated; `Some(true)` when it
     /// applied; `None` on a row persisted before migration 23, which the read
     /// path takes as applicable.
     ///
     /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     pub modularity_applicable: Option<bool>,
     pub acyclicity_raw: f64,
     pub acyclicity_normalized: f64,
+    /// `Some(false)` when Acyclicity was not applicable ([FR-QM-18]); `None`
+    /// before migration 38, read as applicable.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub acyclicity_applicable: Option<bool>,
     pub depth_raw: f64,
     pub depth_normalized: f64,
+    /// `Some(false)` when Depth was not applicable ([FR-QM-18]); `None` before
+    /// migration 38, read as applicable.
+    pub depth_applicable: Option<bool>,
+    /// The cross-module edge count the three graph-dimension flags were decided
+    /// on ([FR-QM-18]); `None` before migration 38.
+    pub cross_module_edges: Option<i64>,
     pub equality_raw: f64,
     pub equality_normalized: f64,
     pub redundancy_raw: f64,
@@ -968,10 +1021,18 @@ pub struct LatestMetricSnapshot {
     pub uniqueness_normalized: Option<f64>,
     /// The worst-offender lists persisted **with this snapshot** ([FR-QM-15]),
     /// read by its id. `recorded` is `false` — every list empty — on a snapshot
-    /// written before migration 26, which recorded none.
+    /// written before migration 26, which recorded none; `values_recorded` is
+    /// `false` on one written before migration 37 ([FR-QM-19]).
     ///
     /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
     pub worst_offenders: WorstOffenders,
+    /// The "where to start" ranking and outlier labels persisted **with this
+    /// snapshot** ([FR-QM-17]), read by its id. `recorded` is `false` — both
+    /// lists empty — on a snapshot written before migration 36.
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    pub where_to_start: WhereToStart,
 }
 
 /// The fields needed to insert a `metric_snapshots` row (S-018, [FR-QM-07]).
@@ -1012,21 +1073,36 @@ pub struct NewMetricSnapshot<'a> {
     pub modularity_raw: f64,
     /// Normalized modularity.
     pub modularity_normalized: f64,
-    /// `Some(false)` when Modularity was not applicable ([CR-156]: fewer than
-    /// [`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES) edges) —
+    /// `Some(false)` when Modularity was not applicable ([CR-156], [FR-QM-18]:
+    /// fewer than [`MIN_CROSS_MODULE_EDGES`](crate::metrics::MIN_CROSS_MODULE_EDGES)
+    /// cross-module edges since metric-semantics v8) —
     /// the raw/normalized pair above is persisted either way; `Some(true)` when
     /// it applied. `None` persists `NULL`, the pre-migration-23 reading.
     ///
     /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     pub modularity_applicable: Option<bool>,
     /// Raw cycle count.
     pub acyclicity_raw: f64,
     /// Normalized acyclicity.
     pub acyclicity_normalized: f64,
+    /// `Some(false)` when Acyclicity was not applicable ([FR-QM-18]: fewer than
+    /// [`MIN_CROSS_MODULE_EDGES`](crate::metrics::MIN_CROSS_MODULE_EDGES)
+    /// cross-module edges) — the pair above is persisted either way. `None`
+    /// persists `NULL`, the pre-migration-38 reading.
+    ///
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    pub acyclicity_applicable: Option<bool>,
     /// Raw condensed longest-path depth.
     pub depth_raw: f64,
     /// Normalized depth.
     pub depth_normalized: f64,
+    /// `Some(false)` when Depth was not applicable ([FR-QM-18]), as for
+    /// [`acyclicity_applicable`](Self::acyclicity_applicable).
+    pub depth_applicable: Option<bool>,
+    /// The cross-module edge count the three graph-dimension flags were decided
+    /// on ([FR-QM-18]); `None` persists `NULL`.
+    pub cross_module_edges: Option<i64>,
     /// Raw Gini coefficient.
     pub equality_raw: f64,
     /// Normalized equality.
@@ -1955,6 +2031,19 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn language_composition(&self) -> Result<Vec<LanguageCount>>;
 
+    /// The **production callables** per language — non-derived, non-test
+    /// `Function`/`Method` nodes, keyed by their file's `files.language` —
+    /// in language order ([NFR-RA-06]). The share each language holds of the
+    /// production code is read from this, the population Equality and
+    /// Redundancy count ([FR-QM-08]); the coverage warning reads it to decide
+    /// which languages are large enough to name ([FR-QM-18]). A callable with
+    /// no file, or a file with no language, belongs to no row.
+    ///
+    /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+    /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn production_callables_by_language(&self) -> Result<Vec<(String, u64)>>;
+
     /// Per-language resolution counts for the `Calls` and `Imports` classes
     /// ([FR-RS-09], [S-441]): one entry per language tagged on an indexed file,
     /// ordered by language name ascending ([NFR-RA-06]).
@@ -2345,6 +2434,18 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn function_metrics(&self) -> Result<Vec<FunctionMetricRow>>;
 
+    /// The **exact-duplicate groups** ([FR-AN-02]): the non-derived
+    /// functions/methods the last annotation run marked `is_duplicate`, grouped
+    /// by the shared AST-shape fingerprint that made them duplicates. Each group
+    /// is id-ascending and the groups are ordered by their lowest id
+    /// ([NFR-RA-06]); test-scope members are included — the reader scopes them.
+    /// The unit the "where to start" ranking ranks for Redundancy ([FR-QM-17]).
+    ///
+    /// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn duplicate_groups(&self) -> Result<Vec<Vec<NodeId>>>;
+
     /// Stream every persisted metric snapshot, ordered by `id` (S-018).
     ///
     /// The append-only series behind [FR-QM-07] verification and the
@@ -2375,6 +2476,27 @@ pub trait GraphStore {
     /// [CR-018]: ../../../docs/requests/CR-018-web-dashboard-write-on-read.md
     /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     fn latest_metric_snapshot(&self) -> Result<Option<LatestMetricSnapshot>>;
+
+    /// The **uncapped** offender lists of the most-recent snapshot
+    /// ([FR-QM-19]), or `None` when no snapshot has ever been recorded. A pure
+    /// read, one statement pair under the row's own id. On a snapshot written
+    /// before migration 37 the lists are empty and
+    /// [`values_recorded`](WorstOffenders::values_recorded) is `false`: that
+    /// snapshot never persisted them, and `[]` must not read as clean.
+    ///
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    fn latest_uncapped_offenders(&self) -> Result<Option<WorstOffenders>>;
+
+    /// The **uncapped** offender lists of the snapshot persisted under
+    /// `snapshot_id` ([FR-QM-19]), or `None` when no such row exists — the
+    /// by-id twin of [`latest_uncapped_offenders`](Self::latest_uncapped_offenders),
+    /// with the same "not recorded" reading of a pre-migration-37 row. The
+    /// branch review reads the merge-base commit's own snapshot through it
+    /// ([ADR-82], S-677).
+    ///
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    /// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
+    fn uncapped_offenders_of(&self, snapshot_id: i64) -> Result<Option<WorstOffenders>>;
 
     /// The singleton `rules_cache` row, or `None` when no `rules.toml` parse
     /// has been cached yet (S-020, [FR-GV-01]).
@@ -3150,6 +3272,25 @@ impl GraphStore for SqliteGraphStore {
                 .then_with(|| a.language.cmp(&b.language))
         });
         Ok(composition)
+    }
+
+    fn production_callables_by_language(&self) -> Result<Vec<(String, u64)>> {
+        // Sorted in Rust, not by SQLite's collation, so the order is identical
+        // on every platform ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.language, COUNT(*) FROM nodes n JOIN files f ON f.id = n.file_id \
+             WHERE n.kind IN (?1, ?2) AND n.derived = 0 AND n.is_test = 0 \
+               AND f.language IS NOT NULL \
+             GROUP BY f.language",
+        )?;
+        let mut rows = stmt
+            .query_map([NodeKind::Function.as_i32(), NodeKind::Method.as_i32()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading production callables per language")?;
+        rows.sort();
+        Ok(rows)
     }
 
     fn resolution_by_language(&self) -> Result<Vec<LanguageRefCounts>> {
@@ -4081,6 +4222,37 @@ impl GraphStore for SqliteGraphStore {
         Ok(rows)
     }
 
+    fn duplicate_groups(&self) -> Result<Vec<Vec<NodeId>>> {
+        // Grouped by fingerprint — the very key the annotation pass grouped the
+        // eligible callables by (annotate::duplicate_set) — so a group here is
+        // exactly the set of members that made each other duplicates.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT fingerprint, id FROM nodes \
+             WHERE kind IN (?1, ?2) AND derived = 0 AND is_duplicate = 1 \
+                   AND fingerprint IS NOT NULL \
+             ORDER BY fingerprint, id",
+        )?;
+        let rows = stmt
+            .query_map(
+                [NodeKind::Function.as_i32(), NodeKind::Method.as_i32()],
+                |row| Ok((row.get::<_, String>(0)?, NodeId(row.get(1)?))),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the exact-duplicate groups")?;
+        let mut groups: Vec<Vec<NodeId>> = Vec::new();
+        let mut last: Option<String> = None;
+        for (fingerprint, id) in rows {
+            if last.as_deref() == Some(fingerprint.as_str()) {
+                groups.last_mut().expect("a group was opened").push(id);
+            } else {
+                groups.push(vec![id]);
+                last = Some(fingerprint);
+            }
+        }
+        groups.sort_by_key(|g| g[0]);
+        Ok(groups)
+    }
+
     fn metric_snapshots(&self) -> Result<Vec<MetricSnapshotRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, created_at, commit_sha, node_count, edge_count, function_count, \
@@ -4090,7 +4262,8 @@ impl GraphStore for SqliteGraphStore {
                     depth_raw, depth_normalized, \
                     equality_raw, equality_normalized, \
                     redundancy_raw, redundancy_normalized, \
-                    thresholds_hash, aggregate_signal, modularity_applicable \
+                    thresholds_hash, aggregate_signal, modularity_applicable, \
+                    acyclicity_applicable, depth_applicable, cross_module_edges \
              FROM metric_snapshots ORDER BY id",
         )?;
         let rows = stmt
@@ -4118,6 +4291,9 @@ impl GraphStore for SqliteGraphStore {
                     thresholds_hash: row.get(19)?,
                     aggregate_signal: row.get(20)?,
                     modularity_applicable: row.get::<_, Option<i64>>(21)?.map(|n| n != 0),
+                    acyclicity_applicable: row.get::<_, Option<i64>>(22)?.map(|n| n != 0),
+                    depth_applicable: row.get::<_, Option<i64>>(23)?.map(|n| n != 0),
+                    cross_module_edges: row.get(24)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -4134,7 +4310,8 @@ impl GraphStore for SqliteGraphStore {
                     m.depth_raw, m.depth_normalized, \
                     m.equality_raw, m.equality_normalized, \
                     m.redundancy_raw, m.redundancy_normalized, \
-                    m.thresholds_hash, m.aggregate_signal, m.modularity_applicable \
+                    m.thresholds_hash, m.aggregate_signal, m.modularity_applicable, \
+                    m.acyclicity_applicable, m.depth_applicable, m.cross_module_edges \
              FROM baseline b \
              JOIN metric_snapshots m ON m.id = b.snapshot_id \
              WHERE b.scope = ?1",
@@ -4163,6 +4340,9 @@ impl GraphStore for SqliteGraphStore {
                 thresholds_hash: row.get(19)?,
                 aggregate_signal: row.get(20)?,
                 modularity_applicable: row.get::<_, Option<i64>>(21)?.map(|n| n != 0),
+                acyclicity_applicable: row.get::<_, Option<i64>>(22)?.map(|n| n != 0),
+                depth_applicable: row.get::<_, Option<i64>>(23)?.map(|n| n != 0),
+                cross_module_edges: row.get(24)?,
             })
         })
         .optional()
@@ -4183,7 +4363,8 @@ impl GraphStore for SqliteGraphStore {
                     cohesion_raw, cohesion_normalized, cohesion_applicable, \
                     focus_raw, focus_normalized, focus_applicable, \
                     uniqueness_raw, uniqueness_normalized, modularity_applicable, \
-                    id, offenders_recorded \
+                    id, offenders_recorded, insight_recorded, offender_values_recorded, \
+                    acyclicity_applicable, depth_applicable, cross_module_edges \
              FROM metric_snapshots ORDER BY id DESC LIMIT 1",
         )?;
         let latest = stmt.query_row([], |row| {
@@ -4193,6 +4374,9 @@ impl GraphStore for SqliteGraphStore {
             };
             let id: i64 = row.get(30)?;
             let recorded = row.get::<_, Option<i64>>(31)?.is_some();
+            let insight_recorded = row.get::<_, Option<i64>>(32)?.is_some();
+            // Only a recorded snapshot can vouch for its entries' values.
+            let values_recorded = recorded && row.get::<_, Option<i64>>(33)?.is_some();
             let snapshot = LatestMetricSnapshot {
                 node_count: row.get(0)?,
                 edge_count: row.get(1)?,
@@ -4205,8 +4389,11 @@ impl GraphStore for SqliteGraphStore {
                 modularity_normalized: row.get(8)?,
                 acyclicity_raw: row.get(9)?,
                 acyclicity_normalized: row.get(10)?,
+                acyclicity_applicable: opt_bool(34)?,
                 depth_raw: row.get(11)?,
                 depth_normalized: row.get(12)?,
+                depth_applicable: opt_bool(35)?,
+                cross_module_edges: row.get(36)?,
                 equality_raw: row.get(13)?,
                 equality_normalized: row.get(14)?,
                 redundancy_raw: row.get(15)?,
@@ -4226,12 +4413,14 @@ impl GraphStore for SqliteGraphStore {
                 modularity_applicable: opt_bool(29)?,
                 worst_offenders: WorstOffenders {
                     recorded,
+                    values_recorded,
                     ..WorstOffenders::default()
                 },
+                where_to_start: WhereToStart::default(),
             };
-            Ok((id, snapshot))
+            Ok((id, insight_recorded, snapshot))
         });
-        let Some((id, mut snapshot)) = latest
+        let Some((id, insight_recorded, mut snapshot)) = latest
             .optional()
             .context("querying the latest metric snapshot")?
         else {
@@ -4243,9 +4432,19 @@ impl GraphStore for SqliteGraphStore {
         // own lists even when a `scan` commits a newer snapshot in between —
         // the single-read property the Health bundle relies on (CR-135 §3.2).
         if snapshot.worst_offenders.recorded {
-            read_snapshot_offenders(&self.conn, id, &mut snapshot.worst_offenders)?;
+            read_snapshot_offenders(&self.conn, CAPPED_OFFENDERS, id, &mut snapshot.worst_offenders)?;
         }
+        // The ranking likewise, by the same id (FR-QM-17).
+        snapshot.where_to_start = read_where_to_start(&self.conn, id, insight_recorded)?;
         Ok(Some(snapshot))
+    }
+
+    fn latest_uncapped_offenders(&self) -> Result<Option<WorstOffenders>> {
+        read_uncapped_offenders(&self.conn, "ORDER BY id DESC LIMIT 1", [])
+    }
+
+    fn uncapped_offenders_of(&self, snapshot_id: i64) -> Result<Option<WorstOffenders>> {
+        read_uncapped_offenders(&self.conn, "WHERE id = ?1", [snapshot_id])
     }
 
     fn rules_cache(&self) -> Result<Option<RulesCacheRow>> {
@@ -4461,24 +4660,94 @@ impl SqliteGraphStore {
     }
 }
 
-/// Fill `into` with the offender rows persisted under `snapshot_id`
+/// Map a persisted vocabulary name back to its `'static` spelling, or `None`
+/// for a name outside `vocabulary` — the one rule every snapshot read-model
+/// reader applies to a column that carries no `CHECK` list: skip, never invent.
+fn pinned(vocabulary: &[&'static str], name: &str) -> Option<&'static str> {
+    vocabulary.iter().copied().find(|v| *v == name)
+}
+
+/// The capped display offender rows ([FR-QM-15]).
+const CAPPED_OFFENDERS: &str = "metric_snapshot_offenders";
+
+/// The uncapped offender rows ([FR-QM-19], migration 37).
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+const UNCAPPED_OFFENDERS: &str = "metric_snapshot_offenders_uncapped";
+
+/// The **uncapped** offender lists ([FR-QM-19]) of the one `metric_snapshots`
+/// row `selector` picks (`ORDER BY id DESC LIMIT 1`, or `WHERE id = ?1`), or
+/// `None` when it picks none. The one body behind
+/// [`GraphStore::latest_uncapped_offenders`] and
+/// [`GraphStore::uncapped_offenders_of`]: the row's flags are read first and
+/// the lists by the id they were read under, so the pair never mixes two
+/// snapshots. Before migration 37 there is no uncapped list to read, and the
+/// lists stay empty under `values_recorded: false`.
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+fn read_uncapped_offenders(
+    conn: &Connection,
+    selector: &'static str,
+    params: impl rusqlite::Params,
+) -> Result<Option<WorstOffenders>> {
+    let picked = conn
+        .prepare_cached(&format!(
+            "SELECT id, offenders_recorded, offender_values_recorded \
+             FROM metric_snapshots {selector}"
+        ))?
+        .query_row(params, |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?.is_some(),
+                row.get::<_, Option<i64>>(2)?.is_some(),
+            ))
+        })
+        .optional()
+        .context("querying a metric snapshot's offender flags")?;
+    let Some((id, recorded, values_flag)) = picked else {
+        return Ok(None);
+    };
+    let values_recorded = recorded && values_flag;
+    let mut offenders = WorstOffenders {
+        recorded,
+        values_recorded,
+        ..WorstOffenders::default()
+    };
+    if values_recorded {
+        read_snapshot_offenders(conn, UNCAPPED_OFFENDERS, id, &mut offenders)?;
+    }
+    Ok(Some(offenders))
+}
+
+/// Fill `into` with the offender rows persisted under `snapshot_id` in `table`
 /// ([FR-QM-15]), each list in rank order — the order it was computed in. A row
 /// whose dimension is outside
 /// [`WorstOffenders::DIMENSIONS`] is skipped: migration 26 leaves the column
-/// open for further lists ([CR-164]), and none of them belongs to these nine.
+/// open for further lists, and none of them would belong to these nine. (None
+/// has used it yet: [CR-164]'s ranking has its own migration-36 tables.)
+///
+/// `table` is [`CAPPED_OFFENDERS`] or [`UNCAPPED_OFFENDERS`] — the same row
+/// shape since migration 37 ([FR-QM-19]). The `node_id`, `measure`, `value`
+/// and `threshold` columns read `NULL` on a pre-migration row, so its entries
+/// carry `None` for all four; the snapshot's `values_recorded` flag says that
+/// means "not recorded". A `measure` outside [`Offender::MEASURES`] reads as
+/// `None`, never invented.
 ///
 /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 /// [CR-164]: ../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md
 fn read_snapshot_offenders(
     conn: &Connection,
+    table: &'static str,
     snapshot_id: i64,
     into: &mut WorstOffenders,
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT dimension, name, file, line, detail FROM metric_snapshot_offenders \
-         WHERE snapshot_id = ?1 ORDER BY dimension, rank",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT dimension, name, file, line, detail, node_id, measure, value, threshold \
+         FROM {table} WHERE snapshot_id = ?1 ORDER BY dimension, rank"
+    ))?;
     let rows = stmt.query_map([snapshot_id], |row| {
+        let measure = row.get::<_, Option<String>>(6)?;
         Ok((
             row.get::<_, String>(0)?,
             Offender {
@@ -4486,6 +4755,10 @@ fn read_snapshot_offenders(
                 file: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 line: row.get(3)?,
                 detail: row.get(4)?,
+                node_id: row.get(5)?,
+                measure: measure.and_then(|m| pinned(&Offender::MEASURES, &m)),
+                value: row.get(7)?,
+                threshold: row.get(8)?,
             },
         ))
     })?;
@@ -4495,6 +4768,140 @@ fn read_snapshot_offenders(
             list.push(offender);
         }
     }
+    Ok(())
+}
+
+/// The "where to start" set of the snapshot persisted under `snapshot_id`
+/// ([FR-QM-17]): its rows ([`read_snapshot_insight`]) when the snapshot's
+/// `insight_recorded` marker is set, otherwise the **not recorded** default
+/// ([NFR-CC-04]) — a snapshot written before migration 36.
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn read_where_to_start(
+    conn: &Connection,
+    snapshot_id: i64,
+    recorded: bool,
+) -> Result<WhereToStart> {
+    if !recorded {
+        return Ok(WhereToStart::default());
+    }
+    let mut where_to_start = WhereToStart::recorded();
+    read_snapshot_insight(conn, snapshot_id, &mut where_to_start)?;
+    Ok(where_to_start)
+}
+
+/// Fill `into` with the "where to start" rows persisted under `snapshot_id`
+/// ([FR-QM-17]): the fix units in rank order, then each outlier measure in
+/// [`OutlierMeasure::MEASURES`] order with its labels in rank order — exactly
+/// as computed. A row naming a kind, dimension or measure outside the pinned
+/// vocabulary is skipped rather than invented, as [`read_snapshot_offenders`]
+/// does: the columns carry no `CHECK` list (migration 36), and a later list
+/// that reuses them does not belong to this read-model.
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+fn read_snapshot_insight(conn: &Connection, snapshot_id: i64, into: &mut WhereToStart) -> Result<()> {
+    // A comma-joined list column back to its names; `None` if any is unknown.
+    fn pinned_list(vocabulary: &[&'static str], joined: &str) -> Option<Vec<&'static str>> {
+        if joined.is_empty() {
+            return Some(Vec::new());
+        }
+        joined.split(',').map(|n| pinned(vocabulary, n)).collect()
+    }
+
+    let mut stmt = conn.prepare_cached(
+        "SELECT kind, node_id, name, file, line, dimensions, points, detail, outliers \
+         FROM metric_snapshot_fix_units WHERE snapshot_id = ?1 ORDER BY rank",
+    )?;
+    let rows = stmt.query_map([snapshot_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+        ))
+    })?;
+    for row in rows {
+        let (kind, node_id, name, file, line, dimensions, points, detail, outliers) =
+            row.context("reading a snapshot fix-unit row")?;
+        let (Some(kind), Some(dimensions), Some(outliers)) = (
+            FixUnitKind::parse(&kind),
+            pinned_list(&FixUnit::DIMENSIONS, &dimensions),
+            pinned_list(&OutlierMeasure::MEASURES, &outliers),
+        ) else {
+            continue;
+        };
+        into.units.push(FixUnit {
+            kind,
+            node_id,
+            name,
+            file: file.unwrap_or_default(),
+            line,
+            dimensions,
+            points,
+            detail,
+            outliers,
+        });
+    }
+
+    let mut measures = conn.prepare_cached(
+        "SELECT measure, units, fence, threshold, labelled FROM metric_snapshot_outlier_measures \
+         WHERE snapshot_id = ?1",
+    )?;
+    let mut read: Vec<OutlierMeasure> = measures
+        .query_map([snapshot_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the snapshot outlier measures")?
+        .into_iter()
+        .filter_map(|(measure, units, fence, threshold, labelled)| {
+            Some(OutlierMeasure {
+                measure: pinned(&OutlierMeasure::MEASURES, &measure)?,
+                units: units as u64,
+                fence,
+                threshold,
+                labelled: labelled as u64,
+                labels: Vec::new(),
+            })
+        })
+        .collect();
+    read.sort_by_key(|m| OutlierMeasure::MEASURES.iter().position(|v| *v == m.measure));
+
+    let mut labels = conn.prepare_cached(
+        "SELECT measure, node_id, name, file, line, value FROM metric_snapshot_outlier_labels \
+         WHERE snapshot_id = ?1 ORDER BY measure, rank",
+    )?;
+    let rows = labels.query_map([snapshot_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            OutlierLabel {
+                node_id: row.get(1)?,
+                name: row.get(2)?,
+                file: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                line: row.get(4)?,
+                value: row.get(5)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (measure, label) = row.context("reading a snapshot outlier label row")?;
+        if let Some(m) = read.iter_mut().find(|m| m.measure == measure) {
+            m.labels.push(label);
+        }
+    }
+    into.outliers = read;
     Ok(())
 }
 
@@ -5656,10 +6063,22 @@ impl BatchWriter<'_> {
     /// stamped `offenders_recorded = 1`, even when every list is empty: that is
     /// a recorded-empty result, not an unrecorded one.
     ///
+    /// The "where to start" ranking ([FR-QM-17]) is required on the same terms
+    /// and lands in the same batch, stamping `insight_recorded = 1`.
+    ///
+    /// `uncapped` is every offender, the lists `offenders` is the head of
+    /// ([FR-QM-19]); it lands in the same batch and the row is stamped
+    /// `offender_values_recorded = 1`, which also vouches for the `node_id`,
+    /// `measure`, `value` and `threshold` of the capped rows.
+    ///
     /// # Errors
-    /// Returns an error if `offenders` is not a recorded set (the
-    /// [`WorstOffenders::default`] "not recorded" value would otherwise persist
-    /// as a recorded-empty result), if a CHECK constraint fires, or if I/O fails.
+    /// Returns an error if `offenders`, `uncapped` or `insight` is not a
+    /// recorded set (the `default()` "not recorded" value would otherwise
+    /// persist as a recorded-empty result), if either offender set was not
+    /// computed with its values, if a CHECK constraint fires, or if I/O fails.
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
     ///
     /// [FR-QM-07]: ../../../docs/specs/requirements/FR-QM-07.md
     /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
@@ -5668,10 +6087,20 @@ impl BatchWriter<'_> {
         &self,
         snapshot: &NewMetricSnapshot<'_>,
         offenders: &WorstOffenders,
+        uncapped: &WorstOffenders,
+        insight: &WhereToStart,
     ) -> Result<i64> {
         anyhow::ensure!(
-            offenders.recorded,
+            offenders.recorded && uncapped.recorded,
             "refusing to persist offender lists that were never computed as a recorded set"
+        );
+        anyhow::ensure!(
+            offenders.values_recorded && uncapped.values_recorded,
+            "refusing to persist offender lists computed without their values"
+        );
+        anyhow::ensure!(
+            insight.recorded,
+            "refusing to persist a where-to-start ranking that was never computed as a recorded set"
         );
         self.conn
             .execute(
@@ -5689,10 +6118,11 @@ impl BatchWriter<'_> {
                   focus_raw, focus_normalized, focus_applicable, \
                   uniqueness_raw, uniqueness_normalized, \
                   thresholds_hash, aggregate_signal, modularity_applicable, \
-                  offenders_recorded) \
+                  offenders_recorded, insight_recorded, offender_values_recorded, \
+                  acyclicity_applicable, depth_applicable, cross_module_edges) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
                          ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, \
-                         ?30, ?31, ?32, ?33, 1)",
+                         ?30, ?31, ?32, ?33, 1, 1, 1, ?34, ?35, ?36)",
                 rusqlite::params![
                     snapshot.created_at,
                     snapshot.commit_sha,
@@ -5727,18 +6157,33 @@ impl BatchWriter<'_> {
                     snapshot.thresholds_hash,
                     snapshot.aggregate_signal,
                     snapshot.modularity_applicable.map(i64::from),
+                    snapshot.acyclicity_applicable.map(i64::from),
+                    snapshot.depth_applicable.map(i64::from),
+                    snapshot.cross_module_edges,
                 ],
             )
             .context("inserting metric snapshot")?;
         let id = self.conn.last_insert_rowid();
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO metric_snapshot_offenders \
-             (snapshot_id, dimension, rank, name, file, line, detail) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
+        self.insert_snapshot_offenders(CAPPED_OFFENDERS, id, offenders)?;
+        self.insert_snapshot_offenders(UNCAPPED_OFFENDERS, id, uncapped)?;
+        self.insert_snapshot_insight(id, insight)?;
+        Ok(id)
+    }
+
+    /// Append the offender rows of snapshot `id` to `table` ([FR-QM-15],
+    /// [FR-QM-19]), each list in computed order: `rank` is the 1-based list
+    /// position, so the read's `ORDER BY rank` returns the list exactly as
+    /// computed.
+    ///
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    fn insert_snapshot_offenders(&self, table: &'static str, id: i64, offenders: &WorstOffenders) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "INSERT INTO {table} \
+             (snapshot_id, dimension, rank, name, file, line, detail, node_id, measure, value, threshold) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        ))?;
         for (dimension, list) in offenders.lists() {
-            // Stored in computed order: rank is the 1-based list position, so
-            // the read's `ORDER BY rank` returns the list exactly as computed.
             for (rank, o) in (1_i64..).zip(list) {
                 stmt.execute(rusqlite::params![
                     id,
@@ -5748,11 +6193,83 @@ impl BatchWriter<'_> {
                     (!o.file.is_empty()).then_some(o.file.as_str()),
                     o.line,
                     o.detail,
+                    o.node_id,
+                    o.measure,
+                    o.value,
+                    o.threshold,
                 ])
                 .context("inserting a snapshot offender row")?;
             }
         }
-        Ok(id)
+        Ok(())
+    }
+
+    /// Append the "where to start" rows of snapshot `id` ([FR-QM-17]), each in
+    /// computed order: `rank` is the 1-based position, so the read's `ORDER BY
+    /// rank` returns the lists exactly as computed. A list column is
+    /// comma-joined in its vocabulary's order, `''` when empty.
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    fn insert_snapshot_insight(&self, id: i64, insight: &WhereToStart) -> Result<()> {
+        let mut units = self.conn.prepare_cached(
+            "INSERT INTO metric_snapshot_fix_units \
+             (snapshot_id, rank, kind, node_id, name, file, line, dimensions, points, detail, outliers) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )?;
+        for (rank, u) in (1_i64..).zip(&insight.units) {
+            units
+                .execute(rusqlite::params![
+                    id,
+                    rank,
+                    u.kind.as_str(),
+                    u.node_id,
+                    u.name,
+                    (!u.file.is_empty()).then_some(u.file.as_str()),
+                    u.line,
+                    u.dimensions.join(","),
+                    u.points,
+                    u.detail,
+                    u.outliers.join(","),
+                ])
+                .context("inserting a snapshot fix-unit row")?;
+        }
+        let mut measures = self.conn.prepare_cached(
+            "INSERT INTO metric_snapshot_outlier_measures \
+             (snapshot_id, measure, units, fence, threshold, labelled) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let mut labels = self.conn.prepare_cached(
+            "INSERT INTO metric_snapshot_outlier_labels \
+             (snapshot_id, measure, rank, node_id, name, file, line, value) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for m in &insight.outliers {
+            measures
+                .execute(rusqlite::params![
+                    id,
+                    m.measure,
+                    m.units as i64,
+                    m.fence,
+                    m.threshold,
+                    m.labelled as i64,
+                ])
+                .context("inserting a snapshot outlier measure row")?;
+            for (rank, l) in (1_i64..).zip(&m.labels) {
+                labels
+                    .execute(rusqlite::params![
+                        id,
+                        m.measure,
+                        rank,
+                        l.node_id,
+                        l.name,
+                        (!l.file.is_empty()).then_some(l.file.as_str()),
+                        l.line,
+                        l.value,
+                    ])
+                    .context("inserting a snapshot outlier label row")?;
+            }
+        }
+        Ok(())
     }
 
     // ── Governance primitives (S-020, [FR-GV-01..05]) ────────────────────────

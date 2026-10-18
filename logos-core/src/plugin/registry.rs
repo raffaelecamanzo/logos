@@ -513,6 +513,35 @@ impl LanguageRegistry {
 
     /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares the **member-access capability** (S-523, [CR-171], [ADR-39]),
+    /// less the ones it carves out in `member_access_excluded_extensions`
+    /// (JavaScript under the TypeScript grammars): the metrics engine scores
+    /// Cohesion only for a class defined in one of them ([FR-QM-11]), and a
+    /// class of any other language is not applicable rather than scored from
+    /// calls alone. The Cohesion twin of
+    /// [`reachability_extensions`](Self::reachability_extensions).
+    ///
+    /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    pub fn member_access_extensions(&self) -> HashSet<String> {
+        // Each plugin's carve-out applies to its own extensions only.
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact() && p.semantics().member_access)
+            .flat_map(|p| {
+                let excluded: HashSet<String> =
+                    p.semantics().member_access_excluded_extensions.iter().map(|e| normalize_ext(e)).collect();
+                p.extensions()
+                    .iter()
+                    .map(|e| normalize_ext(e))
+                    .filter(move |ext| !excluded.contains(ext))
+            })
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
     /// declares `impl_block_lookup = true` (S-607, [FR-RS-47]): a call to a
     /// type's method there binds through the one associated-item lookup over
     /// recorded `impl` blocks. Consumed through
@@ -800,6 +829,24 @@ fn override_dir_for(root: &Path, name: &str) -> std::path::PathBuf {
 /// Normalise an extension for indexing: lower-cased, leading dot stripped.
 fn normalize_ext(ext: &str) -> String {
     ext.trim_start_matches('.').to_ascii_lowercase()
+}
+
+/// Whether the file at `file_path` is in a language whose normalised extension
+/// is in `exts` — one of the capability sets the registry builds
+/// ([`LanguageRegistry::reachability_extensions`],
+/// [`LanguageRegistry::member_access_extensions`]). The one membership test
+/// every capability gate reads ([ADR-39]): a node with no file path, or a file
+/// with no extension, is **not** in the set, so an unidentifiable language never
+/// earns a capability it cannot be shown to declare ([NFR-CC-04]).
+///
+/// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn declares_by_extension(file_path: Option<&str>, exts: &HashSet<String>) -> bool {
+    file_path
+        .and_then(|p| Path::new(p).extension())
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| exts.contains(&ext))
 }
 
 #[cfg(all(test, feature = "lang-rust"))]
@@ -1133,6 +1180,39 @@ mod tests {
             !exts.contains("toy"),
             "a grammar that omits the flag is not capable (normalised lower-case)"
         );
+    }
+
+    /// S-523 / CR-171: exactly the declaring plugins' extensions carry the
+    /// member-access capability Cohesion is gated on — Java, TypeScript, TSX
+    /// and PHP — less the JavaScript the TypeScript grammars carve out
+    /// (`js`, `mjs`, `cjs`, `jsx`); no other code language, Rust, C++ and Ruby
+    /// included.
+    #[cfg(all(feature = "lang-java", feature = "lang-typescript", feature = "lang-php"))]
+    #[test]
+    fn member_access_extensions_are_exactly_the_declaring_languages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let mut exts: Vec<String> = reg.member_access_extensions().into_iter().collect();
+        exts.sort();
+        assert_eq!(exts, ["java", "php", "ts", "tsx"]);
+        for (path, declared) in [
+            (Some("src/Account.java"), true),
+            (Some("web/App.TSX"), true),
+            (Some("app/javascript/user.js"), false),
+            (Some("web/Widget.jsx"), false),
+            (Some("lib/index.mjs"), false),
+            (Some("lib/model.rb"), false),
+            (Some("src/widget.cpp"), false),
+            (Some("src/lib.rs"), false),
+            (Some("Makefile"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                declares_by_extension(path, &reg.member_access_extensions()),
+                declared,
+                "{path:?}"
+            );
+        }
     }
 
     /// The path-grammar extension map covers exactly the grammars that declare

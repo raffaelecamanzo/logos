@@ -66,6 +66,8 @@ impl NoSymbolsPlugin {
                 export_convention: crate::plugin::ExportConvention::All,
                 test_convention: crate::plugin::TestConvention::None,
                 reachability: false,
+                member_access: false,
+                member_access_excluded_extensions: Vec::new(),
                 documentation: false,
                 artifact: false,
                 filenames: Vec::new(),

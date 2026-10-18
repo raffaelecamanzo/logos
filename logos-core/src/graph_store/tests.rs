@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        35,
-        "v35 = migration 35 (S-609 CR-202 the uninherited interface-member marker)"
+        38,
+        "v38 = migration 38 (S-523 CR-171 graph-dimension applicability)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 35,
+        recorded, 38,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 35);
+        assert_eq!(store.schema_version().unwrap(), 38);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 35);
+    assert_eq!(store.schema_version().unwrap(), 38);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 35, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 38, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 35);
+    assert_eq!(reopened.schema_version().unwrap(), 38);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1098,11 +1098,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v35 forward-only).
+    // data (the runner applies v2..v38 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        35,
+        38,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -2262,6 +2262,52 @@ fn seed_in_file(store: &SqliteGraphStore, n: u32, name: &str, file_id: i64) -> N
     store.insert_node(&node).expect("node inserts")
 }
 
+/// The production callables per language ([FR-QM-18]'s share): `Function` and
+/// `Method` nodes only, never a test or derived one, keyed by their file's
+/// language, in language order — a test function counted here would lift a
+/// language's share past the coverage warning's threshold on its own.
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn production_callables_by_language_counts_production_functions_and_methods_only() {
+    let store = mem();
+    let c = seed_file(&store, "src/a.c", "c");
+    let rs = seed_file(&store, "src/lib.rs", "rust");
+    for n in 0..3 {
+        seed_in_file(&store, n, "f", c);
+    }
+    let test_fn = seed_in_file(&store, 10, "test_f", c);
+    let derived_fn = seed_in_file(&store, 11, "derived_f", c);
+    let method = seed_in_file(&store, 12, "m", rs);
+    let class = seed_in_file(&store, 13, "C", rs);
+    store
+        .conn
+        .execute("UPDATE nodes SET is_test = 1 WHERE id = ?1", [test_fn.0])
+        .unwrap();
+    store
+        .conn
+        .execute("UPDATE nodes SET derived = 1 WHERE id = ?1", [derived_fn.0])
+        .unwrap();
+    store
+        .conn
+        .execute("UPDATE nodes SET kind = ?1 WHERE id = ?2", [NodeKind::Method.as_i32() as i64, method.0])
+        .unwrap();
+    store
+        .conn
+        .execute("UPDATE nodes SET kind = ?1 WHERE id = ?2", [NodeKind::Class.as_i32() as i64, class.0])
+        .unwrap();
+    // A callable bound to no file has no language and so no row.
+    let sym = LogosSymbol::parse("local 14").expect("local symbol parses");
+    let symbol_id = store.upsert_symbol(&sym).expect("symbol upserts");
+    store.insert_node(&NewNode::plain(symbol_id, NodeKind::Function, "fileless")).unwrap();
+
+    assert_eq!(
+        store.production_callables_by_language().unwrap(),
+        [("c".to_string(), 3), ("rust".to_string(), 1)],
+        "three production C functions (the test and the derived one excluded) and one Rust method"
+    );
+}
+
 #[test]
 fn language_composition_on_empty_store_is_empty() {
     let store = mem();
@@ -3214,8 +3260,11 @@ fn new_snapshot() -> NewMetricSnapshot<'static> {
         modularity_applicable: Some(false),
         acyclicity_raw: 0.0,
         acyclicity_normalized: 1.0,
+        acyclicity_applicable: Some(false),
         depth_raw: 1.0,
         depth_normalized: 0.9,
+        depth_applicable: Some(false),
+        cross_module_edges: Some(2),
         equality_raw: 0.0,
         equality_normalized: 1.0,
         redundancy_raw: 0.0,
@@ -3243,7 +3292,17 @@ fn offender(name: &str, file: &str, line: Option<i64>, detail: &str) -> Offender
         file: file.to_string(),
         line,
         detail: detail.to_string(),
+        node_id: Some(format!("src/`{name}`().")),
+        measure: Some("nesting_depth"),
+        value: Some(6),
+        threshold: Some(4),
     }
+}
+
+/// A recorded, empty "where to start" set — what a snapshot that ranked
+/// nothing persists (FR-QM-17).
+fn ranked() -> WhereToStart {
+    WhereToStart::recorded()
 }
 
 fn snapshot_count(store: &SqliteGraphStore) -> i64 {
@@ -3261,6 +3320,7 @@ fn snapshot_offenders_round_trip_in_rank_order_through_the_latest_read() {
     let mut store = mem();
     let lists = WorstOffenders {
         recorded: true,
+        values_recorded: true,
         nesting: vec![
             offender("zeta", "src/z.rs", Some(9), "nesting depth 7"),
             offender("alpha", "src/a.rs", Some(1), "nesting depth 5"),
@@ -3284,7 +3344,7 @@ fn snapshot_offenders_round_trip_in_rank_order_through_the_latest_read() {
         unrecorded: Vec::new(),
     };
     let id = store
-        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &lists))
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &lists, &lists, &ranked()))
         .unwrap();
 
     let read = store.latest_metric_snapshot().unwrap().expect("a snapshot exists");
@@ -3309,18 +3369,20 @@ fn the_latest_read_carries_only_the_newest_snapshots_own_lists() {
     let mut store = mem();
     let older = WorstOffenders {
         recorded: true,
+        values_recorded: true,
         nesting: vec![offender("old", "src/o.rs", Some(2), "nesting depth 6")],
         ..WorstOffenders::default()
     };
     let newest_empty = WorstOffenders {
         recorded: true,
+        values_recorded: true,
         ..WorstOffenders::default()
     };
     store
-        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &older))
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &older, &older, &ranked()))
         .unwrap();
     store
-        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &newest_empty))
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &newest_empty, &newest_empty, &ranked()))
         .unwrap();
 
     let read = store.latest_metric_snapshot().unwrap().unwrap().worst_offenders;
@@ -3346,13 +3408,355 @@ fn the_latest_read_carries_only_the_newest_snapshots_own_lists() {
 fn the_append_refuses_an_unrecorded_offender_set_and_writes_nothing() {
     let mut store = mem();
     let err = store
-        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &WorstOffenders::default()))
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &WorstOffenders::default(), &WorstOffenders::default(), &ranked()))
         .expect_err("a not-recorded set is refused");
     assert!(
         format!("{err:#}").contains("never computed as a recorded set"),
         "the refusal says why: {err:#}"
     );
     assert_eq!(snapshot_count(&store), 0, "no snapshot row survives the refusal");
+}
+
+// ── S-676 / FR-QM-19: offender values and the uncapped list ──
+
+/// The uncapped lists persist beside the capped ones and each read returns its
+/// own: the capped read the display head, the uncapped read every entry — in
+/// computed order, with `node_id`, `measure`, `value` and `threshold`
+/// round-tripping, a `NULL` node id and threshold reading back `None`, and a
+/// persisted measure outside the vocabulary reading `None`, not invented.
+#[test]
+fn the_uncapped_lists_persist_beside_the_capped_ones_with_every_value() {
+    let mut store = mem();
+    let chain = Offender {
+        name: "src".into(),
+        detail: "src → lib (2 directories)".into(),
+        measure: Some("chain_length"),
+        value: Some(2),
+        ..Offender::default()
+    };
+    let uncapped = WorstOffenders {
+        recorded: true,
+        values_recorded: true,
+        nesting: vec![
+            offender("deepest", "src/a/x.rs", Some(1), "nesting depth 6"),
+            offender("deep", "src/a/y.rs", Some(9), "nesting depth 6"),
+            offender("deepish", "src/b/z.rs", Some(4), "nesting depth 6"),
+        ],
+        focus: vec![Offender {
+            measure: Some("span"),
+            value: Some(612),
+            threshold: Some(500),
+            ..offender("Wide", "src/w.rs", Some(2), "3 methods · span 612")
+        }],
+        depth: vec![chain],
+        ..WorstOffenders::default()
+    };
+    let capped = uncapped.capped(2);
+    assert_eq!(capped.nesting.len(), 2, "the fixture caps a list");
+    store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &capped, &uncapped, &ranked()))
+        .unwrap();
+
+    assert_eq!(
+        store.latest_metric_snapshot().unwrap().unwrap().worst_offenders,
+        capped,
+        "the capped read is the display head, values and all"
+    );
+    assert_eq!(
+        store.latest_uncapped_offenders().unwrap(),
+        Some(uncapped.clone()),
+        "the uncapped read is every entry, in computed order"
+    );
+
+    store
+        .conn
+        .execute("UPDATE metric_snapshot_offenders_uncapped SET measure = 'bogus' WHERE dimension = 'focus'", [])
+        .unwrap();
+    let read = store.latest_uncapped_offenders().unwrap().unwrap();
+    assert_eq!(read.focus[0].measure, None, "a measure outside the vocabulary is never invented");
+    assert_eq!(read.focus[0].value, Some(612), "the rest of the row still reads");
+}
+
+/// No snapshot reads `None`; a snapshot whose values flag is cleared — the
+/// pre-migration-37 reading — has no uncapped list and its capped entries
+/// read `values_recorded: false`; and a flag cleared under a cleared
+/// `offenders_recorded` never claims values the snapshot did not record.
+#[test]
+fn a_snapshot_without_recorded_values_reads_not_recorded() {
+    let mut store = mem();
+    assert_eq!(store.latest_uncapped_offenders().unwrap(), None, "never scanned");
+
+    let lists = WorstOffenders {
+        recorded: true,
+        values_recorded: true,
+        nesting: vec![offender("deep", "src/d.rs", Some(3), "nesting depth 6")],
+        ..WorstOffenders::default()
+    };
+    store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &lists, &lists, &ranked()))
+        .unwrap();
+    store
+        .conn
+        .execute("UPDATE metric_snapshots SET offender_values_recorded = NULL", [])
+        .unwrap();
+    let uncapped = store.latest_uncapped_offenders().unwrap().expect("a snapshot exists");
+    assert!(uncapped.recorded && !uncapped.values_recorded, "{uncapped:?}");
+    assert!(uncapped.nesting.is_empty(), "no uncapped list is read for it");
+    let capped = store.latest_metric_snapshot().unwrap().unwrap().worst_offenders;
+    assert!(capped.recorded && !capped.values_recorded, "{capped:?}");
+
+    store
+        .conn
+        .execute(
+            "UPDATE metric_snapshots SET offenders_recorded = NULL, offender_values_recorded = 1",
+            [],
+        )
+        .unwrap();
+    let uncapped = store.latest_uncapped_offenders().unwrap().unwrap();
+    assert!(!uncapped.recorded && !uncapped.values_recorded, "{uncapped:?}");
+    let capped = store.latest_metric_snapshot().unwrap().unwrap().worst_offenders;
+    assert_eq!(capped, WorstOffenders::default(), "not recorded, whatever the values flag says");
+}
+
+/// The append refuses offender lists computed without their values, and an
+/// unrecorded uncapped set, and writes nothing.
+#[test]
+fn the_append_refuses_offenders_without_values_and_writes_nothing() {
+    let mut store = mem();
+    let with_values = WorstOffenders {
+        recorded: true,
+        values_recorded: true,
+        ..WorstOffenders::default()
+    };
+    let without = WorstOffenders {
+        recorded: true,
+        ..WorstOffenders::default()
+    };
+    for (capped, uncapped, why) in [
+        (&without, &with_values, "computed without their values"),
+        (&with_values, &without, "computed without their values"),
+        (&with_values, &WorstOffenders::default(), "never computed as a recorded set"),
+    ] {
+        let err = store
+            .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), capped, uncapped, &ranked()))
+            .expect_err("refused");
+        assert!(format!("{err:#}").contains(why), "the refusal says why: {err:#}");
+    }
+    assert_eq!(snapshot_count(&store), 0, "no snapshot row survives a refusal");
+}
+
+// ── S-504 / FR-QM-17: the "where to start" rows persist with their snapshot ──
+
+/// A populated ranking: two units (one bound to no file), a calibrated measure
+/// with a label, a measure with too few units (no fence), and a group mass
+/// (no threshold).
+fn populated_ranking() -> WhereToStart {
+    WhereToStart {
+        recorded: true,
+        basis: WhereToStart::BASIS,
+        units: vec![
+            FixUnit {
+                kind: FixUnitKind::Class,
+                node_id: 7,
+                name: "Split".into(),
+                file: "src/s.rs".into(),
+                line: Some(4),
+                dimensions: vec!["cohesion", "focus"],
+                points: 41,
+                detail: "LCOM4 23 · 25 methods · span 600".into(),
+                outliers: vec!["lcom4", "span"],
+            },
+            FixUnit {
+                kind: FixUnitKind::CloneGroup,
+                node_id: 3,
+                name: "unbound".into(),
+                file: String::new(),
+                line: None,
+                dimensions: vec!["uniqueness"],
+                points: 2,
+                detail: "clone group #3 · 2 members × 30 lines".into(),
+                outliers: Vec::new(),
+            },
+        ],
+        outliers: vec![
+            OutlierMeasure {
+                measure: "lcom4",
+                units: 9,
+                fence: Some(4.375),
+                threshold: Some(2),
+                labelled: 1,
+                labels: vec![OutlierLabel {
+                    node_id: 7,
+                    name: "Split".into(),
+                    file: "src/s.rs".into(),
+                    line: Some(4),
+                    value: 23,
+                }],
+            },
+            OutlierMeasure {
+                measure: "cc",
+                units: 3,
+                fence: None,
+                threshold: Some(15),
+                labelled: 0,
+                labels: Vec::new(),
+            },
+            OutlierMeasure {
+                measure: "clone_mass",
+                units: 8,
+                fence: Some(60.0),
+                threshold: None,
+                labelled: 0,
+                labels: Vec::new(),
+            },
+        ],
+    }
+}
+
+/// The ranking round-trips through the append and the latest read field for
+/// field, in computed order: units by rank, measures in their pinned order,
+/// a missing fence and a missing threshold read back as `None`, and a unit
+/// bound to no file stores `NULL` and reads `""`.
+#[test]
+fn the_where_to_start_rows_round_trip_through_the_latest_read() {
+    let mut store = mem();
+    let ranking = populated_ranking();
+    let id = store
+        .write_batch(|w| {
+            let offenders = WorstOffenders {
+                recorded: true,
+                values_recorded: true,
+                ..WorstOffenders::default()
+            };
+            w.insert_metric_snapshot(&new_snapshot(), &offenders, &offenders, &ranking)
+        })
+        .unwrap();
+    let read = store.latest_metric_snapshot().unwrap().expect("a snapshot exists");
+    assert_eq!(read.where_to_start, ranking, "every field, in computed order");
+    let file: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT file FROM metric_snapshot_fix_units WHERE snapshot_id = ?1 AND rank = 2",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(file, None, "an unbound unit stores NULL");
+}
+
+/// The latest read carries only the newest snapshot's own ranking, a cleared
+/// `insight_recorded` flag reads "not recorded" — while that row's offender
+/// lists stay recorded — and a row naming a kind outside the vocabulary is
+/// skipped, not invented.
+#[test]
+fn the_latest_read_pairs_a_snapshot_with_its_own_ranking_and_a_null_flag_reads_not_recorded() {
+    let mut store = mem();
+    let offenders = WorstOffenders {
+        recorded: true,
+        values_recorded: true,
+        ..WorstOffenders::default()
+    };
+    store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &offenders, &offenders, &populated_ranking()))
+        .unwrap();
+    store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &offenders, &offenders, &ranked()))
+        .unwrap();
+    let read = store.latest_metric_snapshot().unwrap().unwrap();
+    assert_eq!(read.where_to_start, ranked(), "recorded-empty, none of the older rows");
+
+    store
+        .conn
+        .execute(
+            "INSERT INTO metric_snapshot_fix_units \
+             (snapshot_id, rank, kind, node_id, name, dimensions, points, detail, outliers) \
+             VALUES (2, 1, 'module', 1, 'm', 'depth', 3, 'd', ''), \
+                    (2, 2, 'class', 2, 'c', 'cohesion,bogus', 3, 'd', ''), \
+                    (2, 3, 'class', 3, 'c', 'cohesion', 3, 'd', 'lcom4,bogus')",
+            [],
+        )
+        .unwrap();
+    assert!(
+        store.latest_metric_snapshot().unwrap().unwrap().where_to_start.units.is_empty(),
+        "a row naming a kind, a dimension or a measure outside the vocabulary is skipped whole"
+    );
+
+    store
+        .conn
+        .execute("UPDATE metric_snapshots SET insight_recorded = NULL WHERE id = 2", [])
+        .unwrap();
+    let read = store.latest_metric_snapshot().unwrap().unwrap();
+    assert_eq!(read.where_to_start, WhereToStart::default(), "a NULL flag reads not recorded");
+    assert!(read.worst_offenders.recorded, "the offender lists keep their own flag");
+}
+
+/// The append refuses a "not recorded" ranking and the batch rolls back.
+#[test]
+fn the_append_refuses_an_unrecorded_ranking_and_writes_nothing() {
+    let mut store = mem();
+    let offenders = WorstOffenders {
+        recorded: true,
+        values_recorded: true,
+        ..WorstOffenders::default()
+    };
+    let err = store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &offenders, &offenders, &WhereToStart::default()))
+        .expect_err("a not-recorded ranking is refused");
+    assert!(
+        format!("{err:#}").contains("where-to-start ranking that was never computed"),
+        "the refusal says why: {err:#}"
+    );
+    assert_eq!(snapshot_count(&store), 0, "no snapshot row survives the refusal");
+}
+
+/// `duplicate_groups` groups the `is_duplicate` callables — functions and
+/// methods — by the fingerprint that made them duplicates: never a
+/// non-duplicate sharing it, never a non-callable, never a derived node; each
+/// group id-ascending, groups by lowest id.
+#[test]
+fn duplicate_groups_group_the_duplicate_callables_by_fingerprint() {
+    let store = mem();
+    let kinds = [
+        NodeKind::Function,
+        NodeKind::Function,
+        NodeKind::Function,
+        NodeKind::Function,
+        NodeKind::Function,
+        NodeKind::Class,
+        NodeKind::Method,
+        NodeKind::Function,
+    ];
+    let ids: Vec<NodeId> = (0..8).map(|n| seed(&store, n, &format!("f{n}"), kinds[n as usize])).collect();
+    // (node, fingerprint, is_duplicate): f0/f3 share "b", f1/f2 share "a", f4
+    // shares "a" but is not a duplicate (ineligible), the class shares "b",
+    // the method (6) shares "b" and joins, and f7 shares "a" but is derived.
+    store
+        .conn
+        .execute("UPDATE nodes SET derived = 1 WHERE id = ?1", [ids[7].0])
+        .unwrap();
+    for (i, fp, dup) in [
+        (0, "b", 1),
+        (1, "a", 1),
+        (2, "a", 1),
+        (3, "b", 1),
+        (4, "a", 0),
+        (5, "b", 1),
+        (6, "b", 1),
+        (7, "a", 1),
+    ] {
+        store
+            .conn
+            .execute(
+                "UPDATE nodes SET fingerprint = ?2, is_duplicate = ?3 WHERE id = ?1",
+                rusqlite::params![ids[i].0, fp, dup],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.duplicate_groups().unwrap(),
+        vec![vec![ids[0], ids[3], ids[6]], vec![ids[1], ids[2]]],
+        "grouped by fingerprint, ordered by lowest member"
+    );
 }
 
 // ── S-704 / FR-EX-35: the coordinate migration's rewrite ─────────────────────

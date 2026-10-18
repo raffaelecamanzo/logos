@@ -18,6 +18,7 @@
 //! - [`ArtifactRelation`] — the cross-artifact edge **payload** vocabulary and
 //!   its deterministic external-target classifier (CR-011, [FR-CG-07]);
 //! - [`Annotations`] — free-form node metadata;
+//! - [`Severity`] — a security finding's normalised severity (S-668);
 //!
 //! — and confines the `scip` rust-protobuf codec behind the private
 //! [`convert`] seam. **No `scip`/protobuf type appears in any public signature
@@ -42,6 +43,7 @@ mod annotations;
 mod arity;
 mod artifact;
 mod kinds;
+mod severity;
 mod symbol;
 
 pub use annotations::Annotations;
@@ -50,4 +52,5 @@ pub use artifact::{
     ArtifactRelation, BridgeNamespace, BridgeRole, MatchDiscipline, TargetClass,
 };
 pub use kinds::{EdgeKind, NodeKind, ReceiverMode, ReceiverShape, RefForm, UnknownKind};
+pub use severity::Severity;
 pub use symbol::{LogosSymbol, NodeId};

@@ -1,28 +1,42 @@
-//! Spawning one scanner process: an argv vector, never a shell ([NFR-SE-08]),
-//! with stdout and stderr captured to a bound ([ADR-80]).
+//! Spawning one child process — a scanner, or the tool installer's `curl`,
+//! `tar`, `unzip` and `uv` — as an argv vector, never a shell ([NFR-SE-08]),
+//! with stdout and stderr captured to a bound ([ADR-80]), and the rules for
+//! where such a program may come from.
 //!
-//! Both pipes are drained on their own threads, so a scanner that prints more
+//! Both pipes are drained on their own threads, so a process that prints more
 //! than the bound never blocks on a full pipe; only the bounded part is kept.
 //! Stdout keeps its **head** (a version line comes first) and stderr its
 //! **tail** (the cause of a failure comes last).
 //!
-//! On Unix the scanner runs in a process group of its own. When it exits, or
+//! On Unix the process runs in a process group of its own. When it exits, or
 //! when the deadline passes, the whole group is killed: a launcher script's
 //! child (a JVM, a Python interpreter, a build daemon) never outlives the run,
 //! and never holds the pipes open past it. The pipes are read for at most
 //! [`DRAIN_GRACE`] after that.
 //!
+//! The process is started through [`ChildGuard`], so a spawn on a [job's
+//! thread](crate::jobs) joins that job: cancelling the job kills the group at
+//! once, and once it is cancelled no further process starts — [`run`] returns
+//! an [`io::ErrorKind::Interrupted`] error instead (S-673).
+//!
+//! This module is shared by the security orchestrator and the tool installer,
+//! and depends on neither: it lives beside [`ChildGuard`] so that neither of
+//! the two depends on the other to start a process (S-747).
+//!
 //! [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
 //! [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::ChildGuard;
 
 /// Bytes of stdout kept per spawn.
 pub(crate) const STDOUT_CAP: usize = 64 * 1024;
@@ -31,7 +45,7 @@ pub(crate) const STDERR_CAP: usize = 16 * 1024;
 /// How long the pipes are still read once the process group is gone.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
-/// What a spawned scanner left behind.
+/// What a spawned process left behind.
 #[derive(Debug)]
 pub(crate) struct Finished {
     /// `None` when the deadline passed and the child was killed.
@@ -46,13 +60,20 @@ enum Keep {
     Tail,
 }
 
-/// How to start a scanner: everything but the program and its arguments.
+/// How to start a process: everything but the program and its arguments.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Launch<'a> {
-    /// The working directory: the scan root.
+    /// The working directory: the scan root, or the install's staging directory.
     pub cwd: &'a Path,
     /// Variables added to the inherited environment.
     pub env: &'a [(&'a str, &'a str)],
+    /// Variables with an owned value, added after `env`: a managed runtime's
+    /// paths (Dependency-Check's Java runtime, S-746).
+    pub vars: &'a [(&'a str, OsString)],
+    /// When set, the inherited environment is cleared and only these
+    /// variables are set, then `env`, `vars` and `PATH` (the managed `uv`: no
+    /// `UV_*` or `PYTHON*` variable of the user's reaches it).
+    pub isolated: Option<&'a [(&'a str, OsString)]>,
     /// The child's whole `PATH`; `None` removes it.
     pub path: Option<&'a OsString>,
     /// Kill the process group after this long.
@@ -61,12 +82,15 @@ pub(crate) struct Launch<'a> {
 
 /// Run `program` with `args` as `launch` says, stdin closed, and wait for it.
 pub(crate) fn run(program: &Path, args: &[OsString], launch: &Launch<'_>) -> io::Result<Finished> {
-    let mut child = spawn(program, args, launch)?;
+    // Held until the group is gone, so a cancel can still reach it.
+    let (mut child, guard) = spawn(program, args, launch)?;
     let stdout = child.stdout.take().map(|p| drain(p, STDOUT_CAP, Keep::Head));
     let stderr = child.stderr.take().map(|p| drain(p, STDERR_CAP, Keep::Tail));
     let status = wait(&mut child, launch.deadline);
-    // Whatever the scanner left running goes with it.
-    kill_group(&child);
+    // Whatever the process left running goes with it; then the group is no
+    // longer the job's to kill, while the pipes are still drained below.
+    super::kill_group(child.id());
+    drop(guard);
     let status = status?;
     Ok(Finished {
         status,
@@ -75,14 +99,18 @@ pub(crate) fn run(program: &Path, args: &[OsString], launch: &Launch<'_>) -> io:
     })
 }
 
-fn spawn(program: &Path, args: &[OsString], launch: &Launch<'_>) -> io::Result<Child> {
+fn spawn(program: &Path, args: &[OsString], launch: &Launch<'_>) -> io::Result<(Child, ChildGuard)> {
     let mut attempt = 0;
     loop {
         let mut command = Command::new(program);
+        if let Some(vars) = launch.isolated {
+            command.env_clear().envs(vars.iter().map(|(k, v)| (k, v)));
+        }
         command
             .args(args)
             .current_dir(launch.cwd)
             .envs(launch.env.iter().copied())
+            .envs(launch.vars.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -90,12 +118,8 @@ fn spawn(program: &Path, args: &[OsString], launch: &Launch<'_>) -> io::Result<C
             Some(path) => command.env("PATH", path),
             None => command.env_remove("PATH"),
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        match command.spawn() {
+        // A process group of its own (Unix), registered with this thread's job.
+        match ChildGuard::spawn(&mut command) {
             // ETXTBSY: another thread of this process forked while the binary
             // was still open for writing (a freshly written executable). It
             // clears once that child execs; retry a few times.
@@ -139,25 +163,6 @@ fn wait(child: &mut Child, deadline: Option<Duration>) -> io::Result<Option<Exit
         thread::sleep(Duration::from_millis(10));
     }
 }
-
-/// SIGKILL the child's process group (its id: `process_group(0)` made it the
-/// leader). A group with no member left is a no-op (`ESRCH`).
-#[cfg(unix)]
-#[allow(unsafe_code)]
-fn kill_group(child: &Child) {
-    let Ok(group) = libc::pid_t::try_from(child.id()) else {
-        return;
-    };
-    // SAFETY: `killpg` takes two integers and touches no memory of ours. The
-    // group id is a child this process started in a group of its own; while
-    // any member is alive the id is not reused.
-    unsafe {
-        libc::killpg(group, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(_child: &Child) {}
 
 /// A pipe being read on its own thread into a bounded buffer.
 struct Drained {
@@ -206,4 +211,49 @@ fn drain(mut pipe: impl Read + Send + 'static, cap: usize, keep: Keep) -> Draine
         let _ = tx.send(());
     });
     Drained { kept, done }
+}
+
+// ── where a program may come from ────────────────────────────────────────────
+
+/// The `PATH` entries a scanner — or the installer's `curl` and `tar` — may
+/// come from, and the only ones its process sees: absolute, and not inside the project root (compared both as written
+/// and canonicalised). An empty or relative entry would resolve against the
+/// working directory, which is the repository.
+pub(crate) fn usable_path_entries(
+    root: &Path,
+    search_path: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let Some(search_path) = search_path else {
+        return Vec::new();
+    };
+    let canonical_root = root.canonicalize().ok();
+    std::env::split_paths(search_path)
+        .filter(|dir| dir.is_absolute() && !inside_root(root, canonical_root.as_deref(), dir))
+        .collect()
+}
+
+/// Whether `dir` is inside the project `root`, compared both as written and
+/// canonicalised (`canonical_root` is `root` canonicalised, when it can be).
+pub(crate) fn inside_root(root: &Path, canonical_root: Option<&Path>, dir: &Path) -> bool {
+    dir.starts_with(root)
+        || canonical_root.is_some_and(|r| dir.canonicalize().is_ok_and(|d| d.starts_with(r)))
+}
+
+/// A regular file the current user may execute.
+pub(crate) fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }

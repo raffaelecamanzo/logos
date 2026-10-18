@@ -30,6 +30,7 @@ import {
   IconGaps,
   IconGraph,
   IconHealth,
+  IconSecurity,
   IconStatistics,
   IconWorkspace,
 } from "../components/icons.tsx";
@@ -58,6 +59,7 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   files: IconFiles,
   gaps: IconGaps,
   coverage: IconCoverage,
+  security: IconSecurity,
   statistics: IconStatistics,
   config: IconConfig,
   // Workspace mode only (S-250) — absent from a single-root sidebar.
@@ -73,6 +75,9 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // S-430: the app-level Config editor answers "what is configured", one scope up
   // from the member-scoped Config tab, so it carries the same icon (FR-UI-38).
   "workspace-config": IconConfig,
+  // S-674: the app-level Security roll-up answers the member Security page's
+  // question one scope up, so it carries the same shield (FR-SC-16).
+  "workspace-security": IconSecurity,
   // An extension entry's icon comes with its registration (`ExtensionUi.icons`).
 };
 

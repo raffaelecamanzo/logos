@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FilesModel } from "../../api/types.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
-import { filesAbsence, filesRankedByRisk, ownershipDispersion } from "../../copy/files.copy.ts";
+import {
+  filesAbsence,
+  filesFindingsNote,
+  filesRankedByRisk,
+  ownershipDispersion,
+} from "../../copy/files.copy.ts";
 import { widgetTitled } from "../../test/widgetStack.ts";
 import { FilesView } from "./FilesView.tsx";
 
@@ -328,5 +333,91 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     await user.click(within(table).getByRole("button", { name: "File" }));
     const order = [...table.querySelectorAll("tbody [data-path]")].map((el) => el.getAttribute("data-path"));
     expect(order).toEqual([DEEP, "src/b.rs"]);
+  });
+
+  describe("findings column (S-671, FR-SC-14)", () => {
+    const scanned = (over: Partial<FilesModel["hotspots"]> = {}): FilesModel => {
+      const m = model(over);
+      m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0 };
+      m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2 };
+      return m;
+    };
+
+    it("shows count and highest severity, each cell linking to /security?path=", async () => {
+      stubFetch(() => scanned());
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      expect(within(table).getByRole("columnheader", { name: /Findings/ })).toBeInTheDocument();
+      const hot = within(within(table).getByText("src/hot.rs").closest("tr")!);
+      const link = hot.getByRole("link");
+      expect(link).toHaveAttribute("href", "/security?path=src%2Fhot.rs");
+      expect(link).toHaveTextContent("3");
+      expect(link).toHaveTextContent("high");
+    });
+
+    it("labels a stale finding and leaves it out of the count", async () => {
+      stubFetch(() => scanned());
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const cold = within(within(table).getByText("src/cold.rs").closest("tr")!);
+      const link = cold.getByRole("link");
+      expect(link).toHaveAttribute("href", "/security?path=src%2Fcold.rs");
+      expect(link).toHaveTextContent("2 stale");
+      expect(link).toHaveTextContent("0");
+      expect(link).not.toHaveTextContent("high");
+    });
+
+    it("sorts by the column — a file with no cell below a scanned zero, the most severe last when ascending", async () => {
+      const user = userEvent.setup();
+      stubFetch(() => {
+        const m = scanned();
+        m.hotspots.files.push({ ...m.hotspots.files[0], path: "src/none.rs", findings: undefined });
+        return m;
+      });
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const order = () =>
+        within(table)
+          .getAllByRole("row")
+          .slice(1)
+          .map((r) => within(r).getAllByRole("cell")[0].textContent);
+      expect(order()).toEqual(["src/hot.rs", "src/cold.rs", "src/none.rs"]);
+      await user.click(within(table).getByRole("button", { name: /Findings/ }));
+      expect(order()).toEqual(["src/none.rs", "src/cold.rs", "src/hot.rs"]);
+      await user.click(within(table).getByRole("button", { name: /Findings/ }));
+      expect(order()).toEqual(["src/hot.rs", "src/cold.rs", "src/none.rs"]);
+    });
+
+    it("explains the column under the table: stale findings are labelled, not counted", async () => {
+      stubFetch(() => scanned());
+      render(<FilesView />);
+      await screen.findByRole("table", { name: "Files ranked by risk" });
+      expect(screen.getByText(filesFindingsNote)).toBeInTheDocument();
+    });
+
+    it("shows no column, and offers no filter, for a project nothing was scanned in", async () => {
+      stubFetch(() => model());
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      expect(within(table).queryByRole("columnheader", { name: /Findings/ })).toBeNull();
+      expect(within(table).queryByRole("link")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Files with findings first" })).toBeNull();
+    });
+
+    it("re-fetches with the findings filter and keeps it switchable", async () => {
+      const user = userEvent.setup();
+      const urls: string[] = [];
+      stubFetch((url) => {
+        urls.push(url);
+        return scanned(url.includes("with_findings=true") ? { with_findings: true } : {});
+      });
+      render(<FilesView />);
+      await screen.findByRole("table", { name: "Files ranked by risk" });
+      await user.click(screen.getByRole("button", { name: "Files with findings first" }));
+      await screen.findByRole("button", { name: "Rank by risk only" });
+      expect(urls.some((u) => u.includes("with_findings=true"))).toBe(true);
+      await user.click(screen.getByRole("button", { name: "Rank by risk only" }));
+      await screen.findByRole("button", { name: "Files with findings first" });
+    });
   });
 });

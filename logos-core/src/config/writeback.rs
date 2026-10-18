@@ -730,6 +730,7 @@ fn atomic_write(target: &Path, bytes: &[u8], unix_mode: Option<u32>) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Budget, CountBudget};
 
     /// Write `contents` to `<root>/.logos/<name>`, creating `.logos/` as needed.
     fn seed(root: &Path, name: &str, contents: &str) {
@@ -758,7 +759,7 @@ mod tests {
         assert!(docs.rules.exists);
         assert_eq!(docs.rules.path, ".logos/rules.toml");
         assert!(docs.rules.content.contains("max_cycles = 2"));
-        assert_eq!(docs.rules.parsed.constraints.max_cycles, Some(2));
+        assert_eq!(docs.rules.parsed.constraints.max_cycles, Some(CountBudget::Absolute(2)));
     }
 
     #[test]
@@ -1004,8 +1005,8 @@ mod tests {
 
         // The stamped file parses via the standard load path with the edit intact.
         let rules = load_rules_from_root(dir.path()).unwrap();
-        assert_eq!(rules.constraints.max_cycles, Some(0));
-        assert_eq!(rules.constraints.max_cc, Some(12));
+        assert_eq!(rules.constraints.max_cycles, Some(CountBudget::Absolute(0)));
+        assert_eq!(rules.constraints.max_cc, Some(Budget::Absolute(12)));
     }
 
     #[test]

@@ -84,7 +84,9 @@ impl Run {
     }
 }
 
-/// Run `logos --project <project> <args…>` composed with host `kind`.
+/// Run `logos --project <project> <args…>` composed with host `kind`, with the
+/// user's Claude Code directory at a path that does not exist, so a developer's
+/// own plugin enrolment never makes `init -i` here plugin-aware (FR-IN-12).
 fn logos(kind: &str, project: &Path, args: &[&str]) -> Run {
     let mut argv = vec!["logos".to_string(), "--project".to_string(), project.display().to_string()];
     argv.extend(args.iter().map(|a| a.to_string()));
@@ -92,6 +94,7 @@ fn logos(kind: &str, project: &Path, args: &[&str]) -> Run {
         .args(["composed_logos_child", "--exact", "--nocapture", "--test-threads=1"])
         .env(HOST_VAR, kind)
         .env(ARGS_VAR, serde_json::to_string(&argv).expect("serialisable"))
+        .env("CLAUDE_CONFIG_DIR", project.join(".no-claude-config"))
         .output()
         .expect("the child runs");
     Run {

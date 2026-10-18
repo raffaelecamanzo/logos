@@ -5,8 +5,10 @@
 Logos builds a queryable code graph (symbols, calls, imports, routes) from your
 source tree and serves it through two surfaces: a **CLI** for humans and
 scripts, and an **MCP server** for AI coding agents such as Claude Code. It
-runs fully offline, writes nothing outside the project's `.logos/` directory,
-and supports twelve languages out of the box: Rust, Python,
+opens no network connection itself, writes outside the project's `.logos/`
+directory only for setup you ask for — the agent-integration files of
+`logos init -i`, and the scanners `logos security install` downloads under your
+consent — and supports twelve languages out of the box: Rust, Python,
 TypeScript/JavaScript, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, and PHP.
 
 ## What it is primarily for: scoping work before you decompose it
@@ -95,11 +97,13 @@ advisory** — they never move the quality signal and the quality gate never rea
 1. [Installation](installation.md) — building the `logos` binary, the default and slim builds, feature flags, verification
 2. [Configuration](configuration.md) — `.logos/`, `config.toml`, `rules.toml`, logging, query overrides
 3. [Usage](usage.md) — indexing workflow, navigation, evidence tiers (hotspots, coverage, security findings), agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
-4. [Commands](commands.md) — the full 39-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots`, the `logos coverage …` and `logos security …` families and `logos hook --emit`, the session-start quality-report hook)
+4. [Commands](commands.md) — the full 42-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots`, the `logos coverage …` and `logos security …` families and `logos hook --emit`, the session-start quality-report hook)
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)
 8. [Contributing](contributing.md) — the per-sprint pull request (`scripts/publish-sprint.sh`), the issue status labels, and the owner's GitHub settings checklist; contributors start at [CONTRIBUTING.md](../../CONTRIBUTING.md)
+9. [Claude Code plugin](plugin.md) — installing the plugin, migrating from `init -i`, `init --uninstall`, the Stop check with its security leg and its off switch, the `/logos:review` and `/logos:sec-review` skills and their verdicts, the guardrail, and the trust labels
+10. [Security](security.md) — the security section end to end: installing the nine scanners and their tested versions, consent and the network, scans and re-scans, reachability confidence, the `[security]` gate with its ratchet and exit 5, the ignore file, reviewing what a branch introduced (the five verdicts, and that a clean review is not a claim of security), and the Security page
 
 ## Quick start
 
@@ -127,17 +131,29 @@ logos gate --save       # save baseline; re-run without --save in CI
 ```
 
 Restart your agent after `logos init -i` — the `logos:*` MCP tools appear
-automatically.
+automatically. On Claude Code, [the plugin](plugin.md) carries them instead, with
+the review loop around each editing turn.
 
 ## Design guarantees worth knowing up front
 
 - **Offline by construction** — no outbound-HTTP client crate exists in the
   dependency graph, and the slim build links no socket stack at all (both
-  enforced by a fitness test). Nothing phones home.
-- **`.logos/` is the only write target** — derived databases live there, and
-  the only non-derived writes are the policy files `.logos/config.toml` /
-  `.logos/rules.toml` when you explicitly Save them (CLI, or the Config view in
-  the web UI). Your source tree is never touched.
+  enforced by a fitness test). Nothing phones home. The one download is
+  `logos security install` (and Install on the Security page), which runs the
+  system `curl` and `uv` under a consent you give; the scanners themselves may
+  reach the network under the scan consent
+  ([Logos makes no network connection](security.md#logos-makes-no-network-connection)).
+- **`.logos/` is the only write target, except for setup you ask for** — derived
+  databases live there, and the only non-derived writes are the policy files
+  `.logos/config.toml` / `.logos/rules.toml` when you explicitly Save them (CLI, or
+  the Config view in the web UI). Plain `logos init` writes only inside `.logos/`
+  too. `logos init -i` also writes the agent-integration files — `.mcp.json`,
+  `CLAUDE.md` and `.claude/settings.json`, or the plugin's enrolment in that last
+  file when the [plugin](plugin.md) is enabled — and `--hooks` sets
+  `core.hooksPath`; `logos init --uninstall` removes them all. The security
+  consents and the scanners Logos installs live in your user-level directories,
+  never in a repository ([Consent](security.md#consent)). Your source tree is
+  never touched.
 - **Never-fabricate resolution** — a call edge is created only when exactly
   one candidate matches; ambiguity yields *no* edge rather than a guessed one.
 - **Stdout discipline** — `--json` output is always parseable; logs go to
@@ -156,9 +172,11 @@ automatically.
   fresh shadow reindex. See [commands.md](commands.md#doctor).
 - **Deterministic** — same tree in, same graph and same metrics out,
   bit-for-bit.
-- **Evidence tiers never move the gate** — `hotspots`, `coverage` and `security` findings live in a
-  separate `.logos/history.db` the gate never opens, so the 0–10000 signal is
-  byte-identical before and after they run, and after `history.db` is deleted.
+- **Evidence tiers never move the signal** — `hotspots`, `coverage` and `security` findings live in a
+  separate `.logos/history.db` the quality signal never reads, so the 0–10000 signal is
+  byte-identical before and after they run, and after `history.db` is deleted. Security
+  findings gate a merge only when `rules.toml` carries a `[security]` table
+  ([security.md](security.md#gating-a-merge-the-security-table)).
 - **The graph self-corrects on config change** — narrowing admission (an added
   `exclude`, a disabled layer) purges the now-unadmitted nodes on the next
   index/reconcile/navigation, so a narrowed config can never keep serving stale

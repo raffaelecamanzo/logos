@@ -42,6 +42,13 @@
     "scope": "member"
   },
   {
+    "id": "security",
+    "label": "Security",
+    "path": "/security",
+    "group": "B",
+    "scope": "member"
+  },
+  {
     "id": "statistics",
     "label": "Statistics",
     "path": "/statistics",

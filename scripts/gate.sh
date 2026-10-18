@@ -40,9 +40,9 @@
 # Usage:
 #   bash scripts/gate.sh probe    # resolve paths + counts, run no gates
 #   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch,
-#                                 public terms, the script suites when scripts/
-#                                 changed (skips the two timing suites; `full`
-#                                 does not)
+#                                 public terms, the script suites when scripts/,
+#                                 plugins/ or .claude-plugin/ changed (skips the
+#                                 two timing suites; `full` does not)
 #   bash scripts/gate.sh full     # pre-handoff: every package, the agents-marker
 #                                 leg, deny, public terms, the script suites, ui,
 #                                 the ui-e2e browser leg (full only, never fast)
@@ -962,8 +962,10 @@ gate_base() {
     printf '%s\n' HEAD
 }
 
-# 0 when `git diff --name-only <gate base>` names a path under scripts/ (the
-# directory itself: `scripts-old/x` is not under it). Same base as the other
+# 0 when `git diff --name-only <gate base>` names a path under scripts/, plugins/
+# or .claude-plugin/ (the directory itself: `scripts-old/x` is not under it). The
+# plugin tree's scripts are tested by scripts/tests/test-plugin-*.sh, so a change
+# to the plugin alone runs the suites that exercise it. Same base as the other
 # change-scoped legs. Staged, unstaged and committed-since-base changes to tracked
 # files all count; the handoff commits before it gates, so a new file is tracked
 # by then.
@@ -984,6 +986,8 @@ scripts_changed() {
     files="$(git -c core.quotePath=false diff --name-only --no-renames "$base" 2>/dev/null)" || return 0
     case "$files" in
         scripts/* | *$'\n'scripts/*) return 0 ;;
+        plugins/* | *$'\n'plugins/*) return 0 ;;
+        .claude-plugin/* | *$'\n'.claude-plugin/*) return 0 ;;
     esac
     return 1
 }
@@ -1034,7 +1038,7 @@ case "$TIER" in
         if scripts_changed; then
             gate_script_suites
         else
-            echo "script-suites: not run — scripts/ is unchanged against the base $(gate_base)"
+            echo "script-suites: not run — scripts/, plugins/ and .claude-plugin/ are unchanged against the base $(gate_base)"
         fi
         if git diff --name-only "$(gate_base)" 2>/dev/null | grep -q '^web/ui/'; then
             gate_ui ui-typecheck typecheck

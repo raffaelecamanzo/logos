@@ -102,6 +102,122 @@ pub struct Rules {
     /// [CR-007]: ../../../../docs/requests/CR-007-coverage-ingestion.md
     #[serde(default)]
     pub coverage: Coverage,
+
+    /// The security gate table (`[security]`, [FR-SC-10], [ADR-79]) — `None`
+    /// when the contract has no such table. Its presence is the whole opt-in:
+    /// without it no security evidence is read and `check` / `gate` output is
+    /// byte-identical whatever evidence exists ([BR-65]). Omitted from the
+    /// serialised contract when absent, so every other read-model of the
+    /// contract (the rules cache, the config view) is unchanged.
+    ///
+    /// [FR-SC-10]: ../../../../docs/specs/requirements/FR-SC-10.md
+    /// [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
+    /// [BR-65]: ../../../../docs/specs/software-spec.md#328-security-findings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecurityRules>,
+}
+
+/// `rules.toml [security]` — the security gate ([FR-SC-10], [ADR-79] §6–7).
+///
+/// ```toml
+/// [security]
+/// required_scanners = ["semgrep", "gitleaks"]  # each needs a fresh scan at HEAD, else exit 5
+/// ratchet_min_severity = "high"                # new unsuppressed findings at or above fail (default high)
+/// max_severity = "critical"                    # any unsuppressed finding at or above fails
+/// fail_on_owasp = ["A05", "A01:2021"]          # any unsuppressed finding in a category fails
+/// ```
+///
+/// - **Ratchet.** An unsuppressed finding at or above `ratchet_min_severity`
+///   whose fingerprint is not in the set `gate --save` recorded fails the run.
+///   Findings already recorded are tolerated; the set lives in `history.db`.
+/// - **Caps.** `max_severity` and `fail_on_owasp` fail on any unsuppressed
+///   finding they match, recorded or not.
+/// - **Required scanners.** A scanner named here that has no fresh scan at HEAD
+///   — never run, stale, not installed or disabled — makes `check` and `gate`
+///   exit **5**. A scanner this list does not name never does.
+///
+/// Suppressions in `.logos/security-ignore.toml` exclude a finding from every
+/// rule ([FR-SC-11]).
+///
+/// [FR-SC-10]: ../../../../docs/specs/requirements/FR-SC-10.md
+/// [FR-SC-11]: ../../../../docs/specs/requirements/FR-SC-11.md
+/// [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityRules {
+    /// Scanners that must have a fresh scan at HEAD: a registry name
+    /// (`semgrep`) or a report's driver name (`Semgrep OSS`), either case.
+    #[serde(default)]
+    pub required_scanners: Vec<String>,
+    /// The least severity the ratchet gates on; default `high`.
+    #[serde(default = "SecurityRules::default_ratchet_min_severity")]
+    pub ratchet_min_severity: crate::model::Severity,
+    /// The cap: any unsuppressed finding at or above it fails, recorded or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_severity: Option<crate::model::Severity>,
+    /// OWASP Top 10 categories that fail on any unsuppressed finding: `A05`
+    /// (the 2025 edition) or an explicit `A05:2025` / `A05:2021`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fail_on_owasp: Vec<String>,
+}
+
+impl Default for SecurityRules {
+    fn default() -> Self {
+        Self {
+            required_scanners: Vec::new(),
+            ratchet_min_severity: Self::default_ratchet_min_severity(),
+            max_severity: None,
+            fail_on_owasp: Vec::new(),
+        }
+    }
+}
+
+impl SecurityRules {
+    fn default_ratchet_min_severity() -> crate::model::Severity {
+        crate::model::Severity::High
+    }
+
+    /// The `fail_on_owasp` entries as full category ids (`A05:2025`), in
+    /// declared order and each once: a bare `A05` names the 2025 edition, the
+    /// default, so `A05`, ` A05 ` and `A05:2025` are one category.
+    pub fn owasp_categories(&self) -> Vec<String> {
+        let mut categories: Vec<String> = Vec::new();
+        for token in &self.fail_on_owasp {
+            let token = token.trim();
+            let id = if token.contains(':') { token.to_string() } else { format!("{token}:2025") };
+            if !categories.contains(&id) {
+                categories.push(id);
+            }
+        }
+        categories
+    }
+
+    /// Reject a blank scanner name and an `fail_on_owasp` entry that is not an
+    /// OWASP Top 10 category (`A01`..`A10`, optionally `:2025` or `:2021`).
+    fn validate(&self) -> Result<(), super::error::ConfigError> {
+        for (idx, name) in self.required_scanners.iter().enumerate() {
+            if name.trim().is_empty() {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: format!("security.required_scanners[{idx}]"),
+                    message: "must not be empty".to_string(),
+                });
+            }
+        }
+        for (idx, token) in self.fail_on_owasp.iter().enumerate() {
+            let (id, edition) = token.trim().split_once(':').map_or((token.trim(), None), |(i, e)| (i, Some(e)));
+            let number = id.strip_prefix('A').filter(|n| n.len() == 2 && n.bytes().all(|b| b.is_ascii_digit()));
+            let in_range = number.and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=10).contains(&n));
+            if !in_range || !matches!(edition, None | Some("2025") | Some("2021")) {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: format!("security.fail_on_owasp[{idx}]"),
+                    message: format!(
+                        "{token:?} is not an OWASP Top 10 category: use A01..A10, optionally with :2025 or :2021"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The `max_dead` budget's two shapes ([FR-GV-11], [CR-043], [ADR-39]).
@@ -134,7 +250,7 @@ pub struct Rules {
 /// [governance-engine]: ../../../../docs/specs/architecture/components/governance-engine.md
 /// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, expecting = "an integer, `{ baseline = N, delta = D }`, or `{ max = 0, ratchet = true }`")]
 pub enum MaxDead {
     /// The original absolute ceiling: the gate fails iff the project-wide dead
     /// count exceeds this integer ([CR-002], retained unchanged by [CR-043]).
@@ -143,55 +259,283 @@ pub enum MaxDead {
     Absolute(u32),
     /// The delta-from-blessed-baseline form ([CR-043], [ADR-39]).
     Baseline(MaxDeadBaseline),
+    /// The ratchet form `{ max = 0, ratchet = true }` ([FR-GV-23], [ADR-73]):
+    /// every dead production function is one offender, classified against the
+    /// checked-in blessed set. With `ratchet = false` it is the absolute
+    /// ceiling `max`.
+    ///
+    /// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+    /// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+    Ratchet(RatchetBudget),
 }
 
-/// The `max_dead` delta-from-blessed-baseline table ([CR-043], [ADR-39]).
+/// The count-delta-from-blessed-baseline table ([CR-043], [ADR-39]), shared by
+/// every budget over a count that names no symbol: `max_dead`'s delta form and,
+/// since [FR-GV-23], `max_cycles` ([`CountBudget`]).
 ///
-/// The gate fails when the dead count exceeds `baseline + delta`. `baseline` is
-/// the blessed steady-state dead count (human-reviewed, re-blessed after the
+/// The gate fails when the count exceeds `baseline + delta`. `baseline` is
+/// the blessed steady-state count (human-reviewed, re-blessed after the
 /// precision work lands); `delta` is the tolerated increase above it before the
-/// gate fails and defaults to `0` ("no *new* dead code"). Both fields are `u32`,
+/// gate fails and defaults to `0` ("no *new* debt"). Both fields are `u32`,
 /// so the form is always in range — there is nothing further to range-check at
 /// load; `#[serde(deny_unknown_fields)]` still fails a typo'd key loud (exit 2,
 /// [NFR-UX-02]).
 ///
 /// [CR-043]: ../../../../docs/requests/CR-043-dead-code-detector-precision.md
 /// [ADR-39]: ../../../../docs/specs/architecture/decisions/ADR-39.md
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
 /// [NFR-UX-02]: ../../../../docs/specs/requirements/NFR-UX-02.md
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MaxDeadBaseline {
-    /// The blessed steady-state dead-function count.
+pub struct CountBaseline {
+    /// The blessed steady-state count.
     pub baseline: u32,
     /// Tolerated increase above `baseline` before the gate fails (default 0).
     #[serde(default)]
     pub delta: u32,
 }
 
+/// `max_dead`'s name for the shared [`CountBaseline`] table — the spelling
+/// [CR-043] introduced, kept so its form and its callers read unchanged.
+///
+/// [CR-043]: ../../../../docs/requests/CR-043-dead-code-detector-precision.md
+pub type MaxDeadBaseline = CountBaseline;
+
+/// A count-delta table's ceiling: `baseline + delta`, saturating.
+fn baseline_ceiling(b: &CountBaseline) -> u64 {
+    u64::from(b.baseline).saturating_add(u64::from(b.delta))
+}
+
+/// The count-delta message every delta-form budget uses when `count` exceeds
+/// `b`'s ceiling, else `None` — the sibling of [`absolute_exceeded`]. `noun`
+/// names what is counted (`dead functions`, `dependency cycles`).
+fn baseline_exceeded(b: &CountBaseline, count: u64, key: &str, noun: &str) -> Option<String> {
+    let ceiling = baseline_ceiling(b);
+    (count > ceiling).then(|| {
+        format!(
+            "{count} {noun} exceed the blessed {key} baseline {} (+{} delta, ceiling {ceiling})",
+            b.baseline, b.delta
+        )
+    })
+}
+
+/// The absolute-ceiling message every count budget has always used:
+/// `"{count} {noun} exceed {key} = {max}"`, or `None` within budget.
+fn absolute_exceeded(count: u64, max: u32, key: &str, noun: &str) -> Option<String> {
+    (count > u64::from(max)).then(|| format!("{count} {noun} exceed {key} = {max}"))
+}
+
+/// The ratchet table `{ max = N, ratchet = true }` a symbol-naming budget may
+/// declare in place of its scalar ([FR-GV-23], [ADR-73]).
+///
+/// `max` keeps the scalar's meaning. With `ratchet = true`, each offender is
+/// classified against the checked-in blessed set (`.logos/rules-baseline.json`):
+/// blessed at or below its blessed value is a `warning`, new or worse is an
+/// `error`. `ratchet` defaults to `false`, which is the scalar form spelled as
+/// a table. `#[serde(deny_unknown_fields)]` fails a typo'd key loud (exit 2).
+///
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+/// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RatchetBudget {
+    /// The budget's ceiling — per symbol for a per-symbol budget, and `0` for
+    /// a symbol-set budget under ratchet (each member is one offender).
+    pub max: u32,
+    /// Classify offenders against the blessed set (default `false`).
+    #[serde(default)]
+    pub ratchet: bool,
+}
+
+/// A symbol-naming numeric budget ([FR-GV-11], [FR-GV-23]): the original
+/// scalar (`max_cc = 15`), or the [`RatchetBudget`] table
+/// (`max_cc = { max = 15, ratchet = true }`). Disambiguated by value type at
+/// load, exactly as [`MaxDead`] is; the scalar serialises back as the bare
+/// integer, so every existing contract and read-model is unchanged.
+///
+/// [FR-GV-11]: ../../../../docs/specs/requirements/FR-GV-11.md
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, expecting = "a non-negative integer, or `{ max = N, ratchet = true }`")]
+pub enum Budget {
+    /// The original scalar ceiling.
+    Absolute(u32),
+    /// The ratchet table.
+    Ratchet(RatchetBudget),
+}
+
+impl Budget {
+    /// The ceiling, whichever form declared it.
+    pub fn max(&self) -> u32 {
+        match self {
+            Budget::Absolute(max) => *max,
+            Budget::Ratchet(r) => r.max,
+        }
+    }
+
+    /// `true` when the budget classifies against the blessed set.
+    pub fn is_ratchet(&self) -> bool {
+        matches!(self, Budget::Ratchet(r) if r.ratchet)
+    }
+}
+
+/// A budget over a count that names no symbol ([FR-GV-23]): `max_cycles`.
+/// The scalar ceiling, or [`max_dead`](MaxDead)'s count-delta table
+/// `{ baseline = B, delta = D }` ([ADR-39]) generalised to it.
+///
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+/// [ADR-39]: ../../../../docs/specs/architecture/decisions/ADR-39.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, expecting = "a non-negative integer, or `{ baseline = N, delta = D }`")]
+pub enum CountBudget {
+    /// The scalar ceiling: fail iff the count exceeds it.
+    Absolute(u32),
+    /// The delta form: fail iff the count exceeds `baseline + delta`.
+    Baseline(CountBaseline),
+}
+
+impl CountBudget {
+    /// The `check_rules` violation message when `count` exceeds the budget, or
+    /// `None` within it. `key` is the constraint name and `noun` what is
+    /// counted. The scalar form's phrasing is the pre-[FR-GV-23] one verbatim.
+    ///
+    /// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+    pub fn exceeded_message(&self, count: u64, key: &str, noun: &str) -> Option<String> {
+        match self {
+            CountBudget::Absolute(max) => absolute_exceeded(count, *max, key, noun),
+            CountBudget::Baseline(b) => baseline_exceeded(b, count, key, noun),
+        }
+    }
+}
+
+/// The `max_clone_ratio` budget ([FR-GV-11] ext., [FR-GV-23]): the scalar ratio
+/// ceiling, or the count-delta form in ratio units,
+/// `{ baseline = 0.12, delta = 0 }` — fail iff the ratio exceeds
+/// `baseline + delta`. Both values are range-checked at load (exit 2).
+///
+/// `Eq` is not derived: the ratio is an `f64`.
+///
+/// [FR-GV-11]: ../../../../docs/specs/requirements/FR-GV-11.md
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, expecting = "a ratio in [0.0, 1.0], or `{ baseline = R, delta = D }`")]
+pub enum RatioBudget {
+    /// The scalar ratio ceiling in `[0.0, 1.0]`.
+    Absolute(f64),
+    /// The blessed-baseline form.
+    Baseline(RatioBaseline),
+}
+
+/// The `max_clone_ratio` delta table: a blessed ratio and a tolerated rise.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RatioBaseline {
+    /// The blessed near-clone ratio, in `[0.0, 1.0]`.
+    pub baseline: f64,
+    /// Tolerated rise above `baseline` before the gate fails (default 0).
+    #[serde(default)]
+    pub delta: f64,
+}
+
+impl RatioBudget {
+    /// The ratio the measured value must not exceed.
+    pub fn ceiling(&self) -> f64 {
+        match self {
+            RatioBudget::Absolute(max) => *max,
+            RatioBudget::Baseline(b) => b.baseline + b.delta,
+        }
+    }
+
+    /// How the budget names itself in a violation message: `max_clone_ratio =
+    /// 0.1` for the scalar (the pre-[FR-GV-23] phrasing), the blessed baseline
+    /// and delta for the table.
+    ///
+    /// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+    pub fn describe(&self) -> String {
+        match self {
+            RatioBudget::Absolute(max) => format!("max_clone_ratio = {max}"),
+            RatioBudget::Baseline(b) => format!(
+                "the blessed max_clone_ratio baseline {} (+{} delta, ceiling {})",
+                b.baseline,
+                b.delta,
+                self.ceiling()
+            ),
+        }
+    }
+}
+
+/// The `no_god_containers` budget ([FR-GV-11] ext., [FR-GV-23]): the original
+/// flag, or `{ ratchet = true }` — enforced, with each god container classified
+/// against the blessed set by its member-method count.
+///
+/// [FR-GV-11]: ../../../../docs/specs/requirements/FR-GV-11.md
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, expecting = "`true`, `false`, or `{ ratchet = true }`")]
+pub enum GodContainersBudget {
+    /// `true` enforces, `false` does not.
+    Flag(bool),
+    /// The ratchet table — always enforced.
+    Ratchet(RatchetFlag),
+}
+
+/// `{ ratchet = true }` — the ratchet table of a flag budget, which has no `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RatchetFlag {
+    /// Classify offenders against the blessed set.
+    pub ratchet: bool,
+}
+
+impl GodContainersBudget {
+    /// `true` when the budget is enforced at all.
+    pub fn enforced(&self) -> bool {
+        match self {
+            GodContainersBudget::Flag(on) => *on,
+            GodContainersBudget::Ratchet(_) => true,
+        }
+    }
+
+    /// `true` when offenders classify against the blessed set.
+    pub fn is_ratchet(&self) -> bool {
+        matches!(self, GodContainersBudget::Ratchet(r) if r.ratchet)
+    }
+}
+
 impl MaxDead {
     /// The effective ceiling the project-wide dead count must not exceed: the
-    /// absolute integer, or `baseline + delta` (saturating) for the delta form.
+    /// absolute integer, or `baseline + delta` (saturating) for the delta form,
+    /// or the ratchet table's `max`.
     ///
     /// Internal to the crate (the governance evaluator and this module's tests
     /// are the only callers) — the public budget seam is [`Self::exceeded_message`].
     pub(crate) fn ceiling(&self) -> u64 {
         match self {
             MaxDead::Absolute(max) => u64::from(*max),
-            MaxDead::Baseline(b) => u64::from(b.baseline).saturating_add(u64::from(b.delta)),
+            MaxDead::Baseline(b) => baseline_ceiling(b),
+            MaxDead::Ratchet(r) => u64::from(r.max),
         }
+    }
+
+    /// `true` when the dead set classifies against the blessed set
+    /// ([FR-GV-23]).
+    ///
+    /// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+    pub fn is_ratchet(&self) -> bool {
+        matches!(self, MaxDead::Ratchet(r) if r.ratchet)
     }
 
     /// The absolute ceiling when the budget is in absolute mode, else `None`.
     ///
     /// Lets a scalar-only consumer (the web config editor's typed `max_dead`
-    /// field, [FR-UI-12]) render the absolute form while a delta-form contract
-    /// is edited through the authoritative raw-TOML pane.
+    /// field, [FR-UI-12]) render the absolute form while a delta- or
+    /// ratchet-form contract is edited through the authoritative raw-TOML pane.
     ///
     /// [FR-UI-12]: ../../../../docs/specs/requirements/FR-UI-12.md
     pub fn as_absolute(&self) -> Option<u32> {
         match self {
             MaxDead::Absolute(max) => Some(*max),
-            MaxDead::Baseline(_) => None,
+            MaxDead::Baseline(_) | MaxDead::Ratchet(_) => None,
         }
     }
 
@@ -205,19 +549,16 @@ impl MaxDead {
     /// [FR-GV-11]: ../../../../docs/specs/requirements/FR-GV-11.md
     /// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
     pub fn exceeded_message(&self, dead: u64) -> Option<String> {
+        const KEY: &str = "max_dead";
+        const NOUN: &str = "dead functions";
         if dead <= self.ceiling() {
             return None;
         }
-        Some(match self {
-            MaxDead::Absolute(max) => format!("{dead} dead functions exceed max_dead = {max}"),
-            MaxDead::Baseline(b) => format!(
-                "{dead} dead functions exceed the blessed max_dead baseline {} \
-                 (+{} delta, ceiling {})",
-                b.baseline,
-                b.delta,
-                self.ceiling()
-            ),
-        })
+        match self {
+            MaxDead::Absolute(max) => absolute_exceeded(dead, *max, KEY, NOUN),
+            MaxDead::Baseline(b) => baseline_exceeded(b, dead, KEY, NOUN),
+            MaxDead::Ratchet(r) => absolute_exceeded(dead, r.max, KEY, NOUN),
+        }
     }
 }
 
@@ -259,18 +600,24 @@ impl MaxDead {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Constraints {
-    /// Maximum allowed dependency cycles.
-    pub max_cycles: Option<u32>,
-    /// Maximum cyclomatic complexity per function.
-    pub max_cc: Option<u32>,
-    /// Maximum lines per function.
-    pub max_fn_lines: Option<u32>,
-    /// Maximum symbols per file before a file is flagged a "god file" (OQ-06).
-    pub no_god_files: Option<u32>,
-    /// Maximum inbound dependency edges for any one symbol ([FR-GV-11], [BR-19]).
-    pub max_fan_in: Option<u32>,
-    /// Maximum outbound dependency edges for any one symbol ([FR-GV-11], [BR-19]).
-    pub max_fan_out: Option<u32>,
+    /// Maximum allowed dependency cycles — the scalar, or the count-delta form
+    /// `{ baseline = B, delta = D }` ([FR-GV-23], [`CountBudget`]).
+    ///
+    /// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+    pub max_cycles: Option<CountBudget>,
+    /// Maximum cyclomatic complexity per function ([`Budget`]: scalar or ratchet).
+    pub max_cc: Option<Budget>,
+    /// Maximum lines per function ([`Budget`]).
+    pub max_fn_lines: Option<Budget>,
+    /// Maximum symbols per file before a file is flagged a "god file" (OQ-06);
+    /// under ratchet the file path is the offender's identity ([`Budget`]).
+    pub no_god_files: Option<Budget>,
+    /// Maximum inbound dependency edges for any one symbol ([FR-GV-11], [BR-19]);
+    /// under ratchet the module key is the offender's identity ([`Budget`]).
+    pub max_fan_in: Option<Budget>,
+    /// Maximum outbound dependency edges for any one symbol ([FR-GV-11], [BR-19]);
+    /// under ratchet the module key is the offender's identity ([`Budget`]).
+    pub max_fan_out: Option<Budget>,
     /// Project-wide dead-function budget ([FR-GV-11], [CR-043], [ADR-39]).
     ///
     /// Accepts two shapes (see [`MaxDead`]): the original **absolute** integer
@@ -284,21 +631,26 @@ pub struct Constraints {
     /// [ADR-39]: ../../../../docs/specs/architecture/decisions/ADR-39.md
     /// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
     pub max_dead: Option<MaxDead>,
-    /// Maximum project-wide count of `is_duplicate` functions ([FR-GV-11]).
-    pub max_duplicates: Option<u32>,
+    /// Maximum project-wide count of `is_duplicate` functions ([FR-GV-11]);
+    /// under ratchet (`{ max = 0, ratchet = true }`) each duplicate is one
+    /// offender of a symbol set ([`Budget`]).
+    pub max_duplicates: Option<Budget>,
     /// Maximum per-function maximum nesting depth ([FR-GV-11] ext., [FR-EX-07],
     /// [CR-005]); a production function deeper than this is one error violation.
-    pub max_nesting_depth: Option<u32>,
+    pub max_nesting_depth: Option<Budget>,
     /// Maximum project-wide count of brain methods ([FR-GV-11] ext., [FR-QM-10],
-    /// [CR-005]); a brain method meets all three brain thresholds.
-    pub max_brain_methods: Option<u32>,
+    /// [CR-005]); a brain method meets all three brain thresholds. Under ratchet
+    /// each brain method is one offender of a symbol set ([`Budget`]).
+    pub max_brain_methods: Option<Budget>,
     /// Maximum project-wide near-clone production-function ratio ([FR-GV-11] ext.,
     /// [FR-AN-06], [CR-005]); `clone_group IS NOT NULL` over production functions.
-    pub max_clone_ratio: Option<f64>,
+    /// The scalar, or the count-delta form in ratio units ([`RatioBudget`]).
+    pub max_clone_ratio: Option<RatioBudget>,
     /// When `true`, no class-like container may be over the god thresholds
     /// ([FR-GV-11] ext., [FR-QM-12], [CR-005]); each god container is one error
-    /// violation. `false`/omitted is not enforced.
-    pub no_god_containers: Option<bool>,
+    /// violation. `false`/omitted is not enforced; `{ ratchet = true }` enforces
+    /// against the blessed set ([`GodContainersBudget`]).
+    pub no_god_containers: Option<GodContainersBudget>,
 }
 
 impl Constraints {
@@ -320,19 +672,48 @@ impl Constraints {
     /// [FR-CF-03]: ../../../../docs/specs/requirements/FR-CF-03.md
     pub fn recommended() -> Self {
         Self {
-            max_cycles: Some(0),
-            max_cc: Some(15),
-            max_fn_lines: Some(80),
-            no_god_files: Some(40),
-            max_fan_in: Some(30),
-            max_fan_out: Some(30),
+            max_cycles: Some(CountBudget::Absolute(0)),
+            max_cc: Some(Budget::Absolute(15)),
+            max_fn_lines: Some(Budget::Absolute(80)),
+            no_god_files: Some(Budget::Absolute(40)),
+            max_fan_in: Some(Budget::Absolute(30)),
+            max_fan_out: Some(Budget::Absolute(30)),
             max_dead: Some(MaxDead::Absolute(0)),
-            max_duplicates: Some(0),
-            max_nesting_depth: Some(4),
-            max_brain_methods: Some(0),
-            max_clone_ratio: Some(0.0),
-            no_god_containers: Some(true),
+            max_duplicates: Some(Budget::Absolute(0)),
+            max_nesting_depth: Some(Budget::Absolute(4)),
+            max_brain_methods: Some(Budget::Absolute(0)),
+            max_clone_ratio: Some(RatioBudget::Absolute(0.0)),
+            no_god_containers: Some(GodContainersBudget::Flag(true)),
         }
+    }
+
+    /// The constraints declared `ratchet = true` ([FR-GV-23]), in the canonical
+    /// evaluation order — the rules whose offenders classify against the
+    /// blessed set, and whose blessed entries can be reported fixed.
+    ///
+    /// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+    pub fn ratchet_rules(&self) -> Vec<&'static str> {
+        let budget = |b: &Option<Budget>| b.as_ref().is_some_and(Budget::is_ratchet);
+        [
+            ("max_cc", budget(&self.max_cc)),
+            ("max_fn_lines", budget(&self.max_fn_lines)),
+            ("no_god_files", budget(&self.no_god_files)),
+            ("max_fan_in", budget(&self.max_fan_in)),
+            ("max_fan_out", budget(&self.max_fan_out)),
+            ("max_dead", self.max_dead.as_ref().is_some_and(MaxDead::is_ratchet)),
+            ("max_duplicates", budget(&self.max_duplicates)),
+            ("max_nesting_depth", budget(&self.max_nesting_depth)),
+            ("max_brain_methods", budget(&self.max_brain_methods)),
+            (
+                "no_god_containers",
+                self.no_god_containers
+                    .as_ref()
+                    .is_some_and(GodContainersBudget::is_ratchet),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(rule, on)| on.then_some(rule))
+        .collect()
     }
 }
 
@@ -805,11 +1186,48 @@ impl Rules {
         // loud at load (exit 2) rather than silently skewing the signal — e.g. a
         // negative `max_clone_ratio` would make every clean project violate, and a
         // non-positive `T_nest` would flag every function as deeply nested.
-        if let Some(ratio) = self.constraints.max_clone_ratio {
-            if !(0.0..=1.0).contains(&ratio) {
+        match self.constraints.max_clone_ratio {
+            Some(RatioBudget::Absolute(ratio)) if !(0.0..=1.0).contains(&ratio) => {
                 return Err(super::error::ConfigError::InvalidValue {
                     key: "constraints.max_clone_ratio".to_string(),
                     message: format!("{ratio} is outside the valid ratio range [0.0, 1.0]"),
+                });
+            }
+            Some(RatioBudget::Baseline(b))
+                if !(0.0..=1.0).contains(&b.baseline) || !(0.0..=1.0).contains(&b.delta) =>
+            {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: "constraints.max_clone_ratio".to_string(),
+                    message: format!(
+                        "baseline {} and delta {} must each lie in [0.0, 1.0]",
+                        b.baseline, b.delta
+                    ),
+                });
+            }
+            _ => {}
+        }
+        // FR-GV-23: a symbol-set budget under ratchet names every member of the
+        // set as one offender, so a `max` above 0 would silently tolerate that
+        // many *unnamed* members and make the classification meaningless.
+        // Reject it loud (exit 2) rather than guess which members it meant.
+        let c = &self.constraints;
+        let set_max = |b: &Option<Budget>| b.filter(Budget::is_ratchet).map(|b| b.max());
+        let dead_max = match &c.max_dead {
+            Some(MaxDead::Ratchet(r)) if r.ratchet => Some(r.max),
+            _ => None,
+        };
+        for (key, max) in [
+            ("max_dead", dead_max),
+            ("max_duplicates", set_max(&c.max_duplicates)),
+            ("max_brain_methods", set_max(&c.max_brain_methods)),
+        ] {
+            if let Some(max) = max.filter(|m| *m != 0) {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: format!("constraints.{key}"),
+                    message: format!(
+                        "max = {max} under ratchet: a symbol-set budget names each member as \
+                         one offender, so its ratchet form is `{{ max = 0, ratchet = true }}`"
+                    ),
                 });
             }
         }
@@ -895,6 +1313,11 @@ impl Rules {
                     });
                 }
             }
+        }
+        // FR-SC-10: the `[security]` table's scanner names and OWASP categories
+        // are checked at load (exit 2), so a typo never reads as a clean gate.
+        if let Some(security) = &self.security {
+            security.validate()?;
         }
         Ok(())
     }
@@ -1445,18 +1868,18 @@ mod tests {
     #[test]
     fn recommended_populates_every_field_with_documented_baselines() {
         let r = Constraints::recommended();
-        assert_eq!(r.max_cycles, Some(0));
-        assert_eq!(r.max_cc, Some(15));
-        assert_eq!(r.max_fn_lines, Some(80));
-        assert_eq!(r.no_god_files, Some(40));
-        assert_eq!(r.max_fan_in, Some(30));
-        assert_eq!(r.max_fan_out, Some(30));
+        assert_eq!(r.max_cycles, Some(CountBudget::Absolute(0)));
+        assert_eq!(r.max_cc, Some(Budget::Absolute(15)));
+        assert_eq!(r.max_fn_lines, Some(Budget::Absolute(80)));
+        assert_eq!(r.no_god_files, Some(Budget::Absolute(40)));
+        assert_eq!(r.max_fan_in, Some(Budget::Absolute(30)));
+        assert_eq!(r.max_fan_out, Some(Budget::Absolute(30)));
         assert_eq!(r.max_dead, Some(MaxDead::Absolute(0)));
-        assert_eq!(r.max_duplicates, Some(0));
-        assert_eq!(r.max_nesting_depth, Some(4));
-        assert_eq!(r.max_brain_methods, Some(0));
-        assert_eq!(r.max_clone_ratio, Some(0.0));
-        assert_eq!(r.no_god_containers, Some(true));
+        assert_eq!(r.max_duplicates, Some(Budget::Absolute(0)));
+        assert_eq!(r.max_nesting_depth, Some(Budget::Absolute(4)));
+        assert_eq!(r.max_brain_methods, Some(Budget::Absolute(0)));
+        assert_eq!(r.max_clone_ratio, Some(RatioBudget::Absolute(0.0)));
+        assert_eq!(r.no_god_containers, Some(GodContainersBudget::Flag(true)));
     }
 
     /// The recommended set is advisory-only: applying it as a `rules.toml`
@@ -1473,5 +1896,236 @@ mod tests {
             rules.validate().is_ok(),
             "the curated recommended baselines must themselves pass validation"
         );
+    }
+
+    // ── FR-GV-23 / S-507: the ratchet and count-delta forms ────────────────────
+
+    fn constraints(toml_text: &str) -> Constraints {
+        let rules: Rules = toml::from_str(&format!("[constraints]\n{toml_text}\n"))
+            .unwrap_or_else(|e| panic!("{toml_text}: {e}"));
+        rules.validate().unwrap_or_else(|e| panic!("{toml_text}: {e}"));
+        rules.constraints
+    }
+
+    /// Every symbol-naming budget accepts `{ max = N, ratchet = true }` beside
+    /// its scalar, and `ratchet_rules` names exactly the ratcheted ones.
+    #[test]
+    fn every_symbol_naming_budget_accepts_the_ratchet_table() {
+        let c = constraints(
+            "max_cc = { max = 15, ratchet = true }\n\
+             max_fn_lines = { max = 80, ratchet = true }\n\
+             no_god_files = { max = 40, ratchet = true }\n\
+             max_fan_in = { max = 30, ratchet = true }\n\
+             max_fan_out = { max = 30, ratchet = true }\n\
+             max_dead = { max = 0, ratchet = true }\n\
+             max_duplicates = { max = 0, ratchet = true }\n\
+             max_nesting_depth = { max = 4, ratchet = true }\n\
+             max_brain_methods = { max = 0, ratchet = true }\n\
+             no_god_containers = { ratchet = true }",
+        );
+        let ratchet = |max| Some(Budget::Ratchet(RatchetBudget { max, ratchet: true }));
+        assert_eq!(c.max_cc, ratchet(15));
+        assert_eq!(c.max_dead, Some(MaxDead::Ratchet(RatchetBudget { max: 0, ratchet: true })));
+        assert_eq!(
+            c.no_god_containers,
+            Some(GodContainersBudget::Ratchet(RatchetFlag { ratchet: true }))
+        );
+        assert_eq!(
+            c.ratchet_rules(),
+            [
+                "max_cc",
+                "max_fn_lines",
+                "no_god_files",
+                "max_fan_in",
+                "max_fan_out",
+                "max_dead",
+                "max_duplicates",
+                "max_nesting_depth",
+                "max_brain_methods",
+                "no_god_containers",
+            ]
+        );
+    }
+
+    /// The scalar forms parse and serialise exactly as before, so an existing
+    /// contract — and every read-model that renders it — is unchanged; and a
+    /// table with `ratchet = false` (or omitted) is not under ratchet.
+    #[test]
+    fn scalar_forms_are_unchanged_and_ratchet_false_is_not_a_ratchet() {
+        let c = constraints("max_cc = 15\nmax_cycles = 2\nmax_clone_ratio = 0.1\nno_god_containers = true");
+        assert_eq!(c.max_cc, Some(Budget::Absolute(15)));
+        assert_eq!(c.max_cycles, Some(CountBudget::Absolute(2)));
+        assert_eq!(c.max_clone_ratio, Some(RatioBudget::Absolute(0.1)));
+        assert_eq!(c.no_god_containers, Some(GodContainersBudget::Flag(true)));
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["max_cc"], 15);
+        assert_eq!(json["max_cycles"], 2);
+        assert_eq!(json["max_clone_ratio"], 0.1);
+        assert_eq!(json["no_god_containers"], true);
+        assert!(c.ratchet_rules().is_empty());
+
+        let c = constraints("max_cc = { max = 15 }\nmax_fn_lines = { max = 80, ratchet = false }");
+        assert_eq!(c.max_cc.map(|b| b.max()), Some(15));
+        assert!(c.ratchet_rules().is_empty(), "ratchet defaults to false");
+
+        // A cached parse round-trips through JSON (the rules cache, FR-GV-01).
+        let ratcheted = constraints("max_cc = { max = 15, ratchet = true }");
+        let back: Constraints =
+            serde_json::from_str(&serde_json::to_string(&ratcheted).unwrap()).unwrap();
+        assert_eq!(back, ratcheted);
+    }
+
+    /// `max_cycles` and `max_clone_ratio` take the count-delta form; the delta
+    /// defaults to 0. `max_dead`'s inline delta form is unchanged.
+    #[test]
+    fn count_delta_form_parses_for_cycles_and_clone_ratio() {
+        let c = constraints(
+            "max_cycles = { baseline = 2 }\nmax_clone_ratio = { baseline = 0.12, delta = 0 }\n\
+             max_dead = { baseline = 42 }",
+        );
+        assert_eq!(
+            c.max_cycles,
+            Some(CountBudget::Baseline(CountBaseline { baseline: 2, delta: 0 }))
+        );
+        assert_eq!(
+            c.max_clone_ratio,
+            Some(RatioBudget::Baseline(RatioBaseline { baseline: 0.12, delta: 0.0 }))
+        );
+        assert_eq!(
+            c.max_dead,
+            Some(MaxDead::Baseline(MaxDeadBaseline { baseline: 42, delta: 0 }))
+        );
+        assert_eq!(c.max_clone_ratio.unwrap().ceiling(), 0.12);
+    }
+
+    /// A value matching no form names the forms the key accepts, rather than
+    /// serde's bare "did not match any variant" (NFR-UX-02).
+    #[test]
+    fn a_value_matching_no_form_names_the_accepted_forms() {
+        for (bad, expected) in [
+            ("max_cc = -1", "a non-negative integer, or `{ max = N, ratchet = true }`"),
+            ("max_cc = { max = 15, ratchett = true }", "`{ max = N, ratchet = true }`"),
+            ("max_cycles = { baseline = 2, delt = 1 }", "`{ baseline = N, delta = D }`"),
+            ("max_clone_ratio = \"x\"", "a ratio in [0.0, 1.0]"),
+            ("no_god_containers = 1", "`{ ratchet = true }`"),
+            ("max_dead = \"5\"", "`{ max = 0, ratchet = true }`"),
+        ] {
+            let err = toml::from_str::<Rules>(&format!("[constraints]\n{bad}\n"))
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains(expected), "{bad}: {err}");
+            assert!(!err.contains("did not match any variant"), "{bad}: {err}");
+        }
+    }
+
+    /// Misdeclared ratchet and delta tables fail loud at load (exit 2): an
+    /// unknown key, a ratchet table on a no-identity budget, a symbol-set
+    /// ratchet with `max > 0`, and an out-of-range clone-ratio baseline.
+    #[test]
+    fn malformed_ratchet_and_delta_tables_fail_loud() {
+        for bad in [
+            "max_cc = { max = 15, ratchet = true, bogus = 1 }",
+            "max_cc = { ratchet = true }",
+            "max_cycles = { max = 2, ratchet = true }",
+            "max_clone_ratio = { max = 0, ratchet = true }",
+            "no_god_containers = { max = 0, ratchet = true }",
+        ] {
+            assert!(
+                toml::from_str::<Rules>(&format!("[constraints]\n{bad}\n")).is_err(),
+                "{bad} must not parse"
+            );
+        }
+        for (bad, key) in [
+            ("max_dead = { max = 3, ratchet = true }", "constraints.max_dead"),
+            ("max_duplicates = { max = 1, ratchet = true }", "constraints.max_duplicates"),
+            ("max_brain_methods = { max = 2, ratchet = true }", "constraints.max_brain_methods"),
+            ("max_clone_ratio = { baseline = 1.5 }", "constraints.max_clone_ratio"),
+            ("max_clone_ratio = { baseline = 0.1, delta = -0.1 }", "constraints.max_clone_ratio"),
+        ] {
+            let rules: Rules = toml::from_str(&format!("[constraints]\n{bad}\n")).unwrap();
+            let err = rules.validate().expect_err(bad).to_string();
+            assert!(err.contains(key), "{bad}: {err}");
+        }
+        // The near miss: a symbol-set budget with `max > 0` NOT under ratchet is
+        // the ordinary count ceiling and validates.
+        constraints("max_dead = { max = 3, ratchet = false }\nmax_duplicates = { max = 1 }");
+    }
+
+    // ── FR-SC-10 (S-668): the `[security]` table ──────────────────────────────
+
+    /// Every key is optional: an empty table requires nothing, ratchets at
+    /// `high` and sets no cap; a full one parses each key as written.
+    #[test]
+    fn the_security_table_parses_with_its_defaults() {
+        let rules: Rules = toml::from_str("[security]\n").unwrap();
+        let table = rules.security.expect("an empty table is still present");
+        assert_eq!(table, SecurityRules::default());
+        assert_eq!(table.ratchet_min_severity, crate::model::Severity::High);
+        assert!(table.required_scanners.is_empty() && table.max_severity.is_none());
+
+        let rules: Rules = toml::from_str(
+            "[security]\nrequired_scanners = [\"semgrep\", \"Gitleaks\"]\nratchet_min_severity = \"medium\"\n\
+             max_severity = \"critical\"\nfail_on_owasp = [\"A05\", \"A01:2021\"]\n",
+        )
+        .unwrap();
+        rules.validate().unwrap();
+        let table = rules.security.unwrap();
+        assert_eq!(table.required_scanners, ["semgrep", "Gitleaks"]);
+        assert_eq!(table.ratchet_min_severity, crate::model::Severity::Medium);
+        assert_eq!(table.max_severity, Some(crate::model::Severity::Critical));
+        assert_eq!(table.owasp_categories(), ["A05:2025", "A01:2021"], "a bare id is the 2025 edition");
+
+        // Padding is not part of the id, and one category named three ways is
+        // evaluated — and counted — once.
+        let rules: Rules =
+            toml::from_str("[security]\nfail_on_owasp = [\" A05 \", \"A03:2021\", \"A05:2025\", \"A05\"]\n").unwrap();
+        rules.validate().unwrap();
+        assert_eq!(rules.security.unwrap().owasp_categories(), ["A05:2025", "A03:2021"]);
+    }
+
+    /// No table is `None`, and the serialised contract — the rules cache's JSON,
+    /// the config view's payload — carries no `security` key, so it is unchanged.
+    /// A present table round-trips through that JSON.
+    #[test]
+    fn an_absent_security_table_leaves_the_serialised_contract_unchanged() {
+        let rules: Rules = toml::from_str("[constraints]\nmax_cc = 15\n").unwrap();
+        assert!(rules.security.is_none());
+        assert!(!serde_json::to_string(&rules).unwrap().contains("security"));
+
+        let rules: Rules =
+            toml::from_str("[security]\nrequired_scanners = [\"semgrep\"]\nmax_severity = \"high\"\n").unwrap();
+        let json = serde_json::to_string(&rules).unwrap();
+        assert_eq!(serde_json::from_str::<Rules>(&json).unwrap(), rules);
+    }
+
+    /// A misconfigured table fails loud at load: an unknown key or severity at
+    /// parse, a blank scanner or a non-category OWASP entry at validation — each
+    /// beside its one-character near miss, which passes.
+    #[test]
+    fn a_misconfigured_security_table_fails_loud() {
+        for bad in [
+            "required = [\"semgrep\"]",
+            "max_severity = \"severe\"",
+            "ratchet_min_severity = \"High\"",
+        ] {
+            assert!(toml::from_str::<Rules>(&format!("[security]\n{bad}\n")).is_err(), "{bad} must not parse");
+        }
+        for (bad, key) in [
+            ("required_scanners = [\" \"]", "security.required_scanners[0]"),
+            ("fail_on_owasp = [\"A11\"]", "security.fail_on_owasp[0]"),
+            ("fail_on_owasp = [\"A00\"]", "security.fail_on_owasp[0]"),
+            ("fail_on_owasp = [\"A5\"]", "security.fail_on_owasp[0]"),
+            ("fail_on_owasp = [\"A05:2017\"]", "security.fail_on_owasp[0]"),
+            ("fail_on_owasp = [\"A05:\"]", "security.fail_on_owasp[0]"),
+            ("fail_on_owasp = [\"A10\", \"B01\"]", "security.fail_on_owasp[1]"),
+        ] {
+            let rules: Rules = toml::from_str(&format!("[security]\n{bad}\n")).unwrap();
+            let err = rules.validate().expect_err(bad).to_string();
+            assert!(err.contains(key), "{bad}: {err}");
+        }
+        for ok in ["required_scanners = [\"s\"]", "fail_on_owasp = [\"A10\", \"A01:2025\", \"A09:2021\"]"] {
+            let rules: Rules = toml::from_str(&format!("[security]\n{ok}\n")).unwrap();
+            rules.validate().unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
     }
 }

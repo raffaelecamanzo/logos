@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use super::registry::{parse_version, Fill, REGISTRY};
+use super::registry::{parse_version, Fill, ScopedPath, REGISTRY};
 use super::{
-    scanner, Detection, Orchestrator, Outcome, ScanReport, ScannerOutcome, Selection, OUTPUT_DIR,
-    REQUIRES_BUILD,
+    scanner, CopyKind, Detection, Orchestrator, Outcome, ScanEnvironment, ScanReport,
+    ScannerOutcome, Selection, OUTPUT_DIR, REQUIRES_BUILD,
 };
 use crate::config::{parse_config, parse_user_config, ConfigError, SECURITY_SCANNERS};
 use crate::history::security::parse_report;
@@ -333,6 +333,7 @@ fn detection_reports_each_scanner_installed_with_its_version_or_not_installed() 
                 Detection::Installed {
                     binary: w.bin.join(state.scanner),
                     version: Some(version.to_string()),
+                    copy: CopyKind::Path,
                 },
                 "{} is installed with its version",
                 state.scanner
@@ -505,6 +506,83 @@ fn the_same_keys_at_user_level_take_effect() {
     assert_eq!(codeql.len(), 2);
     assert!(!codeql[0].contains(&"--threads=2".to_string()), "{:?}", codeql[0]);
     assert_eq!(codeql[1].last().map(String::as_str), Some("--threads=2"));
+}
+
+/// Each detection names its copy: the user's override first, then a copy on
+/// the search path, then the managed copy at the builtin manifest's pinned
+/// version — and a managed copy of any other version is never used (S-743).
+#[test]
+fn a_scanner_is_the_override_then_the_path_copy_then_the_managed_copy() {
+    let w = World::new(PROJECT);
+    let tools = w.user.join("managed-tools");
+    let pinned = |tool: &str| {
+        let entry = crate::tools::Manifest::builtin().tool(tool).unwrap();
+        tools.join(tool).join(&entry.version).join(&entry.binary)
+    };
+    for tool in ["semgrep", "trivy", "gitleaks", "gosec"] {
+        w.stub(tool, 0);
+    }
+    for tool in ["trivy", "gitleaks", "osv-scanner"] {
+        fs::create_dir_all(pinned(tool).parent().unwrap()).unwrap();
+        w.stub_at(&pinned(tool), tool, &format!("{tool}-managed"), 0, "");
+    }
+    // A managed copy that is not the pinned version is not a copy at all.
+    let stale = tools.join("gosec").join("0.0.1").join("gosec");
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    w.stub_at(&stale, "gosec", "gosec-stale", 0, "");
+    fs::remove_file(w.bin.join("gosec")).unwrap();
+    let custom = w.user.join("semgrep-custom");
+    w.stub_at(&custom, "semgrep", "semgrep-custom", 0, "");
+    w.user_config(&format!("[security_scan.semgrep]\npath = \"{}\"\n", custom.display()));
+
+    let env = ScanEnvironment {
+        user_dir: Some(w.user.clone()),
+        search_path: Some(w.bin.clone().into_os_string()),
+        tools_dir: Some(tools.clone()),
+    };
+    let states = Orchestrator::open_in(&w.root, &env).unwrap().detect();
+    let copy = |name: &str| match &states.iter().find(|s| s.scanner == name).unwrap().detection {
+        Detection::Installed { binary, copy, .. } => Some((binary.clone(), *copy)),
+        _ => None,
+    };
+    assert_eq!(copy("semgrep"), Some((custom, CopyKind::Override)));
+    assert_eq!(copy("trivy"), Some((w.bin.join("trivy"), CopyKind::Path)), "PATH before managed");
+    assert_eq!(copy("osv-scanner"), Some((pinned("osv-scanner"), CopyKind::Managed)));
+    assert_eq!(copy("gosec"), None, "only the pinned version is looked at");
+    // `open_with` names no tools directory, so it finds no managed copy.
+    let without = Orchestrator::open_with(&w.root, Some(&w.user), Some(w.bin.clone().into_os_string()))
+        .unwrap()
+        .detect();
+    assert_eq!(without[3].scanner, "osv-scanner");
+    assert_eq!(without[3].detection, Detection::NotInstalled);
+}
+
+/// A tools directory inside the project — as written, or reached through a
+/// symlink from outside it — supplies no managed copy: the repository could
+/// plant one ([NFR-SE-08]).
+///
+/// [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
+#[test]
+fn a_tools_directory_inside_the_project_supplies_no_managed_copy() {
+    let w = World::new(PROJECT);
+    let entry = crate::tools::Manifest::builtin().tool("osv-scanner").unwrap();
+    let planted = w.root.join(".local/share/logos/tools");
+    let binary = planted.join("osv-scanner").join(&entry.version).join("osv-scanner");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    w.stub_at(&binary, "osv-scanner", "osv-scanner-planted", 0, "");
+    let link = w.user.join("tools-link");
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    for tools_dir in [planted.clone(), link] {
+        let env = ScanEnvironment {
+            user_dir: Some(w.user.clone()),
+            search_path: Some(w.bin.clone().into_os_string()),
+            tools_dir: Some(tools_dir.clone()),
+        };
+        let states = Orchestrator::open_in(&w.root, &env).unwrap().detect();
+        assert_eq!(states[3].scanner, "osv-scanner");
+        assert_eq!(states[3].detection, Detection::NotInstalled, "{}", tools_dir.display());
+    }
+    assert!(w.invocations("osv-scanner-planted").is_empty(), "the planted copy never ran");
 }
 
 #[test]
@@ -695,7 +773,7 @@ fn captured_output_is_bounded_and_a_flooding_scanner_never_blocks() {
         panic!("{report:?}");
     };
     assert_eq!(*exit_code, Some(3));
-    assert!(stderr.len() <= super::spawn::STDERR_CAP, "{} bytes kept", stderr.len());
+    assert!(stderr.len() <= crate::jobs::spawn::STDERR_CAP, "{} bytes kept", stderr.len());
     assert!(stderr.ends_with("END"), "the tail is kept");
 }
 
@@ -728,21 +806,35 @@ fn an_unknown_scanner_in_a_selection_is_rejected_before_any_spawn() {
     assert!(fs::read_dir(&w.rec).unwrap().next().is_none(), "nothing was spawned");
 }
 
-/// The path position is fixed: a scoped run's argv differs from the full
-/// run's only there ([FR-SC-17]); the whole-manifest scanners have none.
+/// The path position is fixed: each scoped run's argv differs from the full
+/// run's only there, by the path elements the scanner's slot takes at its
+/// tested version (CRA-02, [FR-SC-17]); the whole-manifest scanners and CodeQL
+/// have none, and ignore a scope.
 ///
 /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
 #[test]
-fn a_scoped_argv_differs_from_the_full_argv_only_at_the_path_position() {
+fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
     let out = Path::new("/r/.logos/security/x.sarif");
     let extra = strings(&["--flag"]);
-    let scope = strings(&["src/a.py", "src/b.py"]);
-    let path_capable: Vec<&str> = REGISTRY
-        .iter()
-        .filter(|s| s.path_slot.is_some())
-        .map(|s| s.name)
-        .collect();
-    assert_eq!(path_capable, ["semgrep", "gitleaks", "bandit", "gosec", "checkov"]);
+    let scope = [
+        ScopedPath { rel: "app/db.py".to_string(), is_dir: false },
+        ScopedPath { rel: "infra".to_string(), is_dir: true },
+    ];
+    // Per scanner, the path elements of each run, literally.
+    let expected: &[(&str, &[&[&str]])] = &[
+        ("semgrep", &[&["app/db.py", "infra"]]),
+        ("gitleaks", &[&["--no-git", "--source", "app/db.py"], &["--no-git", "--source", "infra"]]),
+        ("bandit", &[&["app/db.py", "infra"]]),
+        ("gosec", &[&["./app", "./infra/..."]]),
+        ("checkov", &[&["--file", "app/db.py"], &["--directory", "infra"]]),
+    ];
+    let path_capable: Vec<&str> = REGISTRY.iter().filter(|s| s.path_slot.is_some()).map(|s| s.name).collect();
+    assert_eq!(path_capable, expected.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+    // Only Gitleaks' scoped run reads other evidence than its full scan (the
+    // files, not their git history), so only its ingest keeps full-scan findings.
+    let keeping: Vec<&str> =
+        REGISTRY.iter().filter(|s| s.path_slot.is_some_and(|p| p.keeps_full_findings)).map(|s| s.name).collect();
+    assert_eq!(keeping, ["gitleaks"]);
     for s in &REGISTRY {
         let fill = Fill {
             out,
@@ -751,25 +843,32 @@ fn a_scoped_argv_differs_from_the_full_argv_only_at_the_path_position() {
             language: "python",
             database: Path::new("/db"),
             pinned_config: Path::new("/r/.logos/security/empty-config.yaml"),
+            ignored: &[],
+            root: None,
         };
         let full = s.render(s.run, &fill);
-        let scoped = s.render(s.run, &Fill { scope: Some(&scope), ..fill });
         let Some(slot) = s.path_slot else {
             assert!(!s.run.contains(&super::registry::Arg::Paths), "{} has no path position", s.name);
-            assert_eq!(full, scoped, "{} ignores a scope", s.name);
+            assert_eq!(full, s.render(s.run, &Fill { scope: Some(&scope), ..fill }), "{} ignores a scope", s.name);
             continue;
         };
-        let at = s.run.iter().position(|a| *a == super::registry::Arg::Paths).unwrap() + extra.len() - 1;
-        let tail = full.len() - at - slot.full.len();
-        assert_eq!(full[..at], scoped[..at], "{}: the prefix is unchanged", s.name);
-        assert_eq!(full[full.len() - tail..], scoped[scoped.len() - tail..], "{}: the suffix is unchanged", s.name);
-        let paths: Vec<OsString> = scoped[at..scoped.len() - tail].to_vec();
-        let mut want = Vec::new();
-        for p in &scope {
-            want.extend(slot.per_path_flag.map(OsString::from));
-            want.push(OsString::from(p));
+        let runs: Vec<Vec<OsString>> =
+            slot.runs(&scope).into_iter().map(|run| s.render(s.run, &Fill { scope: Some(run), ..fill })).collect();
+        // Every placeholder before the path position renders one element but
+        // `Extra` (one per flag) and `Ignored` (none here: nothing is ignored).
+        let before = &s.run[..s.run.iter().position(|a| *a == super::registry::Arg::Paths).unwrap()];
+        let ignored = before.iter().filter(|a| matches!(a, super::registry::Arg::Ignored(_))).count();
+        let at = before.len() + extra.len() - 1 - ignored;
+        let (_, want_runs) = expected.iter().find(|(n, _)| *n == s.name).unwrap();
+        assert_eq!(runs.len(), want_runs.len(), "{}: one run per slot group", s.name);
+        for (scoped, want) in runs.iter().zip(want_runs.iter()) {
+            // The full argv with its full-scan path elements swapped for these.
+            let mut rebuilt: Vec<OsString> = full[..at].to_vec();
+            rebuilt.extend(want.iter().map(OsString::from));
+            rebuilt.extend(full[at + slot.full.len()..].iter().cloned());
+            assert_eq!(*scoped, rebuilt, "{}: only the path elements differ", s.name);
+            assert_eq!(full[at..at + slot.full.len()], strings(slot.full).iter().map(OsString::from).collect::<Vec<_>>()[..]);
         }
-        assert_eq!(paths, want, "{}: the path position holds the scope", s.name);
     }
 }
 
@@ -1106,10 +1205,14 @@ fn the_version_comes_from_a_successful_probe_on_either_stream() {
     write_executable(&w.bin.join("semgrep"), "#!/bin/sh\nprintf '1.85.0\\n'\nexit 2\n");
     write_executable(&w.bin.join("trivy"), "#!/bin/sh\nprintf 'Version: 0.74.0\\n' >&2\nexit 0\n");
     let states = w.open().unwrap().detect();
-    assert_eq!(states[0].detection, Detection::Installed { binary: w.bin.join("semgrep"), version: None });
+    assert_eq!(states[0].detection, Detection::Installed { binary: w.bin.join("semgrep"), version: None, copy: CopyKind::Path });
     assert_eq!(
         states[1].detection,
-        Detection::Installed { binary: w.bin.join("trivy"), version: Some("0.74.0".to_string()) }
+        Detection::Installed {
+            binary: w.bin.join("trivy"),
+            version: Some("0.74.0".to_string()),
+            copy: CopyKind::Path,
+        }
     );
 }
 
@@ -1148,7 +1251,7 @@ fn a_scanner_is_the_first_executable_file_under_any_of_its_names() {
 /// the run open.
 #[test]
 fn a_deadline_and_an_exit_end_the_whole_process_group() {
-    use super::spawn::{run, Launch};
+    use crate::jobs::spawn::{run, Launch};
     use std::time::{Duration, Instant};
     let w = World::new(PROJECT);
     let script = |name: &str, body: &str| {
@@ -1156,7 +1259,7 @@ fn a_deadline_and_an_exit_end_the_whole_process_group() {
         write_executable(&p, &format!("#!/bin/sh\n{body}\n"));
         p
     };
-    let launch = |deadline| Launch { cwd: &w.root, env: &[], path: None, deadline };
+    let launch = |deadline| Launch { cwd: &w.root, env: &[], vars: &[], isolated: None, path: None, deadline };
 
     let hang = script("hang", "/bin/sleep 30 & /bin/sleep 30");
     let start = Instant::now();
@@ -1182,7 +1285,7 @@ fn a_deadline_and_an_exit_end_the_whole_process_group() {
     // Stdout keeps its head, to the cap.
     let flood = script("flood", "printf 'HEAD'; /bin/dd if=/dev/zero bs=1024 count=1024 2>/dev/null | /usr/bin/tr '\\0' 'x'");
     let f = run(&flood, &[], &launch(None)).unwrap();
-    assert_eq!(f.stdout.len(), super::spawn::STDOUT_CAP);
+    assert_eq!(f.stdout.len(), crate::jobs::spawn::STDOUT_CAP);
     assert!(f.stdout.starts_with("HEAD"));
 }
 
@@ -1197,3 +1300,387 @@ fn a_scanner_table_without_enabled_is_enabled_and_an_unreadable_user_config_fail
     assert!(matches!(err, ConfigError::Io { .. }), "{err}");
     assert_eq!(err.exit_code(), 2);
 }
+
+/// A scoped run of a scanner with a directory output (Checkov) makes one run
+/// per path in `scoped/`, each into its own directory, and merges what they
+/// produced into `scoped/checkov.sarif`; the whole-project report is never
+/// touched ([FR-SC-17]).
+///
+/// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+#[test]
+fn a_scoped_directory_output_scanner_runs_per_path_and_merges_into_one_report() {
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    let scope = super::resolve_scope(&w.root, &strings(&["infra/main.tf", "app"])).unwrap();
+    let report = w.open().unwrap().scan_in(&Selection::Only(strings(&["checkov"])), Some(&scope)).unwrap();
+    let scoped = |p: &str| w.root.join(OUTPUT_DIR).join("scoped").join(p).display().to_string();
+    let Outcome::Ran { sarif, .. } = &outcome(&report, "checkov").outcome else {
+        panic!("checkov ran: {report:?}");
+    };
+    assert_eq!(sarif, &[PathBuf::from(scoped("checkov.sarif"))]);
+    let runs = w.runs("checkov");
+    let tails: Vec<&[String]> = runs.iter().map(|r| &r[r.len() - 4..]).collect();
+    assert_eq!(
+        tails,
+        [
+            &strings(&["--skip-path", ".logos", "--file", "infra/main.tf"])[..],
+            &strings(&["--skip-path", ".logos", "--directory", "app"])[..],
+        ]
+    );
+    for (run, n) in runs.iter().zip(1..) {
+        let at = run.iter().position(|a| a == "--output-file-path").unwrap();
+        assert_eq!(run[at + 1], scoped(&format!("checkov.{n}")), "each run writes its own directory");
+    }
+    let merged: serde_json::Value = serde_json::from_slice(&fs::read(scoped("checkov.sarif")).unwrap()).unwrap();
+    assert_eq!(merged["runs"].as_array().unwrap().len(), 2);
+    assert!(!Path::new(&w.out("checkov.sarif")).exists(), "no whole-project report was written");
+}
+
+/// The `[security]` gate reads a scanner fresh exactly when `status` does: a
+/// stale state of any kind — a scoped-only snapshot included — is stale with
+/// its reason, never fresh ([FR-SC-10], [FR-SC-17]).
+///
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+/// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+#[test]
+fn the_gate_reads_every_stale_state_stale_with_its_reason() {
+    use super::{ScanState, StaleBecause};
+    use crate::governance::security::ScanFreshness;
+    let stale = |because| ScanState::Stale {
+        because,
+        snapshot_head: "0123456789abcdef".to_string(),
+        version: "1".to_string(),
+        findings: 1,
+        suppressed: 0,
+    };
+    let fresh = ScanState::Fresh { snapshot_head: "h".to_string(), version: "1".to_string(), findings: 0, suppressed: 0 };
+    let cases = [
+        (fresh, ScanFreshness::Fresh),
+        (stale(StaleBecause::HeadMoved), ScanFreshness::Stale("HEAD moved since 0123456789ab".to_string())),
+        (stale(StaleBecause::FilesChanged), ScanFreshness::Stale("a file it scanned changed".to_string())),
+        (stale(StaleBecause::ScopedOnly), ScanFreshness::Stale("only a scoped scan is stored".to_string())),
+        (ScanState::NeverRun, ScanFreshness::NeverRun),
+        (ScanState::NotInstalled, ScanFreshness::NotInstalled),
+        (ScanState::Disabled, ScanFreshness::Disabled),
+    ];
+    for (state, want) in cases {
+        assert_eq!(super::gate::freshness_of(&state), want, "{state:?}");
+    }
+}
+
+/// gosec is given each package once: two files of one package name it once,
+/// so the package is never loaded twice and no result is reported twice.
+#[test]
+fn two_files_of_one_go_package_name_the_package_once() {
+    let gosec = scanner("gosec").unwrap();
+    let scope = [
+        ScopedPath { rel: "cmd/server/main.go".to_string(), is_dir: false },
+        ScopedPath { rel: "cmd/server/routes.go".to_string(), is_dir: false },
+        ScopedPath { rel: "main.go".to_string(), is_dir: false },
+    ];
+    let fill = Fill {
+        out: Path::new("/r/.logos/security/gosec.sarif"),
+        extra: &[],
+        scope: Some(&scope),
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new(""),
+        ignored: &[],
+        root: None,
+    };
+    let argv = gosec.render(gosec.run, &fill);
+    let at = argv.iter().position(|a| a == "-quiet").unwrap() + 1;
+    assert_eq!(argv[at..], [OsString::from("./cmd/server"), OsString::from(".")]);
+}
+
+/// The ignored directories as each scanner's own exclusion flag takes them,
+/// after the `.logos` it already excluded and before the user's extra flags
+/// (HF-5): a repeated flag for Trivy, Checkov and Dependency-Check, one comma
+/// list for Bandit, whose repeated `--exclude` keeps only the last. The
+/// scanners that take none — and every run on named paths — render exactly as
+/// with nothing ignored.
+#[test]
+fn ignored_directories_reach_each_scanners_exclusion_flag() {
+    let ignored = strings(&["notes", "target", "web/dist"]);
+    let extra = strings(&["--user-flag"]);
+    let base = Fill {
+        out: Path::new("/r/.logos/security/x.sarif"),
+        extra: &extra,
+        scope: None,
+        language: "python",
+        database: Path::new("/db"),
+        pinned_config: Path::new("/r/.logos/security/empty-config.yaml"),
+        ignored: &[],
+        root: Some("/r"),
+    };
+    let with = Fill { ignored: &ignored, ..base };
+    let expected: &[(&str, &[&str])] = &[
+        (
+            "trivy",
+            &[
+                "--skip-dirs", ".logos", "--skip-dirs", "notes", "--skip-dirs", "target", "--skip-dirs",
+                "web/dist",
+            ],
+        ),
+        ("bandit", &["--exclude", "./.logos,./notes,./target,./web/dist"]),
+        (
+            "checkov",
+            &[
+                "--skip-path", ".logos", "--skip-path", r"^(\./|/r/)?notes(/|$)", "--skip-path",
+                r"^(\./|/r/)?target(/|$)", "--skip-path", r"^(\./|/r/)?web/dist(/|$)",
+            ],
+        ),
+        (
+            "dependency-check",
+            &["--exclude", "**/.logos/**", "--exclude", "notes/**", "--exclude", "target/**", "--exclude", "web/dist/**"],
+        ),
+    ];
+    let excluding: Vec<&str> = REGISTRY.iter().filter(|s| s.excludes_ignored()).map(|s| s.name).collect();
+    assert_eq!(excluding, ["trivy", "bandit", "checkov", "dependency-check"]);
+    for s in &REGISTRY {
+        let plain: Vec<String> = s.render(s.run, &base).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let argv: Vec<String> = s.render(s.run, &with).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let Some((_, want)) = expected.iter().find(|(n, _)| *n == s.name) else {
+            assert_eq!(argv, plain, "{} takes no ignored directories", s.name);
+            continue;
+        };
+        let at = argv.iter().position(|a| a == want[0]).unwrap_or_else(|| panic!("{}: {argv:?}", s.name));
+        assert_eq!(argv.get(at..at + want.len()), Some(&strings(want)[..]), "{}'s exclusions", s.name);
+        let user = argv.iter().position(|a| a == "--user-flag").unwrap();
+        assert!(user >= at + want.len(), "{}: the user's extra flags come after Logos' own: {argv:?}", s.name);
+        // Everything else is the argv with nothing ignored: the exclusions
+        // follow the `.logos` pair (Bandit's extend its one value in place).
+        let added = want.len() - 2;
+        let mut rebuilt = plain.clone();
+        rebuilt.splice(at..at + 2, want.iter().map(|w| (*w).to_string()));
+        assert_eq!(argv, rebuilt, "{}: only the exclusions are added", s.name);
+        assert_eq!(argv.len(), plain.len() + added, "{}", s.name);
+        // A run on named paths reads exactly those, ignored or not.
+        if s.path_slot.is_some() {
+            let scope = [ScopedPath { rel: "notes/keep.py".to_string(), is_dir: false }];
+            assert_eq!(
+                s.render(s.run, &Fill { scope: Some(&scope), ..with }),
+                s.render(s.run, &Fill { scope: Some(&scope), ..base }),
+                "{}'s scoped run is unchanged",
+                s.name
+            );
+        }
+    }
+}
+
+/// Checkov's expression skips the ignored directory and what is below it as
+/// its runners join them to `.` or, for the Terraform and SAST runners, to the
+/// absolute root — and no path that merely contains the name.
+#[test]
+fn checkovs_skip_expression_matches_the_directory_and_not_its_near_misses() {
+    let checkov = scanner("checkov").unwrap();
+    let ignored = strings(&["notes", "web/dist"]);
+    let fill = Fill {
+        out: Path::new("/o"),
+        extra: &[],
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new(""),
+        ignored: &ignored,
+        root: Some("/srv/my.app"),
+    };
+    let argv = checkov.render(checkov.run, &fill);
+    let patterns: Vec<regex::Regex> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--skip-path" && w[1] != ".logos")
+        .map(|w| regex::Regex::new(w[1].to_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(patterns.len(), 2);
+    let skipped = |path: &str| patterns.iter().any(|p| p.is_match(path));
+    for path in [
+        "./notes", "./notes/a.tf", "notes", "./web/dist", "./web/dist/x/main.tf", "/srv/my.app/notes",
+        "/srv/my.app/web/dist/main.tf",
+    ] {
+        assert!(skipped(path), "{path} is skipped");
+    }
+    for path in [
+        "./src/notes", "./notesy", "./xnotes/a.tf", "./web/distro", "./webxdist", "./web/src/dist",
+        "/srv/my.app/src/notes", "/srv/myxapp/notes", "/other/srv/my.app/notes", "/srv/my.app/notesy",
+    ] {
+        assert!(!skipped(path), "{path} is not skipped");
+    }
+    // The value is never a substring of a path, which Checkov also skips on.
+    assert!(patterns.iter().all(|p| p.as_str().starts_with('^')));
+}
+
+/// Run `git` in `dir` for a fixture: never above the fixture, no maintenance.
+fn fixture_git(dir: &Path, ceiling: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A git project with ignored trees — beside a hidden directory and a
+/// directory symlink that are not ignored: a build directory, a hidden one, a
+/// nested ignore file's, a `.ignore` file's, `.git/info/exclude`'s, and one of
+/// each name an exclusion flag would misread.
+fn ignoring_world() -> World {
+    let w = World::new(&[
+        (".gitignore", "target/\nnotes/\n.agents/\n*.log\na,b/\nctl*/\n*x/\n"),
+        (".ignore", "scratch/\n"),
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/app.py", "import os\n"),
+        ("build.log", "x\n"),
+        ("target/debug/deps/libx.rlib", "x"),
+        ("notes/old/draft.py", "import pickle\n"),
+        (".agents/skills/x.py", "import pickle\n"),
+        ("web/.gitignore", "dist/\n"),
+        ("a/.gitignore", "build/\n"),
+        ("a/build/out.py", "x"),
+        ("web/dist/bundle.js", "x"),
+        ("web/src/app.js", "x"),
+        ("scratch/a.py", "x"),
+        ("local/a.py", "x"),
+        ("a,b/c.py", "x"),
+        ("ctl\nsrc/c.py", "x"),
+        ("-x/c.py", "x"),
+        ("q\"x/c.py", "x"),
+        ("g*x/c.py", "x"),
+        ("g?x/c.py", "x"),
+        ("g[x/c.py", "x"),
+        ("g]x/c.py", "x"),
+        ("g{x/c.py", "x"),
+        ("g}x/c.py", "x"),
+        ("b\\x/c.py", "x"),
+        (".github/workflows/ci.yml", "x"),
+        (".logos/cache/x.py", "x"),
+    ]);
+    let ceiling = w.root.parent().unwrap().to_path_buf();
+    fixture_git(&w.root, &ceiling, &["init", "-q"]);
+    fs::write(w.root.join(".git/info/exclude"), "local/\n").unwrap();
+    // An ignore file above the root is not the project's.
+    fs::write(ceiling.join(".gitignore"), "src/\nweb/\n").unwrap();
+    // A committed symlink to a directory outside the root is neither listed
+    // nor walked into: the ignore file there would name `linked/gen`.
+    let outside = ceiling.join("outside");
+    fs::create_dir_all(outside.join("gen")).unwrap();
+    fs::write(outside.join(".gitignore"), "gen/\n").unwrap();
+    std::os::unix::fs::symlink(&outside, w.root.join("linked")).unwrap();
+    w
+}
+
+#[test]
+fn the_ignored_directories_are_the_top_most_ones_the_project_itself_ignores() {
+    let w = ignoring_world();
+    assert_eq!(
+        super::ignored_dirs(&w.root),
+        strings(&[".agents", "local", "notes", "scratch", "target", "a/build", "web/dist"]),
+        "top-most only, shallowest first, never a file, never .git or .logos, never a misreadable name"
+    );
+    // The same project reached through a symlink.
+    let link = w.root.parent().unwrap().join("link");
+    std::os::unix::fs::symlink(&w.root, &link).unwrap();
+    assert_eq!(super::ignored_dirs(&link), super::ignored_dirs(&w.root), "a symlinked root");
+    let w = World::new(&[("src/a.py", "")]);
+    assert!(super::ignored_dirs(&w.root).is_empty(), "nothing ignored, nothing excluded");
+}
+
+/// A full scan hands every excluding scanner the project's ignored
+/// directories; a scoped one keeps a path-capable scanner on the named paths
+/// alone while a whole-project scanner still leaves them out. The stubs are
+/// the whole search path and there is no tools directory, so no scanner on
+/// this machine can run.
+#[test]
+fn a_full_scan_keeps_every_scanner_out_of_the_projects_ignored_directories() {
+    let w = ignoring_world();
+    w.all_stubs();
+    w.user_config("[security_scan.trivy]\nextra_args = [\"--timeout\", \"1m\"]\n");
+    let orchestrator = w.open().unwrap();
+    for state in orchestrator.detect() {
+        let Detection::Installed { binary, .. } = state.detection else { panic!("{state:?}") };
+        assert!(binary.starts_with(&w.bin), "{} is the stub: {}", state.scanner, binary.display());
+    }
+    let report = orchestrator.scan(&Selection::All).unwrap();
+    assert!(report.outcomes.iter().all(|o| matches!(o.outcome, Outcome::Ran { .. })), "{report:?}");
+    let dirs = [".agents", "local", "notes", "scratch", "target", "a/build", "web/dist"];
+    let pairs = |flag: &str, values: Vec<String>| -> Vec<String> {
+        values.into_iter().flat_map(|v| [flag.to_string(), v]).collect()
+    };
+    let run = |name: &str| -> Vec<String> {
+        let runs = w.runs(name);
+        assert_eq!(runs.len(), 1, "{name} ran once");
+        runs.into_iter().next().unwrap()
+    };
+    let contains = |argv: &[String], want: &[String]| argv.windows(want.len()).any(|w| w == want);
+
+    let trivy = run("trivy");
+    let mut want = strings(&["--skip-dirs", ".logos"]);
+    want.extend(pairs("--skip-dirs", strings(&dirs)));
+    want.extend(strings(&["--config", &w.out("empty-config.yaml"), "--timeout", "1m", "."]));
+    assert!(trivy.ends_with(&want), "trivy: {trivy:?}");
+
+    let bandit = run("bandit");
+    let list = std::iter::once("./.logos".to_string()).chain(dirs.iter().map(|d| format!("./{d}"))).collect::<Vec<_>>();
+    assert!(contains(&bandit, &[strings(&["--exclude"]), vec![list.join(",")]].concat()), "bandit: {bandit:?}");
+
+    let checkov = run("checkov");
+    let mut want = strings(&["--skip-path", ".logos"]);
+    let root = regex::escape(w.root.to_str().unwrap());
+    want.extend(pairs("--skip-path", dirs.iter().map(|d| format!(r"^(\./|{root}/)?{}(/|$)", regex::escape(d))).collect()));
+    assert!(contains(&checkov, &want), "checkov: {checkov:?}");
+
+    let dc = run("dependency-check");
+    let mut want = strings(&["--exclude", "**/.logos/**"]);
+    want.extend(pairs("--exclude", dirs.iter().map(|d| format!("{d}/**")).collect()));
+    assert!(contains(&dc, &want), "dependency-check: {dc:?}");
+
+    for name in ["semgrep", "gitleaks", "osv-scanner", "gosec"] {
+        let argv = run(name);
+        assert!(!argv.iter().any(|a| dirs.iter().any(|d| a.contains(d))), "{name} takes none: {argv:?}");
+    }
+
+    // A scoped re-scan: Bandit reads the named path, inside an ignored
+    // directory or not; Trivy, which has no path position, still runs whole.
+    fs::remove_dir_all(&w.rec).unwrap();
+    fs::create_dir_all(&w.rec).unwrap();
+    let scope = super::resolve_scope(&w.root, &strings(&["notes/old"])).unwrap();
+    w.open().unwrap().scan_in(&Selection::Only(strings(&["bandit", "trivy"])), Some(&scope)).unwrap();
+    let bandit = run("bandit");
+    assert!(bandit.ends_with(&strings(&["--exclude", "./.logos", "notes/old"])), "scoped bandit: {bandit:?}");
+    let trivy = run("trivy");
+    assert!(contains(&trivy, &pairs("--skip-dirs", strings(&dirs))), "unscoped trivy: {trivy:?}");
+}
+
+/// Thousands of ignored directories — a `__pycache__` in every package of a
+/// monorepo — never make a scanner's argv too long to start: each scanner's
+/// exclusions stop at the budget, keeping the shallowest.
+#[test]
+fn a_huge_ignored_set_is_cut_to_the_argument_budget_keeping_the_shallowest() {
+    use super::registry::IGNORED_ARGV_BUDGET;
+    let mut ignored = strings(&["node_modules", "target"]);
+    ignored.extend((0..5000).map(|i| format!("homeassistant/components/integration_{i:05}/__pycache__")));
+    let fill = Fill {
+        out: Path::new("/o"),
+        extra: &[],
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new("/p"),
+        ignored: &ignored,
+        root: Some("/srv/project"),
+    };
+    let none = Fill { ignored: &[], ..fill };
+    for s in REGISTRY.iter().filter(|s| s.excludes_ignored()) {
+        let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let plain: Vec<String> = s.render(s.run, &none).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let added = argv.iter().map(|a| a.len() + 1).sum::<usize>() - plain.iter().map(|a| a.len() + 1).sum::<usize>();
+        assert!(added <= IGNORED_ARGV_BUDGET, "{} adds {added} bytes", s.name);
+        assert!(added > IGNORED_ARGV_BUDGET / 2, "{} keeps what fits: {added} bytes", s.name);
+        let text = argv.join("\n");
+        assert!(text.contains("node_modules") && text.contains("target"), "{} keeps the shallowest", s.name);
+        assert!(text.contains("integration_00000/"), "{} keeps the first that fit", s.name);
+        assert!(!text.contains("integration_04999/"), "{} leaves out the rest", s.name);
+    }
+}
+

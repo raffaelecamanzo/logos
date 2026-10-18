@@ -315,7 +315,7 @@ fn aggregate_signal(root: &Path) -> Option<u32> {
         .hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
     let rt = engine.runtime().expect("runtime present");
-    let model = metrics::snapshot(rt, &view, Some("sha"), metrics::Thresholds::default())
+    let model = metrics::snapshot(rt, &view, Some("sha"), metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs")
         .metrics;
     model.aggregate_signal

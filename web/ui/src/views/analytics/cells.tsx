@@ -7,8 +7,9 @@
  */
 
 import { Badge } from "../../components/index.ts";
-import type { CoverageCell } from "../../api/types.ts";
-import { NA } from "./analyticsModel.ts";
+import type { CoverageCell, PathFindings } from "../../api/types.ts";
+import { severityTone } from "../security/securityModel.ts";
+import { NA, securityHref } from "./analyticsModel.ts";
 
 /** A muted `n/a` for an absent figure (right-aligns inside a numeric column). */
 export function Na() {
@@ -23,4 +24,28 @@ export function CoverageCellView({ cell, pct }: { cell: CoverageCell; pct: strin
   }
   if (cell.state === "stale") return <Badge tone="red">STALE</Badge>;
   return <Na />;
+}
+
+/** One Files & Risk findings cell (FR-SC-14), linking to the Security page
+ *  filtered to the file: the count with its highest severity, `0` for a scanned
+ *  file with none, and any stale findings labelled apart — they never join the
+ *  count (the file changed since the scan, so they may no longer hold). */
+export function FindingsCellView({ cell, path }: { cell: PathFindings; path: string }) {
+  return (
+    <a href={securityHref(path)}>
+      {cell.count > 0 && cell.highest ? (
+        <>
+          <span className="mono">{cell.count}</span> <Badge tone={severityTone(cell.highest)}>{cell.highest}</Badge>
+        </>
+      ) : (
+        <span className="muted">0</span>
+      )}
+      {cell.stale > 0 && (
+        <>
+          {" "}
+          <Badge tone="orange">{cell.stale} stale</Badge>
+        </>
+      )}
+    </a>
+  );
 }

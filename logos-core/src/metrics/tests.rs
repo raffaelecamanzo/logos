@@ -74,6 +74,19 @@ fn func_struct(
     }
 }
 
+/// The `member_access` set the fixtures score Cohesion under ([CR-171]): the
+/// declaring languages' `java`, `ts`, `tsx` and `php`, plus `rs`, because the
+/// fixtures written before the gate put their synthetic `Class` nodes in `.rs`
+/// files (Rust extracts no class; such a node exists only here). The engine is
+/// pure over whatever set it is handed: the gate itself is pinned with explicit
+/// sets by `cohesion_scores_only_classes_of_member_access_languages`, and which
+/// plugins declare it by the registry's own test.
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+fn member_access() -> HashSet<String> {
+    ["java", "ts", "tsx", "php", "rs"].map(String::from).into()
+}
+
 /// Compute over a node/edge snapshot through the real `ExcludeContains` view,
 /// with no test scope (the production-scope path is exercised by [`run_scoped`]).
 fn run(
@@ -95,7 +108,7 @@ fn offenders_of(
     cap: usize,
 ) -> crate::models::quality::WorstOffenders {
     let view = build_view(Granularity::ExcludeContains, nodes, edges);
-    super::worst_offenders(&view, nodes, edges, functions, test_ids, thresholds, cap)
+    super::all_offenders(&view, nodes, edges, functions, test_ids, thresholds, &member_access()).capped(cap)
 }
 
 /// Compute with an explicit `is_test` node set excluded from the production
@@ -119,6 +132,7 @@ fn run_scoped(
         functions,
         &test_ids,
         super::Thresholds::default(),
+        &member_access(),
     )
 }
 
@@ -341,17 +355,19 @@ fn unbound_directory_membership_follows_the_partition() {
     );
 }
 
-/// The metric-semantics version pins at 7 ([CR-163]): the exact-duplicate floor
-/// (S-501), bodied LCOM4 and bodied Focus change what the signal measures, so
-/// the constant advanced 6 → 7 **once** for the whole CR and the first
-/// post-upgrade gate auto-re-baselines ([FR-GV-10]) exactly as the v2..v6 bumps
-/// did (v6 was [CR-156]'s small-graph Modularity drop-out).
+/// The metric-semantics version pins at 8 ([CR-171]): graph dimensions that
+/// need cross-module edges and Cohesion that needs `member_access` change what
+/// the signal measures, so the constant advanced 7 → 8 **once** for the whole
+/// CR and the first post-upgrade gate auto-re-baselines ([FR-GV-10]) exactly
+/// as the v2..v7 bumps did (v7 was [CR-163]'s declarative-code fixes, v6
+/// [CR-156]'s small-graph Modularity drop-out).
 ///
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[test]
-fn metric_semantics_version_is_v7() {
-    assert_eq!(super::METRIC_SEMANTICS_VERSION, 7);
+fn metric_semantics_version_is_v8() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 8);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────
@@ -761,9 +777,18 @@ fn identical_input_yields_an_identical_pinned_signal() {
     // five Modularity needs, so Modularity is not applicable — its computed Q
     // stays on the snapshot but leaves the mean, which now spans SEVEN
     // dimensions: exp(ln(1·4/5·38/48·3/4·1·1·1)/7)·10000 ≈ 8991 (v5: 8311).
+    //
+    // Metric-semantics v8 (CR-171, FR-QM-18): one of the four edges crosses a
+    // directory, below the five cross-module edges the graph dimensions need,
+    // so Acyclicity and Depth leave the mean beside Modularity — each keeps its
+    // computed pair — and it spans FIVE dimensions:
+    // exp(ln(38/48·3/4·1·1·1)/5)·10000 ≈ 9010 (v7: 8991).
     assert_eq!(first.modularity.raw, 0.21875, "the computed Q is kept");
-    assert!(first.modularity_not_applicable.is_some(), "m = 4 < 5 (CR-156)");
-    assert_eq!(first.aggregate_signal, Some(8991));
+    assert_eq!(first.cross_module_edge_count, Some(1));
+    assert!(first.modularity_not_applicable.is_some(), "1 < 5 cross-module edges");
+    assert!(first.acyclicity_not_applicable.is_some() && first.depth_not_applicable.is_some());
+    assert_eq!((first.acyclicity.raw, first.depth.raw), (0.0, 2.0), "the computed pairs are kept");
+    assert_eq!(first.aggregate_signal, Some(9010));
     // The applicable-dimension provenance: Cohesion/Focus are n/a here.
     assert!(
         first.cohesion.is_none(),
@@ -1188,6 +1213,125 @@ fn cohesion_drops_out_when_no_class_exists() {
         r.aggregate_signal.is_some(),
         "the aggregate is the deterministic mean of the remaining dimensions"
     );
+}
+
+/// Two classes with two methods each and no shared field (LCOM4 2 each): one
+/// in `split_file`, one in `whole_file`, whose methods share a field (LCOM4 1).
+fn two_language_classes(split_file: &str, whole_file: &str) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let nodes = vec![
+        node(1, "Split", NodeKind::Class, Some(split_file)),
+        node(2, "a", NodeKind::Method, Some(split_file)),
+        node(3, "b", NodeKind::Method, Some(split_file)),
+        node(10, "Whole", NodeKind::Class, Some(whole_file)),
+        node(11, "c", NodeKind::Method, Some(whole_file)),
+        node(12, "d", NodeKind::Method, Some(whole_file)),
+        node(13, "x", NodeKind::Field, Some(whole_file)),
+    ];
+    let edges = vec![
+        edge(1, 2, EdgeKind::Contains),
+        edge(1, 3, EdgeKind::Contains),
+        edge(10, 11, EdgeKind::Contains),
+        edge(10, 12, EdgeKind::Contains),
+        edge(10, 13, EdgeKind::Contains),
+        edge(11, 13, EdgeKind::Accesses),
+        edge(12, 13, EdgeKind::Accesses),
+    ];
+    let functions = [2, 3, 11, 12].map(|id| func(id, Some(1), Some(false), Some(false))).to_vec();
+    (nodes, edges, functions)
+}
+
+/// Compute under an explicit `member_access` set.
+fn run_with_member_access(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    functions: &[FunctionMetricRow],
+    member_access: &[&str],
+) -> crate::models::quality::MetricSnapshot {
+    let view = build_view(Granularity::ExcludeContains, nodes, edges);
+    let declared: HashSet<String> = member_access.iter().map(|e| e.to_string()).collect();
+    compute(&view, nodes, edges, functions, &HashSet::new(), super::Thresholds::default(), &declared)
+}
+
+/// Cohesion counts a class only when its language declares `member_access`
+/// ([CR-171], [FR-QM-11]): beside a Java class, a Ruby class is not scored —
+/// the mean is the Java class's alone — and the low-cohesion list names only
+/// the Java class. Focus, which needs no field access, still counts both.
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+#[test]
+fn cohesion_scores_only_classes_of_member_access_languages() {
+    let (nodes, edges, functions) = two_language_classes("app/Split.java", "app/whole.rb");
+    let r = run_with_member_access(&nodes, &edges, &functions, &["java"]);
+    let cohesion = r.cohesion.expect("the Java class is scored");
+    assert_eq!(cohesion.raw, 0.5, "only the Java class (LCOM4 2) enters the mean");
+    let focus = r.focus.expect("Focus counts every class-like container");
+    assert_eq!(focus.raw, 0.0, "two containers, neither god");
+
+    // Declaring Ruby too brings the cohesive class in: (1/2 + 1/1) / 2.
+    let both = run_with_member_access(&nodes, &edges, &functions, &["java", "rb"]);
+    assert_eq!(both.cohesion.expect("both scored").raw, 0.75);
+
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let java: HashSet<String> = HashSet::from(["java".to_string()]);
+    let offenders = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), super::Thresholds::default(), &java);
+    assert_eq!(offenders.cohesion.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["Split"]);
+    let swapped = two_language_classes("app/split.rb", "app/Whole.java");
+    let (n, e, f) = (&swapped.0, &swapped.1, &swapped.2);
+    let view = build_view(Granularity::ExcludeContains, n, e);
+    assert!(
+        super::all_offenders(&view, n, e, f, &HashSet::new(), super::Thresholds::default(), &java)
+            .cohesion
+            .is_empty(),
+        "a low-cohesion class of an undeclared language is no Cohesion offender"
+    );
+}
+
+/// The real registry's `member_access` set: JavaScript, which the TypeScript
+/// grammars parse but carve out (`member_access_excluded_extensions`), never
+/// makes Cohesion applicable — a repository whose only classes are `.js` or
+/// `.jsx` reports it not applicable, as lobsters' one JS class did not before
+/// the carve-out — while a `.ts` or `.tsx` class is scored ([CR-171] AC 3).
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+#[cfg(all(feature = "lang-typescript", feature = "lang-java", feature = "lang-php"))]
+#[test]
+fn a_javascript_class_never_makes_cohesion_applicable_while_a_typescript_class_does() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let declared = crate::plugin::LanguageRegistry::load(tmp.path())
+        .expect("embedded grammars load")
+        .member_access_extensions();
+    let cohesion = |split: &str, whole: &str| {
+        let (nodes, edges, functions) = two_language_classes(split, whole);
+        let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+        compute(&view, &nodes, &edges, &functions, &HashSet::new(), super::Thresholds::default(), &declared)
+            .cohesion
+            .map(|c| c.raw)
+    };
+    // JavaScript only — every carved-out extension: not applicable.
+    assert_eq!(cohesion("app/Split.js", "app/whole.jsx"), None, "js + jsx");
+    assert_eq!(cohesion("lib/split.mjs", "lib/whole.cjs"), None, "mjs + cjs");
+    // A TypeScript class beside them is scored, alone.
+    assert_eq!(cohesion("app/Split.ts", "app/whole.jsx"), Some(0.5), "the ts class (LCOM4 2) alone");
+    assert_eq!(cohesion("app/split.js", "app/Whole.tsx"), Some(1.0), "the tsx class (LCOM4 1) alone");
+    assert_eq!(cohesion("app/Split.ts", "app/Whole.tsx"), Some(0.75), "both TypeScript classes");
+}
+
+/// C++ (ccache) and Ruby (lobsters) declare no `member_access`: a repository
+/// whose classes are all theirs reports Cohesion not applicable — the
+/// class-less drop-out, never a score from calls alone — while Focus still
+/// applies ([CR-171] AC 3).
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+#[test]
+fn cohesion_drops_out_when_no_class_is_in_a_member_access_language() {
+    for (split, whole) in [("src/split.cpp", "src/whole.hpp"), ("app/split.rb", "app/whole.rb")] {
+        let (nodes, edges, functions) = two_language_classes(split, whole);
+        let r = run_with_member_access(&nodes, &edges, &functions, &["java", "ts", "tsx", "php"]);
+        assert!(r.cohesion.is_none(), "{split}: Cohesion drops out");
+        assert!(r.focus.is_some(), "{split}: Focus still applies");
+        assert!(r.aggregate_signal.is_some());
+    }
 }
 
 /// Rust impl blocks / Go method-sets (extracted as `Struct`) are excluded from
@@ -1712,12 +1856,13 @@ fn aggregate_denominator_follows_applicability_drop_out() {
     // No Class/Struct → Cohesion and Focus both n/a; the three other new dims
     // are all 1.0 (no nesting/brain/clone inputs), so the signal equals the
     // five-original geometric mean re-meaned over eight dimensions. Five edges,
-    // so Modularity applies (CR-156 drops it below 5) and only Cohesion/Focus —
-    // the drop-out this test is about — leave the denominator.
+    // each between two directories, so the graph dimensions apply (FR-QM-18
+    // drops them below five cross-module edges) and only Cohesion/Focus — the
+    // drop-out this test is about — leave the denominator.
     let nodes = [
         node(1, "a", NodeKind::Function, Some("x/a.rs")),
-        node(2, "b", NodeKind::Function, Some("x/b.rs")),
-        node(3, "c", NodeKind::Function, Some("x/c.rs")),
+        node(2, "b", NodeKind::Function, Some("y/b.rs")),
+        node(3, "c", NodeKind::Function, Some("z/c.rs")),
     ];
     let edges = [
         edge(1, 2, EdgeKind::Calls),
@@ -1736,7 +1881,8 @@ fn aggregate_denominator_follows_applicability_drop_out() {
         r.cohesion.is_none() && r.focus.is_none(),
         "class-less → 8 dimensions"
     );
-    assert_eq!(r.modularity_not_applicable, None, "m = 5 → Modularity applies");
+    assert_eq!(r.cross_module_edge_count, Some(5));
+    assert_eq!(graph_drop_outs(&r), [&None, &None, &None], "5 cross-module edges → all three apply");
 
     // Recompute the expected signal directly from the five original normalized
     // values plus three 1.0 dimensions, over eight (NFR-RA-06 cross-check).
@@ -1824,9 +1970,9 @@ fn thresholds_hash_is_stable_and_changes_with_tuning() {
         ..default_t
     };
 
-    let a = compute(&view, &[], &[], &funcs, &no_tests, default_t);
-    let b = compute(&view, &[], &[], &funcs, &no_tests, default_t);
-    let c = compute(&view, &[], &[], &funcs, &no_tests, raised);
+    let a = compute(&view, &[], &[], &funcs, &no_tests, default_t, &member_access());
+    let b = compute(&view, &[], &[], &funcs, &no_tests, default_t, &member_access());
+    let c = compute(&view, &[], &[], &funcs, &no_tests, raised, &member_access());
 
     assert!(!a.thresholds_hash.is_empty(), "the hash is recorded");
     assert_eq!(
@@ -2283,108 +2429,176 @@ fn geometric_signal(dims: &[f64]) -> u32 {
     ((ln_sum / dims.len() as f64).exp() * 10_000.0).round() as u32
 }
 
-/// m = 1, 2, 3 and 4 edges all crossing two directories: Modularity is not
-/// applicable, keeps its computed Q = −0.5 / normalized 0, and the signal is the
-/// geometric mean of the SEVEN remaining applicable dimensions (the fixture has
-/// no class, so Cohesion/Focus are out too) — never 0 through Modularity
-/// ([CR-156], [FR-QM-01], [FR-QM-06]).
-///
-/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
-/// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
-/// [FR-QM-06]: ../../../docs/specs/requirements/FR-QM-06.md
-#[test]
-fn modularity_is_not_applicable_below_five_edges() {
-    for m in 1..=4_i64 {
-        let (nodes, edges, functions) = crossing_fixture(m);
-        let r = run(&nodes, &edges, &functions);
-        assert_eq!(r.edge_count, m as u64, "m = {m}: the graph Modularity is computed on");
-        assert_eq!(
-            r.modularity_not_applicable,
-            crate::models::quality::ModularityNotApplicable::for_edges(m as u64),
-            "m = {m} < 5 → Modularity is not applicable"
-        );
-        let na = r.modularity_not_applicable.as_ref().expect("m < 5 drops out");
-        assert_eq!((na.edges, na.min_edges), (m as u64, 5), "the reason carries m and the threshold");
-        assert_eq!(
-            na.reason,
-            format!("{m} of 5 dependency edges — too few for community structure")
-        );
-        // The computed values are kept, not blanked: an all-crossing
-        // two-community graph is Q = −0.5 → normalized exactly 0.
-        assert_eq!(r.modularity.raw, -0.5, "m = {m}: the computed Q is kept");
-        assert_eq!(r.modularity.normalized, 0.0, "m = {m}: the computed normalized value is kept");
-
-        assert!(r.cohesion.is_none() && r.focus.is_none(), "class-less fixture");
-        let expected = geometric_signal(&[
-            r.acyclicity.normalized,
-            r.depth.normalized,
-            r.equality.normalized,
-            r.redundancy.normalized,
-            r.nesting.normalized,
-            r.conciseness.normalized,
-            r.uniqueness.normalized,
-        ]);
-        assert_eq!(
-            r.aggregate_signal,
-            Some(expected),
-            "m = {m}: the signal is the mean of the remaining seven dimensions"
-        );
-        assert_ne!(r.aggregate_signal, Some(0), "m = {m}: never 0 through Modularity");
-    }
+/// The three graph dimensions' drop-outs on one snapshot, in canonical order.
+fn graph_drop_outs(
+    r: &crate::models::quality::MetricSnapshot,
+) -> [&Option<crate::models::quality::GraphDimensionNotApplicable>; 3] {
+    [
+        &r.modularity_not_applicable,
+        &r.acyclicity_not_applicable,
+        &r.depth_not_applicable,
+    ]
 }
 
-/// A non-empty graph with no edges (m = 0) drops Modularity the same way: its
-/// computed neutral 1/3 is kept on the snapshot but no longer enters the mean,
-/// so gaining a first edge can never *raise* the signal ([CR-156] §3.2 point 2).
-///
-/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
-#[test]
-fn modularity_is_not_applicable_on_an_edgeless_graph() {
-    let (nodes, edges, functions) = crossing_fixture(0);
-    let r = run(&nodes, &edges, &functions);
-    assert!(!r.empty, "ten vertices: not the empty sentinel");
-    assert_eq!(r.edge_count, 0);
-    let na = r.modularity_not_applicable.as_ref().expect("m = 0 is inside the rule");
-    assert_eq!((na.edges, na.min_edges), (0, 5));
-    assert_eq!(r.modularity.normalized, 0.5 / 1.5, "the computed 1/3 is kept");
-    let expected = geometric_signal(&[
-        r.acyclicity.normalized,
-        r.depth.normalized,
+/// The signal over the dimensions a thin, class-less fixture leaves applicable:
+/// Equality, Redundancy and the three ratio dimensions.
+fn signal_without_graph_dimensions(r: &crate::models::quality::MetricSnapshot) -> u32 {
+    geometric_signal(&[
         r.equality.normalized,
         r.redundancy.normalized,
         r.nesting.normalized,
         r.conciseness.normalized,
         r.uniqueness.normalized,
-    ]);
-    assert_eq!(r.aggregate_signal, Some(expected), "1/3 no longer enters the mean");
+    ])
 }
 
-/// m = 5 all-crossing edges sits AT the threshold: Modularity applies, normalizes
-/// to 0, and the [ADR-12] short-circuit still collapses the signal — the
-/// anti-gaming guard is intact above the threshold ([CR-156]).
+/// m = 1, 2, 3 and 4 edges, every one crossing two directories: Modularity,
+/// Acyclicity and Depth are each not applicable with one reason, keep their
+/// computed values, and the signal is the geometric mean of the FIVE remaining
+/// applicable dimensions (the fixture has no class, so Cohesion/Focus are out
+/// too) — never 0 through Modularity ([FR-QM-18], [CR-171], [FR-QM-06]).
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [FR-QM-06]: ../../../docs/specs/requirements/FR-QM-06.md
+#[test]
+fn the_graph_dimensions_are_not_applicable_below_five_cross_module_edges() {
+    for m in 1..=4_i64 {
+        let (nodes, edges, functions) = crossing_fixture(m);
+        let r = run(&nodes, &edges, &functions);
+        assert_eq!(r.cross_module_edge_count, Some(m as u64), "m = {m}: every edge crosses");
+        for (dimension, drop_out) in ["modularity", "acyclicity", "depth"].iter().zip(graph_drop_outs(&r)) {
+            assert_eq!(
+                drop_out,
+                &crate::models::quality::GraphDimensionNotApplicable::for_cross_module_edges(m as u64),
+                "m = {m} < 5 → {dimension} is not applicable"
+            );
+            let na = drop_out.as_ref().expect("m < 5 drops out");
+            assert_eq!((na.edges, na.min_edges), (m as u64, 5), "the reason carries m and the threshold");
+            assert_eq!(
+                na.reason,
+                format!("{m} of 5 cross-module edges — too few to measure module structure")
+            );
+        }
+        // The computed values are kept, not blanked: an all-crossing
+        // two-community graph is Q = −0.5 → normalized exactly 0; there is no
+        // cycle and one alpha → beta layer.
+        assert_eq!(r.modularity.raw, -0.5, "m = {m}: the computed Q is kept");
+        assert_eq!(r.modularity.normalized, 0.0, "m = {m}: the computed normalized value is kept");
+        assert_eq!((r.acyclicity.raw, r.depth.raw), (0.0, 2.0), "m = {m}: computed values kept");
+
+        assert!(r.cohesion.is_none() && r.focus.is_none(), "class-less fixture");
+        assert_eq!(
+            r.aggregate_signal,
+            Some(signal_without_graph_dimensions(&r)),
+            "m = {m}: the signal is the mean of the remaining five dimensions"
+        );
+        assert_ne!(r.aggregate_signal, Some(0), "m = {m}: never 0 through Modularity");
+    }
+}
+
+/// A non-empty graph with no edges (m = 0) drops the three the same way:
+/// Modularity's computed neutral 1/3 is kept on the snapshot but no longer
+/// enters the mean, so gaining a first edge can never *raise* the signal
+/// ([CR-156] §3.2 point 2, [FR-QM-18]).
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn the_graph_dimensions_are_not_applicable_on_an_edgeless_graph() {
+    let (nodes, edges, functions) = crossing_fixture(0);
+    let r = run(&nodes, &edges, &functions);
+    assert!(!r.empty, "ten vertices: not the empty sentinel");
+    assert_eq!((r.edge_count, r.cross_module_edge_count), (0, Some(0)));
+    for drop_out in graph_drop_outs(&r) {
+        let na = drop_out.as_ref().expect("m = 0 is inside the rule");
+        assert_eq!((na.edges, na.min_edges), (0, 5));
+    }
+    assert_eq!(r.modularity.normalized, 0.5 / 1.5, "the computed 1/3 is kept");
+    assert_eq!(r.aggregate_signal, Some(signal_without_graph_dimensions(&r)), "1/3 no longer enters the mean");
+}
+
+/// m = 5 all-crossing edges sits AT the threshold: all three apply, Modularity
+/// normalizes to 0, and the [ADR-12] short-circuit still collapses the signal —
+/// the anti-gaming guard is intact above the threshold ([CR-156], [FR-QM-18]).
 ///
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 #[test]
-fn modularity_at_five_edges_applies_and_still_short_circuits() {
+fn the_graph_dimensions_at_five_cross_module_edges_apply_and_still_short_circuit() {
     let (nodes, edges, functions) = crossing_fixture(5);
     let r = run(&nodes, &edges, &functions);
-    assert_eq!(r.edge_count, 5);
-    assert_eq!(r.modularity_not_applicable, None, "m = 5 → applicable");
+    assert_eq!((r.edge_count, r.cross_module_edge_count), (5, Some(5)));
+    assert_eq!(graph_drop_outs(&r), [&None, &None, &None], "5 cross-module edges → all three apply");
     assert_eq!(r.modularity.normalized, 0.0, "all-crossing → normalized 0");
     assert_eq!(r.aggregate_signal, Some(0), "an applicable zero still short-circuits");
 }
 
-/// A graph with m ≥ 5 scores exactly as metric-semantics v5 did: every
-/// dimension's raw/normalized bits and the signal below were captured by running
-/// this fixture through the **unchanged v5 engine** before CR-156 was
-/// implemented, so the pin is the old code's output, not a re-derivation of it
-/// ([CR-156] §6 AC 3, [ADR-08]).
+/// `cross` alpha → beta edges plus all 20 distinct calls among `alpha`'s five
+/// functions — the shape a language that binds within a file only leaves
+/// behind ([CR-171] §3.1).
+fn intra_heavy_fixture(cross: i64) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let (nodes, mut edges, functions) = crossing_fixture(cross);
+    for source in 1..=5 {
+        edges.extend((1..=5).filter(|&target| target != source).map(|target| edge(source, target, EdgeKind::Calls)));
+    }
+    (nodes, edges, functions)
+}
+
+/// The boundary is on **cross-module** edges, per dimension: 4 crossing edges
+/// beside 20 intra-module ones — 24 edges, which cleared the v6 count — leave
+/// all three not applicable; a fifth crossing edge makes all three apply. The
+/// intra-module edges were exactly how a same-file-only language cleared the old
+/// rule ([CR-171] §3.1, [FR-QM-18]).
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn intra_module_edges_never_count_toward_the_threshold() {
+    let (nodes, edges, functions) = intra_heavy_fixture(4);
+    let four = run(&nodes, &edges, &functions);
+    assert_eq!((four.edge_count, four.cross_module_edge_count), (24, Some(4)));
+    for (dimension, drop_out) in ["modularity", "acyclicity", "depth"].iter().zip(graph_drop_outs(&four)) {
+        assert_eq!(drop_out.as_ref().map(|na| na.edges), Some(4), "4 cross-module edges: {dimension} drops out");
+    }
+
+    let (nodes, edges, functions) = intra_heavy_fixture(5);
+    let five = run(&nodes, &edges, &functions);
+    assert_eq!((five.edge_count, five.cross_module_edge_count), (25, Some(5)));
+    assert_eq!(graph_drop_outs(&five), [&None, &None, &None], "5 cross-module edges: all three apply");
+}
+
+/// An edge into a vertex bound to no file is no evidence of module structure:
+/// it lands in the `<unbound>` community, which is no directory of the
+/// repository, so it never counts toward the threshold ([FR-QM-18]).
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+#[test]
+fn an_edge_into_an_unbound_vertex_is_not_cross_module() {
+    let (mut nodes, mut edges, functions) = crossing_fixture(4);
+    nodes.extend((30..36).map(|id| node(id, "external", NodeKind::Function, None)));
+    edges.extend((30..36).map(|id| edge(1, id, EdgeKind::Calls)));
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!((r.edge_count, r.cross_module_edge_count), (10, Some(4)));
+    assert!(r.modularity_not_applicable.is_some(), "six edges into <unbound> do not lift it to 10");
+}
+
+/// Every dimension's computed raw/normalized bits are byte-identical to
+/// metric-semantics v5: they were captured by running this fixture through the
+/// **unchanged v5 engine** before CR-156 was implemented, so the pin is the old
+/// code's output, not a re-derivation of it ([CR-156] §6 AC 3, [ADR-08]).
+///
+/// What v8 changes is only which of them the signal spans ([FR-QM-18]): six
+/// edges cleared the v6 count, but only three cross a directory, so the three
+/// graph dimensions keep these values and leave the mean. The v5/v6/v7 signal
+/// was 8044.
 ///
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 #[test]
-fn a_graph_at_or_above_five_edges_is_byte_identical_to_semantics_v5() {
+fn computed_values_are_byte_identical_to_semantics_v5_and_v8_decides_only_applicability() {
     let nodes = [
         node(1, "a1", NodeKind::Function, Some("alpha/a.rs")),
         node(2, "a2", NodeKind::Function, Some("alpha/b.rs")),
@@ -2408,8 +2622,11 @@ fn a_graph_at_or_above_five_edges_is_byte_identical_to_semantics_v5() {
         func(5, Some(1), Some(false), Some(false)),
     ];
     let r = run(&nodes, &edges, &functions);
-    assert_eq!(r.edge_count, 6, "m = 6 ≥ 5");
-    assert_eq!(r.modularity_not_applicable, None, "m ≥ 5 → applicable");
+    assert_eq!((r.edge_count, r.cross_module_edge_count), (6, Some(3)), "6 edges, 3 between modules");
+    assert!(
+        graph_drop_outs(&r).iter().all(|na| na.as_ref().map(|na| na.edges) == Some(3)),
+        "3 cross-module edges → the graph dimensions are not applicable"
+    );
 
     let bits = |v: &crate::models::quality::MetricValue| (v.raw.to_bits(), v.normalized.to_bits());
     assert_eq!(bits(&r.modularity), (0x3fbffffffffffffb, 0x3fdaaaaaaaaaaaa9));
@@ -2420,56 +2637,53 @@ fn a_graph_at_or_above_five_edges_is_byte_identical_to_semantics_v5() {
     assert_eq!(bits(&r.nesting), (0x0000000000000000, 0x3ff0000000000000));
     assert_eq!(bits(&r.conciseness), (0x0000000000000000, 0x3ff0000000000000));
     assert_eq!(bits(&r.uniqueness), (0x0000000000000000, 0x3ff0000000000000));
-    assert_eq!(r.aggregate_signal, Some(8044), "the v5 signal, unchanged under v6");
+    assert_eq!(
+        r.aggregate_signal,
+        Some(signal_without_graph_dimensions(&r)),
+        "v8: the signal spans the five dimensions that apply (8044 through v7)"
+    );
 }
 
-/// A hard zero on Acyclicity, Depth, Equality or Redundancy still collapses the
-/// signal whether or not Modularity applies: only a not-applicable Modularity
-/// leaves the short-circuit set ([CR-156] §3.2 point 5, [ADR-12]). None of the
-/// four reaches exactly 0 from a real graph (each has a positive floor in
-/// practice), so the guard is exercised at the aggregate itself.
+/// A hard zero on Equality or Redundancy collapses the signal whatever applies;
+/// a zero on a graph dimension — Modularity, Acyclicity or Depth — collapses it
+/// only while that dimension applies ([CR-156] §3.2 point 5, [FR-QM-18],
+/// [ADR-12]). None of the five reaches exactly 0 from a real graph except
+/// Modularity, so the guard is exercised at the aggregate itself.
 ///
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 #[test]
-fn a_zero_on_the_other_originals_short_circuits_at_any_m() {
+fn a_zero_short_circuits_only_from_an_applicable_original() {
     use crate::models::quality::MetricValue;
     let v = |normalized: f64| MetricValue { raw: 0.0, normalized };
     let new_dims = [1.0, 1.0, 1.0];
-    for zeroed in 0..4 {
-        let mut others = [v(0.9), v(0.9), v(0.9), v(0.9)];
-        others[zeroed] = v(0.0);
-        let [a, d, e, r] = &others;
-        for modularity_applicable in [true, false] {
-            let modularity = v(0.5);
-            let originals = super::applicable_original_dimensions(
-                modularity_applicable.then_some(&modularity),
-                a,
-                d,
+    for zeroed in 0..5 {
+        let mut originals = [v(0.9), v(0.9), v(0.9), v(0.9), v(0.9)];
+        originals[zeroed] = v(0.0);
+        let [m, a, d, e, r] = &originals;
+        for graph_applicable in [true, false] {
+            let applicable = super::applicable_original_dimensions(
+                graph_applicable.then_some(m),
+                graph_applicable.then_some(a),
+                graph_applicable.then_some(d),
                 e,
                 r,
             );
-            assert_eq!(
-                super::aggregate(&originals, &new_dims),
-                0,
-                "a zero at original position {} short-circuits (modularity applicable: \
-                 {modularity_applicable})",
-                zeroed + 1
-            );
+            let signal = super::aggregate(&applicable, &new_dims);
+            if graph_applicable || zeroed >= 3 {
+                assert_eq!(signal, 0, "a zero at applicable original position {} short-circuits", zeroed + 1);
+            } else {
+                assert_eq!(applicable.len(), 2, "the three graph dimensions leave the set together");
+                assert_eq!(
+                    signal,
+                    geometric_signal(&[0.9, 0.9, 1.0, 1.0, 1.0]),
+                    "a zero on a not-applicable graph dimension {} never short-circuits",
+                    zeroed + 1
+                );
+            }
         }
     }
-    // …and a zero Modularity short-circuits only while it applies.
-    let others = [v(0.9), v(0.9), v(0.9), v(0.9)];
-    let [a, d, e, r] = &others;
-    let zero = v(0.0);
-    let applicable = super::applicable_original_dimensions(Some(&zero), a, d, e, r);
-    let dropped = super::applicable_original_dimensions(None, a, d, e, r);
-    assert_eq!(super::aggregate(&applicable, &new_dims), 0);
-    assert_eq!(dropped.len(), 4, "a not-applicable Modularity leaves the set");
-    assert_eq!(
-        super::aggregate(&dropped, &new_dims),
-        geometric_signal(&[0.9, 0.9, 0.9, 0.9, 1.0, 1.0, 1.0])
-    );
 }
 
 // ── CR-209: four more worst-offender lists ───────────────────────────────────
@@ -2524,8 +2738,24 @@ fn every_list_fixture() -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) 
 }
 
 /// The five CR-005 lists, serialized — the byte-identity probe of CR-209 AC-5.
+///
+/// Each entry is projected to the four fields it had then (`name`, `file`,
+/// `line`, `detail`): FR-QM-19 (S-676) adds `node_id`, `measure`, `value` and
+/// `threshold` to every entry on purpose, and this probe guards what CR-209
+/// promised — that the entries themselves, and their order, did not move.
 fn five_lists_json(w: &crate::models::quality::WorstOffenders) -> String {
-    let five: Vec<_> = w.lists().into_iter().take(5).collect();
+    let five: Vec<_> = w
+        .lists()
+        .into_iter()
+        .take(5)
+        .map(|(dimension, list)| {
+            let entries: Vec<_> = list
+                .iter()
+                .map(|o| serde_json::json!({"name": o.name, "file": o.file, "line": o.line, "detail": o.detail}))
+                .collect();
+            (dimension, entries)
+        })
+        .collect();
     serde_json::to_string(&five).expect("offenders serialize")
 }
 
@@ -2549,6 +2779,152 @@ fn the_five_cr005_lists_are_byte_identical_to_before_cr209() {
     for (dimension, list) in w.lists().into_iter().skip(5) {
         assert!(!list.is_empty(), "{dimension} lists the fixture's offenders");
     }
+}
+
+/// FR-QM-19 (S-676): every entry of every uncapped list carries its symbol
+/// identity — the coordinate-free descriptor tail, not the storage id or the
+/// whole symbol — the measure its value counts, the value, and the threshold
+/// it met, with `value ≥ threshold` wherever the dimension has one. A Depth
+/// row names directories, so it has no node id.
+#[test]
+fn every_offender_carries_its_identity_measure_value_and_met_threshold() {
+    let (mut nodes, edges, functions) = every_list_fixture();
+    nodes[0].symbol = LogosSymbol::parse("logos . github.com/acme/app . core/`a.rs`/deep_a().")
+        .expect("global symbol parses");
+    let t = super::Thresholds::default();
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let all = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), t, &member_access());
+    assert!(all.recorded && all.values_recorded);
+
+    let expected: [(&str, &str, Option<i64>); 9] = [
+        ("nesting", "nesting_depth", Some(t.nest)),
+        ("conciseness", "cyclomatic_complexity", Some(t.brain_cc)),
+        ("cohesion", "lcom4", Some(2)),
+        // Huge has no bodied method; it is a god by its span alone.
+        ("focus", "span", Some(t.god_span)),
+        ("uniqueness", "clone_group_size", None),
+        ("acyclicity", "cycle_size", None),
+        ("depth", "chain_length", None),
+        ("equality", "cyclomatic_complexity", None),
+        ("redundancy", "line_count", None),
+    ];
+    for ((dimension, list), (want_dimension, measure, threshold)) in all.lists().into_iter().zip(expected) {
+        assert_eq!(dimension, want_dimension);
+        assert!(!list.is_empty(), "{dimension} lists the fixture's offenders");
+        for o in list {
+            assert_eq!((o.measure, o.threshold), (Some(measure), threshold), "{dimension}: {o:?}");
+            let value = o.value.unwrap_or_else(|| panic!("{dimension} records a value: {o:?}"));
+            if let Some(threshold) = threshold {
+                assert!(value >= threshold, "{dimension}: {value} below its threshold {threshold}");
+            }
+            let identity = nodes.iter().find(|n| n.name == o.name).map(|n| n.identity().to_string());
+            match dimension {
+                "depth" => assert_eq!(o.node_id, None, "a chain names no symbol"),
+                _ => assert_eq!(o.node_id, identity, "{dimension}: {o:?}"),
+            }
+        }
+    }
+    assert_eq!(
+        all.nesting[0].node_id.as_deref(),
+        Some("core/`a.rs`/deep_a()."),
+        "the identity drops the repository coordinate"
+    );
+    let value_of = |list: &[crate::models::quality::Offender], name: &str| {
+        list.iter().find(|o| o.name == name).and_then(|o| o.value)
+    };
+    assert_eq!(value_of(&all.nesting, "deep_a"), Some(6));
+    assert_eq!(value_of(&all.conciseness, "brainy"), Some(20));
+    assert_eq!(value_of(&all.cohesion, "Fragmented"), Some(2));
+    assert_eq!(value_of(&all.focus, "Huge"), Some(600));
+    assert_eq!(value_of(&all.uniqueness, "clone_x"), Some(2), "a group of two");
+    assert_eq!(value_of(&all.equality, "brainy"), Some(20));
+    assert_eq!(value_of(&all.redundancy, "deep_a"), Some(40), "its line count");
+    assert_eq!(all.acyclicity[0].value, Some(2), "a two-symbol cycle");
+    // The fixture's cycle has as many directories as symbols, so the value is
+    // tied to the symbol count the detail states, never the directory count.
+    for cycle in &all.acyclicity {
+        let symbols = format!("{} symbols across ", cycle.value.unwrap());
+        assert!(cycle.detail.starts_with(&symbols), "the value is the cycle size: {cycle:?}");
+    }
+    let chain = &all.depth[0];
+    assert!(
+        chain.detail.ends_with(&format!("({} directories)", chain.value.unwrap()))
+            || chain.detail.ends_with(&format!("({} layers)", chain.value.unwrap())),
+        "the value is the chain length the detail states: {chain:?}"
+    );
+}
+
+/// FR-QM-19 (S-676): an Acyclicity row's value is its cycle's symbol count,
+/// not its directory count — pinned on a cycle of three symbols across two
+/// directories, where the two differ.
+#[test]
+fn an_acyclicity_value_is_the_cycle_symbol_count() {
+    let (nodes, mut edges, functions) = every_list_fixture();
+    // api/x.rs (3) ↔ core/a.rs (1) already cycle; route it through core/b.rs (2).
+    edges.extend([edge(3, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)]);
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let all = super::all_offenders(
+        &view,
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        &member_access(),
+    );
+    let cycle = &all.acyclicity[0];
+    assert!(cycle.detail.starts_with("3 symbols across 2 directories"), "the fixture's cycle: {cycle:?}");
+    assert_eq!((cycle.measure, cycle.value, cycle.threshold), (Some("cycle_size"), Some(3), None));
+}
+
+/// FR-QM-19 (S-676): a god container names the measure it crossed — its
+/// bodied-method count when that reaches `T_m`, its span otherwise — so
+/// `value ≥ threshold` holds for both and a review never compares a method
+/// count with a span. A container over both thresholds names its method count.
+/// Lowering a threshold lists more entries, each judged against the threshold
+/// actually in force.
+#[test]
+fn a_god_container_names_the_measure_it_crossed_under_the_thresholds_in_force() {
+    let (mut nodes, edges, functions) = every_list_fixture();
+    // Fragmented spans 600 lines, so under `T_m = 2` it crosses both
+    // thresholds; Huge keeps no bodied method and crosses only `T_span`.
+    let fragmented = nodes.iter_mut().find(|n| n.name == "Fragmented").expect("fixture class");
+    (fragmented.start_line, fragmented.end_line) = (Some(1), Some(600));
+    let t = super::Thresholds {
+        god_methods: 2,
+        nest: 5,
+        ..super::Thresholds::default()
+    };
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let all = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), t, &member_access());
+    let focus: Vec<_> = all.focus.iter().map(|o| (o.name.as_str(), o.measure, o.value, o.threshold)).collect();
+    assert_eq!(
+        focus,
+        [
+            ("Fragmented", Some("methods"), Some(2), Some(2)),
+            ("Huge", Some("span"), Some(600), Some(500)),
+        ]
+    );
+    let nesting: Vec<_> = all.nesting.iter().map(|o| (o.name.as_str(), o.value, o.threshold)).collect();
+    assert_eq!(nesting, [("deep_a", Some(6), Some(5)), ("deep_b", Some(5), Some(5))]);
+}
+
+/// FR-QM-19 (S-676): the capped display lists are exactly the head of the
+/// uncapped ones — computed once and truncated, so a review reading either
+/// sees the same entries in the same order.
+#[test]
+fn the_capped_lists_are_the_head_of_the_uncapped_ones() {
+    let (nodes, edges, functions) = every_list_fixture();
+    let t = super::Thresholds::default();
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let all = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), t, &member_access());
+    let capped = offenders_of(&nodes, &edges, &functions, &HashSet::new(), t, 1);
+    let mut cut = 0;
+    for ((dimension, head), (_, full)) in capped.lists().into_iter().zip(all.lists()) {
+        assert_eq!(head, &full[..full.len().min(1)], "{dimension}");
+        cut += full.len().saturating_sub(1);
+    }
+    assert!(cut > 0, "the cap dropped entries, so the head property is exercised");
 }
 
 /// A function row with a line count and the two Redundancy verdicts.

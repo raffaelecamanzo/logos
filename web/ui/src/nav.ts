@@ -86,6 +86,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // CR-079: the "Gaps" tab is now "Rule findings" (test-gaps roll-up removed).
   { id: "gaps", label: "Rule findings", path: "/gaps", group: "B", scope: "member" },
   { id: "coverage", label: "Coverage", path: "/coverage", group: "B", scope: "member" },
+  // S-670 (FR-SC-09): the Security page — scanner matrix, findings in graph
+  // context, the OWASP view — beside Rule findings and Coverage.
+  { id: "security", label: "Security", path: "/security", group: "B", scope: "member" },
   // Group C — the isolated policy editor (the only mutating surface), with the
   // read-only Statistics view directly above it (S-235, CR-058, FR-UI-27).
   { id: "statistics", label: "Statistics", path: "/statistics", group: "C", scope: "member" },
@@ -138,14 +141,26 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   },
   { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
+  // S-674 (CR-217, FR-SC-16): every member's scanner states and fresh findings,
+  // with each member linked to its own Security page. Named "Security" like its
+  // member-scoped twin (ADR-66 tells the two apart by section label), group B
+  // beside it, and so after Workspace in the section. A sibling route of
+  // `/workspace`, not a child, for the reason the S-428 entries above give.
+  {
+    id: "workspace-security",
+    label: "Security",
+    path: "/workspace-security",
+    group: "B",
+    scope: "app",
+  },
   // S-429 (CR-137, FR-UI-37): usage summed across every member, over an aggregate
   // that constructs no member engine (NFR-PE-10).
   //
   // Group C, not A, so it sits apart from the three cross-service surfaces exactly
   // as its member-scoped twin sits apart from the read surfaces above it — the
   // CR-042 grouping is a property of WHAT a tab answers, and this one answers the
-  // same question one scope up. Group B falls out empty in this section and renders
-  // nothing, which {@link NavItem} already relies on.
+  // same question one scope up. Group B holds only Workspace security (S-674), its
+  // member twin's group, so it renders between the cross-service tabs and this one.
   //
   // Appended LAST, and this position is load-bearing rather than incidental:
   // `Sidebar.test.tsx` asserts the Workspace section renders in this list's order,

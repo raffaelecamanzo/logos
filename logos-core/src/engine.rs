@@ -44,6 +44,7 @@ use crate::models::{
 };
 use crate::observability::{CallOutcome, Tool};
 use crate::runtime::{Runtime, RuntimeConfig, SharedWorkerPool};
+use crate::tools::surface;
 
 /// Thick-core engine — the single public façade over all Logos operations.
 ///
@@ -117,6 +118,11 @@ pub struct Engine {
     /// scanner binaries; `None` reads the process environment on each call
     /// ([`Engine::with_scan_environment`]).
     scan_env: Option<crate::security::ScanEnvironment>,
+    /// The tool manifest the security surfaces resolve managed copies and
+    /// minimum versions against, and install from; `None` is the
+    /// [builtin](crate::tools::Manifest::builtin) one
+    /// ([`Engine::with_tools_manifest`]).
+    tools_manifest: Option<crate::tools::Manifest>,
 }
 
 /// The per-language call residue, keyed by language name.
@@ -290,6 +296,7 @@ impl Engine {
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
             scan_env: None,
+            tools_manifest: None,
         }
     }
 
@@ -555,6 +562,7 @@ impl Engine {
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
             scan_env: None,
+            tools_manifest: None,
         };
 
         // Move a store whose symbols carry another coordinate than the
@@ -748,6 +756,7 @@ impl Engine {
             call_residue: std::sync::Mutex::new(None),
             call_residue_walks: AtomicU64::new(0),
             scan_env: None,
+            tools_manifest: None,
         };
 
         engine.migrate_symbol_coordinate();
@@ -997,6 +1006,35 @@ impl Engine {
     /// [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
     pub fn install_hooks(root: impl AsRef<Path>) -> Result<crate::hooks::HooksResult> {
         crate::hooks::install(root.as_ref())
+    }
+
+    /// `logos init --uninstall` ([FR-IN-12]): remove every artefact Logos
+    /// wrote into the project — the managed blocks, the MCP, hook and plugin
+    /// enrolment entries, the scripts and skill copies with their pointers, and
+    /// the managed git hooks, unsetting `core.hooksPath` only if Logos set it
+    /// ([`crate::hooks::uninstall`]). Foreign content and `.logos/` stay, and
+    /// no store is opened or created. A second run reports every row
+    /// `Unchanged`.
+    ///
+    /// # Errors
+    /// On an I/O failure on a Logos-written file, and when git fails part-way
+    /// through removing the managed git hooks.
+    ///
+    /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+    pub fn init_uninstall(root: impl AsRef<Path>) -> Result<crate::models::pipeline::UninstallResult> {
+        use crate::models::pipeline::InitAction;
+        let root = &crate::workspace::resolve_root(root.as_ref());
+        let steps = crate::init::uninstall(root)?;
+        let removed = steps.iter().any(|s| s.action != InitAction::Unchanged && s.action != InitAction::Skipped);
+        Ok(crate::models::pipeline::UninstallResult {
+            message: if removed {
+                "Logos integration removed; .logos/ is left in place (delete it to drop the index)"
+            } else {
+                "nothing of Logos's to remove; .logos/ is left in place"
+            }
+            .to_string(),
+            steps,
+        })
     }
 
     // ── Navigation (8 tools, FR-NV-01..09, S-013) ─────────────────────────
@@ -1494,7 +1532,7 @@ impl Engine {
     /// fault, failed write batch).
     pub fn gate(&self, threshold: Option<u32>, save: bool, reconcile: bool) -> Result<GateResult> {
         crate::observability::traced(Tool::Gate, || {
-            crate::governance::gate(self, threshold, save, reconcile)
+            crate::governance::gate(self, threshold, save, reconcile, &crate::security::SecurityGateEvidence(self))
         })
     }
 
@@ -1509,7 +1547,25 @@ impl Engine {
     /// [`ConfigError`](crate::config::ConfigError) (usage exit 2).
     pub fn check_rules(&self, rules_path: Option<&Path>, reconcile: bool) -> Result<RulesReport> {
         crate::observability::traced(Tool::CheckRules, || {
-            crate::governance::check_rules(self, rules_path, reconcile)
+            crate::governance::check_rules(self, rules_path, reconcile, &crate::security::SecurityGateEvidence(self))
+        })
+    }
+
+    /// The ratchet's bless command (`check --bless`, [FR-GV-23]): write every
+    /// current offender of a `ratchet = true` constraint to the checked-in
+    /// `.logos/rules-baseline.json` — sorted and deterministic, untouched when
+    /// unchanged — then return the [`check_rules`](Self::check_rules) report
+    /// against the set just written. The only writer of that file: `check`
+    /// and `scan` only read it, and `gate` never touches it.
+    ///
+    /// # Errors
+    /// As [`check_rules`](Self::check_rules); a failed write of the blessed set
+    /// is a [`ConfigError`](crate::config::ConfigError) (usage exit 2).
+    ///
+    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+    pub fn bless_rules(&self, rules_path: Option<&Path>, reconcile: bool) -> Result<RulesReport> {
+        crate::observability::traced(Tool::BlessRules, || {
+            crate::governance::bless_rules(self, rules_path, reconcile, &crate::security::SecurityGateEvidence(self))
         })
     }
 
@@ -1617,7 +1673,9 @@ impl Engine {
     /// # Errors
     /// Returns an error on a structural failure.
     pub fn session_start(&self) -> Result<SessionInfo> {
-        crate::observability::traced(Tool::SessionStart, || crate::governance::session_start(self))
+        crate::observability::traced(Tool::SessionStart, || {
+            crate::governance::session_start(self, &crate::security::SecurityGateEvidence(self))
+        })
     }
 
     /// End the quality session (FR-GV-05): re-score and compare to the
@@ -1627,7 +1685,7 @@ impl Engine {
     /// Returns an error on a structural failure.
     pub fn session_end(&self) -> Result<GateResult> {
         crate::observability::traced(Tool::SessionEnd, || {
-            crate::governance::gate(self, None, false, true)
+            crate::governance::gate(self, None, false, true, &crate::security::SecurityGateEvidence(self))
         })
     }
 
@@ -1876,9 +1934,10 @@ impl Engine {
     /// SQL `ATTACH` across the two stores ([ADR-22], [BR-26]). `limit` caps the
     /// returned board (`logos hotspots --limit N`).
     ///
-    /// This is the single `api` entrypoint behind both the CLI `hotspots`
-    /// subcommand and the MCP `hotspots` tool ([NFR-CC-01]) — they share its
-    /// `Serialize` read-model byte-for-byte ([FR-GH-06] CLI/MCP parity). Like
+    /// The CLI `hotspots` subcommand and the MCP `hotspots` tool both reach this
+    /// through [`hotspots_with_findings`](Self::hotspots_with_findings), of which
+    /// this is the filter-off form ([NFR-CC-01]) — they share its `Serialize`
+    /// read-model byte-for-byte ([FR-GH-06] CLI/MCP parity). Like
     /// [`temporal_report`](Self::temporal_report) it is lazy and **off** the
     /// gate/sync/navigation paths ([BR-26]); a degraded repository rides inside
     /// the report as `n/a` + notice, never an error ([FR-GH-08], [NFR-RA-05]).
@@ -1891,7 +1950,9 @@ impl Engine {
     ///
     /// # Errors
     /// Returns an error only on an unexpected git/store failure, an invalid
-    /// `rules.toml`, or a non-compiling `[history] defect_patterns`.
+    /// `rules.toml`, a non-compiling `[history] defect_patterns`, or — once a
+    /// security report is stored — an invalid `.logos/security-ignore.toml`
+    /// (exit 2).
     ///
     /// [FR-GH-06]: ../../../docs/specs/requirements/FR-GH-06.md
     /// [FR-GH-08]: ../../../docs/specs/requirements/FR-GH-08.md
@@ -1906,16 +1967,37 @@ impl Engine {
         untested: bool,
         production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
+        self.hotspots_with_findings(limit, untested, production_scope, false)
+    }
+
+    /// [`hotspots`](Self::hotspots) with the findings filter ([FR-SC-14]):
+    /// `with_findings = true` ranks the hotspots carrying a fresh unsuppressed
+    /// security finding ahead of those without, highest severity first. Every
+    /// board carries the findings column when a scan is stored, with or without
+    /// the filter.
+    ///
+    /// # Errors
+    /// As [`hotspots`](Self::hotspots).
+    ///
+    /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
+    pub fn hotspots_with_findings(
+        &self,
+        limit: Option<usize>,
+        untested: bool,
+        production_scope: bool,
+        with_findings: bool,
+    ) -> Result<crate::history::HotspotReport> {
         crate::observability::traced(Tool::Hotspots, || {
             // Churn axis: the temporal tier (mines lazily, computes per file).
             let temporal = self.temporal_report()?;
-            self.rank_hotspots(temporal, limit, untested, production_scope)
+            self.rank_hotspots(temporal, limit, untested, production_scope, with_findings)
         })
     }
 
-    /// Join a temporal report with the complexity and coverage axes into the
-    /// ranked [`HotspotReport`](crate::history::HotspotReport). The complexity
-    /// (`logos.db`) and coverage (`history.db`) reads are pure point queries —
+    /// Join a temporal report with the complexity, coverage and findings axes
+    /// into the ranked [`HotspotReport`](crate::history::HotspotReport). The
+    /// complexity (`logos.db`), coverage and findings (`history.db`) reads are
+    /// pure point queries —
     /// this is the shared, **read-only** core of both [`hotspots`](Self::hotspots)
     /// (which mines first) and [`latest_hotspots`](Self::latest_hotspots) (which
     /// reads the last-mined facts). Never an `ATTACH` across the two stores
@@ -1933,6 +2015,7 @@ impl Engine {
         limit: Option<usize>,
         untested: bool,
         production_scope: bool,
+        with_findings: bool,
     ) -> Result<crate::history::HotspotReport> {
         // Complexity axis: per-file Σ cyclomatic_complexity from logos.db,
         // read in Rust — joined here, never via a cross-DB ATTACH (BR-26).
@@ -1976,7 +2059,11 @@ impl Engine {
                 })
                 .collect()
         });
-        Ok(crate::history::rank(
+        // Findings axis ([FR-SC-14]): unsuppressed fresh findings per path from
+        // the security read model and the suppression labeller. `None` = nothing
+        // scanned → no findings column.
+        let findings = crate::history::path_findings(&self.root, today_utc())?;
+        Ok(crate::history::rank_with_findings(
             temporal,
             &complexity,
             coverage.as_ref(),
@@ -1984,6 +2071,7 @@ impl Engine {
             untested,
             production_scope,
             &test_only_files,
+            crate::history::FindingsOverlay { by_path: findings.as_ref(), with_findings },
         ))
     }
 
@@ -2066,6 +2154,125 @@ impl Engine {
     /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
     pub fn latest_health(&self) -> Result<LatestHealth> {
         crate::observability::traced(Tool::LatestHealth, || crate::governance::latest_health(self))
+    }
+
+    /// **Every** offender the last snapshot recorded, uncapped, narrowed by a
+    /// path glob and a dimension ([FR-QM-19]): each with its symbol id, the
+    /// measure its value counts, the value and the threshold it met, in the
+    /// order the capped lists use. The single entry point behind the CLI
+    /// `offenders` and the MCP `offenders` tool, so the two serialize one
+    /// value ([NFR-CC-01]).
+    ///
+    /// A pure read of the last snapshot ([ADR-28]): no reconcile, no score, no
+    /// write, so the signal, the gate and the capped lists are untouched and a
+    /// rerun over an unchanged store is byte-identical ([NFR-RA-06]). With no
+    /// snapshot, or one written before the uncapped list was persisted, the
+    /// listing is `recorded: false` with the reason — never an empty "clean"
+    /// list ([NFR-CC-04]).
+    ///
+    /// # Errors
+    /// Returns an error only on a transient engine or a store-read failure.
+    ///
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+    pub fn offenders(
+        &self,
+        filter: &crate::governance::OffendersFilter,
+    ) -> Result<crate::models::quality::OffenderListing> {
+        crate::observability::traced(Tool::Offenders, || crate::governance::offender_listing(self, filter))
+    }
+
+    /// The **branch delta** ([FR-GV-24]): every offender and every `check`
+    /// violation, classified `new`, `worsened`, `improved`, `resolved` or
+    /// `unchanged` per symbol against the merge-base of `HEAD` and `base` (the
+    /// repository's default branch when `None`), each with its value before
+    /// and after, its threshold and its language's trust label, plus the
+    /// near-clone groups the branch introduced. The single entry point behind
+    /// the CLI `review` and the MCP `review` tool ([NFR-CC-01]).
+    ///
+    /// The before-state is the snapshot recorded at the merge-base, else a
+    /// shadow index of that tree cached by commit under `.logos/review-cache/`
+    /// — never another commit ([ADR-82]). The after-state is the graph as last
+    /// synced, its derived annotations re-materialised under the current
+    /// contract as `check` does; nothing is reconciled and no snapshot or
+    /// violation set is recorded, so `check` and `gate` are untouched and a
+    /// rerun is byte-identical ([NFR-RA-06]). A
+    /// base that does not resolve answers `measured: false` with the reason.
+    ///
+    /// # Errors
+    /// Returns an error on a transient engine, a store fault, an invalid
+    /// `rules.toml`, or a failed shadow index.
+    ///
+    /// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
+    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
+    pub fn review(&self, base: Option<&str>) -> Result<crate::models::quality::BranchReview> {
+        crate::observability::traced(Tool::Review, || {
+            crate::governance::branch_review(self, base, |merge_base| self.review_security_evidence(merge_base))
+        })
+    }
+
+    /// The security evidence the branch review classifies ([FR-SC-18], S-686):
+    /// every stored finding of each scanner's latest report as
+    /// [`security_findings`](Self::security_findings) lists it unfiltered (its
+    /// suppression, OWASP categories and graph context), each scanner's latest
+    /// snapshot, and the reports recorded at `merge_base` with their categories
+    /// and context. Read here so governance never opens `history.db`; the
+    /// merge-base tree is never scanned. Untraced: it is part of `review`.
+    ///
+    /// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+    fn review_security_evidence(&self, merge_base: &str) -> Result<crate::governance::SecurityEvidence> {
+        let filter = crate::security::FindingsFilter::default();
+        let current = crate::security::findings(
+            &self.root,
+            &self.scan_environment(),
+            self.tools_manifest(),
+            &filter,
+            today_utc(),
+            |listed| crate::security::context::contexts(self, listed),
+        )?;
+        let latest = crate::history::security::latest_snapshots(&self.root)?;
+        let base = crate::history::security::read_at(&self.root, merge_base)?;
+        let base_owasp = crate::history::security::classify(&base.findings, filter.edition, &[] as &[&str])
+            .findings
+            .into_iter()
+            .map(|c| c.categories)
+            .collect();
+        let base_contexts = crate::security::context::contexts(self, &base.findings.iter().collect::<Vec<_>>())?;
+        Ok(crate::governance::SecurityEvidence { current, latest, base, base_owasp, base_contexts })
+    }
+
+    /// The **"where to start"** list the last snapshot recorded ([FR-QM-17]): the
+    /// ranked fix units, each with its estimated recoverable signal points, and
+    /// the per-member outlier labels. The single entry point behind the CLI
+    /// `improvements` and the MCP `improvements` tool; `GET /api/v1/health`
+    /// carries the same value as `scan.where_to_start`, read through
+    /// [`latest_health`](Self::latest_health) — so every surface serialises one
+    /// value ([NFR-CC-01]).
+    ///
+    /// A pure read of the last snapshot ([ADR-28]): no reconcile, no score, no
+    /// write, advisory and never gated ([BR-61]). A never-scanned store, or a
+    /// snapshot written before the ranking was persisted, reads
+    /// [`recorded: false`](crate::models::quality::WhereToStart::recorded) — never
+    /// an empty "clean" list ([NFR-CC-04]); a recorded empty list means no single
+    /// unit recovers a whole point.
+    ///
+    /// # Errors
+    /// Returns an error only on a transient engine or a store-read failure.
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    /// [BR-61]: ../../../docs/specs/software-spec.md#311-quality-metrics
+    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+    pub fn improvements(&self) -> Result<crate::models::quality::WhereToStart> {
+        crate::observability::traced(Tool::Improvements, || {
+            Ok(crate::governance::latest_metrics(self)?.map(|s| s.where_to_start).unwrap_or_default())
+        })
     }
 
     /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
@@ -2155,8 +2362,9 @@ impl Engine {
     /// the optional `production_scope` filter ([CR-076]) with [`hotspots`](Self::hotspots).
     ///
     /// # Errors
-    /// Returns an error only on an unexpected git/store failure or a
-    /// non-compiling `[history] defect_patterns`.
+    /// Returns an error only on an unexpected git/store failure, a
+    /// non-compiling `[history] defect_patterns`, or — once a security report is
+    /// stored — an invalid `.logos/security-ignore.toml` (exit 2).
     ///
     /// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
     pub fn latest_hotspots(
@@ -2165,9 +2373,27 @@ impl Engine {
         untested: bool,
         production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
+        self.latest_hotspots_with_findings(limit, untested, production_scope, false)
+    }
+
+    /// [`latest_hotspots`](Self::latest_hotspots) with the findings filter
+    /// ([FR-SC-14]), the read-only twin of
+    /// [`hotspots_with_findings`](Self::hotspots_with_findings).
+    ///
+    /// # Errors
+    /// As [`latest_hotspots`](Self::latest_hotspots).
+    ///
+    /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
+    pub fn latest_hotspots_with_findings(
+        &self,
+        limit: Option<usize>,
+        untested: bool,
+        production_scope: bool,
+        with_findings: bool,
+    ) -> Result<crate::history::HotspotReport> {
         crate::observability::traced(Tool::LatestHotspots, || {
             let temporal = self.latest_temporal_report()?;
-            self.rank_hotspots(temporal, limit, untested, production_scope)
+            self.rank_hotspots(temporal, limit, untested, production_scope, with_findings)
         })
     }
 
@@ -2334,15 +2560,19 @@ impl Engine {
     /// [FR-SC-03]: ../../../docs/specs/requirements/FR-SC-03.md
     /// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
     pub fn security_ingest(&self, report_path: &Path) -> Result<crate::history::SecurityIngestSummary> {
-        crate::observability::traced(Tool::SecurityIngest, || self.security_ingest_untraced(report_path))
+        crate::observability::traced(Tool::SecurityIngest, || self.security_ingest_untraced(report_path, None))
     }
 
     /// The ingest body behind [`Engine::security_ingest`],
     /// [`Engine::security_ingest_auto`] and [`Engine::security_scan`]. Not
     /// `traced`: each public caller owns the span.
-    fn security_ingest_untraced(&self, report_path: &Path) -> Result<crate::history::SecurityIngestSummary> {
+    fn security_ingest_untraced(
+        &self,
+        report_path: &Path,
+        scope: Option<crate::history::security::IngestScope<'_>>,
+    ) -> Result<crate::history::SecurityIngestSummary> {
         let indexed_paths = self.evidence_indexed_paths()?;
-        crate::history::security::ingest(&self.root, report_path, &indexed_paths)
+        crate::history::security::ingest_scoped(&self.root, report_path, &indexed_paths, scope)
     }
 
     /// Watcher-driven **automatic** security ingest ([FR-SC-06]): ingest the
@@ -2371,7 +2601,7 @@ impl Engine {
                     artifact.display()
                 ));
             }
-            self.security_ingest_untraced(artifact)
+            self.security_ingest_untraced(artifact, None)
         })
     }
 
@@ -2390,17 +2620,182 @@ impl Engine {
     /// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
     /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
     pub fn security_scan(&self, consent: bool) -> Result<crate::security::SecurityScanSummary> {
+        self.security_scan_selected(consent, &crate::security::ScanRequest::full(), |_| {})
+    }
+
+    /// [`security_scan`](Self::security_scan), with each scanner's start and
+    /// settled outcome handed to `progress` as it happens — the web UI's scan
+    /// job ([FR-SC-15]), which runs it on a job thread, so a cancel kills the
+    /// scanner running and starts nothing after it.
+    ///
+    /// # Errors
+    /// As [`security_scan`](Self::security_scan), and the jobs module's
+    /// `Cancelled` when the job was cancelled.
+    ///
+    /// [FR-SC-15]: ../../../docs/specs/requirements/FR-SC-15.md
+    pub fn security_scan_reporting(
+        &self,
+        consent: bool,
+        progress: impl FnMut(&crate::security::ScanProgress),
+    ) -> Result<crate::security::SecurityScanSummary> {
+        self.security_scan_selected(consent, &crate::security::ScanRequest::full(), progress)
+    }
+
+    /// `logos security scan --scanner … --path …` ([FR-SC-17]): the scan the
+    /// two methods above run, over the scanners and paths `request` names.
+    /// Each path is confined to the project root before any process starts; a
+    /// path-capable scanner's report replaces its findings only within the
+    /// paths. Every scan goes through here, progress and cancel included.
+    ///
+    /// # Errors
+    /// As [`security_scan_reporting`](Self::security_scan_reporting), and exit
+    /// 2 for an unregistered scanner name or a refused path.
+    ///
+    /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+    pub fn security_scan_selected(
+        &self,
+        consent: bool,
+        request: &crate::security::ScanRequest,
+        mut progress: impl FnMut(&crate::security::ScanProgress),
+    ) -> Result<crate::security::SecurityScanSummary> {
         crate::observability::traced(Tool::SecurityScan, || {
-            crate::security::scan(&self.root, &self.scan_environment(), consent, |report| {
-                self.security_ingest_untraced(report)
-            })
+            crate::security::scan(
+                &self.root,
+                &self.scan_environment(),
+                self.tools_manifest(),
+                consent,
+                request,
+                &mut progress,
+                |report, scope| self.security_ingest_untraced(report, scope),
+            )
         })
+    }
+
+    /// The installed, enabled scanners this project's scan consent does not
+    /// name yet ([FR-SC-07]): what [`security_scan`](Self::security_scan)
+    /// without `consent` would refuse over, and what the web UI's consent
+    /// dialog lists. Starts no process.
+    ///
+    /// # Errors
+    /// Exit 2 for an invalid config or consent record.
+    ///
+    /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
+    pub fn security_consent_pending(&self) -> Result<Vec<&'static str>> {
+        crate::security::consent_pending(&self.root, &self.scan_environment(), self.tools_manifest())
+    }
+
+    /// Record this project's scan consent ([FR-SC-07]) for exactly `scanners`
+    /// — the ones the web UI's consent dialog showed and the user accepted —
+    /// in the user-level `security-consent.toml`, never in the repository.
+    ///
+    /// # Errors
+    /// Exit 2 when there is no user-level directory or the record is invalid;
+    /// an I/O error writing it.
+    ///
+    /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
+    pub fn security_record_consent(&self, scanners: &[&str]) -> Result<()> {
+        crate::config::record_scan_consent(self.scan_environment().user_dir.as_deref(), &self.root, scanners)?;
+        Ok(())
+    }
+
+    /// `logos security scan --install` ([FR-SC-22]): install the default
+    /// scanners this project has not disabled and that are missing — under
+    /// the per-user install consent — then [scan](Self::security_scan). With
+    /// `consent`, both the install consent and the project's scan consent
+    /// are recorded for what is missing. CLI only: no MCP tool installs.
+    ///
+    /// # Errors
+    /// Exit 2 for a missing install consent (nothing is downloaded then), a
+    /// missing scan consent, or an invalid config. One tool's failed install
+    /// is its outcome; the scan runs over what is installed.
+    ///
+    /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
+    pub fn security_scan_install(&self, consent: bool) -> Result<surface::SecurityScanInstall> {
+        let install = surface::install_for_scan(&self.root, &self.scan_environment(), self.tools_manifest(), consent)?;
+        let scan = self.security_scan(consent)?;
+        Ok(surface::SecurityScanInstall { install, scan })
+    }
+
+    /// `logos security install` ([FR-SC-22]): install the requested scanners
+    /// that have no usable copy — not the user's own, at or above the
+    /// manifest's minimum — after checking the per-user, per-tool-version
+    /// install consent ([`crate::tools::surface::install`]). CLI only.
+    ///
+    /// # Errors
+    /// Exit 2 for a missing consent (naming each tool, version, source and
+    /// size; nothing is downloaded), an unknown tool, a platform without
+    /// managed installs or no tools directory.
+    ///
+    /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
+    pub fn security_install(
+        &self,
+        request: &surface::InstallRequest,
+    ) -> Result<surface::SecurityInstall> {
+        surface::install(&self.root, &self.scan_environment(), self.tools_manifest(), request)
+    }
+
+    /// `logos security uninstall` ([FR-SC-22]): remove the managed copies of
+    /// the selected scanners, never a copy the user installed, and report
+    /// those that stay ([`crate::tools::surface::uninstall`]). CLI only.
+    ///
+    /// # Errors
+    /// Exit 2 for an unknown tool, a platform without managed installs or no
+    /// tools directory.
+    ///
+    /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
+    pub fn security_uninstall(
+        &self,
+        tools: &crate::security::Selection,
+    ) -> Result<surface::SecurityUninstall> {
+        surface::uninstall(&self.root, &self.scan_environment(), self.tools_manifest(), tools)
+    }
+
+    /// The Security page's Install, Update or Install & scan ([FR-SC-24],
+    /// S-747): ready to run once the consent dialog answered every line it
+    /// needs, else the plan the dialog shows
+    /// ([`crate::tools::surface::admit_install`]). Starts nothing, writes
+    /// nothing.
+    ///
+    /// # Errors
+    /// Exit 2 for an unknown or unoffered tool, a platform without managed
+    /// installs, no tools directory, or an invalid config.
+    ///
+    /// [FR-SC-24]: ../../../docs/specs/requirements/FR-SC-24.md
+    pub fn security_install_admit(
+        &self,
+        ask: &surface::InstallAsk,
+    ) -> Result<surface::InstallAdmission> {
+        surface::admit_install(&self.root, &self.scan_environment(), self.tools_manifest(), ask)
+    }
+
+    /// The `tool-install` job's work ([FR-SC-24]): the admitted install, then
+    /// — with `scan` — the full [scan](Self::security_scan_reporting) without
+    /// recording consent, each step handed to `progress`. Run on a job thread,
+    /// a cancel stops the download, leaves no partial tool and reports the
+    /// tools installed by then ([`crate::tools::surface::install_job`]).
+    ///
+    /// # Errors
+    /// As [`security_install`](Self::security_install) and the scan, and the
+    /// jobs module's `Cancelled` when the job was cancelled.
+    ///
+    /// [FR-SC-24]: ../../../docs/specs/requirements/FR-SC-24.md
+    pub fn security_install_job(
+        &self,
+        request: &surface::InstallRequest,
+        scan: bool,
+        mut progress: impl FnMut(&surface::InstallStep<'_>),
+    ) -> Result<surface::SecurityInstallJob> {
+        let mut run_scan = |step: &mut dyn FnMut(&crate::security::ScanProgress)| self.security_scan_reporting(false, step);
+        let scan: Option<surface::ScanRun<'_>> = if scan { Some(&mut run_scan) } else { None };
+        surface::install_job(&self.root, &self.scan_environment(), self.tools_manifest(), request, scan, &mut progress)
     }
 
     /// `logos security status` / `security_status` ([FR-SC-08]): each
     /// registered scanner's one state — not installed, disabled, never run,
-    /// stale, or fresh with its unsuppressed finding count — and the consent
-    /// state ([`crate::security::status`]). Starts no scanner.
+    /// stale, or fresh with its unsuppressed finding count — the copy in use
+    /// with its version and any `update_available`, the install command for a
+    /// missing scanner, and the consent state ([`crate::security::status`]).
+    /// Runs no scanner beyond its version probe.
     ///
     /// # Errors
     /// Exit 2 for an invalid config, consent record or ignore file; otherwise
@@ -2408,21 +2803,37 @@ impl Engine {
     ///
     /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
     pub fn security_status(&self) -> Result<crate::security::SecurityStatus> {
+        self.security_status_probing(crate::security::VersionProbes::Every)
+    }
+
+    /// [`security_status`](Self::security_status) with the version probes
+    /// `probes` allows: a page read probes only consented scanners, each
+    /// binary once per process (HF-3).
+    ///
+    /// # Errors
+    /// As [`security_status`](Self::security_status).
+    pub(crate) fn security_status_probing(
+        &self,
+        probes: crate::security::VersionProbes,
+    ) -> Result<crate::security::SecurityStatus> {
         crate::observability::traced(Tool::SecurityStatus, || {
-            crate::security::status(&self.root, &self.scan_environment(), today_utc())
+            crate::security::status(&self.root, &self.scan_environment(), self.tools_manifest(), today_utc(), probes)
         })
     }
 
     /// `logos security findings` / `security_findings` ([FR-SC-08]): the
     /// stored findings with their OWASP categories ([S-664]) and suppression
-    /// ([S-666]), narrowed by `filter` ([`crate::security::findings`]). Starts
-    /// no scanner.
+    /// ([S-666]), narrowed by `filter` ([`crate::security::findings`]), each in
+    /// the graph context this engine computes from logos.db — enclosing
+    /// symbol, route reachability and blast radius, each labelled
+    /// ([FR-SC-13], [`crate::security::context`]). Starts no scanner.
     ///
     /// # Errors
     /// Exit 2 for an invalid config or ignore file; otherwise only a store
     /// failure.
     ///
     /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
+    /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
     /// [S-664]: ../../../docs/planning/journal.md#s-664-findings-are-classified-by-owasp-top-10-2025-and-2021
     /// [S-666]: ../../../docs/planning/journal.md#s-666-suppressions-live-in-a-committed-ignore-file-with-a-reason-and-an-expiry
     pub fn security_findings(
@@ -2430,8 +2841,77 @@ impl Engine {
         filter: &crate::security::FindingsFilter,
     ) -> Result<crate::security::SecurityFindings> {
         crate::observability::traced(Tool::SecurityFindings, || {
-            crate::security::findings(&self.root, &self.scan_environment(), filter, today_utc())
+            crate::security::findings(&self.root, &self.scan_environment(), self.tools_manifest(), filter, today_utc(), |listed| {
+                crate::security::context::contexts(self, listed)
+            })
         })
+    }
+
+    /// The web UI's Security page ([FR-SC-09]): the
+    /// [status](Self::security_status) matrix, every stored finding in graph
+    /// context ([`security_findings`](Self::security_findings), unfiltered),
+    /// the same findings classified under both OWASP editions so the page
+    /// switches edition without a refetch ([FR-SC-04]), and — only with a
+    /// `rules.toml [security]` table — the verdict `check` reaches on it
+    /// ([FR-SC-10]). One status readout serves the matrix and the gate band.
+    /// Starts no scanner beyond the version probe of a scanner the project's
+    /// scan consent names, once per process for each binary
+    /// ([`VersionProbes::Consented`](crate::security::VersionProbes::Consented)):
+    /// the page is a read a cross-site page can trigger.
+    ///
+    /// # Errors
+    /// As [`security_status`](Self::security_status) and
+    /// [`security_findings`](Self::security_findings), and an invalid
+    /// `.logos/rules.toml` (exit 2).
+    ///
+    /// [FR-SC-04]: ../../../docs/specs/requirements/FR-SC-04.md
+    /// [FR-SC-09]: ../../../docs/specs/requirements/FR-SC-09.md
+    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+    pub fn security_page(&self) -> Result<crate::security::SecurityPage> {
+        let status = self.security_status_probing(crate::security::VersionProbes::Consented)?;
+        let gate = crate::security::SecurityGateEvidence(self).band(&status)?;
+        Ok(crate::security::SecurityPage {
+            findings: self.security_findings(&crate::security::FindingsFilter::default())?,
+            editions: crate::security::editions(&self.root, &self.scan_environment(), self.tools_manifest(), today_utc())?,
+            status,
+            gate,
+        })
+    }
+
+    /// Suppress one finding from the Security page ([FR-SC-12]): add an entry
+    /// for `fingerprint` to `.logos/security-ignore.toml` with `reason` and an
+    /// optional `expires` date written `YYYY-MM-DD`
+    /// ([`crate::history::security::suppress`]). Touches no store: the next
+    /// [`security_findings`](Self::security_findings) labels the finding from
+    /// the file.
+    ///
+    /// # Errors
+    /// Exit 2 and no write for a blank reason, a malformed or already
+    /// suppressed fingerprint, an expiry that is not a date or is in the past,
+    /// or an ignore file that is malformed or hand-spelled; a failed atomic
+    /// write.
+    ///
+    /// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
+    pub fn security_suppress(
+        &self,
+        fingerprint: &str,
+        reason: &str,
+        expires: Option<&str>,
+    ) -> Result<crate::history::security::IgnoreWrite> {
+        let expires = expires.map(crate::history::security::parse_expires).transpose()?;
+        crate::history::security::suppress(&self.root, fingerprint, reason, expires, today_utc())
+    }
+
+    /// Remove the suppression for `fingerprint` ([FR-SC-12],
+    /// [`crate::history::security::unsuppress`]); the finding counts again.
+    ///
+    /// # Errors
+    /// Exit 2 and no write when no entry carries `fingerprint` or the ignore
+    /// file is malformed or hand-spelled; a failed write.
+    ///
+    /// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
+    pub fn security_unsuppress(&self, fingerprint: &str) -> Result<crate::history::security::IgnoreWrite> {
+        crate::history::security::unsuppress(&self.root, fingerprint)
     }
 
     /// This engine with the security surfaces looking in `env` instead of the
@@ -2444,7 +2924,23 @@ impl Engine {
         self
     }
 
-    fn scan_environment(&self) -> crate::security::ScanEnvironment {
+    /// This engine with the security surfaces resolving managed copies and
+    /// minimum versions against `manifest`, and installing from it, instead
+    /// of the builtin manifest. For tests: fixture artifacts, or a manifest
+    /// pinning a newer version. No shipped surface calls it.
+    #[must_use]
+    pub fn with_tools_manifest(mut self, manifest: crate::tools::Manifest) -> Self {
+        self.tools_manifest = Some(manifest);
+        self
+    }
+
+    pub(crate) fn tools_manifest(&self) -> &crate::tools::Manifest {
+        self.tools_manifest
+            .as_ref()
+            .unwrap_or_else(|| crate::tools::Manifest::builtin())
+    }
+
+    pub(crate) fn scan_environment(&self) -> crate::security::ScanEnvironment {
         self.scan_env
             .clone()
             .unwrap_or_else(crate::security::ScanEnvironment::from_process)
@@ -3294,7 +3790,7 @@ fn degraded_sync(err: &anyhow::Error) -> SyncResult {
 /// the evidence store never reads the clock ([BR-27]).
 ///
 /// [BR-27]: ../../../docs/specs/software-spec.md
-fn today_utc() -> chrono::NaiveDate {
+pub(crate) fn today_utc() -> chrono::NaiveDate {
     utc_date_of(std::time::SystemTime::now())
 }
 
@@ -3490,7 +3986,10 @@ mod tests {
             .expect("a valid rules write succeeds");
         assert!(written.provenance_stamped);
         let docs = engine.config_read(None).expect("config_read after rules write");
-        assert_eq!(docs.rules.parsed.constraints.max_cc, Some(9));
+        assert_eq!(
+            docs.rules.parsed.constraints.max_cc,
+            Some(crate::config::Budget::Absolute(9))
+        );
         assert!(docs.rules.content.contains("CR-025"));
 
         // An invalid candidate is rejected with a typed error; the file is intact.

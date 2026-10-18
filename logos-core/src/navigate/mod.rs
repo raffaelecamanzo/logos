@@ -696,7 +696,7 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
     let (resolved, passed_over, note, docs, suggestions) =
         runtime.submit_read(|store| match resolve_preferring_code(store, symbol)? {
             Some((row, passed_over, note)) => {
-                let docs = doc_links(store.neighbours_in(row.id)?, Endpoint::DocSource);
+                let docs = impact_docs(store, row.id)?;
                 Ok((Some(row), passed_over, note, docs, Vec::new()))
             }
             None => Ok((
@@ -724,15 +724,7 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
     let resolution_denominator = symbol_denominator(runtime, Some(&symbol_ref(&row)), &mut warnings);
 
     let view = engine.hydrate(Granularity::ExcludeContains)?;
-    let (upstream, downstream) = match view.index_of(row.symbol.as_str()) {
-        Some(start) => (
-            impact_entries(engine, &view, start, Direction::Incoming, depth)?,
-            impact_entries(engine, &view, start, Direction::Outgoing, depth)?,
-        ),
-        // The vertex can be missing only if the symbol landed after this
-        // view's snapshot; best-effort answers empty rather than failing.
-        None => (Vec::new(), Vec::new()),
-    };
+    let (upstream, downstream) = impact_sets(engine, &view, &row, depth)?;
 
     Ok(ImpactResult {
         query: symbol.to_string(),
@@ -749,6 +741,36 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
         resolution_denominator,
         warnings,
     })
+}
+
+/// The upstream and downstream sets of `impact` on `row`, walked `depth` deep
+/// over `view` (the `ExcludeContains` view) — the traversal [`impact`]
+/// reports. Shared with the security findings context (S-669), which sizes
+/// each finding's blast radius from the rows it already holds, so the two
+/// answers agree by construction.
+pub(crate) fn impact_sets(
+    engine: &Engine,
+    view: &GraphView,
+    row: &NodeRow,
+    depth: usize,
+) -> Result<(Vec<ImpactEntry>, Vec<ImpactEntry>)> {
+    Ok(match view.index_of(row.symbol.as_str()) {
+        Some(start) => (
+            impact_entries(engine, view, start, Direction::Incoming, depth)?,
+            impact_entries(engine, view, start, Direction::Outgoing, depth)?,
+        ),
+        // The vertex can be missing only if the symbol landed after this
+        // view's snapshot; best-effort answers empty rather than failing.
+        None => (Vec::new(), Vec::new()),
+    })
+}
+
+/// The documentation sections referencing node `id` — the doc-aware
+/// dimension of [`impact`] ([FR-NV-10]).
+///
+/// [FR-NV-10]: ../../../docs/specs/requirements/FR-NV-10.md
+pub(crate) fn impact_docs(store: &dyn GraphStore, id: NodeId) -> Result<Vec<TraceLink>> {
+    Ok(doc_links(store.neighbours_in(id)?, Endpoint::DocSource))
 }
 
 /// Bounded per-pair shared-symbol list. A pair of items whose impact sets
@@ -3504,7 +3526,7 @@ fn fetch_rows(engine: &Engine, ids: &[NodeId]) -> Result<HashMap<NodeId, NodeRow
 }
 
 /// Map a store row to the wire-facing [`SymbolRef`].
-fn symbol_ref(row: &NodeRow) -> SymbolRef {
+pub(crate) fn symbol_ref(row: &NodeRow) -> SymbolRef {
     SymbolRef {
         symbol: row.symbol.as_str().to_string(),
         name: row.name.clone(),

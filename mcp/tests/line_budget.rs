@@ -314,6 +314,69 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | `security_scan` refuses it with `invalid_params` naming the CLI command | **+3** |
 /// | | **+5** |
 ///
+/// **S-507 1234→1261**: the `bless_rules` tool, the MCP twin of
+/// `logos check --bless` ([FR-GV-23]). Measured 1231→1259 (+28), 2 lines of
+/// headroom. `check_rules` and `bless_rules` share one body, `rules_report`:
+/// written twice, the pair was an exact duplicate the Redundancy dimension
+/// counted against the gate.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `#[tool(description = …)]` attribute | **+3** |
+/// | the `bless_rules` signature over the shared `ReconcileParams`, and its one-line body | **+5** |
+/// | `rules_report`: its doc (5), signature (6) and body — the `repo` refusal, the reconcile flag, and the one `if bless` choice between the two `Engine` calls (11) | **+22** |
+/// | `check_rules`'s body, now one call into `rules_report` (was 4 lines) | **−3** |
+/// | the router comment: 29→30 tools, `bless_rules` named among the write tools | **+1** |
+/// | | **+28** |
+///
+/// **S-676 1261→1279**: the `offenders` tool, the MCP twin of
+/// `logos offenders` ([FR-QM-19]). Measured 1259→1277 (+18), 2 lines of
+/// headroom. Delegation only: the filter tokens go through the core's own
+/// `OffendersFilter::parse`, as the CLI's do, and the listing is one `Engine`
+/// call; the glob, the dimension vocabulary and the not-recorded readings live
+/// in `logos_core::governance::offenders`.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `OffendersParams` (`path`, `dimension` and `repo`, each a doc line and a field) | **+10** |
+/// | the `#[tool(description = …)]` attribute | **+3** |
+/// | the `offenders` tool: signature, the `OffendersFilter::parse` call with its `invalid_params` mapping, the one delegation | **+5** |
+/// | the router comment: 30→31 tools (one line, reworded) | **0** |
+/// | | **+18** |
+///
+/// [FR-QM-19]: ../../docs/specs/requirements/FR-QM-19.md
+///
+/// **S-505 1279→1285**: the `improvements` tool, the MCP twin of
+/// `logos improvements` ([FR-QM-17]). Measured 1277→1283 (+6), 2 lines of
+/// headroom. A sibling session in the same iteration adds its own delta to the
+/// 1279 this one branched from; the merged budget is the sum. Delegation only:
+/// the list is one `Engine::improvements` call over the shared `RepoParams`.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `#[tool(description = …)]` attribute | **+3** |
+/// | the `improvements` tool: signature and its one delegation | **+3** |
+/// | the router comment: 31→32 tools (one line, reworded) | **0** |
+/// | | **+6** |
+///
+/// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
+///
+/// **S-677 1285→1299**: the `review` tool, the MCP twin of `logos review`
+/// ([FR-GV-24]). Measured 1283→1297 (+14); the 2 lines of headroom are kept.
+/// Sibling sessions in Iteration 4 add their own deltas to the 1285 this one
+/// branched from; the merged budget is the sum. Delegation only: the delta is
+/// one `Engine::review` call.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `ReviewParams` (`base` and `repo`, each a doc line and a field, plus derive, attribute, header and close) | **+8** |
+/// | the `#[tool(description = …)]` attribute | **+3** |
+/// | the `review` tool: signature, its one delegation, close | **+3** |
+/// | the router comment: 32→33 tools (one line, reworded) | **0** |
+/// | | **+14** |
+///
+/// [FR-GV-24]: ../../docs/specs/requirements/FR-GV-24.md
+/// [FR-GV-23]: ../../docs/specs/requirements/FR-GV-23.md
 /// [FR-SC-07]: ../../docs/specs/requirements/FR-SC-07.md
 /// [CR-217]: ../../docs/requests/CR-217-security-findings-in-graph-context.md
 /// [FR-SC-06]: ../../docs/specs/requirements/FR-SC-06.md
@@ -329,14 +392,47 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// [S-403]: ../../docs/planning/journal.md#s-403-the-resolved-edge-headline-agrees-with-its-payload
 /// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+///
+/// **S-671 1285→1289**: the `with_findings` argument of `hotspots`
+/// ([FR-SC-14]). Measured 1283→1287 (+4), 2 lines of headroom. A sibling
+/// session in the same iteration adds its own delta to the 1285 this one
+/// branched from; the merged budget is the sum. Delegation only: the column and
+/// the filter are `Engine::hotspots_with_findings`, the call the CLI and
+/// `GET /api/v1/files` also make.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `HotspotsParams.with_findings` (two doc lines and the field) | **+3** |
+/// | the `hotspots` tool: the argument read (the delegation changes in place) | **+1** |
+/// | | **+4** |
+///
+/// [FR-SC-14]: ../../docs/specs/requirements/FR-SC-14.md
+///
+/// Sprint 106 Iteration 4 merge: S-677 (+14) and S-671 (+4) each branched from
+/// the same 1285 budget; the merged budget is 1285 + 14 + 4 = 1303.
+///
+/// **S-685 1303→1310**: `scanners` and `paths` on `security_scan`
+/// ([FR-SC-17]). Measured 1301→1308 (+7); the budget rises by that delta, the
+/// 2 lines of headroom it branched with kept. Sibling sessions in Iteration 5
+/// add their own deltas to the 1303 this one branched from; the merged budget
+/// is the sum. Delegation only: the request goes to
+/// `Engine::security_scan_selected`, the call the CLI makes.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `SecurityScanParams.scanners` and `.paths` (doc, `serde(default)`, field each) | **+6** |
+/// | the `security_scan` tool: the `ScanRequest` built from them (the call changes in place) | **+1** |
+/// | | **+7** |
+///
+/// [FR-SC-17]: ../../docs/specs/requirements/FR-SC-17.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1234,
-        "mcp adapter exceeds the 1234 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1310,
+        "mcp adapter exceeds the 1310 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

@@ -335,10 +335,11 @@ Exit codes are a stable contract for scripting:
 | Code | Meaning |
 |---|---|
 | `0` | Success. |
-| `1` | Completed, but the answer is not the answer it claims to be: violations/threshold failures (`check`, `gate`), structural drift (`doctor`, `verify`), **result-level incompleteness** — a `workspace` subcommand that could not **open** one or more members ([FR-CL-03](../specs/requirements/FR-CL-03.md), [FR-WS-16](../specs/requirements/FR-WS-16.md)) — or an `index`/`sync` that **persisted nothing** of the files it reached, or whose pipeline itself failed ([FR-EH-05](../specs/requirements/FR-EH-05.md)). A run in which only *some* files failed to persist exits `0` and lists them in `files_failed`; an index that admits no file at all still exits `0`. |
+| `1` | Completed, but the answer is not the answer it claims to be: violations/threshold failures (`check`, `gate`), structural drift (`doctor`, `verify`), **result-level incompleteness** — a `workspace` subcommand that could not **open** one or more members ([FR-CL-03](../specs/requirements/FR-CL-03.md), [FR-WS-16](../specs/requirements/FR-WS-16.md)) — a `security install` where none of the requested tools ended in place, or an `index`/`sync` that **persisted nothing** of the files it reached, or whose pipeline itself failed ([FR-EH-05](../specs/requirements/FR-EH-05.md)). A run in which only *some* files failed to persist exits `0` and lists them in `files_failed`; an index that admits no file at all still exits `0`. |
 | `2` | Usage error: bad flags, invalid config/rules file. |
 | `3` | Internal/environment error — e.g. no index present (the message tells you to run `logos index`), engine failure. Never a raw panic. |
 | `4` | `check` only: **no rules contract was loaded and nothing fired** ([FR-GV-22](../specs/requirements/FR-GV-22.md)). A verdict over an empty evaluated set is not a verdict, so `check` reports `passed: null` rather than a vacuous `true`. Note an always-on fold-in (structural, admission) can still raise a real violation with no `rules.toml` present — that stays exit `1`, not `4`. Pass `--allow-no-rules` to restore exit `0` when you have deliberately authored no contract yet. |
+| `5` | `check`, `gate` and `session-end`: a `rules.toml` [`[security]`](configuration.md#security--the-security-gate) table requires a scanner that has **no fresh scan at HEAD** — never run, stale, not installed or disabled ([FR-SC-10](../specs/requirements/FR-SC-10.md)). Exit `4` takes precedence. Exit `5` outranks `1`, and the JSON still lists any violations. A scanner the table does not require never causes it. |
 
 These codes are the CLI projection of Logos's **fail-soft / fail-loud** error
 contract: a *degraded* condition (a skipped file, a partial resolution) warns
@@ -404,7 +405,7 @@ This is the **freshen → enforce → report → bless** loop: `index` freshens,
 `check` enforces (exit 1 fails the build), `scan --json` reports the signal
 without blocking, and `gate --save` blesses a new baseline — **at release only,
 never in the PR path**. The same loop is wired into your editor and `git push`
-by [`logos init`](commands.md#init--i---hooks---workspace---yes---exclude-glob) (the freshness hooks, the `pre-push` gate,
+by [`logos init -i --hooks`](commands.md#init--i---hooks---workspace---yes---exclude-glob) (the freshness hooks, the `pre-push` gate,
 and the session-start quality-report hook — which uses
 [`quality-report`](commands.md#quality-report---hook-json), the write-free
 readout, precisely so a per-session trigger never grows the snapshot series).
@@ -419,6 +420,30 @@ session introduced a regression.
 
 See [commands.md](commands.md#quality--governance) for all flags and
 [metrics.md](metrics.md) for how the signal is computed.
+
+### The review loop: what did this branch do to the contract?
+
+```bash
+logos scan                                 # record a snapshot first
+logos offenders --dimension nesting --json # every offender the snapshot recorded, uncapped
+logos review --base main --json            # the branch delta, per symbol, against the merge-base
+```
+
+`offenders` lists every offender behind `scan`'s top-ten `worst_offenders`, each
+with its symbol id, value and threshold. `review --base <ref>` compares the
+working tree with the merge-base of `HEAD` and the base and classifies each
+offender and each `check` violation as `new`, `worsened`, `improved`, `resolved`
+or `unchanged`, labelling each entry with how far the graph can be trusted on its
+file (`resolved`, `same-file-only`, `stale`). Both are advisory and never change
+an exit code of `check` or `gate`.
+
+On Claude Code, [the plugin](plugin.md) runs the same two legs when the agent ends
+a turn (a 15-second budget, a block once on a regression,
+`LOGOS_STOP_HOOK_DISABLE=1` to turn it off), gives each entry one verdict through
+`/logos:review`, and asks you before an agent edits `.logos/rules.toml` or blesses
+a baseline. A third leg scans the files the turn changed for secrets, only once
+you have recorded scan consent, and `/logos:sec-review` triages the security
+findings the branch introduced ([Security](security.md#reviewing-what-a-branch-introduced)).
 
 ## Worktree-based development
 
@@ -457,7 +482,10 @@ external orchestration tooling
   staleness marker that `logos doctor` reads; silent copies are never left
   behind. `logos init --hooks --uninstall` removes both the primary installation
   and any worktree `hooks/` directories the seed created, so an upgrade leaves
-  no dangling symlinks.
+  no dangling symlinks. It removes the rest of the Logos integration too (the
+  `CLAUDE.md` block, the `.mcp.json` entry, the readout hook and the plugin
+  enrolment; see [`init --uninstall`](commands.md#init--i---hooks---workspace---yes---exclude-glob)),
+  so re-run `logos init -i --hooks` afterwards to put back what you still want.
 
 - **A gitignored file inside the worktree is never indexed.** The same
   `AdmissionAuthority` that guards `sync`/the watcher in the primary checkout
@@ -547,44 +575,54 @@ logos security status                # one state per scanner: never_run / fresh 
 logos security findings --severity high --suppression active
 ```
 
-Logos runs only scanners you have already installed (Semgrep, Trivy, Gitleaks,
+Logos runs the scanners that are installed (Semgrep, Trivy, Gitleaks,
 OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check), with commands
-fixed in Logos: a repository can only switch one off. Consent to the network
-access a scanner may need is yours, given once per project on the command line;
-an agent using the MCP tools is told to ask you for it. A running `serve` watcher
+fixed in Logos: a repository can only switch one off. `logos security install`
+fetches them under your consent into a user-level tools directory: seven by
+default, Dependency-Check and CodeQL only when you name them. A copy you
+installed yourself always wins. Consent to the network
+access a scanner may need is yours, given once per project on the command line
+or in the Security page's dialog; an agent using the MCP tools is told to ask you
+for it. Logos itself makes no network connection. A running `serve` watcher
 auto-ingests a `.sarif` file written into `.logos/security/` and never starts a
 scanner. Findings are grouped by OWASP Top 10 (2025, or `--edition 2021`), and
 accepted risk lives in the committed
 [`.logos/security-ignore.toml`](configuration.md#logossecurity-ignoretoml--suppressions).
 No source snippet is stored, and anything shaped like a secret is masked before
-it is written. Full reference: [commands.md](commands.md#security-findings).
+it is written. The guide to the whole section, with the tested scanner versions,
+the `[security]` gate and the Security page, is [security.md](security.md); the full
+command reference is [commands.md](commands.md#security-findings).
 
 ## Setting up the MCP server (AI agents)
 
 `logos serve --mcp` speaks the Model Context Protocol over **stdio**. The
 recommended setup uses `logos init -i`, which injects the server block into
 `.mcp.json` automatically — restart your agent and the `logos:*` tools appear.
-For manual wiring:
+On Claude Code with [the plugin](plugin.md) enabled, the plugin carries the server
+instead and `init -i` writes no `.mcp.json` entry. For manual wiring:
 
 ```bash
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **25 `logos:*` tools**, all live (34 when the server starts in a
+The host then sees **33 `logos:*` tools**, all live (42 when the server starts in a
 workspace: the nine `xservice_*`/`workspace_*` tools join them):
 
-| Navigation (11) | Quality & Governance (10) | Evidence tiers (4) |
+| Navigation (11) | Quality & Governance (14) | Evidence tiers (8) |
 |---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` |
+| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `bless_rules`, `offenders`, `review`, `improvements`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh`, `security_scan`, `security_ingest`, `security_status`, `security_findings` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
-byte-identical payload — `check_rules` is spelled `logos check`, and `rescan` is
+byte-identical payload — `check_rules` is spelled `logos check` and `bless_rules`
+`logos check --bless`, and `rescan` is
 the one deliberate MCP-only tool (it replays the last scan's parameters *within a
 server process*, which a one-shot CLI invocation has no equivalent of; use
 `logos scan`). The session gate is reachable from either surface:
 `logos session-start` / `logos session-end`, with a failing `session-end`
-exiting 1. The four evidence-tier tools are **non-gated** — like
-their CLI counterparts they never move the `session_end` gate signal.
+exiting 1. The eight evidence-tier tools never move the `session_end` gate
+signal, like their CLI counterparts. The four `hotspots` and `coverage_*` tools
+are **non-gated**; the four `security_*` tools reach the gate only through a
+[`[security]` table](configuration.md#security--the-security-gate) in `rules.toml`.
 
 Server behavior guarantees:
 
@@ -706,8 +744,12 @@ env var moves it), rejects non-loopback `Host` headers with `403`, and stamps a
 self-only `Content-Security-Policy` on every response. Every non-GET request is
 answered `405` **except** a `POST` to one of a small, enumerated set of mutating
 routes — the config save and apply routes (`/config/save`, `/config/apply`),
-the workspace manifest and config saves, and the on-demand `verify`
-(`/api/v1/verify`); those are additionally gated by a
+the workspace manifest and config saves, the on-demand `verify`
+(`/api/v1/verify`), and the Security page's scan start and cancel
+(`/api/v1/security/scan`, `/api/v1/security/scan/cancel`), scanner install and
+its cancel (`/api/v1/security/install`, `/api/v1/security/install/cancel`) and
+suppression writes (`/api/v1/security/suppress`, `/api/v1/security/unsuppress`);
+those are additionally gated by a
 same-origin + per-session intent (CSRF) guard, so a request missing the `x-logos-intent` token or arriving cross-origin
 is rejected `403` before any handler runs. The whole React app — its hashed
 JS/CSS and fonts — is built at build time (Node/Vite run only during the build,
@@ -759,11 +801,12 @@ Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
 - **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`. The Architecture view is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
-- **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
+- **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`, Security `/security` (the scanners, the findings in the graph, the OWASP Top 10 view, Run scan and triage: [security.md](security.md#the-security-page)).
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
   Workspace Health `/workspace-health`, Workspace `/workspace`, Workspace Statistics
-  `/workspace-statistics`, Config `/workspace-config`. These answer for the **whole
+  `/workspace-statistics`, Security `/workspace-security` (every member's scanners and
+  fresh findings, rolled up), Config `/workspace-config`. These answer for the **whole
   workspace**, not for the selected member, and the member selector does not govern them.
 
 ### Reading a widget
@@ -972,7 +1015,9 @@ single-author history is stated as such. The
 (CR-203). On **Health** (`/health`) the Quality-signal table carries a
 **Score** column rendering each metric's normalized value as a CSP-safe `<meter>`
 bar — the same widget the Dashboard roll-ups use; applicability drop-outs
-(Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042).
+(Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042), and a
+not-applicable Modularity, Acyclicity or Depth (fewer than 5 cross-module edges)
+shows **not applicable** with its reason.
 
 Since logos 1.4.14 the Health page's two cards — the gate and the quality
 signal — are built from **one** read of the last persisted snapshot rather than two
@@ -1046,6 +1091,35 @@ scored and excluded, and the thresholds fingerprint with what a change to
 the payload: it scores the directory layout as a whole, and its widget says so,
 never an empty table. The other nine list their worst offenders (CR-209 added
 Acyclicity, Depth, Equality and Redundancy).
+
+**Health's Where to start card (unreleased, S-505, FR-QM-17).** Above the dimension widgets, Health renders a **Where to start** card answering "what
+should I fix first?" from the snapshot it displays. It is a table of the ranked
+fix units with the columns **Rank**, **Unit**, **Dimension**, **Est. points** and
+**Outlier**. The unit is a function, a class or a duplicate or near-clone group,
+named with its file and line. **Est. points** is what the quality signal would
+gain if that one unit stopped offending, an estimate under a single-unit
+counterfactual (see [metrics.md](metrics.md#where-to-start--what-an-estimate-means)).
+**Outlier** names the measures on which the unit is above the member's own
+Tukey fence and its detection threshold, and is blank when there are none. The
+caption says the estimates are advisory and never gate, and the payload's own
+`basis` sentence is shown under the table. A snapshot that recorded no ranking says so and names
+`logos scan`; a recorded ranking with no units says that no single unit recovers
+a whole point, never that the code is clean. The same list is served by
+`logos improvements --json`, the `improvements` MCP tool and
+`scan.where_to_start` in `GET /api/v1/health`. The chat agent does not call it
+yet.
+
+The dimension widgets below the card give the drill-downs. Redundancy lists its
+dead and duplicate functions, and its duplicate groups also appear in the card's
+ranking. Equality and Depth list their worst items and say that they carry no
+points, because splitting a function or a module has no single result.
+Modularity says it has no per-unit attribution. Acyclicity lists its cycles, says
+the same about points, and links to the **Architecture** view while that view is
+not hidden (see [Hidden widgets](#hidden-widgets)): to its Cycles while that list
+is shown, and to the dependency matrix, whose cycle cells stay outlined, while it
+is not. In the current build the Architecture view is hidden, so no link appears
+and the cycles are listed inline; a link into a hidden view would land back on
+Health.
 
 **The same release stops the dashboard inventing an age it cannot establish.**
 Every relative age the SPA renders (`just now`, `5m ago`, `6d ago`) is derived

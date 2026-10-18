@@ -248,14 +248,26 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// (S-518, the `files.namespace` column), 31 (S-597, the alias in that
 /// identity index), 32 (S-587, the ledger's `peeled` column in it), 33
 /// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it), 34
-/// (S-606, the associated-item columns and the impl-block table) and 35
-/// (S-609, the `nodes.uninherited` column); the next open re-applies all
-/// fourteen, as a real upgrade does. Duplicated from
+/// (S-606, the associated-item columns and the impl-block table), 35
+/// (S-609, the `nodes.uninherited` column), 36 (S-504, the snapshot
+/// where-to-start tables and their flag column), 37 (S-676, the offender
+/// value columns, the uncapped offender table and their flag column) and 38
+/// (S-523, the graph-dimension flags and cross-module count); the next open
+/// re-applies all seventeen, as a real upgrade does. Duplicated from
 /// `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
+        "ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
+         ALTER TABLE metric_snapshots DROP COLUMN acyclicity_applicable; DELETE FROM schema_versions WHERE version = 38; \
+         DROP TABLE metric_snapshot_offenders_uncapped; ALTER TABLE metric_snapshot_offenders DROP COLUMN threshold; \
+         ALTER TABLE metric_snapshot_offenders DROP COLUMN value; ALTER TABLE metric_snapshot_offenders DROP COLUMN measure; \
+         ALTER TABLE metric_snapshot_offenders DROP COLUMN node_id; \
+         ALTER TABLE metric_snapshots DROP COLUMN offender_values_recorded; DELETE FROM schema_versions WHERE version = 37; \
+         DROP TABLE metric_snapshot_outlier_labels; DROP TABLE metric_snapshot_outlier_measures; \
+         DROP TABLE metric_snapshot_fix_units; ALTER TABLE metric_snapshots DROP COLUMN insight_recorded; \
+         DELETE FROM schema_versions WHERE version = 36; \
+         ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
          DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
          ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
          ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \
@@ -338,7 +350,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 35, "{name} was opened at the latest version (v35)");
+        assert_eq!(user_version(&root.join(name)), 38, "{name} was opened at the latest version (v38)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

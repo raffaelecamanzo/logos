@@ -17,6 +17,13 @@
 //! ascending — byte-identical across runs and the four CI targets
 //! ([NFR-RA-06]).
 //!
+//! ## The findings column and filter ([FR-SC-14])
+//! Once a security report is stored, each row carries a findings cell — the
+//! unsuppressed *fresh* findings on the file and their highest severity, with
+//! stale ones tallied apart — and no cell at all before any scan. The cell never
+//! changes the score. Only the opt-in filter reorders: hotspots with a fresh
+//! finding lead, highest severity first ([`rank_with_findings`]).
+//!
 //! ## Honest handling of missing inputs ([NFR-RA-05])
 //! Only files present in **both** inputs are ranked. A file with no in-window
 //! history (absent from the temporal report) or no parsed functions (no
@@ -25,12 +32,14 @@
 //! the report is empty and carries the degraded notice ([FR-GH-08]).
 //!
 //! This module is pure (no I/O): the [`Engine`](crate::Engine) reads the two
-//! stores and hands the results to [`aggregate_complexity`] + [`rank`].
+//! stores (and the security read model) and hands the results to
+//! [`aggregate_complexity`] + [`rank_with_findings`].
 //!
 //! [FR-GH-03]: ../../../docs/specs/requirements/FR-GH-03.md
 //! [FR-GH-05]: ../../../docs/specs/requirements/FR-GH-05.md
 //! [FR-GH-06]: ../../../docs/specs/requirements/FR-GH-06.md
 //! [FR-GH-08]: ../../../docs/specs/requirements/FR-GH-08.md
+//! [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
 //! [ADR-22]: ../../../docs/specs/architecture/decisions/ADR-22.md
 //! [BR-26]: ../../../docs/specs/software-spec.md#322-git-history-analytics
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -41,6 +50,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use serde::Serialize;
 
 use super::miner::DegradedReason;
+use super::security::PathFindings;
 use super::temporal::TemporalReport;
 use crate::graph_store::{FunctionMetricRow, NodeRow};
 use crate::model::NodeId;
@@ -136,6 +146,14 @@ pub struct HotspotReport {
     /// when `coverage_basis` is the fallback — the two signals are never blended
     /// without a label ([FR-CV-07], [NFR-CC-04]).
     pub coverage_label: Option<&'static str>,
+    /// Whether the findings filter was applied ([FR-SC-14]): when `true`, the
+    /// hotspots carrying fresh unsuppressed findings rank ahead of those with
+    /// none, highest severity first. Absent from the payload when `false`, so a
+    /// board without the filter is byte-identical to the pre-[FR-SC-14] one.
+    ///
+    /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub with_findings: bool,
 }
 
 /// One ranked hotspot file ([FR-GH-06]). Flat and scannable; the defect column
@@ -163,6 +181,13 @@ pub struct Hotspot {
     /// Per-file coverage column ([FR-CV-05], [FR-CV-07]): fresh value / stale
     /// label / `n/a`. `n/a` for every file when no coverage is ingested.
     pub coverage: CoverageCell,
+    /// The findings cell ([FR-SC-14]): unsuppressed fresh findings on the file
+    /// (count and highest severity) and the stale ones, labelled and uncounted.
+    /// Absent when nothing was ever scanned — no column rather than zeros.
+    ///
+    /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<PathFindings>,
 }
 
 /// Aggregate per-function cyclomatic complexity into a per-file total
@@ -270,6 +295,54 @@ pub fn rank(
     production_scope: bool,
     test_only_files: &BTreeSet<String>,
 ) -> HotspotReport {
+    rank_with_findings(
+        temporal,
+        complexity_by_path,
+        coverage,
+        limit,
+        untested,
+        production_scope,
+        test_only_files,
+        FindingsOverlay::default(),
+    )
+}
+
+/// What the rank joins from the security read model ([FR-SC-14]).
+///
+/// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FindingsOverlay<'a> {
+    /// The per-path cells ([`path_findings`](super::security::path_findings)),
+    /// or `None` when nothing was ever scanned: every row then carries no
+    /// findings cell rather than a zero one.
+    pub by_path: Option<&'a BTreeMap<String, PathFindings>>,
+    /// The findings filter: hotspots with a fresh unsuppressed finding rank
+    /// ahead of those without, highest severity first, then most findings.
+    pub with_findings: bool,
+}
+
+/// [`rank`] with the findings column and filter ([FR-SC-14]).
+///
+/// The cell never moves a hotspot unless `overlay.with_findings` is set: the
+/// score, and so the default order, stay `churn_rank × complexity_rank`.
+/// Under the filter the order is (has a fresh finding, highest severity, count,
+/// score, path) — a stale finding is no finding for it, so it ranks nothing.
+/// Without a scan (`overlay.by_path` is `None`) there is nothing to prefer, and
+/// the filter leaves the board as it was.
+///
+/// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
+#[allow(clippy::too_many_arguments)]
+pub fn rank_with_findings(
+    temporal: TemporalReport,
+    complexity_by_path: &BTreeMap<String, i64>,
+    coverage: Option<&BTreeMap<String, FileCoverage>>,
+    limit: Option<usize>,
+    untested: bool,
+    production_scope: bool,
+    test_only_files: &BTreeSet<String>,
+    overlay: FindingsOverlay<'_>,
+) -> HotspotReport {
+    let with_findings = overlay.with_findings && overlay.by_path.is_some();
     // The coverage column basis is independent of the temporal tier's health: it
     // reflects only whether a coverage snapshot exists ([FR-CV-07]).
     let coverage_basis = if coverage.is_some() {
@@ -295,6 +368,7 @@ pub fn rank(
             production_scope,
             coverage_basis,
             coverage_label,
+            with_findings,
         };
     }
 
@@ -369,6 +443,9 @@ pub fn rank(
                 co_change_count: c.co_change_count,
                 defect_commits: c.defect_commits,
                 coverage: coverage_cell(c.path),
+                findings: overlay
+                    .by_path
+                    .map(|cells| cells.get(c.path).copied().unwrap_or_default()),
             }
         })
         .collect();
@@ -385,8 +462,17 @@ pub fn rank(
     }
 
     // Deterministic order: score desc, then path asc (the documented
-    // tie-break, [NFR-RA-06]).
-    files.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+    // tie-break, [NFR-RA-06]). Under the findings filter the fresh-finding
+    // hotspots lead, by highest severity then count ([FR-SC-14]); a file with
+    // none (or only stale ones) has `highest: None`, which orders below every
+    // severity.
+    let urgency = |h: &Hotspot| h.findings.map(|f| (f.highest, f.count));
+    files.sort_by(|a, b| {
+        let by_findings = if with_findings { urgency(b).cmp(&urgency(a)) } else { std::cmp::Ordering::Equal };
+        by_findings
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| a.path.cmp(&b.path))
+    });
 
     let ranked_files = files.len();
     if let Some(n) = limit {
@@ -409,6 +495,7 @@ pub fn rank(
         production_scope,
         coverage_basis,
         coverage_label,
+        with_findings,
     }
 }
 
@@ -862,5 +949,146 @@ mod tests {
         );
         assert!(r.untested);
         assert!(r.production_scope);
+    }
+
+    // ── Findings column and filter ([FR-SC-14]) ─────────────────────────────
+
+    /// Two files identical on every axis — churn, complexity, coverage — so
+    /// only the findings can tell them apart; `a.rs` sorts first on the path
+    /// tie-break, which is what a fresh finding on `z.rs` must overcome.
+    fn twins() -> (TemporalReport, BTreeMap<String, i64>) {
+        (
+            report(vec![ft("a.rs", 5, 0, 0), ft("z.rs", 5, 0, 0)]),
+            BTreeMap::from([("a.rs".to_string(), 10), ("z.rs".to_string(), 10)]),
+        )
+    }
+
+    fn rank_overlaid(
+        cells: Option<&BTreeMap<String, PathFindings>>,
+        with_findings: bool,
+    ) -> HotspotReport {
+        let (temporal, complexity) = twins();
+        rank_with_findings(
+            temporal,
+            &complexity,
+            None,
+            None,
+            false,
+            false,
+            &BTreeSet::new(),
+            FindingsOverlay { by_path: cells, with_findings },
+        )
+    }
+
+    fn cell(count: usize, highest: Option<crate::model::Severity>, stale: usize) -> PathFindings {
+        PathFindings { count, highest, stale }
+    }
+
+    #[test]
+    fn under_the_filter_a_fresh_high_finding_outranks_an_identical_hotspot_without() {
+        use crate::model::Severity;
+        let cells = BTreeMap::from([("z.rs".to_string(), cell(1, Some(Severity::High), 0))]);
+
+        let plain = rank_overlaid(Some(&cells), false);
+        assert_eq!(plain.files[0].path, "a.rs", "without the filter the path tie-break decides");
+        assert!(!plain.with_findings);
+
+        let filtered = rank_overlaid(Some(&cells), true);
+        let paths: Vec<&str> = filtered.files.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["z.rs", "a.rs"], "the fresh high finding must lead: {paths:?}");
+        assert_eq!(filtered.files[0].score, filtered.files[1].score, "the twins stay identical");
+        assert!(filtered.with_findings);
+        assert_eq!(filtered.ranked_files, 2, "the filter reorders, it drops nothing");
+    }
+
+    #[test]
+    fn the_highest_severity_leads_and_a_stale_finding_ranks_nothing() {
+        use crate::model::Severity;
+        let (temporal, complexity) = twins();
+        let temporal = TemporalReport {
+            files: [temporal.files, vec![ft("m.rs", 5, 0, 0)]].concat(),
+            ..temporal
+        };
+        let complexity = BTreeMap::from([("m.rs".to_string(), 10)]).into_iter().chain(complexity).collect();
+        let cells = BTreeMap::from([
+            ("a.rs".to_string(), cell(0, None, 3)),
+            ("m.rs".to_string(), cell(1, Some(Severity::Low), 0)),
+            ("z.rs".to_string(), cell(1, Some(Severity::Critical), 0)),
+        ]);
+        let r = rank_with_findings(
+            temporal,
+            &complexity,
+            None,
+            None,
+            false,
+            false,
+            &BTreeSet::new(),
+            FindingsOverlay { by_path: Some(&cells), with_findings: true },
+        );
+        let paths: Vec<&str> = r.files.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["z.rs", "m.rs", "a.rs"],
+            "critical, then low; three stale findings on a.rs do not lift it: {paths:?}"
+        );
+        assert_eq!(r.files[2].findings, Some(cell(0, None, 3)), "stale is labelled, uncounted");
+    }
+
+    #[test]
+    fn a_scanned_project_gives_every_row_a_cell_and_a_never_scanned_one_gives_none() {
+        let cells = BTreeMap::new();
+        let scanned = rank_overlaid(Some(&cells), false);
+        assert!(
+            scanned.files.iter().all(|h| h.findings == Some(PathFindings::default())),
+            "a scan that found nothing on a file is a zero cell"
+        );
+
+        let no_scan = rank_overlaid(None, true);
+        assert!(no_scan.files.iter().all(|h| h.findings.is_none()), "no scan, no column");
+        assert!(!no_scan.with_findings, "the filter has nothing to prefer without a scan");
+        let json = serde_json::to_value(&no_scan).unwrap();
+        assert!(json["files"][0].get("findings").is_none(), "absent from the payload: {json}");
+        assert!(json.get("with_findings").is_none(), "{json}");
+    }
+
+    /// The filtered order of `(path, churn, complexity, cell)` rows, best first.
+    fn filtered_order(rows: &[(&str, i64, i64, PathFindings)]) -> Vec<String> {
+        let temporal = report(rows.iter().map(|(p, churn, _, _)| ft(p, *churn, 0, 0)).collect());
+        let complexity = rows.iter().map(|(p, _, cx, _)| (p.to_string(), *cx)).collect();
+        let cells = rows.iter().map(|(p, _, _, c)| (p.to_string(), *c)).collect();
+        rank_with_findings(
+            temporal,
+            &complexity,
+            None,
+            None,
+            false,
+            false,
+            &BTreeSet::new(),
+            FindingsOverlay { by_path: Some(&cells), with_findings: true },
+        )
+        .files
+        .into_iter()
+        .map(|h| h.path)
+        .collect()
+    }
+
+    #[test]
+    fn under_the_filter_severity_orders_before_count_and_count_before_score_and_path() {
+        use crate::model::Severity::{High, Low};
+        // Equal severity: the larger count leads, though `p.rs` wins the path tie-break.
+        assert_eq!(
+            filtered_order(&[("p.rs", 5, 10, cell(1, Some(High), 0)), ("q.rs", 5, 10, cell(3, Some(High), 0))]),
+            ["q.rs", "p.rs"]
+        );
+        // Severity outranks count: five low findings do not beat one high one.
+        assert_eq!(
+            filtered_order(&[("r.rs", 5, 10, cell(5, Some(Low), 0)), ("s.rs", 5, 10, cell(1, Some(High), 0))]),
+            ["s.rs", "r.rs"]
+        );
+        // Equal severity and count: the hotspot score decides, not the path.
+        assert_eq!(
+            filtered_order(&[("a.rs", 1, 1, cell(1, Some(High), 0)), ("z.rs", 9, 9, cell(1, Some(High), 0))]),
+            ["z.rs", "a.rs"]
+        );
     }
 }

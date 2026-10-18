@@ -1,0 +1,54 @@
+# Logos project configuration (.logos/config.toml) — checked-in policy that
+# travels into every worktree (NFR-DM-04). Every key is optional; the
+# commented values below ARE the built-in defaults.
+# Reference: docs/howto/configuration.md
+
+# Code-language admission allowlist (grammar names from `logos languages`).
+# Omit it (or leave it empty) to index every compiled-in code language — the
+# default; set it to restrict indexing to a subset (a narrowing purges the rest).
+# languages = ["rust", "python"]
+
+# Include/exclude globs, matched against root-relative paths. The default
+# `exclude` prunes the planning/security/notes prose paths (CR-029/FR-CF-05)
+# and minified JavaScript, `**/*.min.js` at any depth (CR-154); set
+# `exclude = []` to re-admit them, or list your own globs to replace it (a list
+# that omits `**/*.min.js` re-admits minified files). Add a directory of
+# non-minified vendored scripts here to prune it too.
+# include = ["**"]
+# exclude = ["docs/planning/**", "docs/security/**", "notes/**", "**/*.min.js"]
+
+# Files larger than this many bytes are skipped with a notice.
+# max_file_size = 2097152
+
+# Framework hints biasing route/component extraction.
+# framework_hints = []
+
+# [semantics]
+# Directory names pruned anywhere in the tree during discovery — build outputs,
+# agent/tooling dirs, per-language caches, and scratch dirs (CR-029/FR-CF-05,
+# CR-054). Listing your own replaces this set wholesale.
+# ignored_dirs = ["target", "node_modules", "dist", "build", "vendor", ".git", ".logos", ".agents", ".claude", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", "bin", "obj", ".gradle", "out", "Pods", ".next", ".svelte-kit", "coverage", "cmake-build-debug", "cmake-build-release", ".worktrees", ".playwright-mcp"]
+# Dead-code reachability roots (node names) on top of exports and routes.
+# entry_points = ["main"]
+
+# [resolution]
+# Reference-binder aggressiveness: "strict" | "balanced" | "aggressive".
+# policy = "balanced"
+
+# [watcher]
+# Debounce window (ms) for the `serve --mcp` filesystem watcher.
+# debounce_ms = 300
+
+# [documentation]
+# Markdown documentation indexing (CR-003). On by default; docs ride the same
+# discover/extract/sync pipeline as code. `include`/`exclude` are anchored
+# globs, so `*.md` is top-level only and `README*` is the root README.
+# enabled = true
+# include = ["docs/**/*.md", "*.md", "README*"]
+# exclude = []
+
+# Repository identity coordinate (FR-CF-10). Written once by `logos init` from
+# the `origin` remote (else the main worktree's directory name) and never
+# overwritten; edit it to pin a different coordinate.
+[project]
+id = "fixture-repo"

@@ -18,6 +18,8 @@ const CASES: Record<string, ViewCase> = {
   // The Service map tab, which the view opens on; the coverage tab is
   // `workspace-widgets.workspace.spec.ts`'s.
   "/workspace": { ready: "Cross-service bindings" },
+  // S-674: the per-member roll-up; `api` has a stored report, `web` none.
+  "/workspace-security": { ready: "Members" },
   "/workspace-statistics": { ready: "Estimated value" },
   "/workspace-config": { ready: "Workspace manifest" },
 };

@@ -82,6 +82,13 @@ export const IconCoverage = (p: IconProps) => (
   </Svg>
 );
 
+/* The Security page's glyph (S-670, FR-SC-09): a shield. */
+export const IconSecurity = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+  </Svg>
+);
+
 /* The workspace / service-map glyph (S-250, FR-UI-29): three services wired
    across a boundary — the cross-service axis, distinct from the intra-repo
    IconGraph's free-form node cloud. */
