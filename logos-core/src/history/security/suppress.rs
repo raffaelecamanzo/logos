@@ -11,7 +11,7 @@
 //! expires = 2026-12-31
 //! ```
 //!
-//! Three pieces, none of which touches the store, the reader or the engine:
+//! Four pieces, none of which touches the store or the reader:
 //!
 //! 1. **parse** ([`IgnoreFile::parse`], [`IgnoreFile::load`]) — a malformed file
 //!    is rejected whole, as a [`ConfigError`] (exit 2) that names the line. An
@@ -28,6 +28,11 @@
 //!    not, and each entry expired or orphaned. The caller supplies the date, so
 //!    the labelling never reads a clock and a test pins it either side of an
 //!    expiry.
+//! 4. **triage** ([`suppress`], [`unsuppress`]; [FR-SC-12], [S-672]) — add or
+//!    remove one entry and write the file back through the serialiser, so
+//!    adding then removing an entry restores the file byte for byte. A file not
+//!    in the canonical spelling is refused rather than rewritten: its comments
+//!    and formatting would be lost. Removing the last entry removes the file.
 //!
 //! An entry suppresses through its `expires` date inclusive: it is *expired*
 //! from the next day on, and an expired entry no longer suppresses — the finding
@@ -36,6 +41,8 @@
 //! silent ([NFR-CC-04]).
 //!
 //! [FR-SC-11]: ../../../../docs/specs/requirements/FR-SC-11.md
+//! [FR-SC-12]: ../../../../docs/specs/requirements/FR-SC-12.md
+//! [S-672]: ../../../../docs/planning/journal.md#s-672-findings-are-triaged-from-the-security-page
 //! [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
 //! [S-663]: ../../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
 //! [S-666]: ../../../../docs/planning/journal.md#s-666-suppressions-live-in-a-committed-ignore-file-with-a-reason-and-an-expiry
@@ -200,6 +207,41 @@ impl IgnoreFile {
         }
         out
     }
+
+    /// Add `entry` at its sorted place.
+    ///
+    /// # Errors
+    /// A [`ConfigError`] (exit 2), the same faults [`IgnoreFile::parse`]
+    /// rejects: a fingerprint that is not one of ours, a blank reason, or a
+    /// fingerprint the file already holds.
+    pub fn insert(&mut self, entry: IgnoreEntry) -> Result<()> {
+        if !is_fingerprint(&entry.fingerprint) {
+            return Err(refused(format!(
+                "{:?} is not a finding fingerprint (expected {FINGERPRINT_LEN} lowercase hex characters)",
+                entry.fingerprint
+            )));
+        }
+        if entry.reason.trim().is_empty() {
+            return Err(refused("`reason` is empty: a suppression must say why the risk is accepted"));
+        }
+        match self.entries.binary_search_by(|e| e.fingerprint.cmp(&entry.fingerprint)) {
+            Ok(_) => Err(refused(format!(
+                "{} is already suppressed: remove its entry first to change it",
+                entry.fingerprint
+            ))),
+            Err(at) => {
+                self.entries.insert(at, entry);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the entry for `fingerprint` and return it; `None` when the file
+    /// holds none.
+    pub fn remove(&mut self, fingerprint: &str) -> Option<IgnoreEntry> {
+        let at = self.entries.iter().position(|e| e.fingerprint == fingerprint)?;
+        Some(self.entries.remove(at))
+    }
 }
 
 /// The ignore file as TOML deserialises it, before validation. Every field is an
@@ -225,6 +267,11 @@ fn invalid(line: usize, message: impl Into<String>) -> anyhow::Error {
     ConfigError::InvalidValue { key: format!("{IGNORE_FILE} line {line}"), message: message.into() }.into()
 }
 
+/// A refused triage write, as the exit-2 [`ConfigError`] a malformed file is.
+fn refused(message: impl Into<String>) -> anyhow::Error {
+    ConfigError::InvalidValue { key: IGNORE_FILE.to_string(), message: message.into() }.into()
+}
+
 /// The 1-based line holding byte `offset` of `text`.
 fn line_of(text: &str, offset: usize) -> usize {
     1 + text.as_bytes()[..offset.min(text.len())].iter().filter(|b| **b == b'\n').count()
@@ -248,6 +295,17 @@ fn parse_expiry(value: toml::Value) -> std::result::Result<NaiveDate, String> {
             .ok_or_else(|| format!("`expires` is {text:?}, which is not a calendar date ({EXPECTED})")),
         other => Err(format!("`expires` is a {}, not a date ({EXPECTED})", other.type_str())),
     }
+}
+
+/// An expiry a surface received as text (`2026-12-31`), read with the same
+/// strict `YYYY-MM-DD` rule the file's quoted dates follow.
+///
+/// # Errors
+/// A [`ConfigError`] (exit 2) naming the text when it is not a calendar date.
+pub fn parse_expires(text: &str) -> Result<NaiveDate> {
+    parse_ymd(text.trim()).ok_or_else(|| {
+        refused(format!("`expires` is {text:?}, which is not a calendar date (expected a date such as 2026-12-31)"))
+    })
 }
 
 /// `YYYY-MM-DD`, strictly: four, two and two digits.
@@ -293,6 +351,104 @@ fn serialize_date_opt<S: Serializer>(date: &Option<NaiveDate>, serializer: S) ->
         Some(date) => serializer.serialize_some(&date.to_string()),
         None => serializer.serialize_none(),
     }
+}
+
+/// What one triage write left on disk ([`suppress`], [`unsuppress`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IgnoreWrite {
+    /// The file written, relative to the project root: [`IGNORE_FILE`].
+    pub file: &'static str,
+    /// The entry added or removed.
+    pub entry: IgnoreEntry,
+    /// How many entries the file holds now.
+    pub entries: usize,
+}
+
+/// Serialises the triage writes of this process, so two concurrent ones
+/// cannot each read the file and the second publish drop the first's entry.
+static TRIAGE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Add one suppression to the ignore file under `root` ([FR-SC-12]): `reason`
+/// (trimmed) is required, and `expires` must not be before `today` — an entry
+/// that is already expired would suppress nothing. The file is created if it is
+/// absent.
+///
+/// The write goes through the canonical serialiser ([`IgnoreFile::to_toml`]),
+/// so the edit is the one entry's lines, and [`unsuppress`] of the same
+/// fingerprint restores the previous bytes exactly.
+///
+/// # Errors
+/// A [`ConfigError`] (exit 2) and no write: a refused entry
+/// ([`IgnoreFile::insert`]), an expiry in the past, or a file that is malformed
+/// or not in the canonical spelling (a rewrite would drop its comments or
+/// formatting). A `ConfigError::Write` when the atomic write fails.
+///
+/// [FR-SC-12]: ../../../../docs/specs/requirements/FR-SC-12.md
+pub fn suppress(
+    root: &Path,
+    fingerprint: &str,
+    reason: &str,
+    expires: Option<NaiveDate>,
+    today: NaiveDate,
+) -> Result<IgnoreWrite> {
+    if let Some(expires) = expires.filter(|expires| *expires < today) {
+        return Err(refused(format!("`expires` {expires} is already past: the entry would suppress nothing")));
+    }
+    let entry = IgnoreEntry { fingerprint: fingerprint.to_string(), reason: reason.trim().to_string(), expires };
+    rewrite(root, |file| {
+        file.insert(entry.clone())?;
+        Ok(entry)
+    })
+}
+
+/// Remove the suppression for `fingerprint` from the ignore file under `root`
+/// ([FR-SC-12]). Removing the last entry removes the file, so a first
+/// suppression undone leaves the tree as it was.
+///
+/// # Errors
+/// A [`ConfigError`] (exit 2) and no write: no entry carries `fingerprint`, or
+/// the file is malformed or not in the canonical spelling. A
+/// `ConfigError::Write` when the write fails.
+///
+/// [FR-SC-12]: ../../../../docs/specs/requirements/FR-SC-12.md
+pub fn unsuppress(root: &Path, fingerprint: &str) -> Result<IgnoreWrite> {
+    rewrite(root, |file| {
+        file.remove(fingerprint)
+            .ok_or_else(|| refused(format!("no entry suppresses {fingerprint:?}")))
+    })
+}
+
+/// Read, edit and write back the ignore file under `root`: `edit` changes one
+/// entry and returns it. Nothing is written when the file is not in the
+/// canonical spelling or `edit` refuses.
+fn rewrite(root: &Path, edit: impl FnOnce(&mut IgnoreFile) -> Result<IgnoreEntry>) -> Result<IgnoreWrite> {
+    let _serialised = TRIAGE_WRITE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = root.join(IGNORE_FILE);
+    let mut file = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let file = IgnoreFile::parse_at(&text, &path)?;
+            if file.to_toml() != text {
+                return Err(refused(
+                    "the file is not in the canonical spelling Logos writes (one `[[ignore]]` table per entry, \
+                     sorted by fingerprint, no comments), and rewriting it would drop its comments or formatting: \
+                     edit it by hand instead",
+                ));
+            }
+            file
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => IgnoreFile::default(),
+        Err(source) => return Err(ConfigError::Io { path, source }.into()),
+    };
+    let entry = edit(&mut file)?;
+    let written = if file.is_empty() {
+        std::fs::remove_file(&path)
+    } else {
+        path.parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| crate::config::atomic::publish(&path, file.to_toml().as_bytes(), None))
+    };
+    written.map_err(|source| ConfigError::Write { path, source })?;
+    Ok(IgnoreWrite { file: IGNORE_FILE, entry, entries: file.len() })
 }
 
 /// What the ignore file says about one finding.

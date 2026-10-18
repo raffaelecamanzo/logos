@@ -1,24 +1,37 @@
 {
   "recorded": {
     "recorded": true,
+    "values_recorded": true,
     "nesting": [
       {
         "name": "beta_depth_six",
         "file": "src/lib.rs",
         "line": 6,
-        "detail": "nesting depth 6"
+        "detail": "nesting depth 6",
+        "node_id": "src/`lib.rs`/beta_depth_six().",
+        "measure": "nesting_depth",
+        "value": 6,
+        "threshold": 4
       },
       {
         "name": "gamma_depth_five",
         "file": "src/lib.rs",
         "line": 11,
-        "detail": "nesting depth 5"
+        "detail": "nesting depth 5",
+        "node_id": "src/`lib.rs`/gamma_depth_five().",
+        "measure": "nesting_depth",
+        "value": 5,
+        "threshold": 4
       },
       {
         "name": "alpha_depth_four",
         "file": "src/lib.rs",
         "line": 1,
-        "detail": "nesting depth 4"
+        "detail": "nesting depth 4",
+        "node_id": "src/`lib.rs`/alpha_depth_four().",
+        "measure": "nesting_depth",
+        "value": 4,
+        "threshold": 4
       }
     ],
     "conciseness": [],
@@ -32,13 +45,18 @@
         "name": "beta_depth_six",
         "file": "src/lib.rs",
         "line": 6,
-        "detail": "complexity 7"
+        "detail": "complexity 7",
+        "node_id": "src/`lib.rs`/beta_depth_six().",
+        "measure": "cyclomatic_complexity",
+        "value": 7,
+        "threshold": null
       }
     ],
     "redundancy": []
   },
   "recordedEmpty": {
     "recorded": true,
+    "values_recorded": true,
     "nesting": [],
     "conciseness": [],
     "cohesion": [],
@@ -51,6 +69,7 @@
   },
   "notRecorded": {
     "recorded": false,
+    "values_recorded": false,
     "nesting": [],
     "conciseness": [],
     "cohesion": [],

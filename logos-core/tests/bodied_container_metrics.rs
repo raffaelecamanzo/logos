@@ -48,7 +48,7 @@ fn scan(root: &Path) -> RecordedSnapshot {
         .hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
-    metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("snapshot runs")
+    metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("snapshot runs")
 }
 
 /// The names the Focus offender list reports (the god containers).
@@ -190,7 +190,7 @@ fn a_null_has_body_in_the_store_reads_as_bodied() {
     let view = engine
         .hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
-    let s = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+    let s = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs");
     let mapper: Vec<_> = s
         .worst_offenders
@@ -299,9 +299,13 @@ fn go_type_with_25_bodied_methods_is_god() {
 /// `.cpp`, so extraction records 25 bodyless in-class prototypes and captures
 /// no out-of-line definition. Bodied LCOM4/Focus **score what remains** —
 /// nothing: `Widget` is unscoreable for Cohesion (n/a here, it is the only
-/// class) and, at 29 lines, not god by count. A class keeping its bodies
-/// in-class is still scored over them (`Inline`: LCOM4 1 over its 2 bodied
-/// methods, its 3 prototypes left out).
+/// class) and, at 29 lines, not god by count. Since metric-semantics v8
+/// ([CR-171]) C++ declares no `member_access` capability, so a class keeping
+/// its bodies in-class (`Inline`) is not scored for Cohesion either — its
+/// LCOM4 would rest on `this->` accesses alone — while Focus still counts it.
+/// The bodied-LCOM4 rule itself stays pinned on Java in this file.
+///
+/// [CR-171]: ../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[test]
 fn cpp_out_of_line_members_score_what_remains() {
     let mut header = String::from("class Widget {\n    int a_;\npublic:\n");
@@ -348,12 +352,9 @@ public:
 ",
     );
     let inline = scan(tmp.path());
-    let cohesion = inline
-        .metrics
-        .cohesion
-        .expect("Inline has bodied methods → scoreable");
-    assert_eq!(
-        cohesion.raw, 1.0,
-        "the two bodied methods share a_ (LCOM4 1); the 3 prototypes are not components"
+    assert!(
+        inline.metrics.cohesion.is_none(),
+        "C++ declares no member_access: its bodied class is not scored for Cohesion (CR-171)"
     );
+    assert!(inline.metrics.focus.is_some(), "Focus still counts the C++ class");
 }

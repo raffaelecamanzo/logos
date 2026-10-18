@@ -809,7 +809,9 @@ mod tests {
     /// CR-188's peeled wrappers in it (S-587, migration 32), CR-190/CR-200's
     /// arity facts and argument count in it (S-591, migration 33) and CR-202's
     /// associated-item facts (S-606, migration 34) and uninherited
-    /// interface-member marker (S-609, migration 35) — not the
+    /// interface-member marker (S-609, migration 35), CR-164's
+    /// where-to-start ranking (S-504, migration 36) and CR-218's offender
+    /// values and uncapped list (S-676, migration 37) — not the
     /// ledger-only binding
     /// under test here.
     ///
@@ -820,7 +822,7 @@ mod tests {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            35,
+            38,
             "no migration is added by the ledger-only arm itself — user_version reflects \
              only the later, separate broker-kind widening (migration 17), the \
              relation-aware ledger key (migration 18), the configuration-corpus \
@@ -833,8 +835,11 @@ mod tests {
              shape (migration 29), the file namespace (migration 30), the alias in \
              the ledger identity (migration 31), the peeled wrappers in it \
              (migration 32), the arity facts and argument count in it \
-             (migration 33), the associated-item facts (migration 34) and the \
-             uninherited interface-member marker (migration 35)"
+             (migration 33), the associated-item facts (migration 34), the \
+             uninherited interface-member marker (migration 35), the \
+             where-to-start ranking (migration 36), the offender values and \
+             uncapped list (migration 37) and the graph-dimension applicability \
+             (migration 38)"
         );
     }
 }

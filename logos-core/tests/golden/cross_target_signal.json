@@ -1,6 +1,6 @@
 {
   "schema": "logos.golden-signal/v1",
-  "aggregate_signal": 9833,
+  "aggregate_signal": 10000,
   "metrics": [
     {
       "name": "modularity",

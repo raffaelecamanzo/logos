@@ -22,13 +22,15 @@ Created automatically by the first `logos index`:
 | Path | What it is | Check in? |
 |---|---|---|
 | `.logos/logos.db` | The code-graph index (SQLite). Derived — rebuildable any time with `logos index`. | No |
-| `.logos/history.db` | The evidence store (SQLite): mined git history + ingested coverage, on its own forward-only migration track. Derived — created on demand by `logos hotspots` / `logos coverage ingest`; the gate never opens it. | No |
+| `.logos/history.db` | The evidence store (SQLite): mined git history + ingested coverage, on its own forward-only migration track. Derived — created on demand by `logos hotspots` / `logos coverage ingest` / `logos security scan` / `logos security ingest`; the gate never opens it, except to judge findings under an opt-in `[security]` table. | No |
 | `.logos/telemetry.db` | Local usage/performance events feeding `logos stats`. Never leaves your machine. | No |
 | `.logos/security/` | SARIF reports written by the security scanners Logos runs, and CodeQL's databases. Disposable — a rescan rewrites them. | No |
 | `.logos/config.toml` | Indexing & resolution policy (optional). | Yes |
 | `.logos/rules.toml` | Architecture contract: layers, boundaries, budgets (optional). | Yes |
 | `.logos/hooks/` | Managed git hook scripts: freshness `post-commit`, `post-checkout`, `post-merge` plus the enforcing `pre-push` gate. Installed by `logos init --hooks`. | Yes |
 | `.logos/plugins/` | On-disk language-query overrides (optional, advanced). | Yes |
+| `.logos/review-cache/` | The branch review's merge-base before-states, one JSON file per commit, newest 16 kept. Derived — `logos review` rebuilds it; the generated `.logos/.gitignore` ignores it. | No |
+| `.logos/stop-hook/` | The [plugin's](plugin.md#the-stop-check) Stop check's records: the fingerprint of the last measured turn, the before-state markers and a build lock. Machine-local; the directory ignores itself. | No |
 
 Recommended `.gitignore` entries:
 
@@ -801,10 +803,12 @@ the main checkout, so a linked worktree derives what its main checkout derives.
 
 ### `[security_scan]` — which scanners may run
 
-Logos can run the security scanners you have installed (it never installs one).
-Nine are registered: `semgrep`, `trivy`, `gitleaks`, `osv-scanner`, `bandit`,
-`gosec`, `checkov`, `codeql` and `dependency-check`. Each is enabled by default
-and runs only if it is installed. The repository can switch a scanner off:
+Logos runs the security scanners that are installed, and `logos security install`
+can install all of them under your consent, Dependency-Check and CodeQL only
+when named ([security.md](security.md#installing-scanners)). Nine are registered:
+`semgrep`, `trivy`, `gitleaks`, `osv-scanner`, `bandit`, `gosec`, `checkov`,
+`codeql` and `dependency-check`. Each is enabled by default and runs only if it
+is installed. The repository can switch a scanner off:
 
 ```toml
 [security_scan.codeql]
@@ -854,6 +858,11 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   (the finding was fixed, or its scanner has not run here).
 - **Visible, never silent.** A suppressed finding is still returned by
   `security findings`, with its reason; `--suppression active` hides it.
+- **Written from the Security page.** Its Suppress… and Unsuppress write the
+  file in one canonical spelling: one `[[ignore]]` table per entry, sorted by
+  fingerprint, with no comments. A file spelled any other way (the comment in the
+  example above is enough) is refused with an error that says so, rather than
+  rewritten without your comments. Edit such a file by hand.
 
 The file is optional (absent means nothing is suppressed), travels with the
 repository (the managed `.logos/.gitignore` does not ignore it), and is read on
@@ -908,7 +917,11 @@ first match on `PATH`, using only the entries that are absolute and outside the
 project: an empty or relative entry (`.`, `bin`) and an absolute one inside the
 project (an activated in-repo virtualenv, `node_modules/.bin`) are skipped. The
 scanner runs with that same reduced `PATH`, so a tool it starts by name (`git`,
-`go`, `java`) is never one the repository holds. A scanner is started directly
+`go`, `java`) is never one the repository holds. When neither finds the scanner,
+Logos uses the copy it manages itself, if the version this release pins is
+installed in the user-level tools directory (`$LOGOS_DATA_HOME`, else
+`$XDG_DATA_HOME/logos/tools`, else `~/.local/share/logos/tools`); a tools
+directory inside the project is ignored. A scanner is started directly
 with its argument list, never through a shell, with the project root as its
 working directory, and its stdout and stderr are captured up to a bound (64 KiB
 and 16 KiB). On Linux and macOS it runs in a process group of its own, and when
@@ -918,19 +931,35 @@ command line is fixed in Logos:
 | Scanner | Binary | Version probe | Command line (`OUT` is under `.logos/security/`) |
 |---|---|---|---|
 | Semgrep | `semgrep` | `--version` | `scan --config p/default --sarif --output OUT --metrics off --disable-version-check --quiet --exclude .logos` *extra* `.` |
-| Trivy | `trivy` | `--version` | `fs --scanners vuln,secret,misconfig --format sarif --output OUT --skip-dirs .logos --config .logos/security/empty-config.yaml` *extra* `.` |
+| Trivy | `trivy` | `--version` | `fs --scanners vuln,secret,misconfig --format sarif --output OUT --skip-dirs .logos` *ignored* `--config .logos/security/empty-config.yaml` *extra* `.` |
 | Gitleaks | `gitleaks` | `version` | `detect --redact --no-banner --exit-code 0 --report-format sarif --report-path OUT` *extra* `--source .` |
 | OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output OUT` *extra* `--recursive .` |
-| Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos` *extra* `.` |
+| Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos`(`,`*ignored*) *extra* `.` |
 | gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *extra* `./...` (with `GOTOOLCHAIN=local`) |
-| Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet --skip-path .logos` *extra* `--directory .` |
+| Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet --skip-path .logos` *ignored* *extra* `--directory .` |
 | CodeQL | `codeql` | `version --format=terse` | per language: `database create DB --language=L --build-mode=none --source-root=. --overwrite`, then `database analyze DB --format=sarif-latest --output OUT` *extra*, with `OUT` in `.logos/security/codeql/`; Logos then merges every language's runs into one `codeql.sarif`, so a project's languages are one snapshot |
-| Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/** --disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` *extra* |
+| Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/**` *ignored* `--disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` *extra* |
+
+*ignored* is the top-most directories the project's own ignore files exclude
+(`.gitignore` and `.ignore` at any depth, and `.git/info/exclude`), each passed
+the way that scanner's flag takes it: `--skip-dirs target` for Trivy, appended
+to Bandit's one comma list (`./.logos,./target`), `--skip-path
+'^(\./|/abs/root/)?target(/|$)'` for Checkov (anchored at the project root,
+whether Checkov walks it as `.` or as its absolute path) and `--exclude
+target/**` for Dependency-Check, up to 64 KiB of arguments, shallowest first. A
+Bandit or Checkov run on named paths passes none, so it reads exactly the paths
+you named; Trivy and Dependency-Check, which a re-scan of paths runs over the
+whole project, still pass them. Semgrep and OSV-Scanner already skip what git
+ignores, and Gitleaks reads committed history.
+[Security](security.md#running-scans-and-reading-the-results) lists the edges.
 
 The commands were written against Semgrep 1.85, Trivy 0.74, Gitleaks 8.18,
 OSV-Scanner 1.9, Bandit 1.7.10, gosec 2.21, Checkov 3.2, CodeQL 2.19 and
-Dependency-Check 10.0. A release whose flags have since changed fails, and the
-scanner's own error is reported. Detecting a scanner runs only its version
+Dependency-Check 10.0; the Dependency-Check Logos installs, 13.0.0, still takes
+every flag above. A release whose flags have since changed fails, and the
+scanner's own error is reported. Logos treats a Dependency-Check on `PATH` below
+13.0.0 as below its minimum, as it does any scanner below the version it pins
+as tested: older releases broke on changes to the NVD data they read. Detecting a scanner runs only its version
 probe, with the update-check opt-outs Semgrep (`SEMGREP_ENABLE_VERSION_CHECK=0`)
 and Trivy (`TRIVY_SKIP_VERSION_CHECK=true`) honour set on it and on every scan.
 
@@ -1248,6 +1277,75 @@ non-exported symbols are exempt. The same gap set is available read-only via
 metric-neutral, this contract gates `logos check` without ever moving the
 quality signal.
 
+### Ratchet constraints — adopt a budget on an existing codebase
+
+An absolute budget fails every existing violation on day one, so a codebase with
+debt can never adopt it. A **ratchet** budget tolerates the debt you have
+recorded and fails only on **new or worsened** debt
+([FR-GV-23](../specs/requirements/FR-GV-23.md)). Every budget whose violations
+name a symbol accepts a ratchet table beside its scalar:
+
+```toml
+[constraints]
+max_cc            = { max = 15, ratchet = true }   # per function
+max_fn_lines      = { max = 80, ratchet = true }   # per function
+max_nesting_depth = { max = 4,  ratchet = true }   # per function
+no_god_files      = { max = 40, ratchet = true }   # per file (keyed by path)
+max_fan_in        = { max = 30, ratchet = true }   # per module (keyed by module)
+max_fan_out       = { max = 30, ratchet = true }   # per module
+no_god_containers = { ratchet = true }             # per class-like container
+# Symbol sets: each dead / duplicated / brain-method function is one offender.
+max_dead          = { max = 0, ratchet = true }
+max_duplicates    = { max = 0, ratchet = true }
+max_brain_methods = { max = 0, ratchet = true }
+```
+
+`max` keeps the scalar's meaning; `ratchet` defaults to `false`, which is the
+scalar spelled as a table. A symbol-set budget under ratchet must say
+`max = 0` — every member is named as an offender, so any other value fails at
+load (exit 2).
+
+**The blessed set.** `logos check --bless` records every current offender of a
+ratchet budget in **`.logos/rules-baseline.json`** — one entry per constraint ×
+symbol id, with the value it was blessed at. The file is sorted and
+deterministic (re-blessing an unchanged tree is byte-identical), and it is
+**checked in**: the generated `.logos/.gitignore` leaves it tracked, so CI sees
+it and blessing new debt shows up in code review. Only the bless command writes
+it — `check` and `scan` only read it, and `gate` never touches it. The MCP twin is the `bless_rules`
+tool.
+
+`logos check` then classifies each offender of a ratchet budget:
+
+| Offender | Severity | Fails `check`? |
+|---|---|---|
+| In the blessed set, at or below its blessed value | `warning` — blessed debt | No |
+| In the blessed set, above its blessed value | `error` — worsened | Yes |
+| Not in the blessed set | `error` — new | Yes |
+| Blessed, but no longer violating | reported under `ratchet.fixed` | No |
+
+A fixed entry means the set can be tightened: re-run `logos check --bless` and
+commit the smaller file. With **no** blessed file, every ratchet offender is an
+`error` and the report names the bless command. Identity is the symbol id
+**without its repository coordinate**, so the checked-in file holds in a fork,
+a renamed repository or a clone with no remote; a rename or move of the symbol
+itself reads as one fixed entry plus one new offender — re-bless in the same
+change. The JSON report carries a `ratchet` summary (counts, the fixed
+list, the bless command) and a `ratchet` mark on each classified violation; a
+contract with no ratchet budget reports exactly as before.
+
+**Budgets without symbol identity** — `max_cycles` and `max_clone_ratio` — take
+`max_dead`'s count-delta form instead, failing only when the count rises above
+the blessed baseline:
+
+```toml
+[constraints]
+max_cycles      = { baseline = 2, delta = 0 }      # fail at 3 cycles, pass at 2
+max_clone_ratio = { baseline = 0.12, delta = 0 }   # ratio units, each in [0.0, 1.0]
+```
+
+The CI recipe for adopting ratchets is in
+[ci-integration.md](ci-integration.md#adopting-budgets-on-an-existing-codebase-the-ratchet).
+
 ### `[metric_thresholds]` — tuning the structural dimensions
 
 The five structural metric dimensions (Nesting, Conciseness, Cohesion, Focus,
@@ -1328,8 +1426,10 @@ Two optional `rules.toml` tables tune the **non-gated** evidence tiers
 (`logos hotspots`, `logos coverage`). Every key is optional with a documented
 default, and — like `[metric_thresholds]` — the effective set is hashed into
 every evidence snapshot, so changing a key is recorded with the data it
-produced. Because the gate never reads `history.db`, **editing these tables can
-never move the quality signal**; they only shape advisory output.
+produced. Because the gate never reads history or coverage evidence, **editing
+these tables can never move the quality signal**; they only shape advisory
+output. (Security evidence is the one exception, and only under the opt-in
+[`[security]`](#security--the-security-gate) table below.)
 
 ```toml
 [history]
@@ -1357,6 +1457,67 @@ other table. Both tables are governed by the never-fabricate rule: a file with
 no in-window history is omitted from the hotspot board (never zero-scored), and
 a report path that matches no single indexed file is reported `unmatched`.
 
+### `[security]` — the security gate
+
+Without this table, security findings are advisory: `logos security findings`
+lists them, and `check` and `gate` print exactly what they printed before,
+whether findings are stored, absent or deleted. Adding the table makes them
+**gate input**. `check` and `gate` then fail on new findings and on the caps
+you set, exactly as they fail on a broken rule.
+
+```toml
+[security]
+# Scanners that must have a fresh scan at HEAD. A registry name ("semgrep") or
+# a report's driver name ("Semgrep OSS"), either case. Default: [] (none).
+required_scanners = ["semgrep", "gitleaks"]
+# The ratchet: an unsuppressed finding at or above this severity fails unless
+# `logos gate --save` recorded it. info | low | medium | high | critical.
+# Default: "high".
+ratchet_min_severity = "high"
+# Cap: any unsuppressed finding at or above this severity fails, recorded or
+# not. Default: unset.
+max_severity = "critical"
+# Cap: any unsuppressed finding in these OWASP Top 10 categories fails. A bare
+# id is the 2025 edition; add ":2021" for the older one. Default: [] (none).
+fail_on_owasp = ["A05", "A01:2021"]
+```
+
+**The ratchet** lets you adopt the gate on a codebase that already has
+findings. Run a scan, then `logos gate --save`. Along with the metric baseline,
+this records the fingerprint of every unsuppressed finding of every stored
+scan, whatever its severity and whether or not the scan is fresh. After that,
+`check` and `gate` fail only on a finding that is new since the save. A
+suppressed finding is not recorded. When its suppression expires or is
+removed, the finding is new again until you fix it, suppress it again, or save
+again. Until a save is recorded, every finding at
+or above `ratchet_min_severity` is new, and the report says to run the save.
+The recorded set lives in `.logos/history.db` with the findings, not in the
+repository. `session_start` records it too.
+
+**The caps** ignore the recorded set. `max_severity = "critical"` fails on any
+unsuppressed critical finding, however old it is.
+
+**Suppressions** in [`.logos/security-ignore.toml`](#logossecurity-ignoretoml--suppressions)
+exclude a finding from every rule. To accept one finding, add its
+fingerprint and a reason there. Each violation message prints the fingerprint.
+
+**Freshness.** Only scans that are `fresh` at HEAD are evaluated. Fresh is the
+state `logos security status` reports: anchored to this HEAD, over unchanged
+files. Suppose a scanner named in `required_scanners` has no fresh scan: it
+never ran, its scan is stale, or it is not installed or is disabled. Then
+`check`, `gate` and `session-end` exit **5**, naming the scanner and what
+produces the scan ([error-handling.md](error-handling.md#how-it-surfaces-on-the-cli)).
+The gate never runs a scanner itself. A scanner the list does not name never
+causes exit 5. If its stored scan is stale it is simply not evaluated, and a
+note says so. A `gate --save` that exits 5 saves the metric baseline but not
+the security one. An invalid `.logos/security-ignore.toml` stops `gate --save`
+and `session-start` with exit 2 before either baseline is written.
+
+The table never moves the 0–10000 signal. Security is not a metric dimension,
+so adding, changing or removing the table changes no metric and triggers no
+re-baseline. A blank scanner name, or an `fail_on_owasp` entry other than
+`A01`..`A10` (optionally `:2025` or `:2021`), fails at load with exit 2.
+
 ## Logging and telemetry
 
 - **`RUST_LOG`** controls diagnostic verbosity on **stderr** (e.g.
@@ -1367,6 +1528,22 @@ a report path that matches no single indexed file is reported `unmatched`.
   `.logos/telemetry.db` and feed `logos stats`. Recording activates only
   when `.logos/` already exists, never blocks a command, and degrades
   silently if the database is unwritable.
+
+## The Claude Code plugin — environment variables
+
+The [plugin](plugin.md) has no configuration file. Its hooks read three
+environment variables, set in the shell that starts Claude Code (or in the `env`
+block of your Claude Code settings):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LOGOS_QUALITY_REPORT_DISABLE` | unset | `1` silences the session-start readout, whether the plugin or the hook `logos init -i` writes prints it. |
+| `LOGOS_STOP_HOOK_DISABLE` | unset | `1` turns the Stop check off: the hook exits 0 with no output. |
+| `LOGOS_STOP_HOOK_BUDGET_MS` | `15000` | The Stop check's budget, in milliseconds, shared by its `check`, `review` and `security` legs. A value that is not a number reads as the default. The plugin declares a 30-second timeout for the hook, so a value above `25000` is held at `25000`, and a leg still running then is reported as not measured. |
+
+The guardrail that asks before an agent edits `.logos/rules.toml`,
+`.logos/rules-baseline.json` or `.logos/security-ignore.toml` has no variable;
+disabling the plugin is the only way to stop it asking.
 
 ## Advanced: overriding language queries
 
@@ -1727,6 +1904,24 @@ call of the language then carries a reason in `status`'s `call_residue`, so its
 language's symbols query must record its impl blocks (the `@item.impl`
 captures, `@item.impl.target` for a `Deref` target). It defaults to `false`: a written `T::m()`
 binds among the functions of `T`'s module, as before. Only Rust declares it.
+
+### Member access (`member_access`, `member_access_excluded_extensions`)
+
+```toml
+# Java, TypeScript, TSX, PHP: the references query captures own-field access
+# (`this.x`, `$this->x`) as Accesses edges, so a class's methods can share fields.
+member_access = true
+# TypeScript / TSX: JavaScript files are carved out of the declaration.
+member_access_excluded_extensions = ["js", "mjs", "cjs"]   # TSX: ["jsx"]
+```
+
+The Cohesion dimension ([metrics.md](metrics.md#8-cohesion-lcom4--do-classes-hang-together))
+scores a class only when its language declares `member_access`; a class of any
+other language, or in an excluded extension, is not applicable rather than scored
+from its intra-class calls alone. It defaults to `false`. Each
+`member_access_excluded_extensions` entry must be one of the plugin's
+`extensions`, and the key is accepted only beside `member_access = true`. The
+capability is not listed by `logos languages`.
 
 ### Outbound HTTP client calls (`invocations`)
 

@@ -32,9 +32,12 @@
 //!
 //! # Severity ([FR-GV-03])
 //!
-//! Every `rules.toml` violation is `severity = "error"` in v1 — checked-in
-//! policy is binding (ratified 2026-06-06). The `warning` tier exists in the
-//! schema for future advisory rules.
+//! Every `rules.toml` violation is `severity = "error"` — checked-in policy is
+//! binding (ratified 2026-06-06) — with one exception: an offender of a
+//! `ratchet = true` budget held in the checked-in blessed set at or below its
+//! blessed value is a `warning` ([FR-GV-23], [`ratchet`]).
+//!
+//! [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
 //!
 //! [governance-engine component]: ../../../docs/specs/architecture/components/governance-engine.md
 //! [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
@@ -70,9 +73,9 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvaluatedSetAbsence,
     EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
-    MetricRegression, MetricSnapshot, MetricValue, ModularityNotApplicable, QualityReadout,
-    RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport,
-    Violation, WorstOffenders,
+    GraphDimensionNotApplicable, MetricRegression, MetricSnapshot, MetricValue, QualityReadout,
+    RatchetReport, RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus,
+    VerifyReport, Violation, WhereToStart, WorstOffenders,
 };
 use crate::runtime::Runtime;
 
@@ -82,6 +85,28 @@ use crate::runtime::Runtime;
 ///
 /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 pub mod readout;
+
+pub mod ratchet;
+
+/// The thin-graph coverage helper ([FR-QM-18], S-523): one warning, shared by
+/// every scoring surface, naming each large language the graph cannot see
+/// across files.
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+pub mod thin_graph;
+
+/// The uncapped, per-symbol offender listing ([FR-QM-19], S-676).
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+pub mod offenders;
+pub use offenders::OffendersFilter;
+/// The branch delta ([FR-GV-24], S-677): every offender and violation
+/// classified per symbol against the merge-base.
+///
+/// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
+pub(crate) mod review;
+/// The `rules.toml [security]` gate ([S-668](../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5)).
+pub(crate) mod security;
 
 /// Go packages as DSM rows ([S-527](../../../docs/planning/journal.md#s-527-the-go-dsm-lists-packages)).
 mod go_dsm;
@@ -156,7 +181,8 @@ const DOC_GAPS_CAVEAT: &str =
      doc section resolves a reference to it in the documentation graph; the prose's \
      depth or accuracy is not judged";
 
-/// The only violation severity v1 emits (ratified 2026-06-06).
+/// The severity every violation is emitted at (ratified 2026-06-06);
+/// [`ratchet::classify`] alone lowers blessed ratchet debt to `warning`.
 const SEVERITY_ERROR: &str = "error";
 
 /// Canonical metric order (ADR-08) for regression/delta reporting.
@@ -691,6 +717,41 @@ fn effective_thresholds(rules: &Rules) -> crate::metrics::Thresholds {
     rules.metric_thresholds.effective()
 }
 
+/// The file extensions whose plugin declares the `member_access` capability
+/// ([CR-171]) — the set every metrics pass gates Cohesion on, so `scan`, `gate`,
+/// `session_start` and the readout score Cohesion over one population.
+///
+/// The engine's cached registry when it holds one; otherwise a fresh load, as
+/// [`Engine::languages`] falls back. A registry that will not load declares
+/// nothing, so Cohesion drops out rather than being scored from calls alone
+/// ([NFR-CC-04]) — and the failure is logged, never swallowed.
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn member_access_extensions(engine: &Engine) -> HashSet<String> {
+    if let Some(registry) = engine.registry() {
+        return registry.member_access_extensions();
+    }
+    match crate::plugin::LanguageRegistry::load(engine.root()) {
+        Ok(registry) => registry.member_access_extensions(),
+        Err(err) => {
+            tracing::warn!("could not load plugin registry; Cohesion scores no class: {err}");
+            HashSet::new()
+        }
+    }
+}
+
+/// The [FR-QM-18] coverage warnings for the store behind `runtime` — the one
+/// call `scan`, `gate`, `session_start` and the readout make, so they carry
+/// the same warnings ([`thin_graph::ThinGraph::warnings`]).
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+fn coverage_warnings(runtime: &Runtime) -> Result<Vec<String>> {
+    Ok(runtime
+        .submit_read(|store| thin_graph::ThinGraph::read(store))?
+        .warnings())
+}
+
 /// Evaluate the architecture contract ([FR-GV-02]): constraints (point
 /// queries — including the [FR-GV-11] coupling/redundancy budgets), layer
 /// ordering (BR-11; unassigned files exempt, BR-15), boundaries, the
@@ -741,37 +802,61 @@ pub(crate) fn evaluate(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
     (violations, checked)
 }
 
+/// The ratchet identity of node `id` ([FR-GV-23]): [`NodeRow::identity`], its
+/// symbol id **without the repository coordinate** — the descriptor tail
+/// ([ADR-85]), stable across re-indexing where the storage id is not. The
+/// blessed set is checked in, so it must match in every checkout of the same
+/// tree: the coordinate comes from `[project] id`, else the `origin` remote,
+/// else the directory name, and a fork, a renamed repository or a remote-less
+/// clone would otherwise read every blessed entry as new. A node the id-ordered
+/// slice does not carry falls back to its storage id, spelled so it can never
+/// collide with a symbol.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+/// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
+fn symbol_of(node_of: &HashMap<NodeId, &NodeRow>, id: NodeId) -> String {
+    node_of.get(&id).map_or_else(
+        || format!("node-id:{}", id.get()),
+        |n| n.identity().to_string(),
+    )
+}
+
 /// Constraint point queries (the original "Constraints" section): `max_cycles`,
 /// `max_cc`, `max_fn_lines`, `no_god_files`. Each active key counts once toward
 /// `checked`; inputs arrive in id order so the per-file `no_god_files` walk is
-/// deterministic ([NFR-RA-06]).
+/// deterministic ([NFR-RA-06]). A budget under ratchet ([FR-GV-23]) marks each
+/// offender with its identity and value for [`ratchet::classify`].
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
 fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
     let mut violations = Vec::new();
     let mut checked = 0u32;
     let constraints = &input.compiled.rules.constraints;
+    let node_of: HashMap<NodeId, &NodeRow> = input.nodes.iter().map(|n| (n.id, n)).collect();
 
-    if let Some(max) = constraints.max_cycles {
+    if let Some(budget) = &constraints.max_cycles {
         checked += 1;
-        if input.cycles > u64::from(max) {
+        // Both forms through the one count-budget seam (FR-GV-23 generalises
+        // ADR-39's delta form): the scalar message is the pre-ratchet one.
+        if let Some(message) =
+            budget.exceeded_message(input.cycles, "max_cycles", "dependency cycles")
+        {
             violations.push(Violation {
                 rule: "max_cycles".to_string(),
                 rule_type: "constraint".to_string(),
                 severity: SEVERITY_ERROR.to_string(),
                 file: String::new(),
                 node_id: None,
-                message: format!(
-                    "{} dependency cycles exceed max_cycles = {max}",
-                    input.cycles
-                ),
+                message,
+                ratchet: None,
             });
         }
     }
-    if let Some(max) = constraints.max_cc {
+    if let Some(budget) = constraints.max_cc {
         checked += 1;
+        let max = budget.max();
         for f in input.functions {
-            if f.cyclomatic_complexity
-                .is_some_and(|cc| cc > i64::from(max))
-            {
+            if let Some(cc) = f.cyclomatic_complexity.filter(|cc| *cc > i64::from(max)) {
                 violations.push(Violation {
                     rule: "max_cc".to_string(),
                     rule_type: "constraint".to_string(),
@@ -779,18 +864,23 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     file: f.file_path.clone().unwrap_or_default(),
                     node_id: Some(f.id.get()),
                     message: format!(
-                        "fn `{}` has cyclomatic complexity {} > max_cc = {max}",
-                        f.name,
-                        f.cyclomatic_complexity.unwrap_or_default()
+                        "fn `{}` has cyclomatic complexity {cc} > max_cc = {max}",
+                        f.name
+                    ),
+                    ratchet: ratchet::mark(
+                        budget.is_ratchet(),
+                        symbol_of(&node_of, f.id),
+                        cc.unsigned_abs(),
                     ),
                 });
             }
         }
     }
-    if let Some(max) = constraints.max_fn_lines {
+    if let Some(budget) = constraints.max_fn_lines {
         checked += 1;
+        let max = budget.max();
         for f in input.functions {
-            if f.line_count.is_some_and(|lines| lines > i64::from(max)) {
+            if let Some(lines) = f.line_count.filter(|lines| *lines > i64::from(max)) {
                 violations.push(Violation {
                     rule: "max_fn_lines".to_string(),
                     rule_type: "constraint".to_string(),
@@ -798,16 +888,21 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     file: f.file_path.clone().unwrap_or_default(),
                     node_id: Some(f.id.get()),
                     message: format!(
-                        "fn `{}` spans {} lines > max_fn_lines = {max}",
-                        f.name,
-                        f.line_count.unwrap_or_default()
+                        "fn `{}` spans {lines} lines > max_fn_lines = {max}",
+                        f.name
+                    ),
+                    ratchet: ratchet::mark(
+                        budget.is_ratchet(),
+                        symbol_of(&node_of, f.id),
+                        lines.unsigned_abs(),
                     ),
                 });
             }
         }
     }
-    if let Some(max) = constraints.no_god_files {
+    if let Some(budget) = constraints.no_god_files {
         checked += 1;
+        let max = budget.max();
         // Symbols per file, over extracted (non-policy, non-documentation) nodes only.
         // Documentation nodes are excluded here for the same reason they are excluded at
         // graph hydration ([FR-DG-06], [ADR-19]): a `.md` file with N sections would
@@ -833,6 +928,7 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     message: format!(
                         "`{path}` declares {count} symbols > no_god_files = {max} (OQ-06)"
                     ),
+                    ratchet: ratchet::mark(budget.is_ratchet(), path, count),
                 });
             }
         }
@@ -919,22 +1015,22 @@ fn check_coupling(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
         })
         .collect();
 
-    if let Some(max) = constraints.max_fan_in {
+    if let Some(budget) = constraints.max_fan_in {
         checked += 1;
         violations.extend(module_coupling_violations(
             &view,
-            max,
+            budget,
             "max_fan_in",
             "fan-in",
             Direction::Incoming,
             &module_file,
         ));
     }
-    if let Some(max) = constraints.max_fan_out {
+    if let Some(budget) = constraints.max_fan_out {
         checked += 1;
         violations.extend(module_coupling_violations(
             &view,
-            max,
+            budget,
             "max_fan_out",
             "fan-out",
             Direction::Outgoing,
@@ -947,18 +1043,21 @@ fn check_coupling(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
 
 /// One coupling budget's module-grain violations, ordered by stable module
 /// key ([NFR-RA-06]) rather than rollup-vertex insertion order (which follows
-/// first-seen node id and is therefore not itself the ordering contract).
+/// first-seen node id and is therefore not itself the ordering contract). Under
+/// ratchet ([FR-GV-23]) the module key is each offender's identity.
 ///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
 fn module_coupling_violations(
     view: &crate::hydrate::GraphView,
-    max: u32,
+    budget: crate::config::Budget,
     rule: &str,
     metric_label: &str,
     direction: Direction,
     module_file: &HashMap<String, String>,
 ) -> Vec<Violation> {
     let graph = view.graph();
+    let max = budget.max();
     let mut hits: Vec<(&str, &str, usize)> = graph
         .node_indices()
         .filter_map(|idx| {
@@ -982,6 +1081,39 @@ fn module_coupling_violations(
                 .unwrap_or_default(),
             node_id: None,
             message: format!("`{label}` has {metric_label} {count} > {rule} = {max}"),
+            ratchet: ratchet::mark(budget.is_ratchet(), key, count as u64),
+        })
+        .collect()
+}
+
+/// One violation per member of a symbol set under ratchet ([FR-GV-23]):
+/// `max_dead`, `max_duplicates` and `max_brain_methods` name each dead,
+/// duplicated or brain-method production function, in node-id order, marked
+/// with value `1` — membership is the whole measurement, so a blessed member
+/// can only stay blessed or be fixed, never worsen.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+fn symbol_set_violations<'a>(
+    rule: &str,
+    what: &str,
+    members: impl Iterator<Item = &'a FunctionMetricRow>,
+    node_of: &HashMap<NodeId, &NodeRow>,
+) -> Vec<Violation> {
+    members
+        .map(|f| {
+            let (name, file) = node_of
+                .get(&f.id)
+                .map(|n| (n.name.as_str(), n.file_path.clone().unwrap_or_default()))
+                .unwrap_or(("?", String::new()));
+            Violation {
+                rule: rule.to_string(),
+                rule_type: "constraint".to_string(),
+                severity: SEVERITY_ERROR.to_string(),
+                file,
+                node_id: Some(f.id.get()),
+                message: format!("fn `{name}` is {what} — {rule} = 0 under ratchet"),
+                ratchet: ratchet::mark(true, symbol_of(node_of, f.id), 1),
+            }
         })
         .collect()
 }
@@ -991,7 +1123,10 @@ fn module_coupling_violations(
 /// Counted over the SAME annotation rows the Redundancy metric reads
 /// ([FR-QM-05]) — Function/Method nodes, `is_test` and derived excluded
 /// ([FR-QM-08]) — so the budget and the metric agree by construction. One
-/// project-wide violation per budget (no per-symbol enumeration).
+/// project-wide violation per budget, except under ratchet ([FR-GV-23]), where
+/// each dead or duplicated function is one offender of a symbol set.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
 fn check_redundancy(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
     let mut violations = Vec::new();
     let mut checked = 0u32;
@@ -1003,44 +1138,70 @@ fn check_redundancy(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
             .iter()
             .filter(|f| !test_ids.contains(&f.id))
     };
+    let node_of: HashMap<NodeId, &NodeRow> = input.nodes.iter().map(|n| (n.id, n)).collect();
 
-    if let Some(budget) = &constraints.max_dead {
-        checked += 1;
-        // NULL (`is_dead = None`) is excluded for free — only `Some(true)` counts
-        // ([CR-043], [ADR-39]): a language without the reachability capability
-        // renders NULL and never inflates the budget.
-        let dead = production_fns()
-            .filter(|f| f.is_dead == Some(true))
-            .count() as u64;
-        // Both modes route through the one budget seam ([FR-GV-11], [ADR-39]):
-        // absolute fails iff `dead > max`; delta fails iff `dead` rises above
-        // the blessed `baseline (+delta)`. The message is mode-specific but
-        // deterministic, so a re-run is byte-identical ([NFR-RA-06]).
-        if let Some(message) = budget.exceeded_message(dead) {
-            violations.push(Violation {
-                rule: "max_dead".to_string(),
-                rule_type: "constraint".to_string(),
-                severity: SEVERITY_ERROR.to_string(),
-                file: String::new(),
-                node_id: None,
-                message,
-            });
+    // NULL (`is_dead = None`) is excluded for free — only `Some(true)` counts
+    // ([CR-043], [ADR-39]): a language without the reachability capability
+    // renders NULL and never inflates the budget, nor joins the ratchet set.
+    let dead = |f: &&FunctionMetricRow| f.is_dead == Some(true);
+    match &constraints.max_dead {
+        // FR-GV-23: under ratchet the dead set is named member by member.
+        Some(budget) if budget.is_ratchet() => {
+            checked += 1;
+            violations.extend(symbol_set_violations(
+                "max_dead",
+                "dead code",
+                production_fns().filter(dead),
+                &node_of,
+            ));
         }
+        Some(budget) => {
+            checked += 1;
+            let dead_count = production_fns().filter(dead).count() as u64;
+            // Both modes route through the one budget seam ([FR-GV-11], [ADR-39]):
+            // absolute fails iff `dead > max`; delta fails iff `dead` rises above
+            // the blessed `baseline (+delta)`. The message is mode-specific but
+            // deterministic, so a re-run is byte-identical ([NFR-RA-06]).
+            if let Some(message) = budget.exceeded_message(dead_count) {
+                violations.push(Violation {
+                    rule: "max_dead".to_string(),
+                    rule_type: "constraint".to_string(),
+                    severity: SEVERITY_ERROR.to_string(),
+                    file: String::new(),
+                    node_id: None,
+                    message,
+                    ratchet: None,
+                });
+            }
+        }
+        None => {}
     }
-    if let Some(max) = constraints.max_duplicates {
+    if let Some(budget) = constraints.max_duplicates {
         checked += 1;
-        let duplicates = production_fns()
-            .filter(|f| f.is_duplicate == Some(true))
-            .count() as u64;
-        if duplicates > u64::from(max) {
-            violations.push(Violation {
-                rule: "max_duplicates".to_string(),
-                rule_type: "constraint".to_string(),
-                severity: SEVERITY_ERROR.to_string(),
-                file: String::new(),
-                node_id: None,
-                message: format!("{duplicates} duplicate functions exceed max_duplicates = {max}"),
-            });
+        let duplicate = |f: &&FunctionMetricRow| f.is_duplicate == Some(true);
+        if budget.is_ratchet() {
+            violations.extend(symbol_set_violations(
+                "max_duplicates",
+                "an exact duplicate",
+                production_fns().filter(duplicate),
+                &node_of,
+            ));
+        } else {
+            let max = budget.max();
+            let duplicates = production_fns().filter(duplicate).count() as u64;
+            if duplicates > u64::from(max) {
+                violations.push(Violation {
+                    rule: "max_duplicates".to_string(),
+                    rule_type: "constraint".to_string(),
+                    severity: SEVERITY_ERROR.to_string(),
+                    file: String::new(),
+                    node_id: None,
+                    message: format!(
+                        "{duplicates} duplicate functions exceed max_duplicates = {max}"
+                    ),
+                    ratchet: None,
+                });
+            }
         }
     }
 
@@ -1090,12 +1251,12 @@ fn check_max_nesting_depth(
             .iter()
             .filter(|f| !test_ids.contains(&f.id))
     };
-    if let Some(max) = input.compiled.rules.constraints.max_nesting_depth {
+    if let Some(budget) = input.compiled.rules.constraints.max_nesting_depth {
         checked += 1;
+        let max = budget.max();
         let node_of: HashMap<NodeId, &NodeRow> = input.nodes.iter().map(|n| (n.id, n)).collect();
         for f in production_fns() {
-            if f.max_nesting_depth.is_some_and(|d| d > i64::from(max)) {
-                let depth = f.max_nesting_depth.unwrap_or_default();
+            if let Some(depth) = f.max_nesting_depth.filter(|d| *d > i64::from(max)) {
                 let (name, file) = node_of
                     .get(&f.id)
                     .map(|n| (n.name.as_str(), n.file_path.clone().unwrap_or_default()))
@@ -1108,6 +1269,11 @@ fn check_max_nesting_depth(
                     node_id: Some(f.id.get()),
                     message: format!(
                         "fn `{name}` nests {depth} levels deep > max_nesting_depth = {max}"
+                    ),
+                    ratchet: ratchet::mark(
+                        budget.is_ratchet(),
+                        symbol_of(&node_of, f.id),
+                        depth.unsigned_abs(),
                     ),
                 });
             }
@@ -1129,25 +1295,38 @@ fn check_brain_methods(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Ve
             .iter()
             .filter(|f| !test_ids.contains(&f.id))
     };
-    if let Some(max) = input.compiled.rules.constraints.max_brain_methods {
+    if let Some(budget) = input.compiled.rules.constraints.max_brain_methods {
         checked += 1;
         let t = &input.thresholds;
-        let brain = production_fns()
-            .filter(|f| {
-                f.cyclomatic_complexity.is_some_and(|c| c >= t.brain_cc)
-                    && f.line_count.is_some_and(|l| l >= t.brain_loc)
-                    && f.max_nesting_depth.is_some_and(|d| d >= t.brain_nest)
-            })
-            .count() as u64;
-        if brain > u64::from(max) {
-            violations.push(Violation {
-                rule: "max_brain_methods".to_string(),
-                rule_type: "constraint".to_string(),
-                severity: SEVERITY_ERROR.to_string(),
-                file: String::new(),
-                node_id: None,
-                message: format!("{brain} brain methods exceed max_brain_methods = {max}"),
-            });
+        let is_brain = |f: &&FunctionMetricRow| {
+            f.cyclomatic_complexity.is_some_and(|c| c >= t.brain_cc)
+                && f.line_count.is_some_and(|l| l >= t.brain_loc)
+                && f.max_nesting_depth.is_some_and(|d| d >= t.brain_nest)
+        };
+        if budget.is_ratchet() {
+            // FR-GV-23: under ratchet each brain method is a named offender.
+            let node_of: HashMap<NodeId, &NodeRow> =
+                input.nodes.iter().map(|n| (n.id, n)).collect();
+            violations.extend(symbol_set_violations(
+                "max_brain_methods",
+                "a brain method",
+                production_fns().filter(is_brain),
+                &node_of,
+            ));
+        } else {
+            let max = budget.max();
+            let brain = production_fns().filter(is_brain).count() as u64;
+            if brain > u64::from(max) {
+                violations.push(Violation {
+                    rule: "max_brain_methods".to_string(),
+                    rule_type: "constraint".to_string(),
+                    severity: SEVERITY_ERROR.to_string(),
+                    file: String::new(),
+                    node_id: None,
+                    message: format!("{brain} brain methods exceed max_brain_methods = {max}"),
+                    ratchet: None,
+                });
+            }
         }
     }
     (violations, checked)
@@ -1167,7 +1346,7 @@ fn check_clone_ratio(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Vec<
             .iter()
             .filter(|f| !test_ids.contains(&f.id))
     };
-    if let Some(max) = input.compiled.rules.constraints.max_clone_ratio {
+    if let Some(budget) = input.compiled.rules.constraints.max_clone_ratio {
         checked += 1;
         let total = production_fns().count();
         let cloned = production_fns().filter(|f| f.clone_group.is_some()).count();
@@ -1176,7 +1355,9 @@ fn check_clone_ratio(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Vec<
         } else {
             cloned as f64 / total as f64
         };
-        if ratio > max {
+        // FR-GV-23 generalises ADR-39's count-delta form to the ratio: the
+        // scalar's ceiling and message are the pre-ratchet ones verbatim.
+        if ratio > budget.ceiling() {
             violations.push(Violation {
                 rule: "max_clone_ratio".to_string(),
                 rule_type: "constraint".to_string(),
@@ -1184,9 +1365,10 @@ fn check_clone_ratio(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Vec<
                 file: String::new(),
                 node_id: None,
                 message: format!(
-                    "{cloned}/{total} near-clone functions (ratio {ratio:.4}) exceed \
-                     max_clone_ratio = {max}"
+                    "{cloned}/{total} near-clone functions (ratio {ratio:.4}) exceed {}",
+                    budget.describe()
                 ),
+                ratchet: None,
             });
         }
     }
@@ -1204,7 +1386,13 @@ fn check_god_containers(
 ) -> (Vec<Violation>, u32) {
     let mut violations = Vec::new();
     let mut checked = 0u32;
-    if input.compiled.rules.constraints.no_god_containers == Some(true) {
+    if let Some(budget) = input
+        .compiled
+        .rules
+        .constraints
+        .no_god_containers
+        .filter(crate::config::GodContainersBudget::enforced)
+    {
         checked += 1;
         let node_of: HashMap<NodeId, &NodeRow> = input.nodes.iter().map(|n| (n.id, n)).collect();
         for god in crate::metrics::god_containers(
@@ -1227,6 +1415,12 @@ fn check_god_containers(
                 message: format!(
                     "`{name}` is a god container ({} methods, span {}) — no_god_containers",
                     god.method_count, god.span
+                ),
+                // FR-GV-23: a god container worsens by gaining member methods.
+                ratchet: ratchet::mark(
+                    budget.is_ratchet(),
+                    symbol_of(&node_of, god.id),
+                    god.method_count,
                 ),
             });
         }
@@ -1305,6 +1499,7 @@ fn check_layer_ordering(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     "`{src_file}` (layer `{src_layer}`, order {src_order}) depends \
                      upward on `{dst_file}` (layer `{dst_layer}`, order {dst_order})"
                 ),
+                ratchet: None,
             });
         }
 
@@ -1328,6 +1523,7 @@ fn check_layer_ordering(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                         "`{src_file}` ({src_layer}) depends on `{dst_file}` ({dst_layer}), \
                          a forbidden boundary{reason}"
                     ),
+                    ratchet: None,
                 });
             }
         }
@@ -1398,6 +1594,7 @@ fn check_forbidden_imports(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     message: format!(
                         "`{src_file}` imports `{dst_file}`, a forbidden import{reason}"
                     ),
+                    ratchet: None,
                 });
             }
         }
@@ -1470,6 +1667,7 @@ fn check_require_tested(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                      dynamic-dispatch call paths are not seen){reason}",
                     ann.name
                 ),
+                ratchet: None,
             });
         }
     }
@@ -1540,6 +1738,7 @@ fn check_require_documented(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                      section (reference presence, not documentation quality){reason}",
                     ann.name
                 ),
+                ratchet: None,
             });
         }
     }
@@ -1612,6 +1811,45 @@ fn documented_set(nodes: &[NodeRow], edges: &[EdgeRow]) -> HashSet<NodeId> {
     documented
 }
 
+/// Re-run the annotation pass over the store behind `runtime` under `rules`
+/// ([FR-GV-02], BR-12) — the step that makes an evaluation follow the contract
+/// as it stands now, shared by `check`/`scan` ([`materialise_and_evaluate`])
+/// and the branch review, which applies it to both its measurements.
+///
+/// BR-12: clear + re-materialise the derived policy graph each run. The
+/// annotation pass owns that algorithm (FR-AN-03); re-running it here is what
+/// makes check_rules idempotent AND correct after a rules.toml edit that
+/// touched no source file — the layer and forbidden verdicts, and the
+/// near-clone and duplicate verdicts its `[metric_thresholds]` tune. A full
+/// re-materialisation (a rules.toml edit can flip verdicts across the whole
+/// graph with no source change), so it writes every verdict —
+/// `incremental = false` (S-024-HF); this is the governance path, not the
+/// NFR-PE-03 sync hot path. CR-043 / ADR-39: the reachability-capability set
+/// gates dead-code so the re-materialised `is_dead` column matches what
+/// index/sync wrote. The policy nodes it re-materialises carry the coordinate
+/// the store's symbols already carry (S-703), whatever the project resolves to
+/// now. The caller advances the engine's sync stamp when `runtime` is its own.
+///
+/// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
+pub(crate) fn rematerialise(
+    runtime: &Runtime,
+    registry: &crate::plugin::LanguageRegistry,
+    config: &crate::config::Config,
+    rules: &Rules,
+) -> Result<()> {
+    let ctx = crate::pipeline::store_symbol_context(runtime)?;
+    crate::annotate::run(
+        runtime,
+        rules,
+        &config.semantics.entry_points,
+        &config.semantics.test_markers,
+        &registry.reachability_extensions(),
+        &ctx,
+        false,
+    )?;
+    Ok(())
+}
+
 /// Re-materialise the derived policy graph from the (possibly overridden)
 /// contract and run the evaluator over the post-materialisation snapshot
 /// ([FR-GV-02]: layers assigned, `forbidden_dependency` edges cleared at
@@ -1629,93 +1867,100 @@ fn materialise_and_evaluate(
     cycles: Option<u64>,
 ) -> Result<(Vec<Violation>, u32)> {
     let (runtime, registry, config) = engine.pipeline_ctx()?;
-
-    // BR-12: clear + re-materialise the derived policy graph each run. The
-    // annotation pass owns that algorithm (FR-AN-03); re-running it here is
-    // what makes check_rules idempotent AND correct after a rules.toml edit
-    // that touched no source file.
-    // A full re-materialisation (a rules.toml edit can flip layer/forbidden
-    // verdicts across the whole graph with no source change), so write every
-    // verdict — `incremental = false` (S-024-HF); this is the governance path,
-    // not the NFR-PE-03 sync hot path.
-    // CR-043 / ADR-39: the reachability-capability set gates dead-code so the
-    // re-materialised `is_dead` column matches what index/sync wrote — the same
-    // registry-derived set keeps `check_rules` and the pipeline in agreement.
-    let reachable_exts = registry.reachability_extensions();
-    // The policy nodes it re-materialises carry the coordinate the store's
-    // symbols already carry (S-703), whatever the project resolves to now.
-    let ctx = crate::pipeline::store_symbol_context(runtime)?;
-    crate::annotate::run(
-        runtime,
-        &compiled.rules,
-        &config.semantics.entry_points,
-        &config.semantics.test_markers,
-        &reachable_exts,
-        &ctx,
-        false,
-    )?;
+    rematerialise(runtime, registry, &config, &compiled.rules)?;
     engine.advance_sync_stamp();
 
-    let (nodes, edges, functions, function_metrics, annotations, test_node_ids) = runtime
-        .submit_read(|store| {
-            Ok((
-                store.all_nodes()?,
-                store.all_edges()?,
-                store.function_constraint_rows()?,
-                // The is_dead/is_duplicate annotation rows for the FR-GV-11
-                // redundancy budgets — the SAME query the Redundancy metric reads,
-                // so the budget and the metric agree by construction.
-                store.function_metrics()?,
-                // The annotation rows carry the `exported` flag the FR-GV-13
-                // [[require_tested]] contract needs (NodeRow omits visibility).
-                store.annotation_nodes()?,
-                // The persisted is_test set: shared with the [[require_tested]]
-                // contract (FR-AN-05 / FR-GV-13) and used for production-scope metric filtering
-                // (FR-QM-08) — the gate, coverage contract, and Acyclicity rule
-                // can never disagree about the same SCC set.
-                store.test_node_ids()?,
-            ))
-        })?;
-
+    let facts = StoreFacts::read(runtime)?;
     let cycles = match cycles {
         Some(c) => c,
         // Both the bare check_rules path and scan land here (each calls
         // materialise_and_evaluate with no precomputed cycle count), and only
         // when the contract actually budgets cycles.
         None if compiled.rules.constraints.max_cycles.is_some() => {
-            let view = engine.hydrate(Granularity::ExcludeContains)?;
-            let test_ids: std::collections::HashSet<crate::model::NodeId> =
-                test_node_ids.iter().copied().collect();
-            // Only the Acyclicity cycle count is read here — the CR-005 thresholds
-            // do not affect it, so the documented defaults suffice.
-            crate::metrics::compute(
-                &view,
-                &nodes,
-                &edges,
-                &function_metrics,
-                &test_ids,
-                crate::metrics::Thresholds::default(),
-            )
-            .acyclicity
-            .raw as u64
+            facts.cycle_count(&*engine.hydrate(Granularity::ExcludeContains)?)
         }
         None => 0,
     };
+    Ok(facts.evaluate(compiled, cycles))
+}
 
-    let input = EvalInput {
-        compiled,
-        nodes: &nodes,
-        edges: &edges,
-        functions: &functions,
-        function_metrics: &function_metrics,
-        annotations: &annotations,
-        test_node_ids: &test_node_ids,
-        cycles,
-        // The effective CR-005 thresholds the four new budgets read (BR-25) —
-        // the SAME set the snapshot scores under (composed from the same rules).
-        thresholds: effective_thresholds(&compiled.rules),
-    };
-    Ok(evaluate(&input))
+/// The store facts [`evaluate`] reads, in one `submit_read` — shared by the
+/// `check`/`scan` path ([`materialise_and_evaluate`]) and the branch review
+/// ([`review`]), so the two evaluate one contract over one read shape and can
+/// never disagree about what a violation is.
+pub(crate) struct StoreFacts {
+    pub nodes: Vec<NodeRow>,
+    pub edges: Vec<EdgeRow>,
+    pub functions: Vec<FunctionConstraintRow>,
+    /// The is_dead/is_duplicate annotation rows for the FR-GV-11 redundancy
+    /// budgets — the SAME query the Redundancy metric reads, so the budget and
+    /// the metric agree by construction.
+    pub function_metrics: Vec<FunctionMetricRow>,
+    /// The annotation rows carry the `exported` flag the FR-GV-13
+    /// [[require_tested]] contract needs (NodeRow omits visibility).
+    pub annotations: Vec<AnnotationNodeRow>,
+    /// The persisted is_test set: shared with the [[require_tested]] contract
+    /// (FR-AN-05 / FR-GV-13) and used for production-scope metric filtering
+    /// (FR-QM-08) — the gate, coverage contract, and Acyclicity rule can never
+    /// disagree about the same SCC set.
+    pub test_node_ids: Vec<NodeId>,
+}
+
+impl StoreFacts {
+    /// Read every fact in one checkout of `runtime`'s store.
+    pub(crate) fn read(runtime: &Runtime) -> Result<Self> {
+        runtime.submit_read(|store| {
+            Ok(Self {
+                nodes: store.all_nodes()?,
+                edges: store.all_edges()?,
+                functions: store.function_constraint_rows()?,
+                function_metrics: store.function_metrics()?,
+                annotations: store.annotation_nodes()?,
+                test_node_ids: store.test_node_ids()?,
+            })
+        })
+    }
+
+    /// The production `is_test` set, as the metrics read it.
+    pub(crate) fn test_ids(&self) -> HashSet<NodeId> {
+        self.test_node_ids.iter().copied().collect()
+    }
+
+    /// The Acyclicity cycle count over `view`. Only that count is read — the
+    /// CR-005 thresholds and the Cohesion capability set do not affect it, so
+    /// the documented defaults and an empty set suffice. It is the computed
+    /// count whether or not Acyclicity applies (FR-QM-18): the budget is the
+    /// contract's, not the signal's.
+    pub(crate) fn cycle_count(&self, view: &crate::hydrate::GraphView) -> u64 {
+        crate::metrics::compute(
+            view,
+            &self.nodes,
+            &self.edges,
+            &self.function_metrics,
+            &self.test_ids(),
+            crate::metrics::Thresholds::default(),
+            &HashSet::new(),
+        )
+        .acyclicity
+        .raw as u64
+    }
+
+    /// [`evaluate`] `compiled` over these facts, with `cycles` as the
+    /// `max_cycles` input and the contract's effective CR-005 thresholds — the
+    /// SAME set the snapshot scores under (BR-25).
+    pub(crate) fn evaluate(&self, compiled: &CompiledRules, cycles: u64) -> (Vec<Violation>, u32) {
+        evaluate(&EvalInput {
+            compiled,
+            nodes: &self.nodes,
+            edges: &self.edges,
+            functions: &self.functions,
+            function_metrics: &self.function_metrics,
+            annotations: &self.annotations,
+            test_node_ids: &self.test_node_ids,
+            cycles,
+            thresholds: effective_thresholds(&compiled.rules),
+        })
+    }
 }
 
 /// What a governance run evaluated, carried from the run to its marker
@@ -1824,6 +2069,9 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // was discarded here until S-437; it is the marker's denominator (CR-140
     // §3.1), and `scan` evaluates exactly the same set `check` does.
     let (violations, checked_rules) = materialise_and_evaluate(engine, &compiled, None)?;
+    // FR-GV-23: scored against the blessed set exactly as `check` is — read
+    // only; `scan` never writes it.
+    let (violations, _) = classify_against_blessed(engine, &compiled, violations)?;
     let rules_present = compiled.hash != ABSENT_RULES_HASH;
     let view = engine.hydrate(Granularity::ExcludeContains)?;
     // BR-25: the snapshot scores under the effective rules.toml thresholds, so
@@ -1833,11 +2081,20 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // snapshot that persisted them (FR-QM-15): computed from the same read as
     // the metrics, under the same thresholds, and written in the same batch —
     // so what `scan` reports is exactly what the Health bundle later projects.
+    // The "where to start" ranking (FR-QM-17) rides the same snapshot, computed
+    // after the metrics and never into them (BR-61).
     let crate::metrics::RecordedSnapshot {
         id: snapshot_id,
         metrics,
         worst_offenders,
-    } = crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
+        where_to_start,
+    } = crate::metrics::snapshot(
+        runtime,
+        &view,
+        fresh.head.as_deref(),
+        thresholds,
+        &member_access_extensions(engine),
+    )?;
     persist_violations(
         runtime,
         Some(snapshot_id),
@@ -1871,6 +2128,9 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     if let Some(warning) = persistence.warning() {
         warnings.push(warning);
     }
+    // FR-QM-18: the languages the graph cannot see across files — advisory,
+    // never a verdict, from the helper every scoring surface shares.
+    warnings.extend(coverage_warnings(runtime)?);
 
     Ok(ScanResult {
         signal: metrics.aggregate_signal,
@@ -1878,6 +2138,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
         violations,
         metrics,
         worst_offenders,
+        where_to_start,
         temporal,
         persistence,
         warnings,
@@ -1979,6 +2240,11 @@ pub(crate) struct PersistedSnapshot {
     /// The lists persisted with the row; `recorded: false` on a snapshot written
     /// before they were persisted.
     pub(crate) worst_offenders: WorstOffenders,
+    /// The "where to start" ranking persisted with the row ([FR-QM-17]);
+    /// `recorded: false` on a snapshot written before migration 36.
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    pub(crate) where_to_start: WhereToStart,
 }
 
 /// The most-recent persisted metric snapshot as a full read-model, or `None` on
@@ -1995,6 +2261,7 @@ pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<PersistedSnapshot
     let row = quality_runtime(engine)?.submit_read(|store| store.latest_metric_snapshot())?;
     Ok(row.map(|mut row| {
         let mut worst_offenders = std::mem::take(&mut row.worst_offenders);
+        let where_to_start = std::mem::take(&mut row.where_to_start);
         let metrics = metric_snapshot_from_row(row);
         // A snapshot written before CR-209 holds no row for the four lists it
         // added; name each one its own score says is not empty (NFR-CC-04).
@@ -2002,24 +2269,54 @@ pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<PersistedSnapshot
         PersistedSnapshot {
             metrics,
             worst_offenders,
+            where_to_start,
         }
     }))
 }
 
-/// Read a persisted `modularity_applicable` flag back as the drop-out it
-/// records ([CR-156]) — the one mapping every snapshot reader shares (the
-/// dashboard read-back, the gate's regression detail, the evolution series).
+/// Read a persisted graph-dimension applicability flag back as the drop-out it
+/// records ([FR-QM-18]; Modularity's since [CR-156]) — the one mapping every
+/// snapshot reader shares (the dashboard read-back, the gate's regression
+/// detail, the evolution series).
 ///
-/// Only an explicit `0` drops Modularity out; a `NULL` flag is a row scored
-/// under metric-semantics ≤ 5, when Modularity always applied. `m` is the row's
-/// own edge count — the graph Modularity was computed on.
+/// Only an explicit `0` drops a dimension out; a `NULL` flag is a row scored
+/// before the dimension could drop out, when it always applied. A v8 row
+/// carries the cross-module edge count the flag was decided on, and reads back
+/// with it; a v6/v7 Modularity drop-out has none and was decided on every edge
+/// of its graph, so it reads back with that row's `edge_count` and the reason
+/// that rule gave.
 ///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
-fn modularity_drop_out(applicable: Option<bool>, edge_count: i64) -> Option<ModularityNotApplicable> {
-    match applicable {
-        Some(false) => ModularityNotApplicable::for_edges(edge_count as u64),
-        Some(true) | None => None,
+fn graph_drop_out(
+    applicable: Option<bool>,
+    cross_module_edges: Option<i64>,
+    edge_count: i64,
+) -> Option<GraphDimensionNotApplicable> {
+    match (applicable, cross_module_edges) {
+        (Some(false), Some(cross)) => GraphDimensionNotApplicable::for_cross_module_edges(cross as u64),
+        (Some(false), None) => GraphDimensionNotApplicable::for_edges(edge_count as u64),
+        (Some(true) | None, _) => None,
     }
+}
+
+/// The three graph dimensions' drop-outs read back from one persisted row's
+/// flags, in canonical order (modularity, acyclicity, depth).
+fn graph_drop_outs(
+    flags: [Option<bool>; 3],
+    cross_module_edges: Option<i64>,
+    edge_count: i64,
+) -> [Option<GraphDimensionNotApplicable>; 3] {
+    flags.map(|flag| graph_drop_out(flag, cross_module_edges, edge_count))
+}
+
+/// [`graph_drop_outs`] of one gate/evolution series row.
+fn row_drop_outs(row: &MetricSnapshotRow) -> [Option<GraphDimensionNotApplicable>; 3] {
+    graph_drop_outs(
+        [row.modularity_applicable, row.acyclicity_applicable, row.depth_applicable],
+        row.cross_module_edges,
+        row.edge_count,
+    )
 }
 
 /// Map the persisted [`LatestMetricSnapshot`] columns back into the
@@ -2042,14 +2339,21 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
             _ => None,
         }
     };
+    let [modularity_not_applicable, acyclicity_not_applicable, depth_not_applicable] = graph_drop_outs(
+        [row.modularity_applicable, row.acyclicity_applicable, row.depth_applicable],
+        row.cross_module_edges,
+        row.edge_count,
+    );
     MetricSnapshot {
         modularity: mv(row.modularity_raw, row.modularity_normalized),
-        // CR-156: only an explicit `0` drops Modularity out; a `NULL` flag is a
-        // row scored under semantics ≤ 5, when Modularity always applied. `m` is
-        // the snapshot's own edge count — the graph Modularity was computed on.
-        modularity_not_applicable: modularity_drop_out(row.modularity_applicable, row.edge_count),
+        // CR-156, FR-QM-18: only an explicit `0` drops a graph dimension out; a
+        // `NULL` flag is a row scored when it always applied.
+        modularity_not_applicable,
         acyclicity: mv(row.acyclicity_raw, row.acyclicity_normalized),
+        acyclicity_not_applicable,
         depth: mv(row.depth_raw, row.depth_normalized),
+        depth_not_applicable,
+        cross_module_edge_count: row.cross_module_edges.map(|n| n as u64),
         equality: mv(row.equality_raw, row.equality_normalized),
         redundancy: mv(row.redundancy_raw, row.redundancy_normalized),
         nesting: req(row.nesting_raw, row.nesting_normalized),
@@ -2100,8 +2404,9 @@ pub(crate) fn latest_scan(engine: &Engine) -> Result<ScanResult> {
 ///
 /// `None` (a never-`scan`-ned store) becomes the honest empty sentinel, never a
 /// fabricated zero ([NFR-CC-04]) — see [`latest_scan`] for why the flag alone
-/// does not say which of the two empties happened. Its offender lists are
-/// "not recorded", like a pre-[FR-QM-15] snapshot's: there is nothing to show.
+/// does not say which of the two empties happened. Its offender lists and its
+/// "where to start" ranking are "not recorded", like a pre-[FR-QM-15]
+/// snapshot's: there is nothing to show.
 ///
 /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
@@ -2109,12 +2414,14 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<PersistedSnapshot>) -> S
     let PersistedSnapshot {
         metrics,
         worst_offenders,
+        where_to_start,
     } = snapshot.unwrap_or(PersistedSnapshot {
         metrics: MetricSnapshot {
             empty: true,
             ..MetricSnapshot::default()
         },
         worst_offenders: WorstOffenders::default(),
+        where_to_start: WhereToStart::default(),
     });
     let mut warnings = Vec::new();
     let temporal = latest_temporal_tier(engine, &mut warnings);
@@ -2124,6 +2431,7 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<PersistedSnapshot>) -> S
         violations: Vec::new(),
         metrics,
         worst_offenders,
+        where_to_start,
         temporal,
         persistence: crate::models::PersistenceHealth::default(),
         warnings,
@@ -2181,6 +2489,8 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Res
         message: String::new(),
         warnings: Vec::new(),
         notes: Vec::new(),
+        security_violations: Vec::new(),
+        missing_scans: Vec::new(),
     };
 
     let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
@@ -2268,10 +2578,66 @@ pub(crate) fn latest_health(engine: &Engine) -> Result<LatestHealth> {
     // that wants both fields ([CR-135] §3.2).
     let snapshot = latest_metrics(engine)?;
     let gate = gate_from_snapshot(engine, snapshot.as_ref().map(|s| &s.metrics))?;
-    // Offenders ride inside the same value, so they describe the same row as
-    // the signal and the verdict (FR-QM-15).
+    // Offenders and the "where to start" ranking ride inside the same value, so
+    // they describe the same row as the signal and the verdict (FR-QM-15,
+    // FR-QM-17).
     let scan = scan_from_snapshot(engine, snapshot);
     Ok(LatestHealth { gate, scan })
+}
+
+/// Every offender the last snapshot recorded, narrowed by `filter`
+/// ([FR-QM-19], S-676) — the engine's entry point to
+/// [`offenders::offenders`], named here so the engine reaches the listing
+/// through this module as it does [`latest_health`] and not through a second
+/// one (its module fan-out is budgeted, `max_fan_out`).
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+pub(crate) fn offender_listing(
+    engine: &Engine,
+    filter: &OffendersFilter,
+) -> Result<crate::models::quality::OffenderListing> {
+    offenders::offenders(engine, filter)
+}
+
+/// The branch delta against the merge-base of `HEAD` and `base` ([FR-GV-24],
+/// S-677) — the engine's entry point to [`review::branch_review`], named here
+/// so the engine reaches it through this module as it does
+/// [`offender_listing`] and not through a second one (its module fan-out is
+/// budgeted, `max_fan_out`).
+///
+/// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
+///
+/// `security` reads the security evidence at the merge-base it is handed
+/// ([FR-SC-18], S-686): the engine supplies it, so governance never opens
+/// `history.db`.
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+pub(crate) fn branch_review(
+    engine: &Engine,
+    base: Option<&str>,
+    security: impl FnOnce(&str) -> Result<SecurityEvidence>,
+) -> Result<crate::models::quality::BranchReview> {
+    review::branch_review(engine, base, security)
+}
+
+/// What the branch security delta classifies ([FR-SC-18], S-686), read by the
+/// engine and handed in: governance does not open `history.db`. Defined here,
+/// beside [`branch_review`], so the engine names it through the module it
+/// already calls.
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+pub(crate) struct SecurityEvidence {
+    /// Every stored finding of each scanner's latest report — unfiltered,
+    /// labelled against the ignore file, OWASP-classified and in graph context.
+    pub current: crate::security::SecurityFindings,
+    /// Each scanner's latest snapshot: its id and ingest time.
+    pub latest: Vec<crate::history::ScannerSnapshot>,
+    /// The reports recorded at the merge-base commit — never a scan of its tree.
+    pub base: crate::history::SecurityView,
+    /// Each merge-base finding's OWASP categories, in `base.findings` order.
+    pub base_owasp: Vec<Vec<&'static str>>,
+    /// Each merge-base finding's graph context, in `base.findings` order.
+    pub base_contexts: Vec<crate::security::context::FindingContext>,
 }
 
 /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
@@ -2328,9 +2694,11 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     // BR-25: score under the effective rules.toml thresholds, exactly as `gate`
     // does, so the readout's signal is the one the gate would report.
     let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
-    let metrics = crate::metrics::compute_snapshot(runtime, &view, thresholds)?;
+    let metrics =
+        crate::metrics::compute_snapshot(runtime, &view, thresholds, &member_access_extensions(engine))?;
 
-    let mut warnings = Vec::new();
+    // FR-QM-18: the session-start readout names what the session-start gate does.
+    let mut warnings = coverage_warnings(runtime)?;
     let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
     // Only a *comparable* baseline yields a delta. An incomparable one (metric
     // semantics or thresholds changed since it was saved, FR-GV-10) is reported
@@ -2491,27 +2859,138 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         // The drop-out of the very snapshot the signal came from (CR-156), never
         // re-derived from a second reading of the edge count.
         modularity_not_applicable: metrics.modularity_not_applicable.clone(),
+        acyclicity_not_applicable: metrics.acyclicity_not_applicable.clone(),
+        depth_not_applicable: metrics.depth_not_applicable.clone(),
         violation_count,
         check,
         warnings,
     })
 }
 
+/// Classify an evaluated violation set against the checked-in blessed set
+/// ([FR-GV-23]) — **read-only**: `check`, `scan` and the bless command's own
+/// verdict all come through here, and none of them writes the file here.
+///
+/// With no constraint under ratchet the file is not even read, so a contract
+/// that never opted in cannot be broken by a malformed blessed set.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+fn classify_against_blessed(
+    engine: &Engine,
+    compiled: &CompiledRules,
+    violations: Vec<Violation>,
+) -> Result<(Vec<Violation>, Option<RatchetReport>)> {
+    let rules = compiled.rules.constraints.ratchet_rules();
+    if rules.is_empty() {
+        return Ok((violations, None));
+    }
+    let blessed = ratchet::BlessedSet::read(&ratchet::blessed_path(engine.root()))?;
+    Ok(ratchet::classify(violations, &rules, blessed.as_ref()))
+}
+
 /// `check_rules` — the compliance report ([FR-GV-02]); no metric snapshot
-/// (that is scan/gate's job, [FR-GV-09]).
+/// (that is scan/gate's job, [FR-GV-09]). Never writes the blessed set
+/// ([FR-GV-23]).
 ///
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
 /// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
 pub(crate) fn check_rules(
     engine: &Engine,
     rules_path: Option<&Path>,
     reconcile: bool,
+    evidence: &dyn security::SecurityEvidence,
 ) -> Result<RulesReport> {
-    let fresh = reconcile_step(engine, reconcile)?;
+    check_rules_run(engine, rules_path, reconcile, false, evidence)
+}
+
+/// `check --bless` — record every current offender of a ratchet constraint
+/// as blessed debt in `.logos/rules-baseline.json` ([FR-GV-23], [ADR-73]), then
+/// report exactly as `check` would against the set just written. The only
+/// writer of the blessed set ([BR-62]): sorted and deterministic, so a re-bless
+/// of an unchanged tree is byte-identical and leaves the file untouched.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+/// [ADR-73]: ../../../docs/specs/architecture/decisions/ADR-73.md
+/// [BR-62]: ../../../docs/specs/software-spec.md#318-configuration
+pub(crate) fn bless_rules(
+    engine: &Engine,
+    rules_path: Option<&Path>,
+    reconcile: bool,
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<RulesReport> {
+    check_rules_run(engine, rules_path, reconcile, true, evidence)
+}
+
+/// The shared body of [`check_rules`] and [`bless_rules`]: `bless` is the one
+/// switch that writes the blessed set, before classification reads it.
+/// `evidence` is read only when the contract carries a `[security]` table
+/// ([FR-SC-10]).
+///
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+fn check_rules_run(
+    engine: &Engine,
+    rules_path: Option<&Path>,
+    reconcile: bool,
+    bless: bool,
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<RulesReport> {
+    let mut fresh = reconcile_step(engine, reconcile)?;
     let compiled = load_rules_cached(engine, rules_path)?;
     let runtime = quality_runtime(engine)?;
 
-    let (mut violations, checked_rules) = materialise_and_evaluate(engine, &compiled, None)?;
+    let (violations, checked_rules) = materialise_and_evaluate(engine, &compiled, None)?;
+    let mut notes = std::mem::take(&mut fresh.notes);
+    let rules = compiled.rules.constraints.ratchet_rules();
+    let written = if bless && !rules.is_empty() {
+        let path = ratchet::blessed_path(engine.root());
+        let current = ratchet::BlessedSet::from_violations(&violations, &rules);
+        let count = current.len();
+        // Only the evaluated rules' entries are replaced: another contract's
+        // blessed debt in the same file survives (`--rules FILE`). A malformed
+        // existing file is rewritten rather than blocking the one command its
+        // own error tells the user to run.
+        let existing = ratchet::BlessedSet::read(&path).ok().flatten().unwrap_or_default();
+        existing.reblessed(current, &rules).write(&path)?;
+        Some(u32::try_from(count).unwrap_or(u32::MAX))
+    } else {
+        if bless {
+            // Nothing is under ratchet, so there is no debt to bless — and no
+            // reason to create a file the contract never reads.
+            notes.push(format!(
+                "no constraint declares `ratchet = true`: nothing to bless, {} left as it is",
+                ratchet::BLESSED_FILE_REL
+            ));
+        }
+        None
+    };
+    // FR-GV-23: blessed debt is a warning, new or worsened debt an error —
+    // persisted as classified, so the recorded run matches the report.
+    let (mut violations, mut ratchet_report) =
+        classify_against_blessed(engine, &compiled, violations)?;
+    // FR-SC-10: the `[security]` table's verdict, over the evidence the engine
+    // injects — appended before persistence, so the recorded run carries it. No
+    // table, no read: the report is byte-identical whatever evidence exists.
+    let mut checked_rules = checked_rules;
+    let mut missing_scans = Vec::new();
+    if let Some(table) = compiled.rules.security.as_ref() {
+        let verdict = security::check_security(table, &evidence.summary()?);
+        violations.extend(verdict.violations);
+        checked_rules += verdict.checked;
+        notes.extend(verdict.notes);
+        missing_scans = verdict.missing;
+    }
+    if let Some(report) = ratchet_report.as_mut() {
+        report.written = written;
+        if !report.blessed_file_present {
+            notes.push(format!(
+                "no blessed set at {}: every ratchet offender is an error — run `{}` to \
+                 accept the current debt",
+                ratchet::BLESSED_FILE_REL,
+                ratchet::BLESS_COMMAND
+            ));
+        }
+    }
     // Honest "is a contract authored?" signal (NFR-CC-04): the empty contract
     // that a missing default file compiles to carries the `ABSENT_RULES_HASH`
     // sentinel; any loaded file hashes to its content. Computed here rather
@@ -2548,6 +3027,7 @@ pub(crate) fn check_rules(
             file: String::new(),
             node_id: None,
             message: fault,
+            ratchet: None,
         });
     }
     // S-215 / FR-GV-20: the admission-tripwire analog, folded in the same way —
@@ -2561,6 +3041,7 @@ pub(crate) fn check_rules(
             file: String::new(),
             node_id: None,
             message: fault,
+            ratchet: None,
         });
     }
 
@@ -2572,7 +3053,8 @@ pub(crate) fn check_rules(
     // no contract loaded — only the truly empty case (no contract, nothing
     // fired) reports `None`.
     let passed = if rules_present || has_error {
-        Some(!has_error)
+        // FR-SC-10: a run with a required scan missing has no passing verdict.
+        Some(!has_error && missing_scans.is_empty())
     } else {
         None
     };
@@ -2585,7 +3067,9 @@ pub(crate) fn check_rules(
         ran_at: Some(ran_at),
         freshness: fresh.line(),
         warnings: fresh.warnings,
-        notes: fresh.notes,
+        notes,
+        ratchet: ratchet_report,
+        missing_scans,
     })
 }
 
@@ -2593,9 +3077,119 @@ pub(crate) fn check_rules(
 /// epsilon ([FR-GV-04], [FR-GV-05], BR-10); `save` upserts the baseline
 /// instead of comparing.
 ///
+/// Under a `rules.toml [security]` table ([FR-SC-10]) the security verdict is
+/// folded in after the metric one: `save` also records every unsuppressed
+/// stored finding as the ratchet's baseline, and a compare fails on a new
+/// finding or a cap. Without the table `evidence` is never called.
+///
 /// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
 /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
 pub(crate) fn gate(
+    engine: &Engine,
+    threshold: Option<u32>,
+    save: bool,
+    reconcile: bool,
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<GateResult> {
+    // The evidence is read before anything is written: an invalid ignore file
+    // (exit 2) must leave the metric baseline as it was.
+    let compiled = load_rules_cached(engine, None)?;
+    let security = security_evidence(&compiled, evidence)?;
+    let mut result = gate_metrics(engine, threshold, save, reconcile)?;
+    if let Some((table, summary)) = security {
+        fold_security_into_gate(&mut result, table, &summary, save, evidence)?;
+    }
+    Ok(result)
+}
+
+/// The `[security]` table and the evidence summary it is judged over, or `None`
+/// without the table — in which case `evidence` is never called ([FR-SC-10]).
+///
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+fn security_evidence<'a>(
+    compiled: &'a CompiledRules,
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<Option<(&'a crate::config::SecurityRules, security::SecuritySummary)>> {
+    compiled
+        .rules
+        .security
+        .as_ref()
+        .map(|table| Ok((table, evidence.summary()?)))
+        .transpose()
+}
+
+/// Record the ratchet's baseline for `gate --save` and `session_start`
+/// ([FR-SC-10]) — unless a required scan is `missing`, since a baseline recorded
+/// over missing evidence would accept whatever that scan would have found.
+/// Returns the message fragment either way.
+///
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+fn record_security_baseline(
+    table: &crate::config::SecurityRules,
+    summary: &security::SecuritySummary,
+    missing: &[crate::models::quality::MissingScan],
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<String> {
+    if missing.is_empty() {
+        let recorded = evidence.save_baseline(table, &security::baseline_fingerprints(summary))?;
+        return Ok(format!("security baseline saved ({recorded} finding fingerprints)"));
+    }
+    let named: Vec<&str> = missing.iter().map(|m| m.scanner.as_str()).collect();
+    Ok(format!(
+        "security baseline not saved: required scan missing or stale at HEAD: {}",
+        named.join(", ")
+    ))
+}
+
+/// The security half of [`gate`] ([FR-SC-10]). A required scan missing is exit
+/// 5 and no pass; on `save` it also leaves the ratchet's baseline as it was,
+/// since a baseline recorded over missing evidence would accept whatever the
+/// missing scan would have found. The metric baseline is saved regardless.
+///
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+fn fold_security_into_gate(
+    result: &mut GateResult,
+    table: &crate::config::SecurityRules,
+    summary: &security::SecuritySummary,
+    save: bool,
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<()> {
+    let missing = security::missing_scans(table, summary);
+    let append = |message: &mut String, detail: String| {
+        *message = if message.is_empty() { detail } else { format!("{message}; {detail}") };
+    };
+    if save {
+        append(&mut result.message, record_security_baseline(table, summary, &missing, evidence)?);
+    } else {
+        let verdict = security::check_security(table, summary);
+        if !verdict.violations.is_empty() {
+            result.passed = false;
+            append(
+                &mut result.message,
+                format!("{} security violation(s)", verdict.violations.len()),
+            );
+        }
+        result.security_violations = verdict.violations;
+        result.notes.extend(verdict.notes);
+    }
+    if !missing.is_empty() {
+        result.passed = false;
+        if !save {
+            let named: Vec<&str> = missing.iter().map(|m| m.scanner.as_str()).collect();
+            append(
+                &mut result.message,
+                format!("required scan missing or stale at HEAD: {}", named.join(", ")),
+            );
+        }
+    }
+    result.missing_scans = missing;
+    Ok(())
+}
+
+/// The metric half of [`gate`]: everything it did before the `[security]`
+/// table existed.
+fn gate_metrics(
     engine: &Engine,
     threshold: Option<u32>,
     save: bool,
@@ -2613,7 +3207,17 @@ pub(crate) fn gate(
         id: snapshot_id,
         metrics,
         ..
-    } = crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
+    } = crate::metrics::snapshot(
+        runtime,
+        &view,
+        fresh.head.as_deref(),
+        thresholds,
+        &member_access_extensions(engine),
+    )?;
+    // FR-QM-18: advisory beside the verdict, never part of it.
+    let freshness = fresh.line();
+    let mut warnings = fresh.warnings;
+    warnings.extend(coverage_warnings(runtime)?);
 
     let mut result = GateResult {
         passed: true,
@@ -2625,10 +3229,12 @@ pub(crate) fn gate(
         epsilon: EPSILON,
         regressions: Vec::new(),
         structural_faults: Vec::new(),
-        freshness: fresh.line(),
+        freshness,
         message: String::new(),
-        warnings: fresh.warnings,
+        warnings,
         notes: fresh.notes,
+        security_violations: Vec::new(),
+        missing_scans: Vec::new(),
     };
 
     if save {
@@ -2772,10 +3378,20 @@ pub(crate) fn gate(
 /// Per-metric regressions vs the baseline ([FR-GV-05] detail): canonical
 /// metric order, noise-floored.
 fn metric_regressions(base: &MetricSnapshotRow, current: &MetricSnapshot) -> Vec<MetricRegression> {
-    // CR-156: a Modularity that is not applicable on either side is outside the
-    // signal, so its movement is no regression of it (NFR-CC-04).
-    let modularity_applies = current.modularity_not_applicable.is_none()
-        && modularity_drop_out(base.modularity_applicable, base.edge_count).is_none();
+    // CR-156, FR-QM-18: a graph dimension that is not applicable on either side
+    // is outside the signal, so its movement is no regression of it (NFR-CC-04).
+    let base_drop_outs = row_drop_outs(base);
+    let current_drop_outs = [
+        &current.modularity_not_applicable,
+        &current.acyclicity_not_applicable,
+        &current.depth_not_applicable,
+    ];
+    let applies = |metric: &str| {
+        METRIC_NAMES[..3]
+            .iter()
+            .position(|name| *name == metric)
+            .is_none_or(|i| base_drop_outs[i].is_none() && current_drop_outs[i].is_none())
+    };
     let pairs = [
         (
             METRIC_NAMES[0],
@@ -2805,7 +3421,7 @@ fn metric_regressions(base: &MetricSnapshotRow, current: &MetricSnapshot) -> Vec
     ];
     pairs
         .into_iter()
-        .filter(|(metric, _, _)| modularity_applies || *metric != METRIC_NAMES[0])
+        .filter(|(metric, _, _)| applies(metric))
         .filter(|(_, baseline, current)| *current < *baseline - METRIC_NOISE)
         .map(|(metric, baseline, current)| MetricRegression {
             metric: metric.to_string(),
@@ -2818,33 +3434,60 @@ fn metric_regressions(base: &MetricSnapshotRow, current: &MetricSnapshot) -> Vec
 
 /// `session_start` — the MCP spelling of `gate --save` ([FR-GV-04]).
 ///
+/// Under a `rules.toml [security]` table it also records the security ratchet's
+/// baseline, as `gate --save` does ([FR-SC-10]); the message says when a missing
+/// required scan left it unrecorded.
+///
 /// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
-pub(crate) fn session_start(engine: &Engine) -> Result<SessionInfo> {
+/// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+pub(crate) fn session_start(
+    engine: &Engine,
+    evidence: &dyn security::SecurityEvidence,
+) -> Result<SessionInfo> {
     let fresh = reconcile_step(engine, true)?;
     let runtime = quality_runtime(engine)?;
     let view = engine.hydrate(Granularity::ExcludeContains)?;
     // BR-25: baseline under the effective rules.toml thresholds (its hash gates
     // the later session_end comparison, FR-GV-10).
-    let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
+    let compiled = load_rules_cached(engine, None)?;
+    // Read before the snapshot and the baseline write, as `gate` does: an
+    // invalid ignore file (exit 2) leaves the metric baseline as it was.
+    let security = security_evidence(&compiled, evidence)?;
+    let thresholds = effective_thresholds(&compiled.rules);
     // The baseline snapshot persists its offender lists too (FR-QM-15).
     let crate::metrics::RecordedSnapshot {
         id: snapshot_id,
         metrics,
         ..
-    } = crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
+    } = crate::metrics::snapshot(
+        runtime,
+        &view,
+        fresh.head.as_deref(),
+        thresholds,
+        &member_access_extensions(engine),
+    )?;
 
     let started_at = unix_now();
     runtime.submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, started_at))?;
+
+    let mut message = format!(
+        "session started — baseline saved (snapshot #{snapshot_id}); \
+         `session_end` compares against it"
+    );
+    if let Some((table, summary)) = security {
+        let missing = security::missing_scans(table, &summary);
+        message.push_str("; ");
+        message.push_str(&record_security_baseline(table, &summary, &missing, evidence)?);
+    }
 
     Ok(SessionInfo {
         session_id: snapshot_id.to_string(),
         started_at,
         signal: metrics.aggregate_signal,
         freshness: fresh.line(),
-        message: format!(
-            "session started — baseline saved (snapshot #{snapshot_id}); \
-             `session_end` compares against it"
-        ),
+        message,
+        // FR-QM-18: advisory; session_start always records the baseline.
+        warnings: coverage_warnings(runtime)?,
     })
 }
 
@@ -2891,11 +3534,15 @@ fn evolution_point(row: &MetricSnapshotRow, prev: Option<&MetricSnapshotRow>) ->
     };
     let current = normalized(row);
     let previous = prev.map(normalized);
-    // CR-156: a not-applicable Modularity is reported with its reason, and no
-    // delta is reported across a point where it was outside the signal.
-    let not_applicable = modularity_drop_out(row.modularity_applicable, row.edge_count);
-    let previously_applicable =
-        prev.is_none_or(|p| modularity_drop_out(p.modularity_applicable, p.edge_count).is_none());
+    // CR-156, FR-QM-18: a not-applicable graph dimension is reported with its
+    // reason, and no delta is reported across a point where it was outside the
+    // signal. The drop-outs index the first three METRIC_NAMES; Equality and
+    // Redundancy, past them, always apply.
+    let drop_outs = row_drop_outs(row);
+    let previous_drop_outs = prev.map(row_drop_outs);
+    let applies = |drop_outs: &[Option<GraphDimensionNotApplicable>; 3], i: usize| {
+        drop_outs.get(i).is_none_or(Option::is_none)
+    };
 
     EvolutionPoint {
         snapshot_id: row.id,
@@ -2913,9 +3560,12 @@ fn evolution_point(row: &MetricSnapshotRow, prev: Option<&MetricSnapshotRow>) ->
                 metric: (*name).to_string(),
                 normalized: current[i],
                 delta: previous
-                    .filter(|_| i != 0 || (not_applicable.is_none() && previously_applicable))
+                    .filter(|_| {
+                        applies(&drop_outs, i)
+                            && previous_drop_outs.as_ref().is_none_or(|p| applies(p, i))
+                    })
                     .map(|p| current[i] - p[i]),
-                not_applicable: if i == 0 { not_applicable.clone() } else { None },
+                not_applicable: drop_outs.get(i).cloned().flatten(),
             })
             .collect(),
     }
@@ -3243,6 +3893,15 @@ pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
     // has its own way of silently ceasing to work, so the check outlives the
     // choice of mechanism.
     report.hook_warnings = crate::hooks::reachability_findings(engine.root());
+    // FR-IN-12: the Claude Code plugin registered twice, or newer than this
+    // binary. Diagnostic only, like the lines above. The user's Claude Code
+    // directory is read from the environment here, at the `doctor` entry point,
+    // and passed down: `findings` itself reads no environment.
+    report.plugin_warnings = crate::init::plugin::findings(
+        engine.root(),
+        crate::init::plugin::claude_config_dir().as_deref(),
+        env!("CARGO_PKG_VERSION"),
+    );
     Ok(report)
 }
 
@@ -3363,6 +4022,9 @@ fn doctor_report(report: StructuralReport, admission: AdmissionCensus) -> Doctor
         // is a property of the working tree the command ran in, not of the
         // graph `verify` re-derives (CR-106).
         hook_warnings: Vec::new(),
+        // Populated by `doctor` alone: the plugin's registration is a property
+        // of the host settings, not of the graph (FR-IN-12).
+        plugin_warnings: Vec::new(),
         message,
     }
 }

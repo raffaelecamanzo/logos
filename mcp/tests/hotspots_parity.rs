@@ -283,3 +283,74 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_production_scope() {
     client.cancel().await.ok();
     server.abort();
 }
+
+/// The MCP `hotspots` payload with the findings filter on or off.
+async fn mcp_findings_payload(client: &Client, with_findings: bool) -> Value {
+    let mut params = CallToolRequestParams::new("hotspots");
+    let mut args = serde_json::Map::new();
+    args.insert("with_findings".into(), Value::from(with_findings));
+    params = params.with_arguments(args);
+    let result = client.call_tool(params).await.expect("hotspots tool call");
+    assert_ne!(result.is_error, Some(true), "hotspots must succeed");
+    serde_json::from_str(&result.content.first().unwrap().as_text().unwrap().text).expect("valid JSON")
+}
+
+/// FR-SC-14: CLI and MCP show the same findings column and the same filtered
+/// order — absent before any scan, present after one, `tie_b` (identical to
+/// `tie_a` on both axes) leading under the filter on both surfaces.
+#[tokio::test]
+async fn cli_and_mcp_hotspot_payloads_are_identical_with_the_findings_column_and_filter() {
+    let tmp = fixture();
+    let root = tmp.path();
+    let cli = |with_findings: bool| -> Value {
+        let engine = Engine::start(root).expect("engine");
+        serde_json::to_value(engine.hotspots_with_findings(None, false, false, with_findings).expect("hotspots"))
+            .expect("serialize")
+    };
+    let paths = |payload: &Value| -> Vec<String> {
+        payload["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_string()).collect()
+    };
+    cli(false); // warm the lazy mine, so neither compared call carries the first-mine notice
+
+    // No scan: no column on either surface, and the filter changes nothing.
+    {
+        let (client, server) = boot(root).await;
+        for with_findings in [false, true] {
+            let (cli_payload, mcp_payload) = (cli(with_findings), mcp_findings_payload(&client, with_findings).await);
+            assert_eq!(cli_payload, mcp_payload, "no-scan payloads must be byte-identical");
+            assert!(cli_payload["files"][0].get("findings").is_none(), "no scan, no column: {cli_payload}");
+            assert!(cli_payload.get("with_findings").is_none(), "{cli_payload}");
+        }
+        client.cancel().await.ok();
+        server.abort();
+    }
+
+    // One high finding on tie_b, ingested through the engine as the CLI does.
+    let report = root.join(".logos/tie_b.sarif");
+    std::fs::write(
+        &report,
+        r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0","rules":[]}},
+        "results":[{"ruleId":"r","level":"error","message":{"text":"m"},"locations":[{"physicalLocation":
+        {"artifactLocation":{"uri":"src/tie_b.rs"},"region":{"startLine":1}}}]}]}]}"#,
+    )
+    .unwrap();
+    Engine::start(root).expect("engine").security_ingest(&report).expect("ingest");
+
+    let (client, server) = boot(root).await;
+    let (cli_plain, mcp_plain) = (cli(false), mcp_findings_payload(&client, false).await);
+    assert_eq!(cli_plain, mcp_plain, "the column is the same on CLI and MCP");
+    let tie_b = cli_plain["files"].as_array().unwrap().iter().find(|f| f["path"] == "src/tie_b.rs").unwrap();
+    assert_eq!(tie_b["findings"]["count"], 1, "{cli_plain}");
+    assert_eq!(tie_b["findings"]["highest"], "high", "{cli_plain}");
+    assert_eq!(tie_b["findings"]["stale"], 0, "{cli_plain}");
+
+    let (cli_on, mcp_on) = (cli(true), mcp_findings_payload(&client, true).await);
+    assert_eq!(cli_on, mcp_on, "the filtered boards are the same on CLI and MCP");
+    let (plain_order, filtered_order) = (paths(&cli_plain), paths(&cli_on));
+    let pos = |order: &[String], p: &str| order.iter().position(|x| x == p).unwrap();
+    assert!(pos(&plain_order, "src/tie_a.rs") < pos(&plain_order, "src/tie_b.rs"), "{plain_order:?}");
+    assert_eq!(filtered_order.first().map(String::as_str), Some("src/tie_b.rs"), "{filtered_order:?}");
+
+    client.cancel().await.ok();
+    server.abort();
+}

@@ -4,8 +4,11 @@ import type { HotspotReport, TemporalReport } from "../../api/types.ts";
 import {
   fileLine,
   fileRiskRows,
+  findingsSortValue,
+  hasFindingsColumn,
   ownershipRows,
   pctBp,
+  securityHref,
 } from "./analyticsModel.ts";
 
 describe("pctBp", () => {
@@ -58,5 +61,27 @@ describe("fileRiskRows — the temporal join and the n/a rule", () => {
 
   it("ownershipRows keeps only files with a real ownership/entropy signal", () => {
     expect(ownershipRows(temporal).map((f) => f.path)).toEqual(["ranked-with-temporal.rs"]);
+  });
+});
+
+describe("findings column model (S-671, FR-SC-14)", () => {
+  const row = (findings: { count: number; highest: "high" | "low" | null; stale: number } | undefined) =>
+    ({ path: "a.rs", findings }) as unknown as Parameters<typeof hasFindingsColumn>[0][number];
+
+  it("shows the column only when some row carries a cell — a scanned zero counts, no scan does not", () => {
+    expect(hasFindingsColumn([row(undefined), row(undefined)])).toBe(false);
+    expect(hasFindingsColumn([row(undefined), row({ count: 0, highest: null, stale: 0 })])).toBe(true);
+    expect(hasFindingsColumn([])).toBe(false);
+  });
+
+  it("links to the Security page filtered by the encoded path", () => {
+    expect(securityHref("src/a b.rs")).toBe("/security?path=src%2Fa%20b.rs");
+  });
+
+  it("sorts the highest severity first, then the count, and a clean file below both", () => {
+    const sev = (highest: "high" | "low", count: number) => findingsSortValue({ count, highest, stale: 0 });
+    expect(sev("high", 1)).toBeGreaterThan(sev("low", 99));
+    expect(sev("high", 2)).toBeGreaterThan(sev("high", 1));
+    expect(findingsSortValue({ count: 0, highest: null, stale: 5 })).toBeLessThan(sev("low", 1));
   });
 });

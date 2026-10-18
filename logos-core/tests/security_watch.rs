@@ -64,6 +64,7 @@ fn a_sarif_report_dropped_in_the_security_directory_is_ingested_and_no_scanner_s
     let env = ScanEnvironment {
         user_dir: Some(user),
         search_path: Some(bin.into_os_string()),
+        tools_dir: None,
     };
     let engine = Arc::new(Engine::start(&root).expect("engine starts").with_scan_environment(env));
     engine.index();

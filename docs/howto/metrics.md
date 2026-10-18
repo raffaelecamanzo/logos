@@ -25,18 +25,23 @@ as community-internal. A codebase whose directories are cohesive units scores
 high; one where every directory reaches into every other scores low.
 Normalized `(Q + 0.5) / 1.5`; an edgeless graph computes the neutral `1/3`.
 
-**Not applicable below 5 edges.** When the graph Modularity is computed on has
-fewer than **5** dependency edges (an edgeless graph included), Modularity is
-**not applicable**: with so few edges there is no community structure to
-measure. A small library whose one to four edges all cross between two
-directories — a model depending on its enum — computes Q = −0.5, which
-normalizes to exactly 0 and would otherwise zero the whole signal. Instead the
-snapshot keeps Modularity's computed values, stores `modularity_applicable = 0`,
-and the dimension leaves both the geometric mean and the zero short-circuit —
-the same drop-out Cohesion and Focus take (see
-[Applicability and the n/a drop-out](#applicability-and-the-na-drop-out)). The
-threshold is a fixed part of the metric semantics (since version 6), not a
-`rules.toml` setting. Every graph with 5 or more edges scores exactly as before.
+**Not applicable below 5 cross-module edges.** A *cross-module edge* is a
+production dependency edge between two different directories, both in an
+indexed file. When the graph has fewer than **5** of them (an edgeless graph
+included), the three graph-shape dimensions — Modularity, Acyclicity and Depth —
+are **not applicable** together: with so few edges between modules there is no
+module structure to measure. Edges inside one directory do not count, so a
+graph whose edges all stay within their directories drops out as well. A small
+library whose one to four edges all cross between two directories — a model
+depending on its enum — computes Q = −0.5, which normalizes to exactly 0 and
+would otherwise zero the whole signal. Instead the snapshot keeps each
+dimension's computed values, stores `modularity_applicable`,
+`acyclicity_applicable` and `depth_applicable` as 0 beside the
+`cross_module_edges` count, and the three dimensions leave both the geometric
+mean and the zero short-circuit — the same drop-out Cohesion and Focus take
+(see [Applicability and the n/a drop-out](#applicability-and-the-na-drop-out)).
+The threshold is a fixed part of the metric semantics (since version 8), not a
+`rules.toml` setting.
 
 ### 2. Acyclicity — *are there dependency cycles?*
 
@@ -46,14 +51,17 @@ recursion between distinct units. A single function that calls itself
 Normalized `1 / (1 + cycles)` — zero cycles scores a perfect 1,
 one cycle exactly ½, and each further cycle decays the score. The same
 cycle-detection feeds the `max_cycles` rule in `rules.toml`, so the gate and
-the rule can never disagree about what a cycle is.
+the rule can never disagree about what a cycle is. Not applicable, with
+Modularity and Depth, below 5 cross-module edges (see
+[Modularity](#1-modularity--do-directories-form-real-modules)).
 
 ### 3. Depth — *how long are dependency chains?*
 
 The longest path through the graph after collapsing each cycle to a single
 node (so a tangle can't masquerade as healthy layering — a pure cycle has
 depth 1). Normalized `1 / (1 + depth/8)`: shallow, wide structures score
-higher than deep chains.
+higher than deep chains. Not applicable, with Modularity and Acyclicity, below
+5 cross-module edges.
 
 ### 4. Equality — *is complexity evenly spread?*
 
@@ -110,16 +118,25 @@ declarations and 6 helpers is scored over the 6 helpers. A declaration is
 still a link, though: two methods that both call the same abstract hook (the
 template-method pattern) remain one component, as they always were.
 "Sharing state" means two methods read or write a field of their own class
-through an own-field access (`this.x`, `self.x`) that binds to exactly one field
-of that class; an access that binds to nothing connects nothing. In TypeScript
+through an own-field access that binds to exactly one field of that class; an
+access that binds to nothing connects nothing.
+**Only languages that capture member access are scored** (since version 8): a
+class counts only when its language's plugin declares the `member_access`
+capability — Java (`this.x`; a bare implicit `x` is not captured), TypeScript
+(`.ts`), TSX (`.tsx`) and PHP (`$this->x`). A class in any other language —
+JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`), Python, C++, Ruby and the rest — is
+not scored, because without captured field access its LCOM4 would rest on
+intra-class calls alone (see
+[configuration.md](configuration.md#member-access-member_access-member_access_excluded_extensions)). In TypeScript
 and TSX, declared class fields, `#private` fields and constructor parameter
 properties (`constructor(private readonly http: Client)`) are fields of the
 class. Getters, inherited members, and the fields of an abstract class or a
 class expression are not, so accesses to them stay unbound. A TypeScript class
 whose methods share fields can therefore score higher on Cohesion after a
 re-index with this version than it did before.
-**n/a drop-out:** a class with no bodied production method is not scored, and a
-repo with no class that has one reports Cohesion as `n/a` rather than a
+**n/a drop-out:** a class with no bodied production method, or in a language
+that does not declare `member_access`, is not scored, and a repo with no
+scoreable class reports Cohesion as `n/a` rather than a
 fabricated score — see
 [Applicability and the n/a drop-out](#applicability-and-the-na-drop-out).
 
@@ -233,8 +250,9 @@ properties follow:
 
 - **A hard zero collapses the signal to 0.** You cannot compensate a
   catastrophic metric (say, rampant cycles) with good scores elsewhere.
-  Anti-gaming by construction. A not-applicable Modularity (fewer than 5 edges)
-  is outside this rule: it is not measured, so it cannot be a systemic zero.
+  Anti-gaming by construction. A not-applicable Modularity, Acyclicity or Depth
+  (fewer than 5 cross-module edges) is outside this rule: it is not measured, so
+  it cannot be a systemic zero.
 - **Empty graph reports "n/a", not a number.** With zero nodes the snapshot
   stores an explicit empty marker and a NULL signal rather than the
   misleading mid-range value a naive formula would produce.
@@ -250,24 +268,49 @@ Cohesion and Focus only mean something when the repo has the structures they
 measure. A repo with no class-like containers (pure functions only) has nothing
 for LCOM4 or god-container detection to score, and a repo whose classes have no
 production method **with a body** (since version 7 — e.g. only `abstract`
-declarations) has nothing for LCOM4. Rather than fabricate a flattering `1.0`, the engine **drops the
+declarations), or whose classes are all in languages that do not declare
+`member_access`, has nothing for LCOM4. Rather than fabricate a flattering `1.0`, the engine **drops the
 dimension out**: it stores NULL for that metric with an `applicable = 0` flag,
 and the geometric-mean denominator shrinks accordingly — a class-less repo is
 scored on 8 or 9 dimensions, not 10.
 
-Modularity drops out the same way on a graph with fewer than 5 dependency edges,
-with one difference: its computed raw and normalized values are still stored
-(beside `modularity_applicable = 0`), because Modularity is always computable —
-it is the evidence that is too thin. `scan --json` and `quality-report --json`
-carry the reason and the count as `modularity_not_applicable`, for example
-`{"edges": 3, "min_edges": 5, "reason": "3 of 5 dependency edges — too few for
-community structure"}` (`null` when Modularity applies), and the dashboard's
+Modularity, Acyclicity and Depth drop out the same way, together, on a graph
+with fewer than 5 cross-module edges, with one difference: their computed raw
+and normalized values are still stored (beside `modularity_applicable`,
+`acyclicity_applicable` and `depth_applicable` = 0), because each is always
+computable — it is the evidence that is too thin. `scan --json` and
+`quality-report --json` carry the reason as `modularity_not_applicable`,
+`acyclicity_not_applicable` and `depth_not_applicable` (under `metrics` in
+`scan --json`), for example
+`{"edges": 3, "min_edges": 5, "reason": "3 of 5 cross-module edges — too few to
+measure module structure"}` (`null` when the dimension applies), and
+`scan --json` carries the count as `cross_module_edge_count`. The dashboard's
 Health view shows **not applicable** with that reason in place of a score.
-`evolution` marks the same point's Modularity entry `not_applicable` with that
-reason and reports no delta for it across a drop-out, and `gate`'s per-metric
-regression detail never names a Modularity that is not applicable on either
-side — a dimension outside the signal is not a movement of the signal. The
-other seven dimensions always apply.
+`evolution` marks the same point's entry `not_applicable` with that reason and
+reports no delta for it across a drop-out, and `gate`'s per-metric regression
+detail never names a graph dimension that is not applicable on either side — a
+dimension outside the signal is not a movement of the signal. A snapshot scored
+before version 8 reads Acyclicity and Depth as applicable and keeps the
+Modularity reason it was decided on (`"<m> of 5 dependency edges — too few for
+community structure"`, counted over every edge). Equality, Redundancy, Nesting,
+Conciseness and Uniqueness always apply.
+
+**Coverage warning.** A language whose resolver binds no call and no import
+across a file boundary adds no edge between modules, so the graph dimensions
+cannot see its structure even when the graph as a whole is large enough to
+score. When such a language holds at least **10%** of the production callables,
+`scan` (and `scan --json`, the MCP `scan`), `gate`, `session-start` and the
+session-start readout each carry one warning for it (in `warnings` under
+`--json`), for example:
+
+```text
+coverage: ruby is 33% of production callables (warned at 10% or more) and binds no call or import across files (same-file-only) — Modularity, Acyclicity and Depth cannot see its cross-module structure
+```
+
+The share is floored, never rounded up. The cause in parentheses is the same
+tag `status` reports for the language (`same-file-only` or
+`no-resolved-edges`). The warning is advisory: it never changes an exit code and
+never feeds the signal.
 
 This is the never-fabricate guarantee (see [usage.md](usage.md)) applied to the
 metric signal: absent data reads as **n/a**, never as a number.
@@ -311,10 +354,11 @@ number always means changed code, never floating-point weather.
 
 Every scan will append one row to `metric_snapshots` inside
 `.logos/logos.db` — raw and normalized values for all ten metrics (the five new
-dimensions each carry a raw+normalized pair; Cohesion, Focus and Modularity also
-carry an `*_applicable` 0/1 flag for the drop-out — `NULL` on a Modularity row
-written before Logos recorded the flag, read as applicable), node/edge/function
-counts, the
+dimensions each carry a raw+normalized pair; Cohesion, Focus, Modularity,
+Acyclicity and Depth also carry an `*_applicable` 0/1 flag for the drop-out —
+`NULL` on a row written before Logos recorded the flag, read as applicable),
+the `cross_module_edges` count the graph drop-out was decided on (`NULL` before
+version 8), node/edge/function counts, the
 excluded `test_function_count`, the `metric_version` the row was scored under,
 the `thresholds_hash` of the effective structural thresholds, optional commit
 SHA and label, and the signal. The table is **append-only by construction** (no
@@ -337,8 +381,9 @@ semantics** *and* the **same effective thresholds** (the structural detection
 thresholds plus the two near-clone parameters). Two fields guard this:
 
 - **`metric_version`** records which semantics each row used; the current version
-  is **7** (structural metrics count only code with a body — see
-  [Metric semantics version 7](#metric-semantics-version-7--declarative-code-stops-counting)).
+  is **8** (the graph dimensions drop out below 5 cross-module edges, and
+  Cohesion counts only languages that capture member access — see
+  [Metric semantics version 8](#metric-semantics-version-8--the-signal-drops-what-it-cannot-measure)).
   A formula change bumps it, so the first `gate` after an upgrade that bumps it
   re-baselines once.
 - **`thresholds_hash`** records the effective `[metric_thresholds]` set the row
@@ -355,6 +400,28 @@ way, the *next* gate finds a matching version/hash and compares normally — so 
 existing project can upgrade across a semantics change, or an operator can re-tune
 a threshold, without a spurious gate failure. (The version guard is checked
 first, so a pre-v3 baseline re-baselines once on the upgrade, not twice.)
+
+### Metric semantics version 8 — the signal drops what it cannot measure
+
+Version 8 changes two things, so a project re-baselines **once** for both:
+
+| Change | Before (v7) | Since v8 |
+|---|---|---|
+| **Graph-dimension applicability** | Modularity alone dropped out, below 5 dependency edges of any kind | Modularity, Acyclicity and Depth drop out together, below 5 **cross-module** edges |
+| **Cohesion** (LCOM4) | classes of every language, scored from intra-class calls where no field access was captured | only classes of a language that declares `member_access` (Java, TypeScript, TSX, PHP) |
+
+**Why signals move.** Under v7 intra-module edges kept a graph with nothing
+between its modules looking measured, and a class whose language captures no
+field access was scored from its calls alone. A thin graph now scores on fewer
+dimensions, and a codebase whose classes are Python, C++, Ruby, JavaScript or
+another non-declaring language loses Cohesion (or keeps it only over its
+declaring-language classes). A graph with at least five cross-module edges whose
+classes are all in a declaring language scores exactly as under v7.
+
+**What you see on upgrade.** The first `gate` (or `session_start`) after the
+upgrade reports `baseline reset: metric semantics changed` and passes
+informationally; the next one compares normally. Nothing is re-extracted: the
+next `scan` scores under v8.
 
 ### Metric semantics version 7 — declarative code stops counting
 
@@ -447,6 +514,73 @@ names each of them whose score says it is not empty in `worst_offenders.unrecord
 and Health shows it as "not recorded", never as "none flagged". Run `logos scan`
 to record them. Together the lists are the "which code do I fix first?" surface
 that turns a dropped dimension into an actionable to-do list.
+
+Each list is capped at ten entries. Every entry also carries the symbol's id,
+the number it was judged on and the threshold it met. `logos offenders` (MCP:
+`offenders`) lists every entry the last snapshot recorded, without the cap, and
+can narrow the list by path glob and dimension. See
+[commands.md](commands.md#offenders---path-glob---dimension-d).
+
+### Where to start — what an estimate means
+
+The worst-offender lists say what is wrong in each dimension. The **where to
+start** list says which single fix would move the signal most. Every snapshot
+records it beside the lists, and it is shown by the Health **Where to start**
+card, `logos improvements --json`, the `improvements` MCP tool and
+`scan.where_to_start` in `GET /api/v1/health`. All four return the same list for
+one snapshot. See [commands.md](commands.md#improvements).
+
+Each entry is one **fix unit**: a class (Cohesion, Focus), a function (Nesting,
+Conciseness), an exact-duplicate group (Redundancy) or a near-clone group
+(Uniqueness). Its **points** are what the signal would gain if that unit stopped
+offending:
+
+> points = the signal recomputed with this one unit's contribution removed, and
+> nothing else changed, minus the current signal.
+
+What each unit's contribution is:
+
+| Unit | Contribution removed |
+|---|---|
+| Function | It is no longer deeply nested and no longer a brain method |
+| Class | Its `1/LCOM4` becomes 1, or it is no longer a god container |
+| Exact-duplicate group of *k* | The redundant count falls by *k* − 1: every member but the lowest-id one stops being a duplicate. A member that is also dead stays redundant |
+| Near-clone group | Every member leaves the near-cloned count |
+
+Read the figure as an **estimate**, for three reasons. It changes one unit and
+holds everything else fixed, so two fixes recover about the sum of their
+points, not exactly that. The signal is an integer on a 0–10000 scale, so a
+unit that would recover less than one whole point is **not listed** at all. And
+it says what removing the contribution would be worth, not how hard the fix is.
+The payload states this in its `basis` field, and the Health card shows it
+under the table; the card's caption says the figures are advisory and never gate.
+
+Equality, Depth, Acyclicity and Modularity never carry points. Splitting a
+function or a module has no single result, so those dimensions appear only as
+their offender lists (and, for Modularity, as the note that no single unit is
+responsible). At most ten units are listed.
+
+An empty list needs careful reading. `recorded: false` means the snapshot holds
+no ranking (never scanned, or written before 1.20.0): run `logos scan`.
+`recorded: true` with no units means **no single unit recovers a whole point**.
+On a large codebase one deep function often recovers 0 points, so that is not
+the same as clean.
+
+**Outlier labels.** Beside the ranking, seven per-unit measures are checked for
+outliers against the member's **own** distribution (a workspace member is never
+calibrated against another): LCOM4, bodied method count and line span for
+classes, cyclomatic complexity and nesting depth for functions, and the exact-
+duplicate and near-clone group masses. A unit is labelled an outlier on a measure
+when its value is above `Q3 + 1.5 × IQR` of that distribution **and** at or
+above the dimension's detection threshold. With fewer than 8 units in the
+distribution no label is given and the payload's `fence` is `null`. The
+multiplier and the minimum are constants of the metric semantics, not
+`rules.toml` keys. The label separates "bad against this codebase" from "bad by
+the absolute threshold", and a ranked unit shows the measures it carries in the
+card's **Outlier** column.
+
+The list and the labels are advisory. They never enter the signal, the gate
+verdict or any `check` exit code.
 
 ## The non-gated evidence tiers
 

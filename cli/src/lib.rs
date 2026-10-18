@@ -11,9 +11,9 @@
 //!      active extension's subcommand.
 //!   2. Construct an [`Engine`] and call **exactly one** method per subcommand.
 //!   3. Serialise the read-model to stdout (`--json` machine mode, FR-CL-02).
-//!   4. Map outcomes to exit codes 0/1/2/3/4 — success / violation / usage /
-//!      internal / no rules contract loaded (ADR-14, FR-CL-03, FR-EH-01,
-//!      FR-GV-22).
+//!   4. Map outcomes to exit codes 0/1/2/3/4/5 — success / violation / usage /
+//!      internal / no rules contract loaded / a required security scan missing
+//!      (ADR-14, FR-CL-03, FR-EH-01, FR-GV-22, FR-SC-10).
 //!
 //! [FR-DS-04]: ../../docs/specs/requirements/FR-DS-04.md
 //! [ADR-74]: ../../docs/specs/architecture/decisions/ADR-74.md
@@ -122,6 +122,13 @@ pub(crate) enum Commands {
         /// glob (repeatable).
         #[arg(long, value_name = "GLOB", requires = "workspace")]
         exclude: Vec<String>,
+        /// Remove everything Logos wrote into the project (FR-IN-12): the
+        /// managed blocks, the MCP, hook and plugin-enrolment entries, the
+        /// scripts and skill copies, and the managed git hooks. Foreign content
+        /// and `.logos/` stay; a second run is a no-op. `-i`/`--hooks` add
+        /// nothing: everything is removed.
+        #[arg(long, conflicts_with = "workspace")]
+        uninstall: bool,
     },
     /// Build or rebuild the full code-graph index.
     Index,
@@ -316,8 +323,8 @@ pub(crate) enum Commands {
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
     },
-    /// Architecture-rules compliance check; error violations exit 1, no
-    /// rules contract loaded exits 4 (FR-GV-22).
+    /// Architecture-rules compliance check; error violations exit 1, a missing
+    /// required scan 5 (over 1), no rules contract loaded 4 (FR-GV-22).
     Check {
         /// Alternate rules file (defaults to .logos/rules.toml).
         #[arg(long, value_name = "FILE")]
@@ -329,6 +336,11 @@ pub(crate) enum Commands {
         /// for callers that have deliberately authored no contract yet.
         #[arg(long)]
         allow_no_rules: bool,
+        /// Bless the current offenders of every `ratchet = true` constraint:
+        /// write them to the checked-in .logos/rules-baseline.json, then check
+        /// against it (FR-GV-23). The only command that writes that file.
+        #[arg(long)]
+        bless: bool,
     },
     /// Non-blocking quality readout for the report tier (FR-IN-07, CR-095):
     /// the freshly computed signal, the blessed baseline and their delta, plus
@@ -411,6 +423,39 @@ pub(crate) enum Commands {
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
     },
+    /// Every offender the last snapshot recorded, uncapped (FR-QM-19): each
+    /// with its symbol id, value and threshold, narrowed by path and dimension.
+    /// Reads the last `scan`; writes nothing.
+    Offenders {
+        /// Only offenders defined in files matching this project-relative glob
+        /// (`*` stays in one directory, `**` crosses them).
+        #[arg(long, value_name = "GLOB")]
+        path: Option<String>,
+        /// Only this dimension: nesting, conciseness, cohesion, focus,
+        /// uniqueness, acyclicity, depth, equality or redundancy.
+        #[arg(long)]
+        dimension: Option<String>,
+        #[command(flatten)] member: MemberArg,
+    },
+    /// The branch delta (FR-GV-24): every offender and `check` violation
+    /// classified new, worsened, improved, resolved or unchanged per symbol
+    /// against the merge-base of HEAD and the base ref, with near-clone groups
+    /// the branch introduced. Advisory: exits 0 when it classified, 1 when it
+    /// could not measure; never moves `check` or `gate`.
+    Review {
+        /// The ref to compare against (default: the repository's default
+        /// branch — origin/HEAD, else main, else master).
+        #[arg(long, value_name = "REF")]
+        base: Option<String>,
+        #[command(flatten)] member: MemberArg,
+    },
+    /// Where to start (FR-QM-17): the ranked fix units the last snapshot
+    /// recorded, each with its estimated recoverable signal points, and the
+    /// per-member outlier labels. Advisory, never gated. Reads the last `scan`;
+    /// writes nothing.
+    Improvements {
+        #[command(flatten)] member: MemberArg,
+    },
     /// Hotspot ranking: files high in both churn and structural complexity
     /// (the non-gated temporal tier — never moves the gate, FR-GH-06/BR-26).
     Hotspots {
@@ -425,6 +470,10 @@ pub(crate) enum Commands {
         /// ranking (CR-076); default off — the whole-repo board is unchanged.
         #[arg(long)]
         production_scope: bool,
+        /// Rank hotspots with a fresh unsuppressed security finding first, highest
+        /// severity first (FR-SC-14); the findings column shows with or without it.
+        #[arg(long)]
+        with_findings: bool,
         #[command(flatten)] member: MemberArg,
     },
     /// Coverage evidence tier: ingest external reports and read freshness-checked
@@ -522,12 +571,74 @@ pub(crate) enum CoverageCommands {
 #[derive(Subcommand)]
 pub(crate) enum SecurityCommands {
     /// Run every installed, enabled scanner and ingest its SARIF (FR-SC-06).
-    /// The first scan in a project needs `--consent` (FR-SC-07).
+    /// The first scan in a project needs `--consent` (FR-SC-07). `--scanner`
+    /// and `--path` narrow it to a re-scan that takes seconds (FR-SC-17).
     Scan {
         /// Record consent for the scanners not yet named in this project's
         /// consent, which may reach the network to refresh rules or databases.
+        /// With `--install`, also the install consent for what is installed.
         #[arg(long)]
         consent: bool,
+        /// First install the default scanners that are missing and not
+        /// disabled here, as `security install` does (FR-SC-22).
+        #[arg(long, conflicts_with_all = ["scanners", "paths"])]
+        install: bool,
+        /// Run only this scanner, by registry name or SARIF driver name;
+        /// repeatable.
+        #[arg(long = "scanner", value_name = "NAME")]
+        scanners: Vec<String>,
+        /// Scan only this file or directory, relative to the project root (or
+        /// absolute inside it); repeatable. Semgrep, Gitleaks, Bandit, gosec
+        /// and Checkov run on these paths and replace only their findings
+        /// there (Gitleaks keeps its history findings there); Trivy,
+        /// OSV-Scanner and Dependency-Check are whole-manifest
+        /// only, CodeQL whole-project only, and each runs unscoped when named
+        /// with `--scanner`.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+    },
+    /// Download, verify and install scanners into the user-level tools
+    /// directory (FR-SC-21/22). Only scanners with no usable copy are
+    /// installed: a user-level override or a `PATH` copy at or above the
+    /// minimum version is kept. Needs a per-user, per-version consent.
+    /// Dependency-Check (with a managed Java runtime) and CodeQL are opt-in:
+    /// installed only when named (FR-SC-23).
+    Install {
+        /// Scanners to install, by registry name.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        scanners: Vec<String>,
+        /// Every scanner of the default set: all but Dependency-Check and
+        /// CodeQL, which must be named.
+        #[arg(long)]
+        all: bool,
+        /// Also replace a managed copy older than the version this release
+        /// pins, removing the old one.
+        #[arg(long)]
+        update: bool,
+        /// Install offline from a directory of pre-downloaded release
+        /// artifacts, verified exactly as a download is.
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Record the install consent for the versions about to be installed;
+        /// it covers them in every project.
+        #[arg(long)]
+        consent: bool,
+        /// Accept the CodeQL CLI's licence, which allows its use on
+        /// open-source codebases and for academic research only; recorded
+        /// per user for the pinned version. CodeQL is not installed without it.
+        #[arg(long = "accept-codeql-licence")]
+        accept_codeql_licence: bool,
+    },
+    /// Remove Logos-managed scanner copies; a copy you installed yourself is
+    /// never touched (FR-SC-22). The managed Java runtime goes once no
+    /// installed scanner needs it.
+    Uninstall {
+        /// Scanners to uninstall, by registry name.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        scanners: Vec<String>,
+        /// Every scanner Logos installs, Dependency-Check and CodeQL included.
+        #[arg(long)]
+        all: bool,
     },
     /// Ingest a SARIF 2.1.0 report from any tool into the evidence store (FR-SC-01).
     Ingest {
@@ -863,6 +974,9 @@ pub(crate) fn init_options(interactive: bool, hooks: bool, steps: &[std::sync::A
         // The plain single-repo `init` path — never the workspace-member
         // context `federation::enable::enable` sets (CR-119).
         workspace_member: false,
+        // FR-IN-12: the core reads the Claude Code settings of the root it
+        // resolves, so plugin-aware `-i` asks no question of its own.
+        claude_plugin: logos_core::init::ClaudePlugin::Detect,
     }
 }
 
@@ -954,8 +1068,8 @@ impl Output {
         Ok(0)
     }
 
-    /// [`Output::report_gate`] for `health`, the one verdict command whose MCP twin
-    /// takes `repo`: the exit code follows the selected member's verdict.
+    /// [`Output::report_gate`] for `health` and `review`, the verdict commands whose
+    /// MCP twins take `repo`: the exit code follows the selected member's verdict.
     pub(crate) fn report_gate_for<T: serde::Serialize>(
         &self,
         root: &Path,
@@ -973,22 +1087,25 @@ impl Output {
     /// Chokepoint for the governance verdict commands (`check`/`gate`/`doctor`/
     /// `verify`): run a fallible engine method, print the report, and map it to an
     /// exit code (FR-GV-03) — 1 on failure. `sync` rides it too: its verdict is
-    /// whether the run persisted anything it reached (FR-EH-05, FR-CL-03). `passed` reads the report's verdict
-    /// field, which differs by command (`.passed` vs `.ok`), so the caller
-    /// supplies it.
+    /// whether the run persisted anything it reached (FR-EH-05, FR-CL-03). `code`
+    /// projects the report to its exit code, which differs by command: most map
+    /// their verdict field (`.passed` vs `.ok`) through [`violation_code`], while
+    /// `gate`/`session_end` use `GateResult::exit_code`, whose exit 5 marks a
+    /// `[security]` table's missing required scan (FR-SC-10).
     pub(crate) fn report_gate<T: serde::Serialize>(
         &self,
         root: &Path,
         f: impl FnOnce(&Engine) -> Result<T>,
-        passed: impl FnOnce(&T) -> bool,
+        code: impl FnOnce(&T) -> i32,
     ) -> Result<i32> {
         let report = f(&engine(root, false)?)?;
         self.print(&report)?;
-        Ok(violation_code(passed(&report)))
+        Ok(code(&report))
     }
 
     /// `check` alone (FR-GV-22): the exit code is [`RulesReport::exit_code`]'s
-    /// three-state projection; the human surface names the absent-contract
+    /// projection of the tri-state verdict, with exit 5 for a missing required
+    /// security scan (FR-SC-10); the human surface names the absent-contract
     /// state instead of rendering it as a zero violation count, since
     /// "nothing was evaluated" is not the same claim as a clean evaluation
     /// (NFR-CC-04).
@@ -1199,13 +1316,30 @@ mod surface_parity {
         /// The CLI command path that runs the same `Engine` call, space-joined
         /// (`"scan"`, `"coverage status"`, `"xservice callers"`).
         Twin(&'static str),
+        /// The twin is a **mode flag** of another tool's command — `bless_rules`
+        /// is `logos check --bless` (S-507, [FR-GV-23]). The path stays owned by
+        /// that command's own tool; the flag is this tool's.
+        ///
+        /// [FR-GV-23]: ../../docs/specs/requirements/FR-GV-23.md
+        TwinFlag(&'static str, &'static str),
         /// Deliberately MCP-only — the string is the reason, which [FR-CL-06]
         /// requires and this test requires to be non-empty.
         ///
         /// [FR-CL-06]: ../../docs/specs/requirements/FR-CL-06.md
         McpOnly(&'static str),
     }
-    use Reach::{McpOnly, Twin};
+    use Reach::{McpOnly, Twin, TwinFlag};
+
+    impl Reach {
+        /// The CLI command path a twin runs (a flag twin's included), or `None`
+        /// for an MCP-only tool.
+        fn cli_path(&self) -> Option<&'static str> {
+            match self {
+                Twin(path) | TwinFlag(path, _) => Some(path),
+                McpOnly(_) => None,
+            }
+        }
+    }
 
     /// Every tool the shipped MCP server registers, and its CLI reachability.
     ///
@@ -1240,6 +1374,10 @@ mod surface_parity {
             ),
         ),
         ("check_rules", Twin("check")),
+        ("bless_rules", TwinFlag("check", "bless")),
+        ("offenders", Twin("offenders")),
+        ("review", Twin("review")),
+        ("improvements", Twin("improvements")),
         ("evolution", Twin("evolution")),
         ("dsm", Twin("dsm")),
         ("health", Twin("health")),
@@ -1358,6 +1496,20 @@ mod surface_parity {
             "CLI-only: an INSTALL operation (write the Claude Code session-start \
              quality-report hook and merge `.claude/settings.json`), not a \
              question about the code.",
+        ),
+        (
+            "security install",
+            "downloads and installs binaries Logos will then run, under a \
+             per-user install consent (FR-SC-22, ADR-88 §6). An agent must not \
+             grant itself that consent, so MCP has no install tool: \
+             `security_status` names this command for the user to run instead.",
+        ),
+        (
+            "security uninstall",
+            "the other half of the per-user install lifecycle (FR-SC-22): it \
+             changes which scanner binaries exist on the machine, a user's \
+             decision, not an agent's. MCP reports the copies through \
+             `security_status`.",
         ),
     ];
 
@@ -1489,6 +1641,19 @@ mod surface_parity {
                     "tool `{tool}` claims the CLI twin `logos {path}`, which the \
                      shipped clap definition does not accept (FR-CL-06)"
                 ),
+                TwinFlag(path, flag) => {
+                    let mut root = shipped_command();
+                    root.build();
+                    let cmd = path.split(' ').fold(&root, |cmd, segment| {
+                        cmd.find_subcommand(segment)
+                            .unwrap_or_else(|| panic!("`logos {path}` resolves ({segment} missing)"))
+                    });
+                    assert!(
+                        cmd.get_arguments().any(|arg| arg.get_long() == Some(*flag)),
+                        "tool `{tool}` claims the CLI twin `logos {path} --{flag}`, which \
+                         the shipped clap definition does not accept (FR-CL-06)"
+                    );
+                }
                 McpOnly(reason) => {
                     assert!(
                         !reason.trim().is_empty(),
@@ -1527,7 +1692,8 @@ mod surface_parity {
             .iter()
             .filter_map(|(tool, reach)| match reach {
                 Twin(path) => Some((*path, *tool)),
-                McpOnly(_) => None,
+                // A flag twin borrows no path: `check` stays `check_rules`'s.
+                TwinFlag(..) | McpOnly(_) => None,
             })
             .collect();
         // A `BTreeMap` would silently swallow a second tool claiming the same
@@ -1607,7 +1773,7 @@ mod surface_parity {
         root.build();
 
         for (tool, reach) in MCP_SURFACE {
-            let Twin(path) = reach else { continue };
+            let Some(path) = reach.cli_path() else { continue };
             let mut cmd = &root;
             for segment in path.split(' ') {
                 cmd = cmd
@@ -1656,7 +1822,7 @@ mod surface_parity {
 
         let mut mismatched = Vec::new();
         for (tool, reach) in MCP_SURFACE {
-            let Twin(path) = reach else { continue };
+            let Some(path) = reach.cli_path() else { continue };
             let mut cmd = &root;
             for segment in path.split(' ') {
                 cmd = cmd
@@ -1730,17 +1896,8 @@ mod surface_parity {
     // definition for the same reason the CLI-twin sentence above is: prose that
     // names a tool the binary does not have is worse than no prose at all.
 
-    /// One shipped guidance text.
-    struct Guidance {
-        /// How the failure message refers to it.
-        label: &'static str,
-        /// The rendered markdown.
-        text: String,
-        /// Whether a bare backticked `snake_case` span in this text is a tool
-        /// name. True for the MCP instructions, whose naming convention IS the
-        /// wire name; false for the other two, which prefix (`logos:context`,
-        /// `logos context`) and so are free to backtick ordinary identifiers.
-        bare_names_are_tools: bool,
+    /// The markers of the scoping-before-navigation repositioning in one text.
+    struct Repositioning {
         /// The heading that opens the scoping-before-decomposition material.
         scoping_marker: &'static str,
         /// The marker that opens (or names) the navigate-while-coding material,
@@ -1755,6 +1912,27 @@ mod surface_parity {
         ///
         /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
         hypothesis_marker: &'static str,
+    }
+
+    /// One shipped guidance text.
+    struct Guidance {
+        /// How the failure message refers to it.
+        label: &'static str,
+        /// The rendered markdown.
+        text: String,
+        /// Whether a bare backticked `snake_case` span in this text is a tool
+        /// name. True for the MCP instructions, whose naming convention IS the
+        /// wire name; false for the other two, which prefix (`logos:context`,
+        /// `logos context`) and so are free to backtick ordinary identifiers.
+        bare_names_are_tools: bool,
+        /// The scoping-before-navigation repositioning this text carries, which
+        /// [FR-IN-09] governs in three texts. `None` for a page that is only
+        /// reconciled against the binary (the plugin page): it states no
+        /// repositioning, so it is exempt from the tests about one and still
+        /// held to the span walk.
+        ///
+        /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+        repositioning: Option<Repositioning>,
         /// The fewest tool/command claims this text must actually reconcile
         /// against the shipped binary. A floor, not a count: it exists so a text
         /// that stops naming anything — or that the span parser stops reading —
@@ -1797,9 +1975,11 @@ mod surface_parity {
                 label: "the managed CLAUDE.md block",
                 text: read(tmp.path().join("CLAUDE.md")),
                 bare_names_are_tools: false,
-                scoping_marker: "### Primary — before you decompose the work",
-                navigation_marker: "### Secondary — while you are editing",
-                hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                repositioning: Some(Repositioning {
+                    scoping_marker: "### Primary — before you decompose the work",
+                    navigation_marker: "### Secondary — while you are editing",
+                    hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                }),
                 min_reconciled_claims: 12,
             },
             Guidance {
@@ -1810,9 +1990,11 @@ mod surface_parity {
                 // generating the managed block through the real `init` above.
                 text: mcp::INSTRUCTIONS.to_string(),
                 bare_names_are_tools: true,
-                scoping_marker: "## Primary — before the work is decomposed",
-                navigation_marker: "## Secondary — while editing",
-                hypothesis_marker: "hypothesis, not a finding",
+                repositioning: Some(Repositioning {
+                    scoping_marker: "## Primary — before the work is decomposed",
+                    navigation_marker: "## Secondary — while editing",
+                    hypothesis_marker: "hypothesis, not a finding",
+                }),
                 min_reconciled_claims: 16,
             },
             Guidance {
@@ -1821,12 +2003,49 @@ mod surface_parity {
                 label: "the user guide (docs/howto/README.md)",
                 text: read(repo_root().join("docs/howto/README.md")),
                 bare_names_are_tools: false,
-                scoping_marker: "## What it is primarily for: scoping work before you decompose it",
-                navigation_marker: "is the secondary mode",
-                hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                repositioning: Some(Repositioning {
+                    scoping_marker: "## What it is primarily for: scoping work before you decompose it",
+                    navigation_marker: "is the secondary mode",
+                    hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                }),
                 min_reconciled_claims: 10,
             },
+            Guidance {
+                // The plugin page (S-684) names the commands the plugin's hooks
+                // and skill call; every one is reconciled against the binary.
+                label: "the plugin guide (docs/howto/plugin.md)",
+                text: read(repo_root().join("docs/howto/plugin.md")),
+                bare_names_are_tools: false,
+                repositioning: None,
+                min_reconciled_claims: 30,
+            },
         ]
+    }
+
+    /// A how-to page held to the shipped binary by the same tool-and-command
+    /// walk as the guidance texts, but not to FR-IN-09's scoping, hypothesis and
+    /// relational-scope statements, which govern the three channels of one
+    /// message and have no place in a topic page.
+    struct ManualPage {
+        label: &'static str,
+        text: String,
+        /// The fewest claims the walk must reconcile (see
+        /// [`Guidance::min_reconciled_claims`]).
+        min_reconciled_claims: usize,
+    }
+
+    /// The topic pages of `docs/howto/` the walk covers. A page that names a
+    /// command or a tool joins here, so a rename fails a build instead of the page.
+    fn shipped_manual_pages() -> Vec<ManualPage> {
+        let page = |relative: &str| {
+            let path = repo_root().join(relative);
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        };
+        vec![ManualPage {
+            label: "the security page (docs/howto/security.md)",
+            text: page("docs/howto/security.md"),
+            min_reconciled_claims: 23,
+        }]
     }
 
     /// The inline `` `code` `` spans of a markdown text, whitespace-normalised so
@@ -1892,18 +2111,19 @@ mod surface_parity {
     #[test]
     fn the_shipped_guidance_puts_scoping_before_navigation() {
         for g in shipped_guidance() {
-            let scoping = g.text.find(g.scoping_marker).unwrap_or_else(|| {
+            let Some(r) = &g.repositioning else { continue };
+            let scoping = g.text.find(r.scoping_marker).unwrap_or_else(|| {
                 panic!(
                     "{} does not present scoping before decomposition (FR-IN-09): \
                      expected to find {:?}",
-                    g.label, g.scoping_marker
+                    g.label, r.scoping_marker
                 )
             });
-            let navigation = g.text.find(g.navigation_marker).unwrap_or_else(|| {
+            let navigation = g.text.find(r.navigation_marker).unwrap_or_else(|| {
                 panic!(
                     "{} does not mark navigate-while-coding as the secondary mode \
                      (FR-IN-09): expected to find {:?}",
-                    g.label, g.navigation_marker
+                    g.label, r.navigation_marker
                 )
             });
             assert!(
@@ -1911,8 +2131,8 @@ mod surface_parity {
                 "{} presents navigation before scoping (FR-IN-09): {:?} must come \
                  before {:?}",
                 g.label,
-                g.scoping_marker,
-                g.navigation_marker
+                r.scoping_marker,
+                r.navigation_marker
             );
 
             // Headings alone are a weak anchor: swapping the two sections' BODIES,
@@ -1960,12 +2180,13 @@ mod surface_parity {
     #[test]
     fn the_shipped_guidance_states_the_repositioning_as_a_hypothesis() {
         for g in shipped_guidance() {
+            let Some(r) = &g.repositioning else { continue };
             assert!(
-                g.text.contains(g.hypothesis_marker),
+                g.text.contains(r.hypothesis_marker),
                 "{} presents the repositioning as settled (NFR-CC-04): expected \
                  to find {:?}",
                 g.label,
-                g.hypothesis_marker
+                r.hypothesis_marker
             );
         }
     }
@@ -2044,7 +2265,12 @@ mod surface_parity {
     #[test]
     fn the_shipped_guidance_states_the_language_scope_of_its_relational_claims() {
         let scope = normalise_whitespace(RELATIONAL_SCOPE);
-        let guidance = shipped_guidance();
+        // The three texts [FR-IN-09] governs: a page with no repositioning (the
+        // plugin guide) makes no relational claim to scope.
+        let guidance: Vec<Guidance> = shipped_guidance()
+            .into_iter()
+            .filter(|g| g.repositioning.is_some())
+            .collect();
         let mut failures = Vec::new();
         for g in &guidance {
             let text = normalise_whitespace(&g.text);
@@ -2309,6 +2535,9 @@ mod surface_parity {
     #[test]
     fn the_shipped_guidance_names_the_planning_time_capabilities() {
         for g in shipped_guidance() {
+            if g.repositioning.is_none() {
+                continue;
+            }
             let named: BTreeSet<String> = inline_code_spans(g.label, &g.text)
                 .iter()
                 .filter_map(|span| span.split(' ').next().map(str::to_string))
@@ -2371,12 +2600,26 @@ mod surface_parity {
         // the same words anywhere else in a text are still claims to check.
         let scope_spans = inline_code_spans("the relational scope statement", RELATIONAL_SCOPE);
 
-        for g in shipped_guidance() {
+        // The three FR-IN-09 texts, then the how-to pages held to the same walk.
+        let pages = shipped_manual_pages();
+        let texts: Vec<_> = shipped_guidance()
+            .into_iter()
+            .map(|g| (g.label, g.text, g.bare_names_are_tools, g.min_reconciled_claims))
+            .chain(pages.into_iter().map(|p| (p.label, p.text, false, p.min_reconciled_claims)))
+            .collect();
+        // Dropping the pages from the walk must fail here, not only as a
+        // dead-code warning: the three FR-IN-09 texts, plus at least the security page.
+        assert!(
+            texts.len() > 3 && texts.iter().any(|t| t.0.contains("security page")),
+            "the manual pages are no longer walked: {:?}",
+            texts.iter().map(|t| t.0).collect::<Vec<_>>()
+        );
+        for (label, text, bare_names_are_tools, min_reconciled_claims) in texts {
             // How many spans this text actually RECONCILED against the binary.
             // Without a floor, a text the parser mis-reads (or a future edit that
             // drops every backticked claim) checks nothing and still passes.
             let mut reconciled = 0_usize;
-            let spans = inline_code_spans(g.label, &g.text);
+            let spans = inline_code_spans(label, &text);
             // Where the statement sits in this text's span sequence; a text that
             // lacks it exempts nothing, and fails the scope test instead.
             let statement = spans
@@ -2394,14 +2637,14 @@ mod surface_parity {
                         tools.contains(tool),
                         "{} names the MCP tool `logos:{tool}`, which the shipped \
                          server does not register (FR-IN-09). Span: `{span}`",
-                        g.label
+                        label
                     );
                     reconciled += 1;
                 } else if let Some(rest) = span.strip_prefix("logos ") {
                     reconciled += usize::from(assert_command_path_exists(
-                        &commands, rest, &span, g.label,
+                        &commands, rest, &span, label,
                     ));
-                } else if g.bare_names_are_tools
+                } else if bare_names_are_tools
                     && is_plain_token(&span)
                     && !MCP_BARE_NON_TOOLS.contains(&span.as_str())
                 {
@@ -2410,19 +2653,19 @@ mod surface_parity {
                         "{} names `{span}` as a tool, which the shipped server does \
                          not register (FR-IN-09). If it is not a tool claim, add it \
                          to MCP_BARE_NON_TOOLS with the reason",
-                        g.label
+                        label
                     );
                     reconciled += 1;
                 }
             }
             assert!(
-                reconciled >= g.min_reconciled_claims,
+                reconciled >= min_reconciled_claims,
                 "{} reconciled only {reconciled} claims against the shipped binary, \
                  below its floor of {} (FR-IN-09 AC 4). Either the text stopped \
                  naming tools and commands, or the span parser stopped seeing them \
                  — a guard that checks nothing passes for the wrong reason",
-                g.label,
-                g.min_reconciled_claims
+                label,
+                min_reconciled_claims
             );
         }
     }
@@ -2554,5 +2797,210 @@ mod surface_parity {
              invocation (FR-IN-09). Span: `{span}`"
         );
         true
+    }
+
+    /// The `logos` command lines a markdown text shows, as `(inline, fenced)`:
+    /// the inline spans that start `logos `, and the fenced lines that do, with a
+    /// trailing `# comment` cut and a chained line (`a && b`, `a | b`, `a; b`)
+    /// split so each command is read on its own.
+    fn logos_invocations(markdown: &str) -> (Vec<String>, Vec<String>) {
+        let mut fenced = Vec::new();
+        let mut in_fence = false;
+        for line in markdown.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+            } else if in_fence {
+                let line = line.split(" #").next().unwrap_or("");
+                fenced.extend(
+                    line.replace("&&", "|")
+                        .replace("||", "|")
+                        .replace(';', "|")
+                        .split('|')
+                        .map(str::trim)
+                        .filter(|segment| segment.starts_with("logos "))
+                        .map(str::to_string),
+                );
+            }
+        }
+        let inline = inline_code_spans("a markdown text", markdown)
+            .into_iter()
+            .filter(|span| span.starts_with("logos "))
+            .collect();
+        (inline, fenced)
+    }
+
+    /// Check one `logos …` command line against the shipped clap definition and
+    /// return how many flags it reconciled. The command path is as deep as the
+    /// tokens name subcommands, starting at the root, so a global flag may come
+    /// first (`logos --json quality-report`); the first word that is neither a
+    /// flag nor a subcommand of the root names no command and fails. After the
+    /// command, a word that is not a subcommand is a value and ends the descent.
+    /// A flag is checked against the command reached so far: `--long`, `--long=v`,
+    /// and every letter of a short run (`-zq`); a bracketed synopsis
+    /// (`[--base <ref>]`) is read through its brackets.
+    fn reconcile_invocation(root: &clap::Command, invocation: &str) -> usize {
+        let mut cmd = root;
+        let mut descending = true;
+        let mut flags = 0_usize;
+        for token in invocation.split_whitespace().skip(1) {
+            let token = token.trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | ','));
+            let name = token.split('=').next().unwrap_or("");
+            if let Some(long) = name.strip_prefix("--").filter(|n| !n.is_empty()) {
+                assert!(
+                    cmd.get_arguments().any(|arg| arg.get_long() == Some(long)),
+                    "plugin.md shows `{invocation}`, but `{}` accepts no `{name}` \
+                     (FR-IN-09 AC 4)",
+                    cmd.get_name()
+                );
+                flags += 1;
+            } else if let Some(shorts) = name.strip_prefix('-').filter(|n| !n.is_empty()) {
+                for short in shorts.chars() {
+                    assert!(
+                        cmd.get_arguments().any(|arg| arg.get_short() == Some(short)),
+                        "plugin.md shows `{invocation}`, but `{}` accepts no `-{short}` \
+                         (FR-IN-09 AC 4)",
+                        cmd.get_name()
+                    );
+                    flags += 1;
+                }
+            } else if let Some(sub) = descending.then(|| cmd.find_subcommand(token)).flatten() {
+                cmd = sub;
+            } else {
+                assert!(
+                    !std::ptr::eq(cmd, root) || token.starts_with(['<', '$']),
+                    "plugin.md shows `{invocation}`, but `{token}` is no `logos` command \
+                     (FR-IN-09 AC 4)"
+                );
+                descending = false;
+            }
+        }
+        flags
+    }
+
+    /// The plugin guide names only commands and flags the shipped binary accepts
+    /// ([FR-IN-09] AC 4, S-684). The span walk proves each *inline* command
+    /// exists and says nothing of fenced blocks or of the `--flag` after a
+    /// command, which is where a renamed option goes stale. Every `logos …`
+    /// command the guide shows, inline or fenced, resolves to a command, and
+    /// every flag after it to an argument of that command (or a global one).
+    ///
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    #[test]
+    fn the_plugin_guide_names_only_flags_the_binary_accepts() {
+        // The page is a text beside FR-IN-09's three: dropping its entry would
+        // silently drop its span walk too.
+        assert!(
+            shipped_guidance().iter().any(|g| g.label.contains("plugin guide")),
+            "the plugin guide is no longer one of the shipped guidance texts"
+        );
+        let text = std::fs::read_to_string(repo_root().join("docs/howto/plugin.md"))
+            .expect("read docs/howto/plugin.md");
+        let mut root = shipped_command();
+        root.build();
+        let (inline, fenced) = logos_invocations(&text);
+        let inline_flags: usize = inline.iter().map(|i| reconcile_invocation(&root, i)).sum();
+        let fenced_flags: usize = fenced.iter().map(|i| reconcile_invocation(&root, i)).sum();
+        // One floor per half: either can die silently while the other keeps a
+        // single floor satisfied.
+        assert!(
+            inline_flags >= 20 && fenced_flags >= 6,
+            "plugin.md reconciled {inline_flags} inline and {fenced_flags} fenced flags \
+             against the shipped CLI, below the floors of 20 and 6; a guard that \
+             checks nothing passes for the wrong reason"
+        );
+    }
+
+    /// The `LOGOS_*` name at the start of `text`, or an empty string.
+    fn leading_variable(text: &str) -> String {
+        let name: String = text
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+            .collect();
+        if name.starts_with("LOGOS_") { name } else { String::new() }
+    }
+
+    /// Every file under `dir`, recursively.
+    fn files_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read a directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                files_under(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every environment variable the plugin guide names is read by a shipped
+    /// script or source file, and every `LOGOS_*` variable a plugin script reads
+    /// is named in the guide (S-684). Without the second half a variable added to
+    /// a script ships undocumented; without the first, a renamed one stays
+    /// documented. Names match whole: `LOGOS_STOP_HOOK_BUDGET` is not
+    /// `LOGOS_STOP_HOOK_BUDGET_MS`. The first half reads comments as well as
+    /// code, so it proves a name exists in the shipped tree, not that it is live.
+    #[test]
+    fn the_plugin_guide_names_exactly_the_variables_the_plugin_reads() {
+        // Shell variables a plugin script sets for itself, not environment input.
+        const INTERNAL: &[&str] = &["LOGOS_BIN", "LOGOS_PLUGIN_ROOT"];
+
+        let root = repo_root();
+        let guide = std::fs::read_to_string(root.join("docs/howto/plugin.md"))
+            .expect("read docs/howto/plugin.md");
+        let documented: BTreeSet<String> = guide
+            .split("LOGOS_")
+            .skip(1)
+            .map(|piece| leading_variable(&format!("LOGOS_{piece}")))
+            .filter(|name| name.len() > "LOGOS_".len())
+            .collect();
+
+        // What every plugin shell script reads: `$LOGOS_X` and `${LOGOS_X…}`.
+        let mut plugin_files = Vec::new();
+        files_under(&root.join("plugins/logos"), &mut plugin_files);
+        let read_by_scripts: BTreeSet<String> = plugin_files
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sh"))
+            .flat_map(|path| {
+                let text = std::fs::read_to_string(path).expect("read a plugin script");
+                text.split('$')
+                    .skip(1)
+                    .map(|piece| leading_variable(piece.strip_prefix("{").unwrap_or(piece)))
+                    .filter(|name| !name.is_empty() && !INTERNAL.contains(&name.as_str()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for pinned in [
+            "LOGOS_STOP_HOOK_DISABLE",
+            "LOGOS_STOP_HOOK_BUDGET_MS",
+            "LOGOS_QUALITY_REPORT_DISABLE",
+            "LOGOS_PROJECT_DIR",
+        ] {
+            assert!(
+                read_by_scripts.contains(pinned),
+                "the plugin scan stopped seeing `{pinned}`: {read_by_scripts:?}"
+            );
+        }
+        let undocumented: Vec<&String> = read_by_scripts.difference(&documented).collect();
+        assert!(
+            undocumented.is_empty(),
+            "plugin scripts read these variables and plugin.md does not name them: {undocumented:?}"
+        );
+
+        // Every documented variable appears, whole, in a shipped script or source.
+        let mut sources = plugin_files;
+        files_under(&root.join("logos-core/src"), &mut sources);
+        let shipped: String = sources
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .collect();
+        for name in &documented {
+            let whole = shipped.match_indices(name.as_str()).any(|(at, _)| {
+                !shipped[at + name.len()..]
+                    .starts_with(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            });
+            assert!(
+                whole,
+                "plugin.md names `{name}`, which no shipped script or source reads"
+            );
+        }
     }
 }

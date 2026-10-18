@@ -1,0 +1,231 @@
+{
+  "id": 0,
+  "kind": "security-scan",
+  "state": "completed",
+  "elapsed_ms": 420,
+  "events": [
+    {
+      "seq": 0,
+      "at_ms": 0,
+      "event": {
+        "phase": "finished",
+        "scanner": "semgrep",
+        "driver": "Semgrep OSS",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 1,
+      "at_ms": 0,
+      "event": {
+        "phase": "finished",
+        "scanner": "trivy",
+        "driver": "Trivy",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 2,
+      "at_ms": 0,
+      "event": {
+        "phase": "finished",
+        "scanner": "gitleaks",
+        "driver": "gitleaks",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 3,
+      "at_ms": 0,
+      "event": {
+        "phase": "finished",
+        "scanner": "osv-scanner",
+        "driver": "osv-scanner",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 4,
+      "at_ms": 0,
+      "event": {
+        "phase": "started",
+        "scanner": "bandit"
+      }
+    },
+    {
+      "seq": 5,
+      "at_ms": 419,
+      "event": {
+        "phase": "finished",
+        "scanner": "bandit",
+        "driver": "Bandit",
+        "version": "1.2.3",
+        "outcome": "ran",
+        "sarif": [
+          ".logos/security/bandit.sarif"
+        ],
+        "requires_build": [],
+        "findings": 0,
+        "ingests": [
+          {
+            "format": "sarif",
+            "head_sha": "00cd564bce7a791bc89f22ff903a6512ce3c3740",
+            "report_hash": "b369e0199199f79958ee546d4f3c452ebc0ae44eda76787ec3a2b590d4cf9677",
+            "scanners": [
+              {
+                "name": "Bandit",
+                "version": "1.7.10",
+                "snapshot_id": 1,
+                "findings": 0,
+                "replaced_existing": false
+              }
+            ],
+            "findings": 0,
+            "bound": 0,
+            "unbound": 0,
+            "redacted": 0,
+            "unmatched": [],
+            "already_ingested": false
+          }
+        ]
+      }
+    },
+    {
+      "seq": 6,
+      "at_ms": 419,
+      "event": {
+        "phase": "finished",
+        "scanner": "gosec",
+        "driver": "gosec",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 7,
+      "at_ms": 419,
+      "event": {
+        "phase": "finished",
+        "scanner": "checkov",
+        "driver": "Checkov",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 8,
+      "at_ms": 420,
+      "event": {
+        "phase": "finished",
+        "scanner": "codeql",
+        "driver": "CodeQL",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    },
+    {
+      "seq": 9,
+      "at_ms": 420,
+      "event": {
+        "phase": "finished",
+        "scanner": "dependency-check",
+        "driver": "dependency-check",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    }
+  ],
+  "events_dropped": 0,
+  "result": {
+    "consent_recorded": [],
+    "scanners": [
+      {
+        "scanner": "semgrep",
+        "driver": "Semgrep OSS",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "trivy",
+        "driver": "Trivy",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "gitleaks",
+        "driver": "gitleaks",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "osv-scanner",
+        "driver": "osv-scanner",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "bandit",
+        "driver": "Bandit",
+        "version": "1.2.3",
+        "outcome": "ran",
+        "sarif": [
+          ".logos/security/bandit.sarif"
+        ],
+        "requires_build": [],
+        "findings": 0,
+        "ingests": [
+          {
+            "format": "sarif",
+            "head_sha": "00cd564bce7a791bc89f22ff903a6512ce3c3740",
+            "report_hash": "b369e0199199f79958ee546d4f3c452ebc0ae44eda76787ec3a2b590d4cf9677",
+            "scanners": [
+              {
+                "name": "Bandit",
+                "version": "1.7.10",
+                "snapshot_id": 1,
+                "findings": 0,
+                "replaced_existing": false
+              }
+            ],
+            "findings": 0,
+            "bound": 0,
+            "unbound": 0,
+            "redacted": 0,
+            "unmatched": [],
+            "already_ingested": false
+          }
+        ]
+      },
+      {
+        "scanner": "gosec",
+        "driver": "gosec",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "checkov",
+        "driver": "Checkov",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "codeql",
+        "driver": "CodeQL",
+        "version": null,
+        "outcome": "not_installed"
+      },
+      {
+        "scanner": "dependency-check",
+        "driver": "dependency-check",
+        "version": null,
+        "outcome": "not_installed"
+      }
+    ],
+    "findings": 0
+  },
+  "error": null
+}

@@ -3703,6 +3703,398 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 35");
     }
 
+    /// Migration 36 ([CR-164], S-504) is purely additive: every pre-migration
+    /// snapshot row — and its offender rows — survives byte for byte with
+    /// `insight_recorded` `NULL`, the "not recorded" reading no back-fill
+    /// overwrites, and the three new tables arrive **empty**. Then the additions
+    /// are exercised: the flag admits only `1`, every row names an existing
+    /// snapshot and a positive rank, a ranked unit carries at least one point,
+    /// and each key is unique.
+    ///
+    /// [CR-164]: ../../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md
+    #[test]
+    fn migration_36_adds_the_where_to_start_tables_and_old_snapshots_read_not_recorded() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..35]).unwrap();
+        for id in [1, 2] {
+            conn.execute(
+                "INSERT INTO metric_snapshots (
+                     id, created_at, node_count, edge_count, function_count,
+                     test_function_count, metric_version, empty,
+                     modularity_raw, modularity_normalized,
+                     acyclicity_raw, acyclicity_normalized,
+                     depth_raw, depth_normalized,
+                     equality_raw, equality_normalized,
+                     redundancy_raw, redundancy_normalized,
+                     nesting_raw, nesting_normalized,
+                     conciseness_raw, conciseness_normalized,
+                     cohesion_raw, cohesion_normalized, cohesion_applicable,
+                     focus_raw, focus_normalized, focus_applicable,
+                     uniqueness_raw, uniqueness_normalized,
+                     thresholds_hash, aggregate_signal, modularity_applicable,
+                     offenders_recorded)
+                 VALUES (?1, 1000, 14, 6, 9, 2, 7, 0,
+                         0.2, 0.46, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0,
+                         0.1, 0.9, 0.0, 1.0,
+                         NULL, NULL, 0,
+                         0.0, 1.0, 1,
+                         0.0, 1.0,
+                         'h', 8000, 1, 1)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO metric_snapshot_offenders (snapshot_id, dimension, rank, name, file, line, detail)
+             VALUES (2, 'nesting', 1, 'deep', 'src/d.rs', 3, 'nesting depth 6')",
+            [],
+        )
+        .unwrap();
+        let before = read_table(&conn, "metric_snapshots", "id");
+        let offenders_before = read_table(&conn, "metric_snapshot_offenders", "snapshot_id, dimension, rank");
+        for table in ["metric_snapshot_fix_units", "metric_snapshot_outlier_measures", "metric_snapshot_outlier_labels"] {
+            assert!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
+                    .is_err(),
+                "{table} does not exist at v35"
+            );
+        }
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..36]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 36, "35 → 36, exactly one step");
+        // Read at v36, so a later migration's column is never counted as this one's.
+        let after = read_table(&conn, "metric_snapshots", "id");
+        assert_eq!(after.len(), before.len());
+        for (old, new) in before.iter().zip(&after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one column added");
+            assert_eq!(&new[..old.len()], &old[..], "every existing column verbatim");
+            assert_eq!(new[old.len()], "NULL", "a pre-migration snapshot recorded no ranking");
+        }
+        let last: String = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info('metric_snapshots') ORDER BY cid DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, "insight_recorded", "the appended column is the S-504 flag");
+        assert_eq!(
+            read_table(&conn, "metric_snapshot_offenders", "snapshot_id, dimension, rank"),
+            offenders_before,
+            "the offender rows are untouched"
+        );
+        for table in ["metric_snapshot_fix_units", "metric_snapshot_outlier_measures", "metric_snapshot_outlier_labels"] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 0, "no back-fill into {table}: old snapshots stay not recorded");
+        }
+
+        // The flag admits 1 only.
+        conn.execute("UPDATE metric_snapshots SET insight_recorded = 1 WHERE id = 2", [])
+            .expect("1 is admitted");
+        for refused in [0, 2] {
+            assert!(
+                conn.execute("UPDATE metric_snapshots SET insight_recorded = ?1 WHERE id = 2", [refused])
+                    .is_err(),
+                "insight_recorded = {refused} is refused"
+            );
+        }
+
+        // A fix unit: an existing snapshot, rank ≥ 1, points ≥ 1, a unique key.
+        let unit = |snapshot: i64, rank: i64, points: i64| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_fix_units
+                     (snapshot_id, rank, kind, node_id, name, file, line, dimensions, points, detail, outliers)
+                 VALUES (?1, ?2, 'class', 7, 'C', NULL, NULL, 'cohesion', ?3, 'LCOM4 3', '')",
+                rusqlite::params![snapshot, rank, points],
+            )
+        };
+        unit(2, 1, 5).expect("a well-formed unit with an unbound file is admitted");
+        assert!(unit(2, 1, 5).is_err(), "a (snapshot, rank) is unique");
+        assert!(unit(2, 0, 5).is_err(), "ranks are 1-based");
+        assert!(unit(2, 2, 0).is_err(), "a ranked unit recovers at least one point");
+        assert!(unit(99, 1, 5).is_err(), "a unit names an existing snapshot");
+
+        // A measure: an existing snapshot, a unique (snapshot, measure), and a
+        // NULL fence and threshold admitted.
+        let measure = |snapshot: i64, name: &str| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_outlier_measures (snapshot_id, measure, units, fence, threshold, labelled)
+                 VALUES (?1, ?2, 3, NULL, NULL, 0)",
+                rusqlite::params![snapshot, name],
+            )
+        };
+        measure(2, "cc").expect("a measure below the minimum size stores no fence");
+        assert!(measure(2, "cc").is_err(), "a (snapshot, measure) is unique");
+        assert!(measure(99, "span").is_err(), "a measure names an existing snapshot");
+
+        let label = |snapshot: i64, rank: i64| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_outlier_labels (snapshot_id, measure, rank, node_id, name, file, line, value)
+                 VALUES (?1, 'lcom4', ?2, 7, 'C', NULL, NULL, 23)",
+                rusqlite::params![snapshot, rank],
+            )
+        };
+        label(2, 1).expect("a well-formed label is admitted");
+        assert!(label(2, 1).is_err(), "a (snapshot, measure, rank) is unique");
+        assert!(label(2, 0).is_err(), "ranks are 1-based");
+        assert!(label(99, 1).is_err(), "a label names an existing snapshot");
+
+        // Forward-only: re-running the full ledger never re-applies migration 36.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 36", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 36 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 36");
+    }
+
+    /// Migration 37 ([CR-218], S-676) is purely additive: every pre-migration
+    /// snapshot row survives byte for byte with `offender_values_recorded`
+    /// `NULL`, every pre-migration offender row survives with its four new
+    /// columns `NULL`, and the uncapped table arrives **empty** — no back-fill.
+    /// Read back through the store's own offender read, the old entries carry
+    /// `None` for all four fields, never `0`, and the snapshot reads "not
+    /// recorded" for them ([NFR-CC-04]). Then the additions are exercised: the
+    /// flag admits only `1`, and an uncapped row names an existing snapshot, a
+    /// positive rank and a unique key.
+    ///
+    /// [CR-218]: ../../../../docs/requests/CR-218-agent-dev-kit-plugin-and-review.md
+    /// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn migration_37_adds_offender_values_and_old_snapshots_read_not_recorded() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..36]).unwrap();
+        for id in [1, 2] {
+            conn.execute(
+                "INSERT INTO metric_snapshots (
+                     id, created_at, node_count, edge_count, function_count,
+                     test_function_count, metric_version, empty,
+                     modularity_raw, modularity_normalized,
+                     acyclicity_raw, acyclicity_normalized,
+                     depth_raw, depth_normalized,
+                     equality_raw, equality_normalized,
+                     redundancy_raw, redundancy_normalized,
+                     nesting_raw, nesting_normalized,
+                     conciseness_raw, conciseness_normalized,
+                     cohesion_raw, cohesion_normalized, cohesion_applicable,
+                     focus_raw, focus_normalized, focus_applicable,
+                     uniqueness_raw, uniqueness_normalized,
+                     thresholds_hash, aggregate_signal, modularity_applicable,
+                     offenders_recorded, insight_recorded)
+                 VALUES (?1, 1000, 14, 6, 9, 2, 7, 0,
+                         0.2, 0.46, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0,
+                         0.1, 0.9, 0.0, 1.0,
+                         NULL, NULL, 0,
+                         0.0, 1.0, 1,
+                         0.0, 1.0,
+                         'h', 8000, 1, 1, 1)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO metric_snapshot_offenders (snapshot_id, dimension, rank, name, file, line, detail)
+             VALUES (2, 'nesting', 1, 'deep', 'src/d.rs', 3, 'nesting depth 6'),
+                    (2, 'depth', 1, 'src', NULL, NULL, 'src → lib (2 directories)')",
+            [],
+        )
+        .unwrap();
+        let before = read_table(&conn, "metric_snapshots", "id");
+        let offenders_before = read_table(&conn, "metric_snapshot_offenders", "snapshot_id, dimension, rank");
+        assert!(
+            conn.query_row("SELECT count(*) FROM metric_snapshot_offenders_uncapped", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "the uncapped table does not exist at v36"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..37]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 37, "36 → 37, exactly one step");
+        // Read at v37, so a later migration's column is never counted as this one's.
+        let after = read_table(&conn, "metric_snapshots", "id");
+        assert_eq!(after.len(), before.len());
+        for (old, new) in before.iter().zip(&after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one column added");
+            assert_eq!(&new[..old.len()], &old[..], "every existing column verbatim");
+            assert_eq!(new[old.len()], "NULL", "a pre-migration snapshot recorded no offender values");
+        }
+        let last: String = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info('metric_snapshots') ORDER BY cid DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, "offender_values_recorded", "the appended column is the S-676 flag");
+        let offenders_after = read_table(&conn, "metric_snapshot_offenders", "snapshot_id, dimension, rank");
+        assert_eq!(offenders_after.len(), offenders_before.len());
+        for (old, new) in offenders_before.iter().zip(&offenders_after) {
+            assert_eq!(new.len(), old.len() + 4, "node_id, measure, value and threshold added");
+            assert_eq!(&new[..old.len()], &old[..], "every existing offender column verbatim");
+            assert!(new[old.len()..].iter().all(|v| v == "NULL"), "nothing back-filled: {new:?}");
+        }
+        let uncapped: i64 = conn
+            .query_row("SELECT count(*) FROM metric_snapshot_offenders_uncapped", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uncapped, 0, "no back-fill: old snapshots have no uncapped list");
+
+        // Read back the way the store reads an old snapshot: "not recorded",
+        // never a zero.
+        let mut old = crate::models::quality::WorstOffenders {
+            recorded: true,
+            ..Default::default()
+        };
+        super::super::read_snapshot_offenders(&conn, super::super::CAPPED_OFFENDERS, 2, &mut old).unwrap();
+        assert_eq!(old.nesting.len(), 1, "the capped entry still reads");
+        assert_eq!(old.depth.len(), 1);
+        for entry in old.nesting.iter().chain(&old.depth) {
+            assert_eq!(
+                (entry.node_id.as_deref(), entry.measure, entry.value, entry.threshold),
+                (None, None, None, None),
+                "an old entry's four fields read not recorded, never 0: {entry:?}"
+            );
+        }
+
+        // The flag admits 1 only.
+        conn.execute("UPDATE metric_snapshots SET offender_values_recorded = 1 WHERE id = 2", [])
+            .expect("1 is admitted");
+        for refused in [0, 2] {
+            assert!(
+                conn.execute("UPDATE metric_snapshots SET offender_values_recorded = ?1 WHERE id = 2", [refused])
+                    .is_err(),
+                "offender_values_recorded = {refused} is refused"
+            );
+        }
+
+        // An uncapped row: an existing snapshot, rank ≥ 1, a unique key, and the
+        // four value columns nullable (a Depth row has no node id or threshold).
+        let row = |snapshot: i64, rank: i64| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_offenders_uncapped
+                     (snapshot_id, dimension, rank, name, file, line, detail, node_id, measure, value, threshold)
+                 VALUES (?1, 'depth', ?2, 'src', NULL, NULL, 'src → lib (2 directories)', NULL, 'chain_length', 2, NULL)",
+                rusqlite::params![snapshot, rank],
+            )
+        };
+        row(2, 1).expect("a well-formed row with no node id or threshold is admitted");
+        assert!(row(2, 1).is_err(), "a (snapshot, dimension, rank) is unique");
+        assert!(row(2, 0).is_err(), "ranks are 1-based");
+        assert!(row(99, 1).is_err(), "a row names an existing snapshot");
+
+        // Forward-only: re-running the full ledger never re-applies migration 37.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 37", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 37 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 37");
+    }
+
+    /// Migration 38 (S-523, [CR-171], [FR-QM-18]) adds Acyclicity's and Depth's
+    /// applicability flags and the cross-module edge count all three graph
+    /// dimensions are decided on — forward-only and purely additive: every
+    /// existing row crosses 37 → 38 byte for byte with the three new columns
+    /// `NULL`, nothing is back-filled, a v7 row reads Acyclicity and Depth
+    /// applicable and keeps its recorded Modularity drop-out, and the flags
+    /// admit only 0/1 and the count only a non-negative integer.
+    ///
+    /// [CR-171]: ../../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+    /// [FR-QM-18]: ../../../../docs/specs/requirements/FR-QM-18.md
+    #[test]
+    fn migration_38_adds_the_graph_dimension_flags_and_old_rows_read_applicable() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..37]).unwrap();
+        // Row 1: a v7 snapshot with Modularity dropped out (4 edges, all
+        // counted); row 2: one where it applied.
+        for (id, edges, modularity_applicable) in [(1, 4, 0), (2, 40, 1)] {
+            conn.execute(
+                "INSERT INTO metric_snapshots (
+                     id, created_at, node_count, edge_count, function_count,
+                     test_function_count, metric_version, empty,
+                     modularity_raw, modularity_normalized,
+                     acyclicity_raw, acyclicity_normalized,
+                     depth_raw, depth_normalized,
+                     equality_raw, equality_normalized,
+                     redundancy_raw, redundancy_normalized,
+                     nesting_raw, nesting_normalized,
+                     conciseness_raw, conciseness_normalized,
+                     cohesion_raw, cohesion_normalized, cohesion_applicable,
+                     focus_raw, focus_normalized, focus_applicable,
+                     uniqueness_raw, uniqueness_normalized,
+                     thresholds_hash, aggregate_signal, modularity_applicable,
+                     offenders_recorded, insight_recorded, offender_values_recorded)
+                 VALUES (?1, 1000, 14, ?2, 9, 2, 7, 0,
+                         0.2, 0.46, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0,
+                         0.1, 0.9, 0.0, 1.0,
+                         NULL, NULL, 0,
+                         0.0, 1.0, 1,
+                         0.0, 1.0,
+                         'h', 8000, ?3, 1, 1, 1)",
+                rusqlite::params![id, edges, modularity_applicable],
+            )
+            .unwrap();
+        }
+        let before = read_table(&conn, "metric_snapshots", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..38]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 38, "37 → 38, exactly one step");
+        // Read at v38, so a later migration's column is never counted as this one's.
+        let after = read_table(&conn, "metric_snapshots", "id");
+        assert_eq!(after.len(), before.len());
+        for (old, new) in before.iter().zip(&after) {
+            assert_eq!(new.len(), old.len() + 3, "exactly three columns added");
+            assert_eq!(&new[..old.len()], &old[..], "every existing column verbatim");
+            assert!(new[old.len()..].iter().all(|v| v == "NULL"), "nothing back-filled: {new:?}");
+        }
+        let appended: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('metric_snapshots') ORDER BY cid DESC LIMIT 3")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(appended, ["cross_module_edges", "depth_applicable", "acyclicity_applicable"]);
+
+        // The v7 Modularity drop-out is untouched; how a reader takes the NULL
+        // flags (applicable) and the missing count (the v7 all-edges reason) is
+        // pinned on a real store in `tests/metrics.rs`.
+        let modularity: Vec<Option<i64>> = conn
+            .prepare("SELECT modularity_applicable FROM metric_snapshots ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(modularity, [Some(0), Some(1)]);
+
+        // The flags admit 0/1 only; the count a non-negative integer.
+        for column in ["acyclicity_applicable", "depth_applicable"] {
+            for admitted in [0, 1] {
+                conn.execute(&format!("UPDATE metric_snapshots SET {column} = ?1 WHERE id = 1"), [admitted])
+                    .unwrap_or_else(|e| panic!("{column} = {admitted} is admitted: {e}"));
+            }
+            assert!(
+                conn.execute(&format!("UPDATE metric_snapshots SET {column} = 2 WHERE id = 1"), []).is_err(),
+                "{column} is constrained to 0/1"
+            );
+        }
+        conn.execute("UPDATE metric_snapshots SET cross_module_edges = 0 WHERE id = 1", [])
+            .expect("a zero count is admitted");
+        assert!(
+            conn.execute("UPDATE metric_snapshots SET cross_module_edges = -1 WHERE id = 1", []).is_err(),
+            "a negative count is refused"
+        );
+
+        // Forward-only: re-running the full ledger never re-applies migration 38.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 38", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 38 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 38");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

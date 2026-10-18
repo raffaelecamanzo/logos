@@ -490,15 +490,17 @@ export interface MetricValue {
   normalized: number;
 }
 
-/** Why Modularity is not applicable (mirrors `ModularityNotApplicable`, CR-156):
- *  the graph it was computed on has fewer edges than it needs for community
- *  structure. `reason` is the server's one spelling, rendered verbatim. */
-export interface ModularityNotApplicable {
-  /** `m` — the edges of the graph Modularity was computed on. */
+/** Why a graph dimension — Modularity, Acyclicity or Depth — is not applicable
+ *  (mirrors `GraphDimensionNotApplicable`, FR-QM-18; Modularity alone since
+ *  CR-156): the graph has fewer cross-module edges than module structure needs.
+ *  `reason` is the server's one spelling, rendered verbatim. */
+export interface GraphDimensionNotApplicable {
+  /** The edges counted against the threshold — cross-module edges since metric
+   *  semantics v8, every edge on an older Modularity drop-out. */
   edges: number;
   /** The fixed threshold (5). */
   min_edges: number;
-  /** e.g. "3 of 5 dependency edges — too few for community structure". */
+  /** e.g. "3 of 5 cross-module edges — too few to measure module structure". */
   reason: string;
 }
 
@@ -506,11 +508,21 @@ export interface ModularityNotApplicable {
 export interface MetricSnapshot {
   /** Always the computed pair — also when Modularity is not applicable. */
   modularity: MetricValue;
-  /** Non-null when Modularity is not applicable (CR-156): it left the aggregate,
-   *  so the grid names the reason instead of scoring it. */
-  modularity_not_applicable: ModularityNotApplicable | null;
+  /** Non-null when Modularity is not applicable (CR-156, FR-QM-18): it left the
+   *  aggregate, so the grid names the reason instead of scoring it. */
+  modularity_not_applicable: GraphDimensionNotApplicable | null;
+  /** Always the computed pair — also when Acyclicity is not applicable. */
   acyclicity: MetricValue;
+  /** Non-null when Acyclicity is not applicable (FR-QM-18) — the same condition
+   *  as Modularity's on a metric-semantics v8 snapshot. */
+  acyclicity_not_applicable: GraphDimensionNotApplicable | null;
+  /** Always the computed pair — also when Depth is not applicable. */
   depth: MetricValue;
+  /** Non-null when Depth is not applicable (FR-QM-18). */
+  depth_not_applicable: GraphDimensionNotApplicable | null;
+  /** The cross-module edges the three graph dimensions' applicability was
+   *  decided on; `null` on a snapshot from before metric semantics v8. */
+  cross_module_edge_count: number | null;
   equality: MetricValue;
   redundancy: MetricValue;
   nesting: MetricValue;
@@ -570,6 +582,60 @@ export interface WorstOffenders {
   unrecorded?: string[];
 }
 
+/** What a ranked "where to start" unit is (mirrors `FixUnitKind`, [FR-QM-17]). */
+export type FixUnitKind = "class" | "function" | "duplicate_group" | "clone_group";
+
+/** One ranked fix unit (mirrors `FixUnit`): the one thing a fix addresses, with
+ *  the signal points fixing it would recover — an ESTIMATE under a single-unit
+ *  counterfactual, always ≥ 1 (a unit recovering no whole point is not ranked). */
+export interface FixUnit {
+  kind: FixUnitKind;
+  node_id: number;
+  name: string;
+  file: string;
+  line: number | null;
+  /** The dimension keys the unit offends, in canonical order. */
+  dimensions: string[];
+  points: number;
+  detail: string;
+  /** The `OutlierMeasure.measure`s whose label this unit carries. */
+  outliers: string[];
+}
+
+/** One unit labelled an outlier on one measure (mirrors `OutlierLabel`). */
+export interface OutlierLabel {
+  node_id: number;
+  name: string;
+  file: string;
+  line: number | null;
+  value: number;
+}
+
+/** One per-unit measure's per-member Tukey calibration (mirrors `OutlierMeasure`).
+ *  `fence` is `null` below the minimum distribution size (never a guess). */
+export interface OutlierMeasure {
+  measure: string;
+  units: number;
+  fence: number | null;
+  threshold: number | null;
+  labelled: number;
+  labels: OutlierLabel[];
+}
+
+/** The "where to start" read-model (mirrors `WhereToStart`, [FR-QM-17]).
+ *
+ *  `recorded` is the state, never the list lengths: `true` with no `units` means
+ *  no single unit recovers a whole point (never "clean"); `false` means the
+ *  snapshot recorded no ranking — a snapshot written before it, or no scan at
+ *  all — and both lists mean nothing (NFR-CC-04). `basis` is what every `points`
+ *  figure means, present on a recorded set only. Advisory: never gated (BR-61). */
+export interface WhereToStart {
+  recorded: boolean;
+  basis?: string;
+  units: FixUnit[];
+  outliers: OutlierMeasure[];
+}
+
 /** The last persisted scan read-model (mirrors `ScanResult`). */
 export interface ScanResult {
   /** The 0–10000 signal, or `null` when the last persisted snapshot has none —
@@ -578,6 +644,8 @@ export interface ScanResult {
   freshness: string;
   metrics: MetricSnapshot;
   worst_offenders: WorstOffenders;
+  /** The advisory "where to start" ranking of the same snapshot (FR-QM-17). */
+  where_to_start: WhereToStart;
   warnings: string[];
 }
 
@@ -652,6 +720,19 @@ export interface Hotspot {
   defect_commits: number;
   /** Per-file coverage cell — fresh value / stale label / `n/a`. */
   coverage: CoverageCell;
+  /** The findings cell (FR-SC-14); absent when nothing was ever scanned, so the
+   *  column is hidden rather than a column of zeros. */
+  findings?: PathFindings;
+}
+
+/** One path's unsuppressed security findings (mirrors `PathFindings`, FR-SC-14). */
+export interface PathFindings {
+  /** Unsuppressed findings whose file still matches the scanned content. */
+  count: number;
+  /** The highest severity among the counted findings; `null` when `count` is 0. */
+  highest: SecuritySeverity | null;
+  /** Unsuppressed findings the file's later change made stale — labelled, never counted. */
+  stale: number;
 }
 
 /** The hotspot ranking read-model (mirrors `HotspotReport`, [FR-GH-06]). */
@@ -680,6 +761,9 @@ export interface HotspotReport {
   coverage_basis: string;
   /** The static-reachability caveat, present only on the fallback basis. */
   coverage_label: string | null;
+  /** Present (`true`) only when the findings filter was applied (FR-SC-14):
+   *  hotspots with a fresh unsuppressed finding rank first, highest severity first. */
+  with_findings?: boolean;
 }
 
 /** One file's temporal metrics over the HEAD-anchored window (mirrors
@@ -881,11 +965,20 @@ export interface ParsedConfig {
 
 /** The parsed `rules.toml` projection the typed rules fields pre-fill from. The
  *  values mirror `Constraints`/`MetricThresholds` (`Option<T>` ⇒ `T | null`).
- *  `max_dead` is either an absolute integer or a delta table — only the absolute
- *  form is typed here; the delta form is edited via the raw pane (mirrors the
+ *  A constraint is a scalar, a count-delta table (`max_dead`, `max_cycles`,
+ *  `max_clone_ratio`) or a ratchet table (FR-GV-23) — only the scalar form is
+ *  typed here; the table forms are edited via the raw pane (mirrors the
  *  server's `MaxDead::as_absolute`). */
 export interface ParsedRules {
-  constraints: Record<string, number | boolean | { baseline: number; delta: number } | null>;
+  constraints: Record<
+    string,
+    | number
+    | boolean
+    | { baseline: number; delta: number }
+    | { max: number; ratchet: boolean }
+    | { ratchet: boolean }
+    | null
+  >;
   metric_thresholds: Record<string, number | null>;
 }
 
@@ -2494,4 +2587,488 @@ export interface WorkspaceStatistics {
   reads_saved_estimate: number;
   /** The headline value estimate, summed — likewise an estimate, never a measurement. */
   tokens_saved_estimate: number;
+}
+
+// ── Security (mirrors `SecurityModel` / `SecurityPage`, S-670, FR-SC-09) ──────────
+// The wire mirrors of `logos-core/src/security/{surface,context,page,gate}.rs` and
+// `history/security/{owasp,suppress}.rs`. A stored finding carries no source
+// snippet (ADR-79 §2), and a secret-class one is stored with a fixed, redacted
+// message — the page still renders `[redacted]` for it.
+
+/** A finding's normalised severity (mirrors `Severity`). */
+export type SecuritySeverity = "critical" | "high" | "medium" | "low" | "info";
+
+/** The copy of a scanner that runs (mirrors `InstalledCopy`). */
+export interface SecurityInstalledCopy {
+  copy: "override" | "path" | "managed";
+  binary: string;
+  version: string | null;
+  update_available: string | null;
+  /** Present when no version probe ran (mirrors `Unprobed`): the page probes
+   *  only a scanner the project's scan consent names (HF-3). */
+  unprobed?: "not_consented";
+}
+
+/** A stored report's tally, on a `stale` or `fresh` row. */
+interface StoredScan {
+  snapshot_head: string;
+  version: string;
+  /** Unsuppressed findings in it; `0` on a fresh row is a clean scan. */
+  findings: number;
+  suppressed: number;
+}
+
+/** Why a stored report is stale (mirrors `StaleBecause`): HEAD moved since the
+ *  full scan behind it, a file it anchors changed, or only a scoped re-scan
+ *  (`security scan --path`, FR-SC-17) stands behind it. */
+export type SecurityStaleBecause = "head_moved" | "files_changed" | "scoped_only";
+
+/** Exactly one scanner state (mirrors the flattened `ScanState`). */
+export type SecurityScanState =
+  | { state: "not_installed" }
+  | { state: "disabled" }
+  | { state: "never_run" }
+  | ({ state: "stale"; because: SecurityStaleBecause } & StoredScan)
+  | ({ state: "fresh" } & StoredScan);
+
+/** One row of the scanner matrix (mirrors `ScannerStatus`). */
+export type SecurityScannerStatus = SecurityScanState & {
+  /** The registry name, or the driver name of an unregistered tool. */
+  scanner: string;
+  /** The SARIF driver name its reports carry. */
+  driver: string;
+  installed: SecurityInstalledCopy | null;
+  /** The command that installs it, when Logos can install it here. */
+  install: string | null;
+  /** Present and true for a scanner installed only when named (Dependency-Check,
+   *  CodeQL: FR-SC-23): `scan --install` never installs it. */
+  opt_in?: boolean;
+  /** Present only for a scanner with a licence to acknowledge (CodeQL, FR-SC-23):
+   *  the versions accepted, and whether the pinned one is (mirrors `LicenceAcceptance`). */
+  licence?: { accepted: string[]; pinned_accepted: boolean };
+  /** The failure log, when its last scan failed. */
+  last_failure: string | null;
+};
+
+/** `security status` (mirrors `SecurityStatus`). */
+export interface SecurityStatus {
+  head_sha: string | null;
+  consent: { consented: string[]; pending: string[] };
+  scanners: SecurityScannerStatus[];
+  /** Stored reports from tools that are not registered scanners. */
+  other_reports: SecurityScannerStatus[];
+}
+
+/** How a claim can be trusted (mirrors `Confidence`). */
+export type SecurityConfidence = "resolved" | "unresolved" | "unbound";
+
+/** One finding's graph context (mirrors `FindingContext`, S-669). */
+export interface SecurityFindingContext {
+  line: number | null;
+  enclosing: {
+    confidence: SecurityConfidence;
+    symbol: SymbolRef | null;
+    unbound_because: "no_location" | "not_indexed" | "stale" | "no_symbol" | null;
+  };
+  reachability: {
+    confidence: SecurityConfidence;
+    /** `unknown` is never `unreachable`: the graph could not have seen a way in. */
+    verdict: "reachable" | "unreachable" | "unknown";
+    route: { symbol: string; name: string; hops: number } | null;
+    unresolved_because:
+      | "language"
+      | "no_routes"
+      | "unproven_route"
+      | "dispatch"
+      | "value_reference"
+      | "not_in_graph"
+      | null;
+  };
+  /** Sizes of `impact` on the enclosing symbol; the lists are one impact call away.
+   *  Only `confidence` when unbound. */
+  blast_radius: {
+    confidence: SecurityConfidence;
+    depth?: number;
+    upstream?: number;
+    downstream?: number;
+    docs?: number;
+  };
+  resolution: {
+    language: string;
+    calls: { references: number; bound: number; same_file_edges: number; cross_file_edges: number | null };
+  } | null;
+}
+
+/** A suppression entry's verdict on one finding (mirrors `Suppression`). */
+export type SecuritySuppression =
+  | { state: "suppressed"; reason: string; expires: string | null }
+  | { state: "expired"; reason: string; expires: string | null };
+
+/** One ignore entry (mirrors `IgnoreEntry`). */
+export interface SecurityIgnoreEntry {
+  fingerprint: string;
+  reason: string;
+  expires: string | null;
+}
+
+/** What a triage write left on disk (mirrors `IgnoreWrite`, S-672): the file
+ *  written, the entry added or removed, and the entries it holds now. */
+export interface SecurityIgnoreWrite {
+  file: string;
+  entry: SecurityIgnoreEntry;
+  entries: number;
+}
+
+/** One listed finding (mirrors `ListedFinding`, its `SecurityFinding` flattened). */
+export interface SecurityFinding {
+  scanner_name: string;
+  scanner_version: string;
+  head_sha: string;
+  fingerprint: string;
+  rule_id: string;
+  severity: SecuritySeverity;
+  cwes: string[];
+  /** The rule message — or, when `redacted`, fixed text the page never shows. */
+  message: string;
+  /** A secret-class finding: its message reads `[redacted]` on the page. */
+  redacted: boolean;
+  binding: "bound" | "unmatched" | "ambiguous" | "unbound";
+  report_path: string | null;
+  path: string | null;
+  start_line: number | null;
+  start_column: number | null;
+  end_line: number | null;
+  end_column: number | null;
+  /** The same `FRESHNESS_*` tokens coverage uses: `n/a` when no file is bound. */
+  freshness: Freshness;
+  /** The 2025 categories; the page reads the edition it shows from `editions`. */
+  owasp: string[];
+  unclassified: SecurityUnclassified | null;
+  suppression: SecuritySuppression | null;
+  context: SecurityFindingContext;
+}
+
+/** Why a finding sits under no category (mirrors `Unclassified`). */
+export type SecurityUnclassified = "no_cwe" | "unmapped";
+
+/** One OWASP category's coverage (mirrors `CategoryCoverage`). Not covered is not
+ *  a count of zero: nothing that ran could detect it (BR-66). */
+export interface SecurityCategoryCoverage {
+  id: string;
+  name: string;
+  scanners: string[];
+  enabled_scanners: string[];
+  state: { state: "not_covered" } | { state: "covered"; findings: number };
+}
+
+/** `security findings` (mirrors `SecurityFindings`). */
+export interface SecurityFindings {
+  edition: OwaspEditionYear;
+  as_of: string;
+  /** Every stored report; empty when nothing was ever scanned or ingested. */
+  scanned: { driver: string; version: string; head_sha: string; findings: number }[];
+  /** Installed, enabled scanners with no stored report. */
+  never_run: string[];
+  /** Said when nothing was ever scanned or ingested. */
+  notice: string | null;
+  total: number;
+  findings: SecurityFinding[];
+  categories: SecurityCategoryCoverage[];
+  suppressions: unknown[];
+}
+
+/** An OWASP Top 10 edition. */
+export type OwaspEditionYear = "2025" | "2021";
+
+/** The stored findings under one edition (mirrors `EditionClassification`). */
+export interface SecurityEditionClassification {
+  edition: OwaspEditionYear;
+  categories: SecurityCategoryCoverage[];
+  /** One per stored finding, keyed by scanner and fingerprint. */
+  findings: {
+    scanner_name: string;
+    fingerprint: string;
+    categories: string[];
+    unclassified: SecurityUnclassified | null;
+  }[];
+}
+
+/** A required scanner with no fresh scan at HEAD (mirrors `MissingScan`). */
+export interface SecurityMissingScan {
+  scanner: string;
+  state: "never_run" | "stale" | "not_installed" | "disabled" | "unknown";
+  message: string;
+}
+
+/** The `[security]` gate band (mirrors `SecurityGateBand`, FR-SC-10). */
+export interface SecurityGateBand {
+  passed: boolean;
+  checked_rules: number;
+  required_scanners: string[];
+  missing_scans: SecurityMissingScan[];
+  violations: Violation[];
+  notes: string[];
+}
+
+/** The Security page read-model (mirrors `SecurityPage`). */
+export interface SecurityPage {
+  status: SecurityStatus;
+  findings: SecurityFindings;
+  /** 2025 then 2021: switching edition reads this, never the network. */
+  editions: SecurityEditionClassification[];
+  /** `null` without a `rules.toml [security]` table. */
+  gate: SecurityGateBand | null;
+}
+
+/** `GET /api/v1/security` (mirrors `SecurityModel`). */
+export interface SecurityModel {
+  status: StatusInfo;
+  security: SecurityPage;
+}
+
+// ── Security scan job (mirrors `jobs::JobSnapshot` and `security::ScanProgress`,
+// S-673, FR-SC-15) ──────────────────────────────────────────────────────────
+
+/** One scanner's outcome in a scan (mirrors `RunOutcome`, flattened). */
+export type SecurityRunOutcome =
+  | { outcome: "ran"; sarif: string[]; requires_build: string[]; findings: number }
+  | { outcome: "not_installed" }
+  | { outcome: "disabled" }
+  | { outcome: "not_selected" }
+  | { outcome: "requires_build"; languages: string[]; reason: string }
+  | { outcome: "not_applicable"; reason: string }
+  | { outcome: "failed"; exit_code: number | null; log: string | null; stderr: string };
+
+/** How a scoped scan treated one scanner (mirrors `RunScope`, FR-SC-17). */
+export type SecurityRunScope = { kind: "paths"; paths: string[] } | { kind: "unscoped"; reason: string };
+
+/** One scanner's part of a scan (mirrors `ScannerRun`; `scope` only in a
+ *  scoped scan, which the page never starts). */
+export type SecurityScannerRun = {
+  scanner: string;
+  driver: string;
+  version: string | null;
+  scope?: SecurityRunScope;
+} & SecurityRunOutcome;
+
+/** What a scan returns (mirrors `SecurityScanSummary`). */
+export interface SecurityScanSummary {
+  consent_recorded: string[];
+  scanners: SecurityScannerRun[];
+  findings: number;
+}
+
+/** One step of a scan as it happened (mirrors `ScanProgress`). */
+export type SecurityScanProgress = { phase: "started"; scanner: string } | ({ phase: "finished" } & SecurityScannerRun);
+
+/** One replayed job event (mirrors `JobEvent`). */
+export interface ScanJobEvent {
+  seq: number;
+  at_ms: number;
+  event: SecurityScanProgress;
+}
+
+export type ScanJobState = "running" | "completed" | "failed" | "cancelled";
+
+/** The member's scan job (mirrors `JobSnapshot`). */
+export interface ScanJob {
+  id: number;
+  kind: "security-scan";
+  state: ScanJobState;
+  elapsed_ms: number;
+  events: ScanJobEvent[];
+  events_dropped: number;
+  /** Once `completed`. */
+  result: SecurityScanSummary | null;
+  /** Once `failed`. */
+  error: string | null;
+}
+
+/** `GET /api/v1/security/scan` and the cancel's answer: `null` when no scan ran in this serve. */
+export interface ScanJobModel {
+  job: ScanJob | null;
+}
+
+/** `POST /api/v1/security/scan` (mirrors `jobs::Started`). */
+export interface ScanJobStarted {
+  /** A scan was already running: this start joined it. */
+  joined: boolean;
+  job: ScanJob;
+}
+
+/** The `409` of a start without consent: the scanners the dialog names. */
+export interface ScanConsentRequired {
+  error: string;
+  consent_required: string[];
+}
+
+// ── Workspace security (mirrors `WorkspaceSecurityAnswer`, S-674, FR-SC-16) ─────
+// The wire mirrors of `logos-core/src/security/rollup.rs` and
+// `federation::query::WorkspaceSecurity`. Every count is of fresh, unsuppressed
+// findings; a member never scanned has no count at all (`null`), never 0 (BR-66).
+
+/** Whether a member has a current scan (mirrors `MemberScan`). */
+export type MemberSecurityScan = "never_run" | "stale" | "fresh";
+
+/** Findings by severity, and their sum (mirrors `SeverityCounts`). */
+export interface SecuritySeverityCounts {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  info: number;
+  total: number;
+}
+
+/** The stored findings the counts leave out, by why (mirrors `Excluded`). */
+export interface SecurityExcluded {
+  /** In a report that is not fresh: stale, or from a scanner now disabled. */
+  not_fresh: number;
+  /** In a fresh report, suppressed by a current entry. */
+  suppressed: number;
+}
+
+/** One member's security roll-up (mirrors `MemberSecurity`). */
+export interface MemberSecurity {
+  scan: MemberSecurityScan;
+  scanners_fresh: number;
+  /** Registered scanners not disabled, plus unregistered tools with a stored report. */
+  scanners_enabled: number;
+  scanners: SecurityScannerStatus[];
+  /** `null` unless `scan` is `fresh`: nothing current to count. */
+  findings: SecuritySeverityCounts | null;
+  excluded: SecurityExcluded;
+  owasp: {
+    edition: OwaspEditionYear;
+    /** `findings` is `null` when no fresh report can detect the category. */
+    categories: { id: string; name: string; findings: number | null }[];
+    /** Counted findings under no category of the edition. */
+    unclassified: number;
+  }[];
+}
+
+/** One category summed over the members read (mirrors `WorkspaceCategory`). */
+export interface WorkspaceSecurityCategory {
+  id: string;
+  name: string;
+  /** Members with a fresh report from a scanner that can detect it. */
+  covered_in: number;
+  /** `null` when no member covers it — not covered, never 0. */
+  findings: number | null;
+}
+
+/** The workspace roll-up (mirrors `WorkspaceSecurity`). */
+export interface WorkspaceSecurity {
+  /** One row per member, roster order; an unread member carries `error`. */
+  members: MemberResult<MemberSecurity>[];
+  members_total: number;
+  members_read: number;
+  members_never_scanned: number;
+  /** Members with a fresh report: the population the totals are summed over. */
+  members_counted: number;
+  totals: SecuritySeverityCounts;
+  excluded: SecurityExcluded;
+  /** `unclassified`: counted findings under no category of the edition. */
+  owasp: { edition: OwaspEditionYear; categories: WorkspaceSecurityCategory[]; unclassified: number }[];
+}
+
+/** `GET /api/v1/workspace/security` (mirrors `WorkspaceSecurityAnswer`). */
+export interface WorkspaceSecurityAnswer extends AnswerCompleteness {
+  security: WorkspaceSecurity;
+}
+
+// ── Scanner install (mirrors `tools::surface::{InstallPlan, InstallStep,
+// SecurityInstallJob}` and the `tool-install` job, S-747, FR-SC-24) ──────────
+
+/** One tool's install outcome (mirrors `InstallOutcome`, flattened). */
+export type SecurityInstallOutcome =
+  | { outcome: "installed"; binary: string }
+  | { outcome: "already_present"; binary: string }
+  | { outcome: "unavailable"; reason: string }
+  | { outcome: "failed"; stage: "download" | "checksum" | "unpack" | "install"; reason: string }
+  | { outcome: "cancelled" };
+
+/** One tool's part of an install (mirrors `ToolInstall`). */
+export type SecurityToolInstall = { tool: string; version: string } & SecurityInstallOutcome;
+
+/** What an install returns (mirrors `SecurityInstall`). */
+export interface SecurityInstall {
+  consent_recorded: string[];
+  licence_recorded: string[];
+  kept: ({ tool: string } & SecurityInstalledCopy)[];
+  tools: SecurityToolInstall[];
+}
+
+/** One step of the install job as it happened (mirrors `InstallStep`): a tool's
+ *  install, a scanner's run in the scan that follows, or the cancel's report of
+ *  the tools installed by then (`<tool> <version>`). */
+export type SecurityInstallStep =
+  | { phase: "install_started"; tool: string; version: string }
+  | ({ phase: "install_finished" } & SecurityToolInstall)
+  | SecurityScanProgress
+  | { phase: "cancelled"; installed: string[] };
+
+/** The `tool-install` job's result (mirrors `SecurityInstallJob`). */
+export interface SecurityInstallJobResult {
+  install: SecurityInstall;
+  /** The scan that followed Install & scan; `null` for an install alone. */
+  scan: SecurityScanSummary | null;
+}
+
+/** The member's install job (mirrors `JobSnapshot` of kind `tool-install`). */
+export interface InstallJob {
+  id: number;
+  kind: "tool-install";
+  state: ScanJobState;
+  elapsed_ms: number;
+  events: { seq: number; at_ms: number; event: SecurityInstallStep }[];
+  events_dropped: number;
+  /** Once `completed`. */
+  result: SecurityInstallJobResult | null;
+  /** Once `failed`. */
+  error: string | null;
+}
+
+/** `GET /api/v1/security/install` and the cancel's answer. */
+export interface InstallJobModel {
+  job: InstallJob | null;
+}
+
+/** `POST /api/v1/security/install` (mirrors `jobs::Started`). */
+export interface InstallJobStarted {
+  joined: boolean;
+  job: InstallJob;
+}
+
+/** One line of the consent dialog (mirrors `ConsentLine`). */
+export type SecurityConsentLine =
+  | { line: "tool"; tool: string; version: string; source: string; size: number; recorded: boolean; offered: boolean }
+  | { line: "support"; tool: string; version: string; source: string; size: number; recorded: boolean; for_tools: string[] }
+  | { line: "licence"; tool: string; version: string; terms: string; flag: string };
+
+/** What the consent dialog shows before an install (mirrors `InstallPlan`). */
+export interface SecurityInstallPlan {
+  lines: SecurityConsentLine[];
+  kept: ({ tool: string } & SecurityInstalledCopy)[];
+  /** Install & scan's scanners short of the project's network consent; an
+   *  offered opt-in tool among them is asked only when ticked. */
+  scan_consent: string[];
+}
+
+/** The `409` of an install start with a line still unanswered. */
+export interface InstallConsentRequired {
+  error: string;
+  plan: SecurityInstallPlan;
+}
+
+/** What `POST /api/v1/security/install` sends: the action, then the dialog's
+ *  answers. `tools` absent is Install & scan's default set. */
+export interface SecurityInstallAsk {
+  tools?: string[];
+  update?: boolean;
+  scan?: boolean;
+  opt_in?: string[];
+  consent?: string[];
+  accept_licences?: string[];
+  scan_consent?: string[];
 }

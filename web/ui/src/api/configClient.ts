@@ -62,14 +62,28 @@ export function formBody(params: Record<string, string>): string {
 }
 
 /** Read the server's verbatim error text (trimmed) for an honest rejection.
- *  Exported so the workspace writes layer their JSON `{error}` read on top of
- *  it rather than restating it. */
+ *  {@link apiErrorDetail} layers the `/api/v1` JSON `{error}` read on top of it. */
 export async function detailOf(res: Response): Promise<string> {
   try {
     return (await res.text()).trim();
   } catch {
     return "";
   }
+}
+
+/** The `/api/v1` family's JSON error body (`{ "error": "…" }`) as its message, or
+ *  {@link detailOf}'s verbatim text when the body is not that shape (a guard's
+ *  plain-text `403`). One reader for the workspace writes and the Security
+ *  page's scan and triage writes. */
+export async function apiErrorDetail(res: Response): Promise<string> {
+  const text = await detailOf(res);
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === "string") return parsed.error;
+  } catch {
+    // Not JSON — the verbatim text is the honest detail.
+  }
+  return text;
 }
 
 /** `GET /api/v1/config` — both policy files + the masked chat key (FR-UI-12). A

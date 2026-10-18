@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
+import { SecurityView } from "./security/SecurityView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../extensions/registry.ts";
 import { extensionsInfo, STUB_UI, StubView, stubInfo } from "../test/extensions.tsx";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
+import { WorkspaceSecurityView } from "./workspace/WorkspaceSecurityView.tsx";
 import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.tsx";
 import { NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { viewForPath, VIEW_REGISTRY } from "./index.ts";
@@ -34,6 +36,12 @@ describe("VIEW_REGISTRY", () => {
 
   it("registers the Statistics view at /statistics (S-235)", () => {
     expect(VIEW_REGISTRY["/statistics"]).toBe(StatisticsView);
+  });
+
+  it("registers the member-scoped Security view at /security, in group B (S-670, FR-SC-09)", () => {
+    expect(VIEW_REGISTRY["/security"]).toBe(SecurityView);
+    expect(viewForPath("/security")).toBe(SecurityView);
+    expect(NAV_ITEMS.find((i) => i.path === "/security")).toMatchObject({ id: "security", group: "B", scope: "member" });
   });
 
   it("does NOT register /overview (that route is retired)", () => {
@@ -122,6 +130,9 @@ describe("the app-level workspace views (S-428 FR-UI-36, S-429 FR-UI-37)", () =>
     expect(VIEW_REGISTRY["/workspace-dashboard"]).toBe(WorkspaceDashboardView);
     expect(VIEW_REGISTRY["/workspace-health"]).toBe(WorkspaceHealthView);
     expect(VIEW_REGISTRY["/workspace-statistics"]).toBe(WorkspaceStatisticsView);
+    // S-674: the app-level Security roll-up, never the member-scoped Security page.
+    expect(VIEW_REGISTRY["/workspace-security"]).toBe(WorkspaceSecurityView);
+    expect(VIEW_REGISTRY["/workspace-security"]).not.toBe(SecurityView);
     // …and none of them is the member-scoped Statistics view, which stays at
     // `/statistics` (FR-UI-37: the member-scoped view is unchanged).
     expect(VIEW_REGISTRY["/statistics"]).toBe(StatisticsView);

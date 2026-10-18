@@ -422,10 +422,7 @@ fn resolve_base(
     let mut args = vec!["merge-base", "--octopus"];
     args.extend(live.iter().map(|(_, _, commit)| *commit));
     args.extend(merge);
-    let commit = git(root, &args).ok().filter(|o| o.status.success()).map(|o| {
-        String::from_utf8_lossy(&o.stdout).trim().to_string()
-    });
-    match commit.filter(|c| !c.is_empty()) {
+    match git_line(root, &args) {
         Some(commit) => (
             Some(commit),
             "the common ancestor (git merge-base) of the supplied refs".to_string(),
@@ -438,9 +435,41 @@ fn resolve_base(
 }
 
 /// Per-file changed line ranges on the **new** side of a diff.
-type FileRanges = BTreeMap<String, Vec<(u32, u32)>>;
+pub(crate) type FileRanges = BTreeMap<String, Vec<(u32, u32)>>;
 
-/// The line ranges `commit` changed relative to `base`, per file.
+/// The line ranges `commit` changed relative to `base`, per file ([`diff_ranges`]).
+fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
+    diff_ranges(root, &[base, commit])
+}
+
+/// The hunks the branch changed: the line ranges of **the working tree** that
+/// differ from `merge_base`, per file — committed and uncommitted edits alike,
+/// since a review reads the tree as it stands — and every line of each
+/// untracked, unignored file, which git's diff does not list but the branch
+/// added all the same. A deleted file is [`WHOLE_FILE`], as in
+/// [`changed_ranges`]. The branch security delta's `hunk` method and its
+/// `touched` class read these ([FR-SC-18]).
+///
+/// Local and read-only: a single-rev `git diff <merge_base>` and
+/// `git ls-files --others --exclude-standard`, neither of which writes.
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+pub(crate) fn changed_hunks(root: &Path, merge_base: &str) -> Result<FileRanges> {
+    let mut files = diff_ranges(root, &[merge_base])?;
+    let out = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    anyhow::ensure!(out.status.success(), "{}", git_failure(&out.status, &out.stderr));
+    // `-z` paths are NUL-terminated and never C-quoted.
+    for path in out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        files
+            .entry(String::from_utf8_lossy(path).into_owned())
+            .or_default()
+            .push(WHOLE_FILE);
+    }
+    Ok(files)
+}
+
+/// `git diff --unified=0` over `revs` (two commits, or one commit against the
+/// working tree), parsed into new-side ranges per file.
 ///
 /// `--unified=0` so a range is the change itself and not three lines of
 /// courtesy context either side; `--no-renames` so a rename reads as the
@@ -448,7 +477,7 @@ type FileRanges = BTreeMap<String, Vec<(u32, u32)>>;
 /// convention has to be stripped (which would corrupt a real path beginning
 /// `b/`). The header path still needs [`header_path`] — `--no-prefix` does not
 /// make the rest of the line a bare path.
-fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
+fn diff_ranges(root: &Path, revs: &[&str]) -> Result<FileRanges> {
     // STREAMED, not buffered. The parse consumes only the four header line
     // kinds and discards every `+`/`-` content line, but `Command::output()`
     // would hold the entire diff in memory first — and a branch that deletes a
@@ -462,9 +491,8 @@ fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
             "--no-renames",
             "--no-prefix",
             "--unified=0",
-            base,
-            commit,
         ])
+        .args(revs)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -522,7 +550,7 @@ fn paths_differing_from_snapshot(root: &Path, commit: &str) -> Option<BTreeSet<S
 /// contributes, since it has no new side to carry hunks. A ref that deletes a
 /// file has modified every symbol the file held, and that is exactly the kind of
 /// contention this query exists to surface before a merge.
-const WHOLE_FILE: (u32, u32) = (1, u32::MAX);
+pub(crate) const WHOLE_FILE: (u32, u32) = (1, u32::MAX);
 
 /// Feed one line of `git diff --unified=0 --no-prefix` to the parse.
 ///
@@ -746,7 +774,11 @@ fn touched_symbols<'a>(
 /// useless. So an overlapping node is kept only when it contains no other
 /// overlapping node: a hunk inside one function yields that function, and a
 /// range spanning several siblings yields each sibling.
-fn innermost<'a>(nodes: &[&'a NodeRow], (lo, hi): (u32, u32)) -> Vec<&'a NodeRow> {
+///
+/// Also the binder a security finding's enclosing symbol is read with
+/// ([`crate::security::context`], S-669): one rule for "which symbol does this
+/// line sit in", never a second one.
+pub(crate) fn innermost<'a>(nodes: &[&'a NodeRow], (lo, hi): (u32, u32)) -> Vec<&'a NodeRow> {
     let span = |row: &NodeRow| {
         let start = row.start_line.unwrap_or(0).max(0) as u32;
         let end = row.end_line.unwrap_or(0).max(0) as u32;
@@ -776,13 +808,19 @@ fn innermost<'a>(nodes: &[&'a NodeRow], (lo, hi): (u32, u32)) -> Vec<&'a NodeRow
 /// Resolve a ref to a commit id, or `None` when it is not one (or `git` is not
 /// on `PATH`, or this is not a repository — all of which the caller reports as
 /// an unresolved ref rather than an error, [ADR-14]).
-fn rev_parse(root: &Path, reference: &str) -> Option<String> {
+pub(crate) fn rev_parse(root: &Path, reference: &str) -> Option<String> {
     let spec = format!("{reference}^{{commit}}");
-    let out = git(root, &["rev-parse", "--verify", "--quiet", &spec]).ok()?;
+    git_line(root, &["rev-parse", "--verify", "--quiet", &spec])
+}
+
+/// The trimmed stdout of a git call that succeeded and printed something, or
+/// `None` — a ref, a merge-base, a symbolic-ref target.
+pub(crate) fn git_line(root: &Path, args: &[&str]) -> Option<String> {
+    let out = git(root, args).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|sha| !sha.is_empty())
+        .filter(|line| !line.is_empty())
 }
 
 /// Spawn `git -C <root> <args…>`, returning the raw [`Output`].
@@ -795,7 +833,7 @@ fn git(root: &Path, args: &[&str]) -> std::io::Result<Output> {
 
 /// `git -C <root> -c core.quotePath=false`, ready for more args — the spawn
 /// form [`changed_ranges`] needs so it can stream rather than buffer.
-fn git_command(root: &Path) -> Command {
+pub(crate) fn git_command(root: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")

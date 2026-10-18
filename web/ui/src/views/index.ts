@@ -25,6 +25,7 @@ import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { GapsView } from "./gaps/GapsView.tsx";
 import { GraphView } from "./graph/GraphView.tsx";
 import { HealthView } from "./health/HealthView.tsx";
+import { SecurityView } from "./security/SecurityView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.tsx";
 import { CoverageView } from "./analytics/CoverageView.tsx";
@@ -32,6 +33,7 @@ import { FilesView } from "./analytics/FilesView.tsx";
 import { WorkspaceConfigView } from "./workspace/WorkspaceConfigView.tsx";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
+import { WorkspaceSecurityView } from "./workspace/WorkspaceSecurityView.tsx";
 import { WorkspaceView } from "./workspace/WorkspaceView.tsx";
 
 /** A view is a plain, prop-less component mounted in the shell content slot. */
@@ -49,6 +51,8 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // S-189 — the Architecture/Cycles and Rule-findings tabs.
   "/architecture": ArchitectureView,
   "/gaps": GapsView,
+  // S-670 — the Security page over GET /api/v1/security (FR-SC-09), in group B.
+  "/security": SecurityView,
   // S-235 — the read-only Statistics view over GET /api/v1/statistics (CR-058),
   // sitting directly above Config in the last sidebar group.
   "/statistics": StatisticsView,
@@ -79,6 +83,10 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // single-root serve states that this is not a workspace; its nav item is
   // workspace-mode-only (nav.ts), and its endpoints answer `404` there.
   "/workspace-config": WorkspaceConfigView,
+  // S-674 — the app-level Security roll-up (FR-SC-16) over `workspace/security`.
+  // Registered unconditionally like the views above; its nav item is
+  // workspace-mode-only (nav.ts).
+  "/workspace-security": WorkspaceSecurityView,
   // An extension's views are mounted from its registration when the server reports
   // it active, through `mountedViews()` below.
 };

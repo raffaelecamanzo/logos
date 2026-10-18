@@ -1,0 +1,31 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Semgrep OSS",
+          "semanticVersion": "1.85.0",
+          "rules": [
+            { "id": "rust.lang.security.format-injection", "properties": { "tags": ["CWE-89: SQL Injection", "security"] } },
+            { "id": "generic.secrets.hardcoded-token", "properties": { "tags": ["CWE-798: Hard-coded Credentials", "security"] } }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "rust.lang.security.format-injection",
+          "level": "error",
+          "message": { "text": "A formatted string reaches an output sink." },
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "src/main.rs" }, "region": { "startLine": 24 } } }]
+        },
+        {
+          "ruleId": "generic.secrets.hardcoded-token",
+          "level": "warning",
+          "message": { "text": "A hard-coded token." },
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "src/main.rs" }, "region": { "startLine": 28 } } }]
+        }
+      ]
+    }
+  ]
+}

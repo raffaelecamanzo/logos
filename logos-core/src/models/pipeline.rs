@@ -397,6 +397,12 @@ pub enum InitAction {
     Unchanged,
     /// Deliberately not touched (non-clobber, DL-07); `detail` says why.
     Skipped,
+    /// A Logos-written artefact was deleted outright: a legacy entry or
+    /// script the Claude Code plugin replaces, or anything `init --uninstall`
+    /// takes away ([FR-IN-12]).
+    ///
+    /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+    Removed,
 }
 
 /// One step of the `init` bootstrap (S-023, FR-IN-01..04).
@@ -418,6 +424,19 @@ pub struct InitResult {
     pub message: String,
     /// Per-target outcomes for every step this invocation ran (S-023,
     /// FR-IN-01..04).
+    pub steps: Vec<InitStep>,
+}
+
+/// Result of `logos init --uninstall` ([FR-IN-12]): one [`InitStep`] per
+/// artefact kind Logos writes into a project, each `Removed`, `Updated` (only
+/// the Logos part of a shared file went), `Unchanged` (nothing of Logos's was
+/// there) or `Skipped` (left alone, with the reason). `.logos/` is never a
+/// target: its data stays.
+///
+/// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
+#[derive(Debug, Default, Serialize)]
+pub struct UninstallResult {
+    pub message: String,
     pub steps: Vec<InitStep>,
 }
 

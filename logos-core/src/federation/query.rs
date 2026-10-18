@@ -35,8 +35,10 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use crate::history::security::OwaspEdition;
 use crate::model::{LogosSymbol, NodeKind};
 use crate::models::{AffectedResult, CallersResult, ImpactResult, SearchResult, StatusInfo, SymbolRef};
+use crate::security::{Excluded, MemberScan, MemberSecurity, SeverityCounts};
 use crate::Engine;
 
 use super::bridge::{BridgeEdge, BridgeEndpoint, BridgeIntake, MemberContracts};
@@ -204,9 +206,9 @@ struct FactsWalked {
 /// nothing, so the join names the member unread instead of counting it read
 /// with no manifests; a store holding no extracted facts yet is pushed by name
 /// onto `not_extracted`, so the join names it unread with that reason. The
-/// freshness row is exactly what [`flatten_status`] makes of the status half
+/// freshness row is exactly what [`flatten_read`] makes of the status half
 /// in every case. Split out from [`fan_status`] so all four channels are
-/// assertable without a corrupt on-disk store, as [`flatten_status`] is.
+/// assertable without a corrupt on-disk store, as [`flatten_read`] is.
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
@@ -244,25 +246,24 @@ fn split_status_and_facts(
         }
         status
     });
-    flatten_status(MemberScoped { member, value })
+    flatten_read(MemberScoped { member, value })
 }
 
-/// Collapse the two nested failure channels of a fanned [`Engine::try_status`]
-/// onto [`MemberResult`]'s single `error` ([BR-44]).
+/// Collapse the two nested failure channels of a fanned fallible read —
+/// [`Engine::try_status`], or [`workspace_security`]'s member read — onto
+/// [`MemberResult`]'s single `error` ([BR-44]).
 ///
 /// Outer `Err`: the member's engine failed to start. Inner `Err`: it started and
-/// the freshness read itself failed. Split out from [`fan_status`] so both are
-/// assertable without a corrupt on-disk store — the inner channel is the one
-/// this story added, and the point of it is that it must NOT arrive as a
+/// the read itself failed. Split out from [`fan_status`] so both are assertable
+/// without a corrupt on-disk store — the inner channel is the one S-323 added for
+/// the freshness read, and the point of it is that it must NOT arrive as a
 /// defaulted `StatusInfo`.
 ///
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
-fn flatten_status(
-    scoped: MemberScoped<anyhow::Result<anyhow::Result<StatusInfo>>>,
-) -> MemberResult<StatusInfo> {
+fn flatten_read<T>(scoped: MemberScoped<anyhow::Result<anyhow::Result<T>>>) -> MemberResult<T> {
     MemberResult::from_scoped(MemberScoped {
         member: scoped.member,
-        value: scoped.value.and_then(|status| status),
+        value: scoped.value.and_then(|read| read),
     })
 }
 
@@ -1969,6 +1970,154 @@ pub fn workspace_reachability(
     super::reach::app_wide_reachability(registry, &reach_edges(bridge, registry))
 }
 
+/// The workspace security roll-up ([FR-SC-16]): every member's
+/// [`MemberSecurity`], and the totals summed over them, each figure beside the
+/// population it was summed over ([NFR-CC-04]).
+///
+/// Totals count only fresh, unsuppressed findings, and only from the members
+/// that have a fresh report (`members_counted`); what they leave out is in
+/// `excluded`. A member never scanned is counted in `members_never_scanned`,
+/// never as a member with no findings ([BR-66]). A member that could not be
+/// opened or read is a row with its `error`, and every other member still
+/// answers ([ADR-53]).
+///
+/// [FR-SC-16]: ../../../docs/specs/requirements/FR-SC-16.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+#[derive(Debug, Serialize)]
+pub struct WorkspaceSecurity {
+    /// One row per member, in roster order.
+    pub members: Vec<MemberResult<MemberSecurity>>,
+    /// Every member of the roster.
+    pub members_total: usize,
+    /// The members whose security state was read.
+    pub members_read: usize,
+    /// Members read with no stored report at all.
+    pub members_never_scanned: usize,
+    /// Members read with at least one fresh report: the members the totals
+    /// and the category counts come from.
+    pub members_counted: usize,
+    /// Fresh, unsuppressed findings by severity, over `members_counted`.
+    pub totals: SeverityCounts,
+    /// The stored findings of the members read that the totals leave out.
+    pub excluded: Excluded,
+    /// The categories summed over the members read, per edition.
+    pub owasp: Vec<WorkspaceEdition>,
+}
+
+/// One OWASP edition summed over the members read.
+#[derive(Debug, Serialize)]
+pub struct WorkspaceEdition {
+    pub edition: OwaspEdition,
+    /// Every category of the edition, in OWASP's order.
+    pub categories: Vec<WorkspaceCategory>,
+    /// Counted findings under no category of the edition, summed over the
+    /// members read ([`MemberEdition::unclassified`](crate::security::MemberEdition::unclassified)).
+    pub unclassified: usize,
+}
+
+/// One category summed over the members read.
+#[derive(Debug, Serialize)]
+pub struct WorkspaceCategory {
+    /// The category id (`A05:2025`).
+    pub id: &'static str,
+    /// The category name.
+    pub name: &'static str,
+    /// Members with a fresh report from a scanner that can detect it, of
+    /// `members_read`.
+    pub covered_in: usize,
+    /// Fresh, unsuppressed findings under it in those members; `None` when no
+    /// member covers it — not covered, never zero ([BR-66]).
+    ///
+    /// [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
+    pub findings: Option<usize>,
+}
+
+/// The workspace security roll-up ([`WorkspaceSecurity`]): each member's
+/// `security status` and stored findings read through its own engine, then
+/// summed. Starts no scanner beyond the version probe of a scanner a member's
+/// scan consent names, once per process for each binary, as the Security page
+/// does; writes nothing, and computes no graph context.
+pub fn workspace_security(registry: &EngineRegistry<Engine>) -> WorkspaceSecurity {
+    let members = registry
+        .answer()
+        .fan_out(|_, engine| member_security(engine))
+        .into_iter()
+        // A member that would not open and one whose read failed both land in
+        // `error`: either way there is nothing to count.
+        .map(flatten_read)
+        .collect();
+    roll_up_security(members)
+}
+
+/// One member's [`MemberSecurity`] off its engine.
+fn member_security(engine: &Engine) -> anyhow::Result<MemberSecurity> {
+    let status = engine.security_status_probing(crate::security::VersionProbes::Consented)?;
+    let listings = crate::security::listings(
+        engine.root(),
+        &engine.scan_environment(),
+        engine.tools_manifest(),
+        crate::engine::today_utc(),
+    )?;
+    Ok(MemberSecurity::from_reads(status, &listings))
+}
+
+/// Sum the member rows into a [`WorkspaceSecurity`]. Pure, so every
+/// combination of rows is assertable without a store.
+fn roll_up_security(members: Vec<MemberResult<MemberSecurity>>) -> WorkspaceSecurity {
+    let mut totals = SeverityCounts::default();
+    let mut excluded = Excluded::default();
+    let mut owasp: Vec<WorkspaceEdition> = Vec::new();
+    let (mut read, mut never_scanned, mut counted) = (0, 0, 0);
+    for security in members.iter().filter_map(|m| m.result.as_ref()) {
+        read += 1;
+        match security.scan {
+            MemberScan::NeverRun => never_scanned += 1,
+            MemberScan::Fresh => counted += 1,
+            MemberScan::Stale => {}
+        }
+        if let Some(findings) = &security.findings {
+            totals.absorb(findings);
+        }
+        excluded.absorb(&security.excluded);
+        for member_edition in &security.owasp {
+            let at = match owasp.iter().position(|e| e.edition == member_edition.edition) {
+                Some(at) => at,
+                None => {
+                    owasp.push(WorkspaceEdition { edition: member_edition.edition, categories: Vec::new(), unclassified: 0 });
+                    owasp.len() - 1
+                }
+            };
+            owasp[at].unclassified += member_edition.unclassified;
+            let categories = &mut owasp[at].categories;
+            for category in &member_edition.categories {
+                let summed = match categories.iter().position(|c| c.id == category.id) {
+                    Some(i) => &mut categories[i],
+                    None => {
+                        categories.push(WorkspaceCategory { id: category.id, name: category.name, covered_in: 0, findings: None });
+                        categories.last_mut().expect("just pushed")
+                    }
+                };
+                if let Some(n) = category.findings {
+                    summed.covered_in += 1;
+                    summed.findings = Some(summed.findings.unwrap_or(0) + n);
+                }
+            }
+        }
+    }
+    WorkspaceSecurity {
+        members_total: members.len(),
+        members_read: read,
+        members_never_scanned: never_scanned,
+        members_counted: counted,
+        totals,
+        excluded,
+        owasp,
+        members,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2716,7 +2865,7 @@ mod tests {
     ///
     /// [`Engine::status`] hides exactly that case by design (ADR-14 degradation),
     /// which is why [`fan_status`] fans [`Engine::try_status`]. Asserted over
-    /// [`flatten_status`] rather than a corrupted on-disk store, so all three
+    /// [`flatten_read`] rather than a corrupted on-disk store, so all three
     /// channels are pinned deterministically.
     ///
     /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
@@ -2728,7 +2877,7 @@ mod tests {
         };
 
         // Inner Err — the engine started, `navigate::status` failed. THE case.
-        let row = flatten_status(scoped(Ok(Err(anyhow::anyhow!("no such table: edges")))));
+        let row = flatten_read(scoped(Ok(Err(anyhow::anyhow!("no such table: edges")))));
         assert!(
             row.result.is_none(),
             "a failed read must not surface as a defaulted, apparently-empty graph"
@@ -2743,12 +2892,12 @@ mod tests {
         );
 
         // Outer Err — the engine never started. Still degraded, as before.
-        let row = flatten_status(scoped(Err(anyhow::anyhow!("starting the engine"))));
+        let row = flatten_read(scoped(Err(anyhow::anyhow!("starting the engine"))));
         assert!(row.result.is_none());
         assert_eq!(row.error.as_deref(), Some("starting the engine"));
 
         // Ok — the read succeeded and reports an honestly empty graph.
-        let row = flatten_status(scoped(Ok(Ok(StatusInfo::default()))));
+        let row = flatten_read(scoped(Ok(Ok(StatusInfo::default()))));
         assert!(row.error.is_none(), "a successful read carries no error");
         assert_eq!(
             MemberStatus::labelled(row, TEST_COORDINATE, &WarmEvidence::none(), opened()).warm,
@@ -3111,5 +3260,104 @@ mod tests {
             assert!(dotted.attributed.is_empty());
         }
         assert_eq!(importers(&references_reaching(&roster, &refs, SHARED, Some("svc-a")).attributed), ["svc-a:UsesA.java"]);
+    }
+
+    // ── the workspace security roll-up (S-674, FR-SC-16) ────────────────────
+
+    /// A member row with `scan`, the severity counts, the exclusions, and one
+    /// 2025 edition holding `categories` (id, findings); its low findings are
+    /// the ones under no category.
+    fn security_row(
+        member: &str,
+        scan: MemberScan,
+        findings: Option<SeverityCounts>,
+        excluded: Excluded,
+        categories: &[(&'static str, Option<usize>)],
+    ) -> MemberResult<MemberSecurity> {
+        MemberResult {
+            member: member.to_string(),
+            result: Some(MemberSecurity {
+                scan,
+                scanners_fresh: usize::from(scan == MemberScan::Fresh),
+                scanners_enabled: 1,
+                scanners: Vec::new(),
+                findings,
+                excluded,
+                owasp: vec![crate::security::MemberEdition {
+                    edition: OwaspEdition::V2025,
+                    categories: categories
+                        .iter()
+                        .map(|&(id, findings)| crate::security::MemberCategory { id, name: id, findings })
+                        .collect(),
+                    unclassified: findings.map_or(0, |f| f.low),
+                }],
+            }),
+            error: None,
+        }
+    }
+
+    fn counts(high: usize, low: usize) -> SeverityCounts {
+        SeverityCounts { high, low, total: high + low, ..SeverityCounts::default() }
+    }
+
+    /// The fold sums only the members read: a fresh member's counts, a stale
+    /// member's exclusions and never a figure for it, a never-scanned member
+    /// as such, and an unread member in the total alone. A category covered
+    /// nowhere stays `None`; one covered with no finding is `Some(0)`.
+    #[test]
+    fn the_security_roll_up_sums_fresh_counts_over_the_members_read() {
+        let rows = vec![
+            security_row(
+                "a",
+                MemberScan::Fresh,
+                Some(counts(2, 1)),
+                Excluded { not_fresh: 0, suppressed: 1 },
+                &[("A01", Some(1)), ("A02", Some(0)), ("A03", None)],
+            ),
+            security_row(
+                "b",
+                MemberScan::Fresh,
+                Some(counts(1, 0)),
+                Excluded::default(),
+                &[("A01", Some(1)), ("A02", None), ("A03", None)],
+            ),
+            security_row(
+                "c",
+                MemberScan::Stale,
+                None,
+                Excluded { not_fresh: 4, suppressed: 0 },
+                &[("A01", None), ("A02", None), ("A03", None)],
+            ),
+            security_row("d", MemberScan::NeverRun, None, Excluded::default(), &[("A01", None), ("A02", None), ("A03", None)]),
+            MemberResult { member: "e".to_string(), result: None, error: Some("unable to open database file".into()) },
+        ];
+        let rolled = roll_up_security(rows);
+        assert_eq!(
+            (rolled.members_total, rolled.members_read, rolled.members_never_scanned, rolled.members_counted),
+            (5, 4, 1, 2)
+        );
+        assert_eq!(rolled.totals, counts(3, 1));
+        assert_eq!(rolled.excluded, Excluded { not_fresh: 4, suppressed: 1 });
+        let names: Vec<&str> = rolled.members.iter().map(|m| m.member.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d", "e"], "every row kept, in order");
+
+        assert_eq!(rolled.owasp.len(), 1);
+        let summed: Vec<(&str, usize, Option<usize>)> =
+            rolled.owasp[0].categories.iter().map(|c| (c.id, c.covered_in, c.findings)).collect();
+        assert_eq!(summed, [("A01", 2, Some(2)), ("A02", 1, Some(0)), ("A03", 0, None)]);
+        assert_eq!(rolled.owasp[0].unclassified, 1, "the findings under no category are summed apart");
+    }
+
+    /// No member read: nothing summed, and no edition is invented.
+    #[test]
+    fn a_security_roll_up_with_no_member_read_sums_nothing() {
+        let rolled = roll_up_security(vec![MemberResult {
+            member: "only".to_string(),
+            result: None,
+            error: Some("store obstructed".into()),
+        }]);
+        assert_eq!((rolled.members_total, rolled.members_read, rolled.members_counted), (1, 0, 0));
+        assert_eq!(rolled.totals, SeverityCounts::default());
+        assert!(rolled.owasp.is_empty());
     }
 }

@@ -27,7 +27,9 @@
 //! Migration 2 ([S-047]) adds `commits.subject` and the append-only
 //! `temporal_snapshots` series ([FR-GH-09]) on this same independent track.
 //! Migration 3 ([S-049]) adds the coverage tables; migration 4 ([S-663]) adds the
-//! security-finding tables ([ADR-79]) — the evidence store stays one file.
+//! security-finding tables ([ADR-79]), migration 5 ([S-668]) the security
+//! ratchet's baseline and migration 6 ([S-685]) the provenance of a scoped
+//! scan's snapshot — the evidence store stays one file.
 //!
 //! Migrations follow the same forward-only `user_version` discipline as
 //! [`crate::graph_store::migrate`] and [`crate::observability::db`] — one
@@ -43,6 +45,8 @@
 //! [S-046]: ../../../docs/planning/journal.md#s-046-history-store-and-incremental-git-miner
 //! [S-049]: ../../../docs/planning/journal.md#s-049-coverage-store-parsers-and-ingest-pipeline
 //! [S-663]: ../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
+//! [S-668]: ../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5
+//! [S-685]: ../../../docs/planning/journal.md#s-685-a-security-re-scan-can-target-one-scanner-and-a-set-of-paths
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 
 use std::path::Path;
@@ -56,8 +60,10 @@ use super::miner::{CommitFact, FileChange};
 /// increasing (mirrors `graph_store::schema::MIGRATIONS` and
 /// `observability::db::MIGRATIONS`). [S-047] appends migration 2 (the commit
 /// subject + the temporal snapshot series); [S-049] appends migration 3 for the
-/// coverage tables and [S-663] migration 4 for the security findings, on this
-/// same track. A shipped migration is **never** edited.
+/// coverage tables, [S-663] migration 4 for the security findings, [S-668]
+/// migration 5 for the security ratchet's baseline and [S-685] migration 6 for
+/// scoped-snapshot provenance, on this same track. A shipped migration is
+/// **never** edited.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -259,6 +265,59 @@ const MIGRATIONS: &[(i64, &str)] = &[
              CHECK ((binding = 'bound') = (path IS NOT NULL))
          ) STRICT, WITHOUT ROWID;
          CREATE INDEX security_findings_path ON security_findings (path);",
+    ),
+    // ── Migration 5 (S-668, CR-217, ADR-79): the security ratchet's baseline —
+    // the finding fingerprints `gate --save` recorded, which `check` and `gate`
+    // compare against under a `rules.toml [security]` table (FR-SC-10). It lives
+    // here, beside the findings it keys, so the gate's opt-in stays off the
+    // logos.db ledger. One baseline per project, replaced wholesale on every
+    // save; `config_hash` is the `[security]` table and ignore file it was saved
+    // under (ADR-79 Neutral), recorded for provenance, never compared.
+    (
+        5,
+        "CREATE TABLE security_baseline (
+             id          INTEGER PRIMARY KEY CHECK (id = 1),
+             head_sha    TEXT,              -- HEAD at save time; NULL outside a repo
+             config_hash TEXT    NOT NULL,  -- blake3 of the [security] table + ignore file
+             created_at  INTEGER NOT NULL   -- unixepoch() at save (provenance only)
+         ) STRICT;
+
+         -- The recorded fingerprints: every unsuppressed finding of every stored
+         -- scan at save time, fresh or stale and whatever its severity, so a
+         -- later change of `ratchet_min_severity` or a refreshed scan never
+         -- reads an old finding as new. A suppressed finding is not recorded:
+         -- when its suppression expires it returns to the ratchet (FR-SC-11).
+         CREATE TABLE security_baseline_findings (
+             fingerprint  TEXT NOT NULL PRIMARY KEY,
+             scanner_name TEXT NOT NULL      -- the driver that reported it (provenance)
+         ) STRICT, WITHOUT ROWID;",
+    ),
+    // ── Migration 6 (S-685, CR-219, ADR-83): scoped-snapshot provenance. A
+    // scoped re-scan (`security scan --path`, FR-SC-17) replaces a scanner's
+    // findings only within the paths it scanned and carries every other row of
+    // the scanner's latest snapshot into a new one, so the snapshot must say
+    // which full scan stands behind those carried rows. Without it a scoped
+    // run at a new HEAD would read fresh for files it never re-scanned, and a
+    // scoped run with no full scan behind it would read as a whole-project scan.
+    //
+    // `full_head_sha` is the HEAD of the full scan whose findings the snapshot
+    // holds outside `scope` — its own HEAD for a full scan (backfilled below),
+    // NULL when no full scan stands behind it. `scope` is the sorted JSON array
+    // of project-relative paths scoped runs re-scanned on top of it; NULL for a
+    // full scan. A scoped snapshot's `report_hash` is blake3 of its report's
+    // bytes and its scope, so the same bytes over other paths are not a no-op.
+    //
+    // `security_findings.scoped` marks a row a scoped run wrote. For Gitleaks,
+    // whose scoped run reads the files and whose full scan reads their git
+    // history, a scoped run keeps the full scan's rows in its paths (a secret
+    // removed from a file is still in history) and replaces only the rows an
+    // earlier scoped run wrote — this flag tells the two apart.
+    (
+        6,
+        "ALTER TABLE security_snapshots ADD COLUMN full_head_sha TEXT;
+         ALTER TABLE security_snapshots ADD COLUMN scope TEXT;
+         UPDATE security_snapshots SET full_head_sha = head_sha;
+         ALTER TABLE security_findings ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0 CHECK (scoped IN (0, 1));",
     ),
 ];
 

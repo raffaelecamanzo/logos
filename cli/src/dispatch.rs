@@ -22,7 +22,11 @@
 use std::path::Path;
 
 use anyhow::Result;
-use logos_core::{config::load_config_from_root, security::FindingsFilter, Engine};
+use logos_core::security::{FindingsFilter, ScanRequest, Selection};
+use logos_core::tools::surface::InstallRequest;
+use logos_core::{
+    config::load_config_from_root, governance::OffendersFilter, models::GateResult, Engine,
+};
 use logos_ext::ExtensionHost;
 
 use crate::{engine, init_options, Commands, CoverageCommands, Output, SecurityCommands};
@@ -36,12 +40,16 @@ use crate::{engine, init_options, Commands, CoverageCommands, Output, SecurityCo
 /// steps, `serve` their routes and tools (FR-DS-04, ADR-74).
 pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &ExtensionHost) -> Result<i32> {
     match command {
+        // FR-IN-12: an uninstall touches no store and offers no workspace, so
+        // it is routed before the nudge; `-i`/`--hooks` add nothing to it.
+        Commands::Init { uninstall: true, .. } => out.print(&Engine::init_uninstall(root)?).map(|()| 0),
         Commands::Init {
             interactive,
             hooks,
             workspace,
             yes,
             exclude,
+            uninstall: _,
         } => {
             // The whole routing decision is `nudge`'s, so it is unit-testable
             // without a terminal: `--workspace` short-circuits inside it, and a
@@ -94,7 +102,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             // FR-CF-03), validated up front — `Engine::sync` would fold it into a
             // `failed` run (exit 1, FR-EH-05) instead.
             load_config_from_root(root)?;
-            out.report_gate(root, |e| Ok(e.sync(&paths)), |r| !r.failed)
+            out.report_gate(root, |e| Ok(e.sync(&paths)), |r| crate::violation_code(!r.failed))
         }
         Commands::Status { member } => out.query_for(root, &member, |e| e.status()),
         Commands::Search { query, kind, limit, member } => out.query_for(root, &member, |e| e.search(&query, kind, limit)),
@@ -158,9 +166,19 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // here. `check` alone gets its own chokepoint (`report_check`): its
         // verdict is a tri-state `Option<bool>`, not a plain bool, because a
         // report over no rules contract carries no verdict at all (FR-GV-22).
-        Commands::Check { rules, no_reconcile, allow_no_rules } => out.report_check(
+        // `--bless` (FR-GV-23) is the same report after writing the blessed
+        // set — the one writer of `.logos/rules-baseline.json`. `gate` and
+        // `session_end` project through `GateResult::exit_code`: a `[security]`
+        // table's missing required scan is exit 5 (FR-SC-10), not a verdict's 0/1.
+        Commands::Check { rules, no_reconcile, allow_no_rules, bless } => out.report_check(
             root,
-            |e| e.check_rules(rules.as_deref(), !no_reconcile),
+            |e| {
+                if bless {
+                    e.bless_rules(rules.as_deref(), !no_reconcile)
+                } else {
+                    e.check_rules(rules.as_deref(), !no_reconcile)
+                }
+            },
             allow_no_rules,
         ),
         Commands::Gate {
@@ -172,7 +190,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             if label.is_some() {
                 eprintln!("logos gate: --label is accepted but not persisted yet");
             }
-            out.report_gate(root, |e| e.gate(threshold, save, !no_reconcile), |r| r.passed)
+            out.report_gate(root, |e| e.gate(threshold, save, !no_reconcile), GateResult::exit_code)
         }
         // ARCHITECTURE health, and it PROJECTS ITS VERDICT (FR-GV-20 AC 1:
         // "`session_end`, `check_rules`, and `health` all fail (exit 1)" on
@@ -188,14 +206,14 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         }
         // CR-052 / FR-GV-18/19/20: structural-integrity guards — a corrupted or
         // drifted graph is a failure a human or CI must see, not a silent read.
-        Commands::Doctor => out.report_gate(root, |e| e.doctor(), |r| r.ok),
-        Commands::Verify => out.report_gate(root, |e| e.verify(), |r| r.ok),
+        Commands::Doctor => out.report_gate(root, |e| e.doctor(), |r| crate::violation_code(r.ok)),
+        Commands::Verify => out.report_gate(root, |e| e.verify(), |r| crate::violation_code(r.ok)),
         // The session gate (FR-GV-04/05) without an MCP host (FR-CL-06):
         // `session-start` records the baseline and always exits 0;
         // `session-end` projects the regression verdict onto exit 1 the way
         // `gate` does, so a CLI-directed agent can detect a failing gate.
         Commands::SessionStart => out.try_query(root, |e| e.session_start()),
-        Commands::SessionEnd => out.report_gate(root, |e| e.session_end(), |r| r.passed),
+        Commands::SessionEnd => out.report_gate(root, |e| e.session_end(), GateResult::exit_code),
         Commands::Evolution { limit, member } => out.try_query_for(root, &member, |e| e.evolution(limit)),
         Commands::Dsm {
             granularity,
@@ -205,12 +223,30 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         Commands::DocGaps { limit, no_reconcile } => {
             out.try_query(root, |e| e.doc_gaps(limit, !no_reconcile))
         }
+        // The uncapped offender listing (FR-QM-19): one `Engine` call shared
+        // with its MCP twin; a bad glob or dimension is a config error (exit 2).
+        Commands::Offenders { path, dimension, member } => {
+            let filter = OffendersFilter::parse(path.as_deref(), dimension.as_deref())?;
+            out.try_query_for(root, &member, |e| e.offenders(&filter))
+        }
+        // The branch delta (FR-GV-24): one `Engine` call shared with its MCP
+        // twin. Advisory — it exits 1 only when it could not measure, and
+        // says on stderr whether the shadow before-state was built or reused.
+        Commands::Review { base, member } => out.report_gate_for(root, &member, |e| {
+            let review = e.review(base.as_deref())?;
+            if let Some(note) = review.before_state_cache.note() { eprintln!("logos review: {note}"); }
+            Ok(review)
+        }, |r| r.measured),
+        // The "where to start" list (FR-QM-17): one `Engine` call shared with
+        // its MCP twin.
+        Commands::Improvements { member } => out.try_query_for(root, &member, |e| e.improvements()),
         Commands::Hotspots {
             limit,
             untested,
             production_scope,
+            with_findings,
             member,
-        } => out.try_query_for(root, &member, |e| e.hotspots(limit, untested, production_scope)),
+        } => out.try_query_for(root, &member, |e| e.hotspots_with_findings(limit, untested, production_scope, with_findings)),
         // The coverage evidence tier (CR-007): each sub-subcommand is one `Engine`
         // call shared with its MCP twin.
         Commands::Coverage { command } => match command {
@@ -222,7 +258,18 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         },
         // The security evidence tier (S-667): the same one-call-per-twin shape.
         Commands::Security { command } => match command {
-            SecurityCommands::Scan { consent } => out.try_query(root, |e| e.security_scan(consent)),
+            SecurityCommands::Scan { consent, install: false, scanners, paths } => {
+                let request = ScanRequest::new(scanners, paths);
+                out.try_query(root, |e| e.security_scan_selected(consent, &request, |_| {}))
+            }
+            SecurityCommands::Scan { consent, install: true, .. } => out.try_query(root, |e| e.security_scan_install(consent)),
+            // Per-user installs need no index: the engine is only opened (FR-SC-22).
+            SecurityCommands::Install { scanners, all, update, from, consent, accept_codeql_licence } => {
+                let accept_licences = accept_codeql_licence.then(|| "codeql".to_string()).into_iter().collect();
+                let request = InstallRequest { tools: Selection::named_or_all(scanners, all), update, from, consent, accept_licences };
+                Engine::open(root).security_install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
+            }
+            SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security_uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
             SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
             SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
             SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, member } => {

@@ -28,11 +28,13 @@
 //! [FR-SC-01]: ../../../../docs/specs/requirements/FR-SC-01.md
 //! [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
 //! [FR-SC-03]: ../../../../docs/specs/requirements/FR-SC-03.md
+//! [FR-SC-17]: ../../../../docs/specs/requirements/FR-SC-17.md
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 //! [S-049]: ../../../../docs/planning/journal.md#s-049-coverage-store-parsers-and-ingest-pipeline
 //! [S-663]: ../../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
 
 pub mod mask;
+mod overlay;
 pub mod owasp;
 mod parse;
 mod read;
@@ -53,11 +55,13 @@ use anyhow::{anyhow, Context, Result};
 use super::coverage::{content_hash, Binding, PathMapper};
 use store::{FindingRow, ScannerBatch};
 
+pub use overlay::{path_findings, PathFindings};
 pub use owasp::{classify, OwaspEdition, OwaspReport};
 pub use parse::{ParsedFinding, ParsedRun, Region, SecurityFormat};
-pub use read::read_latest;
+pub use read::{latest_snapshots, read_at, read_baseline, read_latest};
 pub use suppress::{
-    label, EntryStatus, IgnoreEntry, IgnoreFile, Labelled, LabelledFinding, Suppression, IGNORE_FILE,
+    label, parse_expires, suppress, unsuppress, EntryStatus, IgnoreEntry, IgnoreFile, IgnoreWrite, Labelled, LabelledFinding,
+    Suppression, IGNORE_FILE,
 };
 
 /// Detect, parse and validate a security report's text — the parser on its own,
@@ -75,35 +79,15 @@ pub fn parse_report(text: &str) -> Result<(SecurityFormat, Vec<ParsedRun>)> {
     Ok((format, parse::parse(format, text)?))
 }
 
-/// A finding's severity, normalised across scanners. Ordered `Info < Low <
-/// Medium < High < Critical`, so a threshold is a comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    /// SARIF level `none`, or a CVSS score of 0.
-    Info,
-    /// SARIF level `note`, or a CVSS score below 4.0.
-    Low,
-    /// SARIF level `warning` (the SARIF default), or a CVSS score below 7.0.
-    Medium,
-    /// SARIF level `error`, or a CVSS score below 9.0.
-    High,
-    /// A CVSS score of 9.0 or more.
-    Critical,
-}
+/// The finding severity — shared vocabulary in [`crate::model`], so `config`
+/// can name a threshold without depending on this store ([S-668]). The two
+/// parsers below are the store's own: how a stored token and a SARIF result map
+/// onto it.
+///
+/// [S-668]: ../../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5
+pub use crate::model::Severity;
 
 impl Severity {
-    /// The lowercase wire token (the stored `severity`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Severity::Info => "info",
-            Severity::Low => "low",
-            Severity::Medium => "medium",
-            Severity::High => "high",
-            Severity::Critical => "critical",
-        }
-    }
-
     /// The severity a stored token names, or `None` for a token Logos never writes.
     pub(crate) fn from_str_stored(token: &str) -> Option<Self> {
         Some(match token {
@@ -225,6 +209,17 @@ pub struct SecurityFinding {
     pub freshness: &'static str,
 }
 
+impl SecurityFinding {
+    /// Where the finding is: its bound path, else the path its report named,
+    /// separator-normalised — the spelling its [`fingerprint`] and a scoped
+    /// run's scope match use. `None` when the result had no location.
+    pub fn location(&self) -> Option<String> {
+        self.path
+            .clone()
+            .or_else(|| self.report_path.as_deref().map(normalise_report_path))
+    }
+}
+
 /// One scanner's latest snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ScannerSnapshot {
@@ -236,10 +231,29 @@ pub struct ScannerSnapshot {
     pub scanner_version: String,
     /// The ingest-time HEAD it is anchored to.
     pub head_sha: String,
-    /// blake3 of the report it was ingested from.
+    /// blake3 of the report it was ingested from (and, for a scoped one, its
+    /// scope).
     pub report_hash: String,
     /// Findings stored under it — `0` is *fresh, 0 findings*, not *never run*.
     pub finding_count: usize,
+    /// When it was ingested, in Unix seconds. Not serialised: a surface that
+    /// prints a snapshot stays byte-identical across re-reads, and the branch
+    /// security delta reads it only to tell whether a file was edited after
+    /// the scan ([FR-SC-18]).
+    ///
+    /// [FR-SC-18]: ../../../../docs/specs/requirements/FR-SC-18.md
+    #[serde(skip)]
+    pub created_at: i64,
+    /// The HEAD of the full scan behind its findings outside [`scope`](Self::scope):
+    /// its own `head_sha` for a full scan, an earlier one when a scoped run at a
+    /// later HEAD carried them over, `None` when no full scan stands behind it
+    /// ([FR-SC-17], migration 6).
+    ///
+    /// [FR-SC-17]: ../../../../docs/specs/requirements/FR-SC-17.md
+    pub full_head_sha: Option<String>,
+    /// The paths scoped runs re-scanned on top of that full scan, sorted; empty
+    /// for a full scan.
+    pub scope: Vec<String>,
 }
 
 /// Every scanner's latest snapshot and its findings, as [`read_latest`] returns.
@@ -250,6 +264,38 @@ pub struct SecurityView {
     pub snapshots: Vec<ScannerSnapshot>,
     /// Their findings, ordered by scanner, then path, line and rule.
     pub findings: Vec<SecurityFinding>,
+}
+
+/// The security ratchet's baseline as [`read_baseline`] returns it: the
+/// fingerprints `gate --save` recorded ([FR-SC-10], migration 5).
+///
+/// [FR-SC-10]: ../../../../docs/specs/requirements/FR-SC-10.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityBaseline {
+    /// HEAD when it was saved; `None` outside a repository.
+    pub head_sha: Option<String>,
+    /// The `[security]` table and ignore file it was saved under.
+    pub config_hash: String,
+    /// Every recorded fingerprint, sorted.
+    pub fingerprints: BTreeSet<String>,
+}
+
+/// Record `findings` — `(scanner, fingerprint)` pairs — as the security
+/// ratchet's baseline under `root`, replacing the previous one ([FR-SC-10]).
+/// Returns how many fingerprints were recorded.
+///
+/// [FR-SC-10]: ../../../../docs/specs/requirements/FR-SC-10.md
+///
+/// # Errors
+/// Returns an error only on a store failure.
+pub fn save_baseline(
+    root: &Path,
+    head_sha: Option<&str>,
+    config_hash: &str,
+    findings: &[(String, String)],
+) -> Result<usize> {
+    let mut conn = super::open(root)?;
+    store::persist_baseline(&mut conn, head_sha, config_hash, findings)
 }
 
 /// A report path that bound to no single indexed file.
@@ -285,7 +331,8 @@ pub struct SecurityIngestSummary {
     pub format: SecurityFormat,
     /// The ingest-time HEAD every snapshot of this ingest is anchored to.
     pub head_sha: String,
-    /// blake3 of the report bytes — the byte-identical re-ingest key.
+    /// blake3 of the report bytes — the byte-identical re-ingest key; for a
+    /// scoped report, of its bytes and its scope ([`ingest_scoped`]).
     pub report_hash: String,
     /// One row per scanner in the report, ordered by name.
     pub scanners: Vec<ScannerIngest>,
@@ -314,6 +361,43 @@ pub struct SecurityIngestSummary {
 /// — unmatched, ambiguous, unbound, redacted, an idempotent no-op — ride in the
 /// returned summary, never errors.
 pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Result<SecurityIngestSummary> {
+    ingest_scoped(root, report_path, indexed_paths, None)
+}
+
+/// A scoped run's scope, as its ingest needs it ([FR-SC-17]).
+///
+/// [FR-SC-17]: ../../../../docs/specs/requirements/FR-SC-17.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestScope<'a> {
+    /// The project-relative paths the run scanned.
+    pub paths: &'a [String],
+    /// `true` when the scoped run reads other evidence than a full scan does —
+    /// Gitleaks reads the files as they are, its full scan their git history —
+    /// so the full scan's findings in these paths are kept rather than
+    /// replaced ([`store`]).
+    pub keeps_full_findings: bool,
+}
+
+impl<'a> IngestScope<'a> {
+    /// A scope whose run replaces every finding in `paths`.
+    pub fn replacing(paths: &'a [String]) -> Self {
+        Self { paths, keeps_full_findings: false }
+    }
+}
+
+/// [`ingest`] a scoped run's report ([FR-SC-17]). `scope` names its
+/// project-relative paths: the report's findings outside them are dropped, and
+/// each scanner's findings and file anchors outside them are carried over
+/// unchanged from its latest snapshot ([`store`]). `None` is [`ingest`].
+///
+/// # Errors
+/// As [`ingest`].
+pub fn ingest_scoped(
+    root: &Path,
+    report_path: &Path,
+    indexed_paths: &[String],
+    scope: Option<IngestScope<'_>>,
+) -> Result<SecurityIngestSummary> {
     // 1. Read + detect + parse + redact — all before any store write.
     let bytes = std::fs::read(report_path)
         .with_context(|| format!("reading security report {}", report_path.display()))?;
@@ -322,7 +406,7 @@ pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Resu
     })?;
     let (format, runs) = parse_report(text)
         .with_context(|| format!("rejecting {}: nothing was written", report_path.display()))?;
-    let report_hash = blake3::hash(&bytes).to_hex().to_string();
+    let report_hash = report_key(&bytes, scope);
 
     // 2. Anchor to HEAD — without one there is nothing to anchor to.
     let head_sha = super::miner::head_sha(root).ok_or_else(|| {
@@ -335,14 +419,7 @@ pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Resu
 
     // 3. Group runs by scanner (one tool may span several runs), bind, anchor and
     //    fingerprint.
-    let mut grouped: BTreeMap<String, (String, Vec<ParsedFinding>)> = BTreeMap::new();
-    for run in runs {
-        let entry = grouped
-            .entry(run.scanner_name)
-            .or_insert_with(|| (run.scanner_version, Vec::new()));
-        entry.1.extend(run.findings);
-    }
-
+    let grouped = group_by_scanner(runs);
     let mapper = PathMapper::new(indexed_paths, &[]);
     let mut anchors: HashMap<String, Option<String>> = HashMap::new();
     let mut unmatched: BTreeSet<UnmatchedPath> = BTreeSet::new();
@@ -353,52 +430,30 @@ pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Resu
         let mut seen: HashMap<String, usize> = HashMap::new();
         let mut findings = Vec::with_capacity(parsed.len());
         for f in parsed {
-            let (binding, path) = match f.report_path.as_deref() {
-                None => (FindingBinding::Unbound, None),
-                Some(report) => match mapper.bind(report) {
-                    Binding::Bound(indexed) => {
-                        let hash = anchors
-                            .entry(indexed.to_string())
-                            .or_insert_with(|| content_hash(&root.join(indexed)));
-                        match hash {
-                            Some(hash) => {
-                                files.insert(indexed.to_string(), hash.clone());
-                                (FindingBinding::Bound, Some(indexed.to_string()))
-                            }
-                            // Bound but unreadable: it cannot be anchored, so it is
-                            // not attached ([NFR-RA-05]).
-                            None => {
-                                unmatched.insert(UnmatchedPath { path: report.to_string(), candidates: 1 });
-                                (FindingBinding::Unmatched, None)
-                            }
-                        }
-                    }
-                    Binding::Unmatched => {
-                        unmatched.insert(UnmatchedPath { path: report.to_string(), candidates: 0 });
-                        (FindingBinding::Unmatched, None)
-                    }
-                    Binding::Ambiguous { candidates } => {
-                        unmatched.insert(UnmatchedPath { path: report.to_string(), candidates });
-                        (FindingBinding::Ambiguous, None)
-                    }
-                },
+            // Bind without side effects first: a scoped report's finding outside
+            // its scope leaves no anchor and no unmatched entry behind.
+            let ReportBinding { binding, path, anchor, miss } = match f.report_path.as_deref() {
+                None => ReportBinding::unbound(),
+                Some(report) => bind_report_path(root, &mapper, &mut anchors, report),
             };
+            if let Some(scope) = scope {
+                let location = path.clone().or_else(|| f.report_path.as_deref().map(normalise_report_path));
+                if !in_scope(location.as_deref(), scope.paths) {
+                    continue;
+                }
+            }
+            if let Some((indexed, hash)) = anchor {
+                files.insert(indexed, hash);
+            }
+            if let Some(miss) = miss {
+                unmatched.insert(miss);
+            }
             total += 1;
             bound += usize::from(binding == FindingBinding::Bound);
             unbound += usize::from(binding == FindingBinding::Unbound);
             redacted += usize::from(f.redacted);
 
-            let base = fingerprint(&f, path.as_deref());
-            // Two results with one identity in one report are two findings, never
-            // one silently dropped: the later ones take an occurrence suffix, in
-            // report order.
-            let n = seen.entry(base.clone()).or_insert(0);
-            *n += 1;
-            let fingerprint = if *n == 1 {
-                base
-            } else {
-                blake3::hash(format!("{base}#{n}").as_bytes()).to_hex().to_string()
-            };
+            let fingerprint = occurrence(&mut seen, fingerprint(&f, path.as_deref()));
             findings.push(FindingRow {
                 fingerprint,
                 rule_id: f.rule_id,
@@ -410,6 +465,7 @@ pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Resu
                 report_path: f.report_path,
                 path,
                 region: f.region,
+                scoped: scope.is_some(),
             });
         }
         batches.push(ScannerBatch {
@@ -422,7 +478,7 @@ pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Resu
 
     // 4. Persist — opening the store is the first write.
     let mut conn = super::open(root)?;
-    let outcome = store::persist_ingest(&mut conn, &head_sha, &report_hash, format, &batches)?;
+    let outcome = store::persist_ingest(&mut conn, &head_sha, &report_hash, format, &batches, scope)?;
 
     let scanners = batches
         .iter()
@@ -447,6 +503,103 @@ pub fn ingest(root: &Path, report_path: &Path, indexed_paths: &[String]) -> Resu
         unmatched: unmatched.into_iter().collect(),
         already_ingested: outcome.already_ingested,
     })
+}
+
+/// The idempotency key of a report: its bytes' hash. A scoped report's key
+/// folds in its scope: the same bytes over other paths — an empty report,
+/// say — replace other findings.
+fn report_key(bytes: &[u8], scope: Option<IngestScope<'_>>) -> String {
+    let Some(scope) = scope else {
+        return blake3::hash(bytes).to_hex().to_string();
+    };
+    let mut key = blake3::Hasher::new();
+    key.update(bytes);
+    for path in scope.paths.iter().collect::<BTreeSet<_>>() {
+        key.update(b"\x1f");
+        key.update(path.as_bytes());
+    }
+    key.finalize().to_hex().to_string()
+}
+
+/// The report's runs grouped by scanner — one tool may span several runs —
+/// each with the version of its first run and the findings of all of them.
+fn group_by_scanner(runs: Vec<ParsedRun>) -> BTreeMap<String, (String, Vec<ParsedFinding>)> {
+    let mut grouped: BTreeMap<String, (String, Vec<ParsedFinding>)> = BTreeMap::new();
+    for run in runs {
+        let entry = grouped
+            .entry(run.scanner_name)
+            .or_insert_with(|| (run.scanner_version, Vec::new()));
+        entry.1.extend(run.findings);
+    }
+    grouped
+}
+
+/// What binding one finding's report path gave, before its scope decides
+/// whether the finding is kept: the binding, the indexed path, the file
+/// anchor to record and the unmatched entry to report.
+struct ReportBinding {
+    binding: FindingBinding,
+    path: Option<String>,
+    anchor: Option<(String, String)>,
+    miss: Option<UnmatchedPath>,
+}
+
+impl ReportBinding {
+    /// A finding that names no path.
+    fn unbound() -> Self {
+        Self { binding: FindingBinding::Unbound, path: None, anchor: None, miss: None }
+    }
+
+    /// A path that is not attached: `binding` says why, `candidates` how many
+    /// indexed paths it could have been.
+    fn missed(binding: FindingBinding, report: &str, candidates: usize) -> Self {
+        let miss = UnmatchedPath { path: report.to_string(), candidates };
+        Self { binding, path: None, anchor: None, miss: Some(miss) }
+    }
+}
+
+/// Bind one report path against the indexed paths, hashing each bound file's
+/// content once into `anchors`.
+fn bind_report_path(
+    root: &Path,
+    mapper: &PathMapper<'_>,
+    anchors: &mut HashMap<String, Option<String>>,
+    report: &str,
+) -> ReportBinding {
+    match mapper.bind(report) {
+        Binding::Bound(indexed) => {
+            let hash = anchors
+                .entry(indexed.to_string())
+                .or_insert_with(|| content_hash(&root.join(indexed)));
+            match hash {
+                Some(hash) => ReportBinding {
+                    binding: FindingBinding::Bound,
+                    path: Some(indexed.to_string()),
+                    anchor: Some((indexed.to_string(), hash.clone())),
+                    miss: None,
+                },
+                // Bound but unreadable: it cannot be anchored, so it is not
+                // attached ([NFR-RA-05]).
+                None => ReportBinding::missed(FindingBinding::Unmatched, report, 1),
+            }
+        }
+        Binding::Unmatched => ReportBinding::missed(FindingBinding::Unmatched, report, 0),
+        Binding::Ambiguous { candidates } => ReportBinding::missed(FindingBinding::Ambiguous, report, candidates),
+    }
+}
+
+/// `base`, or — for its second and later occurrence in one report — `base`
+/// with an occurrence suffix, hashed. Two results with one identity in one
+/// report are two findings, never one silently dropped: the later ones take
+/// the suffix, in report order.
+fn occurrence(seen: &mut HashMap<String, usize>, base: String) -> String {
+    let n = seen.entry(base.clone()).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        base
+    } else {
+        blake3::hash(format!("{base}#{n}").as_bytes()).to_hex().to_string()
+    }
 }
 
 /// A finding's identity ([FR-SC-02], [ADR-79]): the report's own fingerprint
@@ -493,6 +646,20 @@ pub(crate) fn fingerprint(f: &ParsedFinding, bound_path: Option<&str>) -> String
         )
     };
     blake3::hash(canonical.as_bytes()).to_hex().to_string()
+}
+
+/// Whether `path` — project-relative, `/`-separated — is one of a scoped run's
+/// `scope` paths or lies under one ([FR-SC-17]). No location is in no scope.
+///
+/// [FR-SC-17]: ../../../../docs/specs/requirements/FR-SC-17.md
+pub(crate) fn in_scope(path: Option<&str>, scope: &[String]) -> bool {
+    path.is_some_and(|p| scope.iter().any(|s| path_within(p, s)))
+}
+
+/// Whether `path` is `dir` or lies under it, by whole path segments — `src/a`
+/// holds `src/a/b.py`, never `src/ab.py`.
+pub(crate) fn path_within(path: &str, dir: &str) -> bool {
+    path == dir || path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// A report path as an identity component: backslashes to `/` and a leading

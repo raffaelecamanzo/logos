@@ -149,13 +149,25 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// index), 30 (S-518, the `files.namespace` column), 31 (S-597, the alias in
 /// that identity index), 32 (S-587, the ledger's `peeled` column in it), 33
 /// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it), 34
-/// (S-606, the associated-item columns and the impl-block table) and 35
-/// (S-609, the `nodes.uninherited` column) after it; the next
-/// [`Engine::start`] re-applies all twelve, as a real upgrade does.
+/// (S-606, the associated-item columns and the impl-block table), 35
+/// (S-609, the `nodes.uninherited` column), 36 (S-504, the snapshot
+/// where-to-start tables and their flag column), 37 (S-676, the offender
+/// value columns, the uncapped offender table and their flag column) and 38
+/// (S-523, the graph-dimension flags and cross-module count) after it; the
+/// next [`Engine::start`] re-applies all fifteen, as a real upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
+        "ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
+         ALTER TABLE metric_snapshots DROP COLUMN acyclicity_applicable; DELETE FROM schema_versions WHERE version = 38; \
+         DROP TABLE metric_snapshot_offenders_uncapped; ALTER TABLE metric_snapshot_offenders DROP COLUMN threshold; \
+         ALTER TABLE metric_snapshot_offenders DROP COLUMN value; ALTER TABLE metric_snapshot_offenders DROP COLUMN measure; \
+         ALTER TABLE metric_snapshot_offenders DROP COLUMN node_id; \
+         ALTER TABLE metric_snapshots DROP COLUMN offender_values_recorded; DELETE FROM schema_versions WHERE version = 37; \
+         DROP TABLE metric_snapshot_outlier_labels; DROP TABLE metric_snapshot_outlier_measures; \
+         DROP TABLE metric_snapshot_fix_units; ALTER TABLE metric_snapshots DROP COLUMN insight_recorded; \
+         DELETE FROM schema_versions WHERE version = 36; \
+         ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
          DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
          ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
          ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \

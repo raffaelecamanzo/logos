@@ -1,0 +1,72 @@
+<!-- logos:managed:begin -->
+## Logos — structural code intelligence
+
+This project is indexed by Logos. The graph's primary use is **scoping work before
+you decompose it**. Navigating while you code is the secondary mode.
+
+### Primary — before you decompose the work
+
+Each tool's own description says what it returns; these are the moments to ask.
+
+- **What does this task touch?** — `logos:context` with the task in one sentence.
+  The first move of a task, not a mid-edit lookup.
+- **Can these two work items run in parallel?** — `logos:impact_intersection`.
+  Split colliding items across iterations instead of colliding at merge.
+- **Has this already been done here?** — `logos:precedent` on what you are about
+  to write. Follow the sibling rather than inventing a second spelling.
+- **How large is the change really?** — `logos:impact` for one symbol;
+  `logos affected <file>…` for a changed set, the pre-review reach check.
+- **Which branches collide, and did the merge carry everything?** —
+  `logos:branch_overlap`. A clean merge is not a complete merge.
+
+### Secondary — while you are editing
+
+- **Relational / cross-file** ("who calls this?", "where is X used?", dead code)
+  — `logos:node` / `logos:callers` / `logos:callees`, and `logos:search` /
+  `logos:explore` to find and group, on the languages the graph resolves (below).
+- **Localized lookups** (a string, a value, a formula inside a file you can already
+  name) — a direct read or grep is fine, sometimes faster. Don't force the graph on
+  a question grep already answers.
+- **Disambiguate by symbol** — prefer a unique name as the entry point. `logos:node`
+  on a common bare name (`new`, `map`, `severity`) resolves to one arbitrary match;
+  pivot from a unique caller or qualify the path instead.
+
+**Where the relational claims hold.** Relational answers hold only on the languages
+the graph resolves. The answers that traverse resolved edges — callers, callees,
+impact, affected, precedent, impact intersection and branch overlap — say which:
+each carries a `resolution_denominator` whose `languages` rows give each anchor
+language's `calls` resolution. A node answer's edge list carries none, so read it
+against the project's rows named below. Where a row has a `cross_file_edges` figure,
+the graph beats grep for that language, as completely as its `bound` share of
+`references` — a partial ratio is a partial answer. Where its `cross_file_absence`
+reads `same-file-only` or `no-resolved-edges`, the graph binds no call across a file
+boundary there: an empty or short answer is the index's reach, not evidence of
+absence, and grep is the better tool. Callers can live in another language than
+their target, so read the whole project's rows as well — `resolution_by_language` in
+the status readout. For this project that is `logos status --json`.
+
+This ordering is a **hypothesis under measurement, not a settled finding** — it comes
+from one project's telemetry. `logos stats --json` breaks calls down by tool class
+and origin; read the figure for THIS project there.
+
+Wrap editing sessions in the quality gate: `logos:session_start` before edits,
+`logos:session_end` after — on a failing gate, stop and fix the regression before
+piling on more changes. Run `logos:check_rules` before declaring any task done.
+Without an MCP host the same gate is `logos session-start` / `logos session-end`
+(a failing gate exits 1) and `logos check`.
+
+The full quality loop has four moves — **freshen** (index/sync so the graph matches
+the code), **enforce** (`logos check` blocks regressions; the `pre-push` gate runs
+it), **report** (`logos scan` surfaces the 0–10000 signal; the session-start hook
+prints it), and **bless** (`logos gate --save` records a new baseline, at release only). The
+copy-pasteable CI recipe is `docs/howto/ci-integration.md`.
+
+Every tool has a CLI twin (`logos impact-intersection`, `logos precedent`,
+`logos branch-overlap`, …) with `--json` output, with one deliberate exception:
+`rescan` is MCP-only, because it replays the parameters of the last scan **in the
+same server process** and a one-shot CLI invocation has no earlier scan to replay —
+run `logos scan` instead.
+
+This block is managed by `logos init -i`: edits inside the markers are regenerated on
+re-run; content outside the markers is never touched.
+<!-- logos:managed:end -->

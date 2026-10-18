@@ -157,6 +157,9 @@ const TWINS: &[&[&str]] = &[
     &["coverage", "status"],
     &["security", "status"],
     &["security", "findings"],
+    &["offenders"],
+    &["review", "--base", "HEAD"],
+    &["improvements"],
 ];
 
 /// Every twin takes `--repo` and answers for the member it names, saying so.

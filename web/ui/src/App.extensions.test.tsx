@@ -201,6 +201,7 @@ describe("with no extension active — a build without extensions (S-643, S-644,
       "Files & Risk",
       "Rule findings",
       "Coverage",
+      "Security",
       "Statistics",
       "Config",
     ]);

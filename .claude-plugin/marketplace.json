@@ -1,0 +1,19 @@
+{
+  "name": "logos",
+  "owner": {
+    "name": "Raffaele Camanzo",
+    "url": "https://github.com/raffaelecamanzo"
+  },
+  "metadata": {
+    "description": "The Logos plugin for Claude Code: the logos MCP server and the session-start quality readout."
+  },
+  "plugins": [
+    {
+      "name": "logos",
+      "source": "./plugins/logos",
+      "description": "Structural code intelligence for an enrolled repository: the logos MCP server and the session-start quality readout.",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/raffaelecamanzo/logos"
+    }
+  ]
+}

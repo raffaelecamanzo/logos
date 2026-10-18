@@ -272,6 +272,18 @@ registered_tools! {
     SecurityScan => "security_scan",
     SecurityStatus => "security_status",
     SecurityFindings => "security_findings",
+    /// The ratchet's bless command (`check --bless`, FR-GV-23, S-507): writes
+    /// the checked-in blessed set, then reports the check verdict against it.
+    BlessRules => "bless_rules",
+    /// The uncapped offender listing (`logos offenders`, FR-QM-19, S-676): a
+    /// read of the last snapshot's per-symbol offenders.
+    Offenders => "offenders",
+    /// The branch delta (`logos review --base`, FR-GV-24, S-677): every
+    /// offender and violation classified against the merge-base.
+    Review => "review",
+    /// The "where to start" list (`logos improvements`, FR-QM-17, S-505): a
+    /// read of the last snapshot's ranked fix units and outlier labels.
+    Improvements => "improvements",
 
     // ── Session gate (FR-SG-*) ──────────────────────────────────────────────
     SessionStart => "session_start",
@@ -406,6 +418,10 @@ impl Tool {
             | Tool::SecurityScan
             | Tool::SecurityStatus
             | Tool::SecurityFindings
+            | Tool::BlessRules
+            | Tool::Offenders
+            | Tool::Review
+            | Tool::Improvements
             // Session gate.
             | Tool::SessionStart
             | Tool::SessionEnd
@@ -503,7 +519,16 @@ impl Tool {
             // same way: its two reads are verdicts, its scan and ingests write.
             | Tool::CoverageStatus
             | Tool::SecurityStatus
-            | Tool::SecurityFindings => ToolClass::QualityGate,
+            | Tool::SecurityFindings
+            // `check --bless` writes the blessed set, but what it returns is
+            // the `check` verdict over the code against that set (FR-GV-23).
+            | Tool::BlessRules
+            // The offenders the last snapshot flagged, per symbol (FR-QM-19).
+            | Tool::Offenders
+            // The branch delta against the merge-base, per symbol (FR-GV-24).
+            | Tool::Review
+            // The advisory fix-first ranking the last snapshot recorded (FR-QM-17).
+            | Tool::Improvements => ToolClass::QualityGate,
 
             // ── Session gate ────────────────────────────────────────────────
             Tool::SessionStart | Tool::SessionEnd => ToolClass::SessionGate,

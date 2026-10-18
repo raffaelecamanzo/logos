@@ -1,0 +1,85 @@
+{
+  "lines": [
+    {
+      "line": "tool",
+      "tool": "trivy",
+      "version": "0.74.0",
+      "source": "fixtures.invalid",
+      "size": 572,
+      "recorded": false,
+      "offered": false
+    },
+    {
+      "line": "tool",
+      "tool": "gitleaks",
+      "version": "8.18.4",
+      "source": "fixtures.invalid",
+      "size": 574,
+      "recorded": false,
+      "offered": false
+    },
+    {
+      "line": "tool",
+      "tool": "osv-scanner",
+      "version": "1.9.2",
+      "source": "fixtures.invalid",
+      "size": 373,
+      "recorded": false,
+      "offered": false
+    },
+    {
+      "line": "tool",
+      "tool": "gosec",
+      "version": "2.21.4",
+      "source": "fixtures.invalid",
+      "size": 571,
+      "recorded": false,
+      "offered": false
+    },
+    {
+      "line": "tool",
+      "tool": "codeql",
+      "version": "2.27.2",
+      "source": "github.com",
+      "size": 1257204497,
+      "recorded": false,
+      "offered": true
+    },
+    {
+      "line": "tool",
+      "tool": "dependency-check",
+      "version": "13.0.0",
+      "source": "github.com",
+      "size": 29411949,
+      "recorded": false,
+      "offered": true
+    },
+    {
+      "line": "support",
+      "tool": "java",
+      "version": "21.0.12.1",
+      "source": "github.com",
+      "size": 48144965,
+      "recorded": false,
+      "for_tools": [
+        "dependency-check"
+      ]
+    },
+    {
+      "line": "licence",
+      "tool": "codeql",
+      "version": "2.27.2",
+      "terms": "the CodeQL CLI is licensed under the GitHub CodeQL Terms and Conditions (https://github.com/github/codeql-cli-binaries/blob/main/LICENSE.md): it may be used to analyse open-source codebases and for academic research; any other use, such as analysing a closed-source codebase, needs a licence from GitHub",
+      "flag": "--accept-codeql-licence"
+    }
+  ],
+  "kept": [],
+  "scan_consent": [
+    "trivy",
+    "gitleaks",
+    "osv-scanner",
+    "gosec",
+    "codeql",
+    "dependency-check"
+  ]
+}

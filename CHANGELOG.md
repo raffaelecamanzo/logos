@@ -13,6 +13,613 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.20.2] — 2026-10-18
+
+### Fixed
+
+- **Bandit, Trivy, Checkov and Dependency-Check stay out of the directories the
+  project ignores.** Every scanner excluded only `.logos/`, so Bandit reported
+  findings in ignored notes and tool directories, and Trivy walked a Rust
+  `target/` until its five-minute timeout and failed. That means any project
+  with a build directory lost Trivy on its first scan. A scan now finds the
+  top-most directories that the project's own `.gitignore`, `.ignore` and
+  `.git/info/exclude` exclude. It passes them to Bandit (`--exclude`), Trivy
+  (`--skip-dirs`), Checkov (`--skip-path`, as an anchored expression) and
+  Dependency-Check (`--exclude`), after `.logos` and before your `extra_args`.
+  Semgrep and OSV-Scanner already skip what git ignores, Gitleaks reads
+  committed history, and gosec and CodeQL are unchanged. This covers `logos
+  security scan`, the Security page and the MCP `security_scan`. A re-scan of
+  named paths still reads exactly those paths with every scanner that takes
+  paths. `docs/howto/security.md` lists the edges: a file ignored by name, and a
+  file committed inside an ignored directory.
+
+## [1.20.1] — 2026-10-18
+
+### Fixed
+
+- **The plugin guardrail now asks before `logos security ingest`.** Ingesting an
+  empty SARIF report clears a failing `[security]` gate, required scanners
+  included, and the `PreToolUse` guard let it through. It now asks, naming the
+  action, for the shell command (in every spelling it already catches for
+  `gate --save`: by path, behind `env` or an assignment, in `bash -c`, through
+  `$(which logos)` or a variable) and for the MCP tool `security_ingest` under
+  both the plugin's and a project `.mcp.json`'s prefix. `security findings`,
+  `status` and `scan` still pass.
+- **The secret masker masks a value that follows a few words after a credential
+  key.** `password for db: Tr0ub4dorNeedle&3` was stored and shown as
+  `password [masked] db: Tr0ub4dorNeedle&3`: the masker hid the first word
+  after the key and kept the value. A `:`, `=`, `=>`, `:=` or `==` up to three
+  words after a credential key, on the key's line and before a `.`, `,` or `;`
+  ends a word, now has its value masked as well
+  (`password [masked] db: [masked]`). The word right after the key stays
+  masked, since that is where a scanner echoes a value
+  (`password [masked] in app.py:[masked]`). This applies to every stored
+  finding message (and so to the Security page, the branch review's security
+  delta and the Stop hook message) and to a failed scanner's excerpt. Text with
+  no credential key in reach is unchanged.
+- **The Security page starts no scanner the project has not consented to.** Each
+  load of the page, and of the workspace security roll-up, ran every installed
+  scanner's version command, a cross-site page's request included. It now runs the
+  version command only for a scanner the project's scan consent names, and only
+  once per `logos serve` for each binary: a reinstalled copy is probed again. Any
+  other installed scanner reads installed, with its version unknown and the reason
+  `not_consented`. `check` over a `[security]` table, which the Dashboard runs on
+  every load, now starts no scanner at all: it reads only each scanner's state.
+  `logos security status`, the MCP `security_status` tool and `check` answer as
+  before.
+- **`logos security install` exits 1 when nothing it was asked to install got
+  installed.** It exited 0 when every requested tool failed (for instance
+  `install gosec --consent` with no network). It now exits 1 when none of the
+  requested tools ended `installed`, `already_present` or kept as your own copy,
+  and still exits 0 when at least one did; the per-tool outcomes are printed
+  either way and the exit-2 refusals are unchanged. The CI guide now says that
+  the `[security]` ratchet's baseline lives in the gitignored `.logos/history.db`,
+  so a fresh CI clone reads every finding at or above `ratchet_min_severity` as
+  new, and names the two ways to gate today.
+
+## [1.20.0] — 2026-10-18
+
+### Added
+
+- **`/logos:sec-review`: the plugin's `logos-sec-review` skill.** It reads the
+  security section of the branch delta and gives every introduced or touched
+  finding one verdict: `fix`, `escalate-secret`, `escalate-dependency`,
+  `false-positive` or `untrusted`. The gate sets all but `fix` and
+  `false-positive` from the finding itself (redacted, a dependency scanner or
+  advisory id, reachability confidence, freshness); the agent may only confirm a
+  proposed `fix` or downgrade it to `false-positive`. Only `fix` code is edited,
+  and a fix is claimed only when a re-scan by the same scanner over the changed
+  files (`security scan --scanner --path`) no longer lists its fingerprint, lists
+  no new finding at or above its severity, and the project's tests pass with a
+  count. A secret is reported for rotation, never closed by deleting the value
+  (it stays in git history). A dependency finding gets a proposal with its
+  changelog risk and blast radius. A false positive gets an ignore-entry draft
+  whose write is held by the plugin guardrail's `ask`. The report never says the
+  code is secure: it names the scanners, their versions and the paths, and lists
+  the OWASP categories no enabled scanner covers. The deterministic steps are
+  scripts in the skill's `scripts/` (delta read, triage, targeted re-scan, proof,
+  coverage, draft, report check), each printing a denominator; they source the
+  `logos-review` skill's helpers in place.
+- **The Stop hook scans the files a turn changed for secrets.** With recorded
+  scan consent, the plugin's Stop hook adds a security leg after `check` and
+  `review`: it runs Gitleaks, plus Semgrep when it is installed and consented, on
+  only the files the turn changed (`security scan --scanner … --path …`), inside
+  the same budget; a turn that changed only documentation or media runs this leg
+  alone. A new secret, or a new finding at `high` or above, blocks the
+  stop once; the reason names the rule, file, line and the stored redacted message,
+  and points to `/logos:sec-review`. A finding the scan recognises as one it
+  already recorded is not new, and suppressed findings are never listed. Without
+  consent, without Gitleaks, or over budget, nothing is scanned, nothing blocks,
+  and the hook says what it did not measure ("security not measured: no
+  consent"). Consent is the scan's own check: without it, the scan refuses before
+  any scanner process starts, its version probe included.
+- **The manual documents the Security section.** `docs/howto/security.md` is
+  the guide to it: installing the scanners with `logos security install` (your own
+  copy wins), the tested version of each of the nine scanners beside the version
+  Logos installs, scan and install consent, what consent lets a scanner do and
+  that Logos itself makes no network connection, `security scan`, `ingest`,
+  `status` and `findings`, the scoped re-scan with its `stale` reasons and
+  Gitleaks's content mode, what reachability confidence means (including that
+  `unknown` is never `unreachable`, and what `unreachable` cannot see), the
+  `[security]` gate with its ratchet, caps and exit 5, the ignore file and the
+  Security page's triage. Tests hold it to the binary: every command and flag it
+  prints exists, its `[security]` example passes `check` on the fixture and is
+  evaluated, and its nine tested versions are the registry's and the install
+  manifest's. `README.md`, `usage.md`, `commands.md`, `configuration.md` and
+  `error-handling.md` link to it, and two stale claims are corrected: that Logos
+  never installs a scanner, and that security findings never gate.
+- **The manual documents the security review loop.** `docs/howto/security.md`
+  gains "Reviewing what a branch introduced": how to read `sections.security` of
+  `logos review --base <ref>` (the classes `introduced`, `touched`, `resolved`,
+  `stale` and `pre-existing`, the `fingerprint` and `hunk` methods, suppressed
+  findings listed apart, `measured: false` for a project never scanned), the five
+  verdicts of `/logos:sec-review` in a table that a test holds to the skill and,
+  where the specification is present, to the requirement, what an agent may close (a `fix`,
+  only by a targeted re-scan with the fingerprint absent, no new finding at or above
+  its severity, and passing tests) and what it may not (a secret, which is reported
+  for rotation and never closed; a dependency; an untrusted finding; a suppression),
+  and that a clean review is not a claim that the code is secure. `plugin.md`
+  documents the skill, the Stop hook's security leg and its consent requirement
+  (the leg never asks for consent and never records it: the scan's own refusal
+  turns the leg into "security not measured: no consent"), and the Stop check's
+  three legs. `commands.md` documents `sections.security` and no longer says
+  `sections` is `{}`. The plugin page now joins the span walk that holds every
+  command and tool a page names to the shipped binary.
+
+- **A security re-scan of one scanner and a few paths.** `logos security scan
+  --scanner <name> --path <path>` (both repeatable; MCP `security_scan` takes
+  `scanners` and `paths`; a scanner is named by registry name, `semgrep`, or by
+  its report's tool name, `Semgrep OSS`, as the branch review gives it) runs
+  Semgrep, Gitleaks, Bandit, gosec and Checkov on
+  those files or directories only, so a fix is proved in seconds. Each path must
+  resolve inside the project root: one outside it, through `..`, an absolute path
+  or a symbolic link, is refused with exit 2 before any scanner starts, and each
+  reaches the scanner as one argument in its command's fixed path position. The
+  ingest replaces that scanner's findings only in the scanned paths; every other
+  file's findings and freshness are unchanged. Gitleaks scans the files as they
+  are (`--no-git`) while its full scan reads git history, so its history
+  findings in the scanned paths stay, and a secret it finds again keeps its
+  recorded fingerprint: only a newly added secret reads as new. Trivy, OSV-Scanner and
+  Dependency-Check report `whole-manifest only` (CodeQL `whole-project only`) and
+  run unscoped when named. A scanner whose stored report rests on `--path` scans
+  alone reads `stale` (`scoped_only`) in `security status` and to the security
+  gate, never fresh. `history.db` migrates to schema 6, which records the full
+  scan behind a scoped snapshot and the paths re-scanned since.
+
+- **`logos review --base <ref>`: the branch delta, per symbol.** It classifies
+  every offender of the nine offender dimensions and every `check` violation as
+  `new`, `worsened`, `improved`, `resolved` or `unchanged` against the merge-base of
+  `HEAD` and the base (default: the repository's default branch). Each entry
+  the branch changed is listed with its value before and after, its threshold
+  and a trust label (unchanged entries are counted, not listed): `resolved`,
+  `stale` for a file edited since the last sync, or the tag of a language the
+  graph binds within files only. The answer also lists the near-clone groups the
+  branch introduced. On a module graph too thin to measure on either side (the
+  graph dimensions are out of the signal), Acyclicity and Depth offenders are not
+  classified, and the answer says so. The before-state is the snapshot recorded at the merge-base,
+  or else a shadow index of that tree, cached by commit under
+  `.logos/review-cache/`. That directory is in the generated `.logos/.gitignore`.
+  No other commit is ever compared. The MCP twin is `review`. The command is
+  advisory: it exits 1 only when it could not measure, writes no snapshot, and
+  never moves a `check` or `gate` exit code. Reruns are byte-identical.
+- **`logos review --base` lists the security findings the branch caused.** Under
+  `sections.security`, every finding of each scanner's latest stored report is
+  `introduced`, `touched` (a merge-base finding inside a hunk the branch changed)
+  or `pre-existing`, and every merge-base finding the latest re-scan no longer
+  reports is `resolved`, or `stale` when its file was edited after that re-scan.
+  A scanner whose report was recorded at the merge-base is compared by
+  fingerprint; any other by the hunks the branch changed, uncommitted and
+  untracked files included, and so is one whose merge-base report a `--path`
+  re-scan rewrote (it holds the working tree of that run, not the commit). Each entry names its method, freshness, severity,
+  OWASP categories and reachability confidence. Suppressed findings are listed
+  apart with their reason and expiry, messages stay redacted, and the merge-base
+  tree is never scanned. A project never scanned reads `measured: false`.
+- **Hotspots and Files & Risk show security findings.** Once a full scan is stored,
+  every `logos hotspots` row, every row of the MCP `hotspots` tool and the web
+  Files & Risk table carries a findings cell: the count of the file's
+  unsuppressed findings and the highest severity among them, each web cell linking
+  to the Security page filtered to that file. A finding in a file that changed since
+  the scan is labelled `stale` and is never counted; a suppressed finding is not
+  counted. A project that was never scanned shows no column, not a column of zeros.
+  The new `--with-findings` flag (MCP `with_findings`, web `?with_findings`) ranks
+  the files with a fresh finding first, highest severity first, and drops none. The
+  score and the default order are unchanged.
+- **Offenders carry a symbol id, a value and a threshold, and list uncapped.**
+  Every worst-offender entry now records `node_id` (the symbol id without its
+  repository coordinate, the identity `check --bless` uses), the `measure` its
+  `value` counts, the `value`, and the `threshold` it met, so a review can show
+  that one symbol improved. `value ≥ threshold` holds wherever the dimension has
+  a threshold. New `logos offenders [--path <glob>] [--dimension <d>] --json`,
+  with the MCP twin `offenders`, lists every offender the last snapshot
+  recorded, past the top-10 cap, in the order the capped lists use. It reads
+  the snapshot and writes nothing. The capped lists, the signal, the gate and
+  the metric semantics are unchanged. The store moves to schema 37; a
+  snapshot written before it reads its new fields as not recorded (`null` under
+  `values_recorded: false`), never as 0.
+- **Every snapshot records where to start.** Each `scan`, `gate`,
+  `session_start` and `session_end` snapshot now persists an advisory
+  "where to start" list: up to ten fix units — a class, a function, an
+  exact-duplicate group or a near-clone group — each with the signal points
+  fixing it would recover. A unit's points are an estimate: the signal
+  recomputed with that one unit no longer offending, minus the current signal.
+  Units are ordered by points, then dimension, then node id, and a unit that
+  recovers no whole point is not listed. Equality and Depth never carry points,
+  because splitting a function or a module has no single result. Beside the
+  list, seven per-unit measures (LCOM4, method count, span, complexity, nesting
+  depth and the two group masses) label outliers against the member's own
+  distribution: above `Q3 + 1.5 × IQR` and at or above the detection threshold,
+  and never with fewer than 8 units. Both are read back unchanged as
+  `where_to_start` in `scan --json` and the Health payload. They never enter the
+  signal, the gate or any `check` exit code, and they leave the metric
+  semantics unchanged. The store moves to schema 36; snapshots written before it read as not
+  recorded.
+- **Ratchet constraints: adopt a budget on an existing codebase and fail only on
+  new debt.** Every budget whose violations name a symbol — `max_cc`,
+  `max_fn_lines`, `no_god_files`, `max_fan_in`, `max_fan_out`,
+  `max_nesting_depth`, `no_god_containers`, `max_brain_methods`, and `max_dead`
+  and `max_duplicates` as symbol sets — accepts `{ max = N, ratchet = true }`
+  (`no_god_containers = { ratchet = true }`). `logos check --bless`, with the MCP
+  twin `bless_rules`, records every current offender in the checked-in
+  `.logos/rules-baseline.json`, sorted and byte-identical on re-bless; `check`
+  and `scan` only read it, and `gate` never touches it. `check` then reports a blessed offender at or
+  below its blessed value as a `warning`, a new or worsened one as an `error`,
+  and a blessed one that no longer violates under `ratchet.fixed`. With no
+  blessed file every ratchet offender is an error and the report names the bless
+  command. `max_cycles` and `max_clone_ratio` take `max_dead`'s count-delta form,
+  `{ baseline = N, delta = 0 }`; `max_dead`'s own delta form is unchanged, and a
+  contract with no ratchet budget reports exactly as before. The generated
+  `.logos/.gitignore` leaves the blessed set tracked, and `ci-integration.md`
+  shows the adoption recipe.
+- **Security findings in graph context.** Every finding `security findings`
+  (and MCP `security_findings`) lists now carries a `context`: the innermost
+  code symbol enclosing its line, whether a framework route reaches that symbol
+  over call edges — `reachable` naming the nearest route and its hop count,
+  `unreachable`, or `unknown` — and its blast radius, the sizes of `impact` on
+  the same symbol. Each claim is labelled `resolved`, `unresolved` or `unbound`,
+  read from the per-language resolution denominator, whose `calls` row rides
+  along: a language whose calls do not resolve across files is `unresolved`,
+  and an unresolved claim is never `unreachable`. `unreachable` is claimed only
+  when the graph could have seen every way in; otherwise the reachability names
+  what it could not see — no route at all, a route with no proven handler, a
+  member behind an interface or trait, or a callable handed off by value. A finding with no enclosing
+  symbol is `unbound` and says why (no location, not an indexed file, changed
+  since the scan, or in no symbol); a lockfile finding keeps its manifest line.
+- **A Claude Code plugin, published from this repository's marketplace.**
+  `.claude-plugin/marketplace.json` lists one plugin, `plugins/logos/`, version
+  1.20.0, which needs a `logos` binary of 1.20.0 or newer (`metadata.minBinaryVersion`
+  in its `plugin.json`). Install it with `claude plugin marketplace add
+  <this repository>` and `claude plugin install logos@logos`. It declares the
+  `logos` MCP server and the session-start quality readout, and does nothing in a
+  directory without a `.logos/` store: there, every hook exits 0 with no output, and
+  the server starts no `logos` process and offers no tool, so it creates no store.
+  At session start the readout compares `logos --version` with that minimum. An older binary
+  is named with both versions and the readout is skipped. A missing binary or a
+  version it cannot read is said so. Neither blocks the session.
+  `LOGOS_QUALITY_REPORT_DISABLE=1` silences the readout, as it does the hook
+  `init -i` writes. The plugin's scripts are bash (plus `git`, and `python3` in
+  the review skills). Each has a
+  fixture suite (`scripts/tests/test-plugin-*.sh`), and one suite asserts that the
+  tree names no extension that is not part of this repository. `gate.sh fast` now
+  runs the script suites when `plugins/` or `.claude-plugin/` changed, as well as
+  `scripts/`.
+- **A managed tools directory for scanner binaries.** Logos can
+  now install Trivy, Gitleaks, OSV-Scanner and gosec itself, into one user-level
+  tools directory shared by every project and never inside a repository:
+  `$LOGOS_DATA_HOME`, else `$XDG_DATA_HOME/logos/tools`, else
+  `~/.local/share/logos/tools`. Each release compiles in a manifest that pins
+  every tool's version, URL and SHA-256 for macOS arm64/x86_64 and Linux
+  x86_64/arm64. Downloads go through the system `curl` with a fixed, HTTPS-only
+  argv that ignores `.curlrc`, so Logos still links no HTTP client. Logos checks
+  the SHA-256 itself before anything is unpacked: a tampered or truncated
+  download is deleted, never run, and its tool fails with the checksum reason.
+  Each tool is unpacked in a staging directory and moved into place with one
+  rename, so an install that is interrupted or killed leaves no partial tool,
+  and the next run completes it. Security detection now names which copy of a
+  scanner it found (`override`, `path` or `managed`) and falls back to the
+  managed copy of the pinned version. A missing `curl` reports `curl not found`
+  and names the package; Windows reports `managed install not available on this
+  platform`. `logos security install` runs it (below).
+- **Security findings can gate a merge, and a missing scan exits 5.** A
+  `[security]` table in `rules.toml` makes security findings gate input.
+  `required_scanners` names the scanners that must have a fresh scan at HEAD.
+  The ratchet fails on an unsuppressed finding at or above
+  `ratchet_min_severity` (default `high`) that `gate --save` did not record.
+  The caps `max_severity` and `fail_on_owasp` fail on any unsuppressed finding
+  they match, recorded or not. `gate --save` and `session_start` record the
+  fingerprint of every unsuppressed stored finding; the set lives in
+  `history.db`, which moves to schema 5. A finding suppressed in
+  `.logos/security-ignore.toml` is excluded from every rule. When a required
+  scanner never ran, is stale, is not installed or is disabled, `check` and
+  `gate` exit 5 naming it. Exit 4 takes precedence, and a scanner the table does
+  not require never causes exit 5. `check --json` gains `missing_scans`;
+  `gate --json` gains `security_violations` and `missing_scans`. Without the
+  table nothing reads the evidence and the output is unchanged. It moves
+  neither the signal nor the metric semantics.
+- **The plugin asks before an agent relaxes the quality contract.** A
+  PreToolUse hook (`plugins/logos/hooks/guard.sh`) returns `ask` when an agent
+  would write, edit or delete `.logos/rules.toml`, `.logos/rules-baseline.json`
+  or `.logos/security-ignore.toml` (any `.logos/`, so a workspace member's too),
+  or run `logos gate --save` or `logos check --bless`, whether as a shell command
+  or through the `bless_rules` MCP tool under either the plugin's or a project
+  `.mcp.json`'s prefix. The reason names the file or the command, and the human
+  decides. Reads pass: a Read of a guarded file, and a shell command that only
+  reads one (`cat .logos/rules.toml`). A shell command that names a guarded file,
+  as a word of its own or glued to an option (`dd of=…`, `--output=…`), asks
+  unless its command is a known reader and the file is not a redirection target;
+  a command that is not a known reader also asks when given the `.logos`
+  directory itself, a glob under it that can match a guarded name, or a bare
+  guarded name, glob or brace list beside a mention of `.logos`
+  (`cd .logos && rm *`). Edits to other `.logos/` files and unrelated commands
+  pass untouched.
+  A payload the hook cannot read asks rather than allows. It is a guardrail
+  against an agent loosening the contract by mistake, not a sandbox: a path
+  assembled at run time is not seen.
+- **`logos security install`, `uninstall` and `scan --install`, under a
+  per-user consent.** `logos security install [<scanner>…|--all]` installs the
+  scanners that have no usable copy. A user-level `path` override, or a copy on
+  `PATH` at or above the minimum version Logos was tested with, is kept and
+  never downloaded; a `PATH` copy below that minimum no longer wins over a
+  managed copy. Installing needs the user's consent for each tool's pinned
+  version, recorded once per user in `security-install-consent.toml` beside the
+  scan consent and covering every project. Without it the command exits 2
+  naming each tool, version, source host and download size, and downloads
+  nothing; `--consent` records it. `--update` replaces a managed copy older than
+  the release's pin, after consenting to the new version, and removes the old
+  one; nothing updates by itself. `--from <dir>` installs offline from
+  pre-downloaded artifacts with the same SHA-256 check. `logos security
+  uninstall` removes managed copies only. `logos security scan --install`
+  installs what is missing and not switched off, then scans. `security status`
+  (and its MCP twin) now carries, per installed scanner, the copy in use, its
+  version and `update_available`, and for a missing one the install command;
+  reading the versions runs each installed scanner's version command. MCP has
+  no install tool: an agent cannot consent to downloading a binary.
+- **The web UI has a Security page.** A new **Security** entry in the
+  sidebar, beside Rule findings and Coverage, shows each scanner's state, every
+  stored finding with its enclosing symbol and route reachability, the findings
+  grouped by OWASP Top 10 with a 2025/2021 switch, and one finding's detail with
+  its blast radius. Each absent state names the command that fixes it: no scan
+  yet, a scanner that is not installed or has never run, and an OWASP category
+  no scanner that ran can detect, which reads "not covered" rather than zero.
+  The findings table filters by severity, scanner, category, path and
+  suppression, and a `?path=` link opens it narrowed to a file or directory.
+  Switching edition re-classifies the same findings without a new request. No
+  source snippet is shown, and a secret-class finding's message reads
+  `[redacted]`. With a `[security]` table in `.logos/rules.toml`, the page
+  also shows the verdict `logos check` reaches on it: the missing required
+  scans and the findings its rules fail on. The page reads one new endpoint,
+  `GET /api/v1/security`, which runs no scan and writes nothing.
+- **A scan runs from the Security page.** A **Run scan** button starts
+  `logos security scan` as a background job, so every other page keeps
+  answering while it runs, and the panel shows each scanner as it starts and
+  finishes. Clicking again while a scan runs joins it rather than starting a
+  second one. **Cancel scan** stops every scanner process, including any a
+  scanner started itself, and starts none after it; a cancelled scanner leaves
+  no failure log, and the previous results are kept. Each scanner's captured
+  output stays bounded. The first scan in a project opens a dialog that names
+  the scanners that may reach the network; accepting records the consent in the
+  user-level Logos config, never in the repository, and later scans do not
+  ask. The new endpoints are `GET /api/v1/security/scan` (the job and its
+  progress) and `POST /api/v1/security/scan` and
+  `POST /api/v1/security/scan/cancel`, which accept a request only from the UI's
+  own origin carrying the session's intent token.
+- **Findings are triaged from the Security page.** Each finding row has a
+  **Suppress…** action that opens a dialog. The dialog requires a reason, takes
+  an optional expiry date, and names the file it writes:
+  `.logos/security-ignore.toml`, which is committed with the repository. An empty
+  reason is refused and nothing is sent. A suppressed finding stays listed,
+  labelled with its reason and expiry. **Unsuppress** removes the entry. Both
+  write through the ignore file's sorted serialisation, so adding an entry then
+  removing it restores the file byte for byte, and removing the last entry
+  removes the file. A file that is not in that canonical spelling, for example
+  one with comments, is refused rather than rewritten, so nothing a person wrote
+  by hand is lost. An expiry in the past or an already-suppressed finding is
+  also refused with the reason. The new endpoints, `POST /api/v1/security/suppress`
+  and `POST /api/v1/security/unsuppress`, accept a request only from the UI's own
+  origin carrying the session's intent token.
+- **A workspace rolls security up per member.** In a workspace, the sidebar's
+  Workspace section gains **Security**: one row per member with how many of its
+  scanners have a fresh scan, and its findings by severity, each row linking to
+  that member's Security page. Totals count only fresh, unsuppressed findings,
+  say so, and state the members they were summed over and the stale and
+  suppressed findings they left out. A member never scanned reads "never run",
+  never 0. A member that cannot be opened is a row with its reason, and the
+  others still answer. The OWASP Top 10 table sums the members read, with a
+  2025/2021 switch, and says in how many members a fresh scan covers each
+  category; a category no member covers reads "not covered", and the findings
+  under no category are counted apart, as on a member's own page. The page starts
+  no scan. It reads one new endpoint, `GET /api/v1/workspace/security`, which
+  runs no scan and writes nothing; a security read over a project that never
+  stored a report no longer creates `.logos/history.db`.
+- **The `logos-review` skill, the `logos-reviewer` subagent and `/logos:review`.**
+  The plugin now reviews a branch symbol by symbol and gives every entry of the
+  `logos review` delta one verdict. `untrusted` is an entry labelled `stale`,
+  `same-file-only` or anything but `resolved`: reported, never edited.
+  `test-first` is a trusted entry no test reaches: the skill names the
+  characterisation test and stops. `no-action-warranted` always carries a reason.
+  `fix` is a trusted, covered entry worth the change, and only `fix` symbols are
+  edited. A fix is claimed only when a re-run of the delta shows its entry
+  `resolved` or `improved` and the tests pass, with their count. An entry the
+  branch added and then fixed has no merge-base state to resolve, so it is
+  reported as `cleared`, never as `resolved`. The aggregate quality number is
+  never cited. A clean branch reports "no entries" and edits nothing. Every
+  deterministic step is a script that states its denominator: the merge-base, the
+  delta run, the test-reach lookup, the trust gate, the edit-scope check, the
+  re-measurement and a check of the report itself. On request, debt mode reads
+  the "where to start" list instead of the branch. Test reach is by test-marked
+  files, so a unit test inside the offender's own file is not seen and the entry
+  reads `test-first`.
+- **The plugin checks each editing turn when the agent stops.** A Stop hook
+  (`plugins/logos/hooks/stop.sh`) acts only when tracked source changed since its
+  previous run (documentation and media files do not count), and then runs
+  `logos check` and `logos review` within a budget of 15 s (at most 25 s, inside
+  the hook's 30-second timeout). A clean turn prints
+  nothing. On a regression it blocks the stop once: the reason lists each new or
+  worsened entry with its symbol, value, threshold and trust label, and each
+  failing rule, and names `/logos:review`. An entry the graph could not fully
+  resolve, `stale` among them, is listed but never alone blocks. The host does
+  not block once by itself, so the hook reads `stop_hook_active` and never blocks
+  again in the same chain. Over budget, or when a leg cannot run, that leg never
+  blocks: the hook says it was not measured (a regression another leg did find
+  still blocks, with the unmeasured leg named). The merge-base before-state is not
+  built inside the budget: unless it was built here under the same logos version,
+  contract and configuration (or, with no rule to evaluate, a snapshot is recorded
+  at the merge-base), the hook starts the build detached, one at a time, says "not
+  measured", and measures the next turn. A build that failed is not retried until
+  the contract, the configuration or logos change. `LOGOS_STOP_HOOK_BUDGET_MS` sets the budget and
+  `LOGOS_STOP_HOOK_DISABLE=1` turns the hook off; a directory without `.logos/`
+  is left alone. The script runs its checks as a list of legs behind that one
+  budget, so a further check is one function and one word in the list. Unlike the
+  plugin's other scripts it needs `git` on `PATH` (it measures a working tree),
+  and exits 0 silently without it.
+- **A manual page for the plugin and the review loop.**
+  `docs/howto/plugin.md` documents installing the plugin, migrating a project
+  that ran `init -i` before it, `init --uninstall`, `offenders` and
+  `review --base`, the Stop check with its 15 s budget and its off switch, the
+  guardrail, the review skill's four verdicts and what proves a fix, and a table
+  of the trust labels `review` puts on each entry. The page is held to the binary
+  by tests: every `logos` command and flag it shows, inline or fenced, must exist in the shipped CLI,
+  every `LOGOS_*` variable it names must be read by a shipped script or source file,
+  and every variable a plugin script reads must be named in it.
+  `docs/howto/configuration.md` lists the three plugin variables and the two
+  directories (`.logos/review-cache/`, `.logos/stop-hook/`) the loop keeps.
+- **Dependency-Check and CodeQL install only when named.** `logos security
+  install dependency-check` installs Dependency-Check 13.0.0 with a pinned,
+  SHA-256-verified Java runtime (Eclipse Temurin 21.0.12.1) that only it uses,
+  so no system Java is needed; the managed copy always runs on that runtime,
+  whatever `JAVA_HOME` says, and the consent names the runtime as a line of its
+  own. `logos security install codeql --accept-codeql-licence` installs the
+  CodeQL 2.27.2 bundle; without the flag it exits 2 showing the CodeQL licence
+  terms (open-source codebases and academic research only) and downloads
+  nothing. The acknowledgement is recorded per user and per version in
+  `security-install-consent.toml`, with the install consent, and `security
+  status` (and its MCP twin) shows it on CodeQL's row as `licence`; CodeQL's
+  `install` hint names the flag until it is accepted. Neither is installed by
+  `--all` or by `security scan --install`, and their status rows carry
+  `opt_in: true`, so the Security page no longer suggests `scan --install` for
+  them. `uninstall` removes the Java runtime once no installed scanner needs it,
+  and `uninstall --all` covers both. A Dependency-Check on `PATH` below 13.0.0
+  now counts as below the tested minimum: the managed copy runs in its place
+  once installed.
+- **Scanners install from the Security page, and Install & scan runs a full scan
+  in one action.** While any of the seven default scanners is missing,
+  **Install & scan** replaces **Run scan**: one background job installs the
+  missing scanners, then runs the full scan, with no terminal. A *not installed*
+  row offers **Install**; the new **Copy** column reads `managed`, `path` or
+  `override`, and a managed copy older than the pin reads `update available` and
+  offers **Update**, which replaces it. One consent dialog comes first: each tool
+  with its version, source host and size, the support installs it needs, and
+  for Install & scan the scanners still awaiting this project's network consent.
+  Dependency-Check (with its Java runtime's size) and CodeQL (with its licence
+  terms, the licence a checkbox of its own) are opt-in lines, unticked, and are
+  never installed unless ticked. The panel lists each tool as it installs, then
+  each scanner as it runs; **Cancel install** stops the download, leaves no
+  partial tool, starts no further tool and names the tools installed before
+  the cancel. A scan and an install, or two installs, never run side by side for
+  one project: the second start is refused. The
+  new endpoints are `GET /api/v1/security/install` (the job and its progress)
+  and `POST /api/v1/security/install` and `POST /api/v1/security/install/cancel`,
+  which accept a request only from the UI's own origin carrying the session's
+  intent token; a start with a line still unanswered gets `409` with the plan
+  and downloads nothing.
+- **Hook and skill calls carry an invoker, and `stats --json` counts by it.** A
+  process that declares itself in `LOGOS_INVOKER` stamps every telemetry event
+  it records with that name. The plugin's hooks export `hook:stop`,
+  `hook:pre-tool-use` and `hook:session-start`, and its skill scripts
+  `skill:logos-review` and `skill:logos-sec-review` (a `logos-review` script run
+  by `logos-sec-review` keeps the latter). Only `hook:<name>` or `skill:<name>`
+  is taken; a direct call, or any other value, records none. `stats --json`
+  adds `calls_by_tool_invoker`, per-tool counts by invoker with `null` for none,
+  and the workspace statistics sum it across members. `attribution_coverage`
+  states its limits: raw events only, like the origin cross-tab, and
+  `null_invoker_includes_pre_stamp_rows` — events written before the stamp are
+  never given an invoker. `telemetry.db` migrates forward to version 5 (a
+  nullable `invoker` column); a reader of an older store counts every call as
+  having none.
+
+### Changed
+
+- **The signal drops the graph dimensions it cannot measure, and Cohesion counts
+  only languages that capture member access (metric semantics v8).** Modularity,
+  Acyclicity and Depth are now not applicable when the production graph has
+  fewer than 5 cross-module edges — edges between two different directories,
+  both in an indexed file. Before, Modularity alone dropped out, and only below
+  5 edges of any kind, so intra-module edges kept a graph with nothing between
+  its modules looking measured. Each dimension keeps its computed values beside
+  a false flag and leaves the mean and the zero short-circuit; `scan --json`
+  and `quality-report --json` carry `acyclicity_not_applicable`,
+  `depth_not_applicable` and `cross_module_edge_count` beside
+  `modularity_not_applicable`, and the Health page names the reason on each row.
+  Cohesion now scores a class only in a language whose plugin declares the new
+  `member_access` capability — Java, TypeScript, TSX and PHP; a class of any
+  other language, C++, Ruby and JavaScript included, is not applicable rather
+  than scored from its calls alone. A plugin can carve extensions out of its
+  declaration with `member_access_excluded_extensions`; the TypeScript grammars
+  carve out `js`, `mjs`, `cjs` and `jsx`, whose constructor-assigned fields no
+  query captures. `scan`, `gate`, `session-start`, the
+  MCP `scan` and the session-start readout carry one coverage warning per
+  language that is at least 10% of the production callables and binds no call
+  or import across files, naming the language and its share; it never changes an
+  exit code. The first gate after upgrading re-baselines once, announced. The
+  store moves to schema 38; a snapshot written before it reads Acyclicity and
+  Depth as applicable and keeps the Modularity reason it was decided on.
+- **Semgrep, Bandit and Checkov install on a machine with no Python.**
+  `logos security install` (and `scan --install`, and `--all`) now covers the
+  three Python scanners: Semgrep 1.85.0, Bandit 1.7.10 (with its SARIF extra)
+  and Checkov 3.2.533. Logos installs a pinned, SHA-256-verified `uv` 0.12.21,
+  which provisions a managed CPython 3.12.14 and one environment per scanner.
+  Each environment comes from requirements compiled into the release, every
+  package pinned with its hashes and installed with `--require-hashes` from
+  wheels only. A package whose hash does not match fails that scanner with the
+  checksum reason and leaves no environment. Everything lives under the tools
+  directory (`uv/`, `python/`, `uv-cache/` and `<scanner>/<version>/`). `uv`
+  runs with a cleared environment, no config file and its home inside the
+  install's staging directory, so nothing is written to your own Python, your
+  `PATH` or your home directory; only the proxy and CA-bundle variables pass
+  through. The three are detected as `managed` and run through their usual
+  fixed command lines. The consent names `uv` and the Python runtime as lines
+  of their own, beside each scanner's size from `pypi.org`. For an offline
+  install, `--from <dir>` also reads `<dir>/uv-cache`: a copy of a connected
+  machine's `<tools dir>/uv-cache` after it installed the three, the Python
+  runtime included, with the `uv` archive beside it. That machine must have the
+  same operating system and processor: the cache holds only its platform's
+  packages. Its packages are trusted the way `uv` trusts its own cache, without
+  re-hashing their files, so use a cache you produced yourself. Uninstalling the last of
+  the three also removes `uv`, the Python runtime and the cache.
+- **`init -i` adopts the Claude Code plugin, and `init --uninstall` exists.**
+  When the plugin `logos@logos` is enabled for the project or the user (its
+  `enabledPlugins` entry in `.claude/settings.local.json`,
+  `.claude/settings.json` or the user's `settings.json` under
+  `$CLAUDE_CONFIG_DIR`, else `~/.claude`; the most specific one decides),
+  `init -i` enrols it in the committed `.claude/settings.json`
+  (`extraKnownMarketplaces.logos` and `enabledPlugins`), so every teammate is
+  prompted to install it. It also removes what an earlier `init -i` wrote and
+  the plugin now carries: the `logos` `.mcp.json` entry, the session-start
+  readout entry and its script, and a materialized skill copy with its
+  `.claude/skills` pointer. With the plugin absent, `init -i` prints and writes
+  exactly what it did before. `logos init --uninstall` (also spelled
+  `init --hooks --uninstall`) removes everything Logos wrote: the `CLAUDE.md`
+  block, the MCP, readout and plugin entries, the scripts and skill copies, and
+  the managed git hooks, unsetting `core.hooksPath` only if Logos set it. It
+  removes an entry only while it holds exactly what `init` writes, leaves
+  foreign content and `.logos/` in place, and a second run changes nothing.
+  `logos doctor` gains `plugin_warnings`: a `logos` server declared both by
+  `.mcp.json` and by the enabled plugin (every tool would be listed twice), and
+  a binary older than an installed plugin's `minBinaryVersion`. Both are
+  advisory and do not change the exit code.
+- **Health, MCP and the CLI answer "what should I fix first?".** Health gains a
+  **Where to start** card above the per-dimension widgets: the ranked fix units
+  of the displayed snapshot with Rank, Unit, Dimension, Est. points and Outlier
+  columns, captioned as an advisory estimate that never gates. An empty recorded
+  list reads "no single unit recovers a whole point", never "clean", and Health
+  names `logos scan` when the snapshot recorded no ranking. Acyclicity's widget
+  links to the Architecture view (its Cycles while that list is shown, the
+  dependency matrix otherwise) whenever that view is not hidden; in this build
+  the view is hidden, so no link appears and the cycles are listed inline. New
+  `logos improvements --json`, with the MCP twin `improvements`, prints the same
+  list `GET /api/v1/health` carries as `scan.where_to_start`; the three agree
+  field for field on one snapshot, and a rerun is byte-identical. It reads the
+  last snapshot and writes nothing. `docs/howto/metrics.md` explains what an
+  estimate means. The chat agent's use of the list is not part of the public
+  build.
+- **The manual stops saying `init -i` installs git hooks, and describes plain
+  `init` as it is.** `init -i` writes `.mcp.json`, `CLAUDE.md` and the readout hook,
+  or the plugin's enrolment when the plugin is enabled, and installs no git hook:
+  on a terminal it asks and the default is no, and `init --hooks` is the way to
+  install them. Plain `init` writes `.logos/config.toml`, `.logos/rules.toml` and
+  `.logos/.gitignore` beside the store, where `index` alone creates the store and
+  no policy file. The MCP section of `usage.md` now counts the 33 tools the server
+  registers (42 in a workspace) and lists `bless_rules`, `offenders`, `review`,
+  `improvements` and the four `security_*` tools it had left out.
+
+### Fixed
+
+- **`/logos:review` sees a symbol's tests against the real binary.** Its test-reach
+  step asked `logos impact` for each entry's symbol id, which carries no
+  repository coordinate, and the binary resolves no such id, so every entry read
+  test reach `unknown` and went to `test-first`: the skill could never propose a
+  fix. It now asks the bare name the id ends in when the id does not resolve, and
+  credits the answer only when it lands in the entry's own file.
+
 ## [1.19.0] — 2026-10-16
 
 ### Added

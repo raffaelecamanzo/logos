@@ -1,0 +1,52 @@
+/*
+ * Security view layout (S-670, FR-UI-23, ADR-44). Zero-runtime CSS Module →
+ * external <link> stylesheet (no inline <style>, no CSS-in-JS), so the self-only
+ * CSP stays byte-identical. Every value is a design token.
+ */
+
+/* The findings filters: one wrapping row of labelled controls. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+}
+
+/* The OWASP edition switch: two toggle buttons. */
+.switch {
+  display: flex;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+}
+
+/* The gate band's missing scans, violations and notes. */
+.list {
+  margin: 0;
+  padding-left: var(--space-4);
+  line-height: var(--leading-base);
+  color: var(--text-1);
+}
+
+/* A scan or triage request the server refused (S-673, S-672). */
+.alert {
+  margin: 0 0 var(--space-3);
+  color: var(--text-1);
+}
+
+/* The finding detail's facts: a term column and its value. */
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  margin: 0 0 var(--space-3);
+  line-height: var(--leading-base);
+}
+
+.facts dt {
+  color: var(--text-2);
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--text-1);
+}

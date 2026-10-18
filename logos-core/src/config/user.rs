@@ -22,6 +22,10 @@
 //! state, such as the scan consent record (S-667): it is resolved once here so
 //! each consumer adds a file or a table instead of a second lookup.
 //!
+//! The user-level **tools directory** ([`user_tools_dir`], S-743) is resolved
+//! beside it by the same rules, from `$LOGOS_DATA_HOME`, `$XDG_DATA_HOME` and
+//! `$HOME`.
+//!
 //! A missing directory or file is not a fault: it reads as no overrides. A file
 //! that exists is parsed strictly (`deny_unknown_fields`, exit 2), like the
 //! repository config.
@@ -35,6 +39,16 @@
 //! config. A project is keyed by its canonical root path, never by anything the
 //! repository says about itself, so a repository cannot claim another
 //! project's consent. Nothing is ever written inside the repository.
+//!
+//! # Install consent
+//! Beside it, [`INSTALL_CONSENT_FILE`] records which tool versions the user
+//! allowed Logos to download and install (S-744, [FR-SC-22]): per user and per
+//! tool version, covering every project. It is a separate file because it
+//! answers a separate question — the scan consent is per project and about the
+//! scanners' own network use. The CodeQL licence acknowledgement is recorded
+//! in it too, per tool version, with the install consent it came with (S-746).
+//!
+//! [FR-SC-22]: ../../../../docs/specs/requirements/FR-SC-22.md
 //!
 //! [NFR-SE-08]: ../../../../docs/specs/requirements/NFR-SE-08.md
 //! [NFR-SE-07]: ../../../../docs/specs/requirements/NFR-SE-07.md
@@ -78,6 +92,41 @@ pub fn user_config_dir_from(lookup: impl Fn(&str) -> Option<OsString>) -> Option
         .or_else(|| absolute("XDG_CONFIG_HOME").map(|p| p.join("logos")))
         .or_else(|| absolute("HOME").map(|p| p.join(".config").join("logos")))
         .or_else(|| absolute("APPDATA").map(|p| p.join("logos")))
+}
+
+/// The variable that overrides the user-level tools directory (S-743).
+pub const USER_DATA_HOME_ENV: &str = "LOGOS_DATA_HOME";
+
+/// The user-level **tools directory** the [tool installer](crate::tools) keeps
+/// managed tools in ([FR-SC-21]), resolved from the process environment, or
+/// `None` when no candidate variable is usable. First match wins:
+///
+/// 1. `$LOGOS_DATA_HOME` — the directory itself (tests point it at a temp dir);
+/// 2. `$XDG_DATA_HOME/logos/tools`;
+/// 3. `$HOME/.local/share/logos/tools`.
+///
+/// Resolved here, beside [`user_config_dir`] and by the same rules (an unset,
+/// empty or relative value is skipped), because it is the same kind of state:
+/// one per user, shared by every project, never inside a repository. There is
+/// no Windows fallback: managed installs are not available there yet.
+///
+/// [FR-SC-21]: ../../../../docs/specs/requirements/FR-SC-21.md
+pub fn user_tools_dir() -> Option<PathBuf> {
+    user_tools_dir_from(|name| std::env::var_os(name))
+}
+
+/// [`user_tools_dir`] over an injected environment lookup.
+pub fn user_tools_dir_from(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        lookup(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    absolute(USER_DATA_HOME_ENV)
+        .or_else(|| absolute("XDG_DATA_HOME").map(|p| p.join("logos").join("tools")))
+        .or_else(|| {
+            absolute("HOME").map(|p| p.join(".local").join("share").join("logos").join("tools"))
+        })
 }
 
 /// The parsed user-level config file.
@@ -265,9 +314,176 @@ pub fn record_scan_consent<S: AsRef<str>>(
     Ok(consented)
 }
 
+/// The install-consent record's file name inside [`user_config_dir`], beside
+/// [`SCAN_CONSENT_FILE`].
+pub const INSTALL_CONSENT_FILE: &str = "security-install-consent.toml";
+
+/// The user's recorded **install consent** ([FR-SC-22], S-744): per tool, the
+/// versions the user allowed Logos to download, install and run. One
+/// `[tool]` table, `<tool> = ["<version>", …]`, and — once a licence has been
+/// acknowledged ([FR-SC-23], S-746) — a `[licence]` table of the same shape:
+/// the versions of each tool whose licence terms the user accepted.
+///
+/// Per user and per tool version, never per project: a consent covers that
+/// version in every project, and a newly pinned version is asked for again.
+/// Like [`ScanConsent`] it is state Logos writes, kept out of
+/// [`USER_CONFIG_FILE`] and out of every repository.
+///
+/// [FR-SC-22]: ../../../../docs/specs/requirements/FR-SC-22.md
+/// [FR-SC-23]: ../../../../docs/specs/requirements/FR-SC-23.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallConsent {
+    #[serde(default)]
+    tool: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    licence: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl InstallConsent {
+    /// Whether the user consented to installing `version` of `tool`.
+    pub fn covers(&self, tool: &str, version: &str) -> bool {
+        self.tool.get(tool).is_some_and(|v| v.contains(version))
+    }
+
+    /// Whether the user accepted the licence of `version` of `tool`.
+    pub fn licence_accepted(&self, tool: &str, version: &str) -> bool {
+        self.licence.get(tool).is_some_and(|v| v.contains(version))
+    }
+
+    /// The versions of `tool` whose licence the user accepted, in version
+    /// string order.
+    pub fn licences(&self, tool: &str) -> Vec<String> {
+        self.licence
+            .get(tool)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Load the install-consent record from `dir`, or an empty record when `dir`
+/// is `None` or holds none.
+///
+/// # Errors
+/// [`ConfigError::Io`] if the file exists but cannot be read, or
+/// [`ConfigError::Parse`] if it is not a record Logos wrote.
+pub fn load_install_consent(dir: Option<&Path>) -> Result<InstallConsent, ConfigError> {
+    let Some(path) = dir.map(|d| d.join(INSTALL_CONSENT_FILE)) else {
+        return Ok(InstallConsent::default());
+    };
+    match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse { path, source }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(InstallConsent::default()),
+        Err(source) => Err(ConfigError::Io { path, source }),
+    }
+}
+
+/// Add each `(tool, version)` of `lines` to the install consent under `dir`
+/// (created if absent), and each of `licences` to its accepted licences, in
+/// one write. The file is replaced atomically through
+/// [`publish`](super::atomic::publish), as [`record_scan_consent`] does.
+///
+/// # Errors
+/// [`ConfigError::InvalidValue`] when there is no user-level directory to
+/// record in, else as [`load_install_consent`], or [`ConfigError::Write`] when
+/// the record cannot be written.
+pub fn record_install_consent<T: AsRef<str>, V: AsRef<str>>(
+    dir: Option<&Path>,
+    lines: &[(T, V)],
+    licences: &[(&str, &str)],
+) -> Result<InstallConsent, ConfigError> {
+    let Some(dir) = dir else {
+        return Err(ConfigError::InvalidValue {
+            key: "consent".to_string(),
+            message: format!(
+                "there is no user-level directory to record the install consent in; set \
+                 ${USER_CONFIG_HOME_ENV} or $HOME"
+            ),
+        });
+    };
+    let mut record = load_install_consent(Some(dir))?;
+    for (tool, version) in lines {
+        record
+            .tool
+            .entry(tool.as_ref().to_string())
+            .or_default()
+            .insert(version.as_ref().to_string());
+    }
+    for (tool, version) in licences {
+        record
+            .licence
+            .entry((*tool).to_string())
+            .or_default()
+            .insert((*version).to_string());
+    }
+    let path = dir.join(INSTALL_CONSENT_FILE);
+    let text = toml::to_string(&record).expect("a consent record always serialises");
+    fs::create_dir_all(dir)
+        .and_then(|()| super::atomic::publish(&path, text.as_bytes(), None))
+        .map_err(|source| ConfigError::Write { path, source })?;
+    Ok(record)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_consent_is_per_tool_version_and_accumulates_beside_the_scan_consent() {
+        let user = tempfile::TempDir::new().unwrap();
+        assert!(!load_install_consent(Some(user.path())).unwrap().covers("trivy", "0.74.0"));
+
+        record_install_consent(Some(user.path()), &[("trivy", "0.74.0")], &[]).unwrap();
+        let record = record_install_consent(
+            Some(user.path()),
+            &[("trivy", "0.75.0"), ("gosec", "2.21.4")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(record, load_install_consent(Some(user.path())).unwrap());
+        assert!(record.covers("trivy", "0.74.0"), "a later consent adds to the earlier one");
+        assert!(record.covers("trivy", "0.75.0") && record.covers("gosec", "2.21.4"));
+        assert!(!record.covers("gosec", "2.22.0"), "a consent names one version");
+        assert!(!record.covers("gitleaks", "8.18.4"));
+        // Its own file, beside the scan consent's, and no temporary left behind.
+        let files: Vec<_> = fs::read_dir(user.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(files, [INSTALL_CONSENT_FILE]);
+        assert!(load_scan_consent(Some(user.path())).unwrap().consented(user.path()).is_empty());
+        assert!(matches!(
+            record_install_consent(None, &[("trivy", "0.74.0")], &[]),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+        fs::write(user.path().join(INSTALL_CONSENT_FILE), "all = true\n").unwrap();
+        assert!(matches!(
+            load_install_consent(Some(user.path())),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn a_licence_acknowledgement_is_recorded_per_version_with_the_install_consent() {
+        let user = tempfile::TempDir::new().unwrap();
+        // A record without one writes no `[licence]` table.
+        record_install_consent(Some(user.path()), &[("trivy", "0.74.0")], &[]).unwrap();
+        let text = fs::read_to_string(user.path().join(INSTALL_CONSENT_FILE)).unwrap();
+        assert!(!text.contains("licence"), "{text}");
+
+        let record =
+            record_install_consent(Some(user.path()), &[("codeql", "2.27.2")], &[("codeql", "2.27.2")])
+                .unwrap();
+        assert_eq!(record, load_install_consent(Some(user.path())).unwrap());
+        assert!(record.covers("codeql", "2.27.2") && record.covers("trivy", "0.74.0"));
+        assert!(record.licence_accepted("codeql", "2.27.2"));
+        assert!(!record.licence_accepted("codeql", "2.28.0"), "an acknowledgement names one version");
+        assert!(!record.licence_accepted("trivy", "0.74.0"), "an install consent is not one");
+        assert_eq!(record.licences("codeql"), ["2.27.2"]);
+        assert!(record.licences("trivy").is_empty());
+        let text = fs::read_to_string(user.path().join(INSTALL_CONSENT_FILE)).unwrap();
+        assert!(text.contains("[licence]"), "{text}");
+    }
 
     #[test]
     fn consent_is_recorded_per_project_outside_the_repository_and_accumulates() {
@@ -353,6 +569,40 @@ mod tests {
         assert_eq!(
             user_config_dir_from(env(&skipped)),
             Some(PathBuf::from("/h/.config/logos"))
+        );
+    }
+
+    #[test]
+    fn the_tools_directory_resolves_override_then_xdg_data_then_home() {
+        let all = [
+            ("LOGOS_DATA_HOME", "/d"),
+            ("XDG_DATA_HOME", "/x"),
+            ("HOME", "/h"),
+            ("APPDATA", "/a"),
+        ];
+        assert_eq!(user_tools_dir_from(env(&all)), Some(PathBuf::from("/d")));
+        assert_eq!(
+            user_tools_dir_from(env(&all[1..])),
+            Some(PathBuf::from("/x/logos/tools"))
+        );
+        assert_eq!(
+            user_tools_dir_from(env(&all[2..])),
+            Some(PathBuf::from("/h/.local/share/logos/tools"))
+        );
+        // No Windows fallback, and the config overrides are not consulted.
+        assert_eq!(user_tools_dir_from(env(&all[3..])), None);
+        assert_eq!(
+            user_tools_dir_from(env(&[("LOGOS_CONFIG_HOME", "/o"), ("XDG_CONFIG_HOME", "/c")])),
+            None
+        );
+        let skipped = [
+            ("LOGOS_DATA_HOME", ""),
+            ("XDG_DATA_HOME", "relative/dir"),
+            ("HOME", "/h"),
+        ];
+        assert_eq!(
+            user_tools_dir_from(env(&skipped)),
+            Some(PathBuf::from("/h/.local/share/logos/tools"))
         );
     }
 

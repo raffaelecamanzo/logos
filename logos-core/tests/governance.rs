@@ -753,7 +753,16 @@ fn tangle_b() {
 
 #[test]
 fn gate_threshold_floor_fails_a_low_signal() {
-    let tmp = clean_project();
+    // Uneven complexity, so Equality sits below 1. `clean_project`'s two calls
+    // share one file, so since metric-semantics v8 (FR-QM-18) its graph
+    // dimensions drop out and every remaining dimension is a clean 1.0 — a
+    // perfect 10000 that no floor can fail.
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/lib.rs",
+        "pub fn api(x: i32) -> i32 {\n    if x > 0 { helper() } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\nfn helper() -> i32 {\n    1\n}\n",
+    );
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let result = engine.gate(Some(10_000), false, true).expect("gate runs");
     assert!(
@@ -861,30 +870,31 @@ fn downgrade_all_snapshots_to(root: &Path, version: i64) {
     .expect("downgrade the recorded semantics version");
 }
 
-/// The CR-163 upgrade boundary (S-502, [FR-GV-10]): a baseline saved by a v6
-/// build (before the duplicate floor and bodied LCOM4/Focus) is incomparable
-/// to a v7 run. The first gate after the upgrade passes informationally with
-/// the re-baseline notice; the second compares normally against the snapshot
-/// the first re-based to. One bump, one re-baseline, nothing re-blessed by
-/// hand.
+/// The CR-171 upgrade boundary (S-523, [FR-GV-10]; S-502 pinned the v6 → v7
+/// one the same way): a baseline saved by a v7 build (before the graph
+/// dimensions needed cross-module edges and Cohesion needed `member_access`)
+/// is incomparable to a v8 run. The first gate after the upgrade passes
+/// informationally with the re-baseline notice; the second compares normally
+/// against the snapshot the first re-based to. One bump, one re-baseline,
+/// nothing re-blessed by hand.
 ///
 /// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
 #[test]
-fn a_v6_baseline_re_baselines_once_under_semantics_v7() {
+fn a_v7_baseline_re_baselines_once_under_semantics_v8() {
     assert_eq!(
         logos_core::metrics::METRIC_SEMANTICS_VERSION,
-        7,
-        "CR-163 is semantics v7"
+        8,
+        "CR-171 is semantics v8"
     );
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     assert!(engine.index().warnings.is_empty());
     assert!(engine.gate(None, true, true).expect("gate --save runs").saved);
-    downgrade_all_snapshots_to(tmp.path(), 6);
+    downgrade_all_snapshots_to(tmp.path(), 7);
 
     let first = engine.gate(None, false, true).expect("gate runs");
-    assert!(first.passed, "a v6 baseline never fails a v7 gate: {}", first.message);
-    assert!(first.saved, "the first v7 gate re-baselines");
+    assert!(first.passed, "a v7 baseline never fails a v8 gate: {}", first.message);
+    assert!(first.saved, "the first v8 gate re-baselines");
     assert!(
         first
             .message
@@ -1805,7 +1815,7 @@ fn health_reports_store_integrity_and_counts() {
     // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 35, "migration 35 applied");
+    assert_eq!(health.schema_version, 38, "migration 38 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);
@@ -3271,20 +3281,22 @@ fn a_run_finding_fewer_violations_lowers_the_marker_count() {
     );
 }
 
-// ── CR-156: a not-applicable Modularity is not a regression of the signal ────
+// ── CR-156 / FR-QM-18: a not-applicable graph dimension is not a regression ──
 
-/// A graph that stays below five edges keeps Modularity out of the aggregate on
-/// both sides of a gate, so the gate's per-metric regression detail must not
-/// name it — the drop that failed this gate is Depth's (two layers where there
-/// was one), and naming Modularity first, at four times Depth's delta, blames a
-/// dimension that contributed nothing ([CR-156], [NFR-CC-04]). The evolution
-/// series reports the same Modularity as not applicable with its reason and no
-/// delta across the drop-out, rather than as a movement of 0.333 → 0.
+/// A graph that stays below five cross-module edges keeps Modularity,
+/// Acyclicity and Depth out of the aggregate on both sides of a gate, so the
+/// gate's per-metric regression detail must name none of them — the fixture
+/// moves Modularity (0.333 → 0) and Depth (one layer → two), and naming either
+/// blames a dimension that contributed nothing to the signal ([CR-156],
+/// [FR-QM-18], [NFR-CC-04]). The evolution series reports each as not
+/// applicable with its reason and no delta across the drop-out, rather than as
+/// a movement.
 ///
 /// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../docs/specs/requirements/FR-QM-18.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 #[test]
-fn a_not_applicable_modularity_is_never_a_gate_regression_or_an_evolution_delta() {
+fn a_not_applicable_graph_dimension_is_never_a_gate_regression_or_an_evolution_delta() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/core.rs", "pub fn base() {}\n");
     write(tmp.path(), "src/sub/mid.rs", "pub fn mid() {\n    let _ = 1;\n}\n");
@@ -3292,7 +3304,7 @@ fn a_not_applicable_modularity_is_never_a_gate_regression_or_an_evolution_delta(
     engine.index();
     engine.gate(None, true, true).expect("gate --save");
     let before = engine.latest_metrics().unwrap().expect("a snapshot");
-    assert!(before.modularity_not_applicable.is_some(), "m = {} < 5", before.edge_count);
+    assert!(before.modularity_not_applicable.is_some(), "{:?} < 5", before.cross_module_edge_count);
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
     write(
@@ -3302,25 +3314,31 @@ fn a_not_applicable_modularity_is_never_a_gate_regression_or_an_evolution_delta(
     );
     let gate = engine.gate(None, false, true).expect("gate");
     let after = engine.latest_metrics().unwrap().expect("a snapshot");
-    let na = after.modularity_not_applicable.clone().expect("still m < 5");
+    let na = after.modularity_not_applicable.clone().expect("still fewer than 5 cross-module edges");
+    let crossing = after.cross_module_edge_count.expect("a v8 snapshot counts them");
+    assert!((1..5).contains(&crossing), "the new call and its import cross src/sub → src: {crossing}");
     assert!(
-        after.modularity.normalized < before.modularity.normalized,
-        "the fixture moves the computed Modularity, so an unfiltered detail would name it"
+        after.modularity.normalized < before.modularity.normalized
+            && after.depth.normalized < before.depth.normalized,
+        "the fixture moves the computed Modularity and Depth, so an unfiltered detail would name them"
     );
     assert!(
-        gate.regressions.iter().all(|r| r.metric != "modularity"),
-        "a not-applicable Modularity is not a regression of the signal: {:?}",
+        gate.regressions
+            .iter()
+            .all(|r| !["modularity", "acyclicity", "depth"].contains(&r.metric.as_str())),
+        "a not-applicable graph dimension is not a regression of the signal: {:?}",
         gate.regressions
     );
 
     let evolution = engine.evolution(None).expect("evolution");
     let last = evolution.snapshots.last().expect("a point");
-    let modularity = &last.metric_deltas[0];
-    assert_eq!(modularity.metric, "modularity");
-    assert_eq!(modularity.not_applicable, Some(na), "evolution names the drop-out and its m");
-    assert_eq!(modularity.delta, None, "no movement is reported for a dimension outside the signal");
+    for (delta, metric) in last.metric_deltas[..3].iter().zip(["modularity", "acyclicity", "depth"]) {
+        assert_eq!(delta.metric, metric);
+        assert_eq!(delta.not_applicable.as_ref(), Some(&na), "evolution names {metric}'s drop-out and its count");
+        assert_eq!(delta.delta, None, "no movement is reported for {metric}, outside the signal");
+    }
     assert!(
-        last.metric_deltas[1..].iter().all(|d| d.not_applicable.is_none()),
-        "only Modularity can be not applicable"
+        last.metric_deltas[3..].iter().all(|d| d.not_applicable.is_none()),
+        "only the three graph dimensions can be not applicable"
     );
 }

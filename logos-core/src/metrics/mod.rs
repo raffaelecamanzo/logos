@@ -10,9 +10,10 @@
 //!    file, so intra-directory dependency edges count as community-internal
 //!    (the rolled-up "module self-loops" the SRS §7.4 trap warns about — drop
 //!    them and Q ≈ 0 always). Normalized `(Q+0.5)/1.5` clamped to [0,1];
-//!    `m == 0` → `1/3`. **Not applicable** below [`MODULARITY_MIN_EDGES`]
-//!    edges (m = 0 included, [CR-156], metric-semantics v6): the computed pair
-//!    is kept, but the dimension drops out of the aggregate.
+//!    `m == 0` → `1/3`. **Not applicable** below [`MIN_CROSS_MODULE_EDGES`]
+//!    cross-module edges ([FR-QM-18], metric-semantics v8; every edge counted
+//!    since [CR-156], v6): the computed pair is kept, but the dimension drops
+//!    out of the aggregate.
 //! 2. **Acyclicity** ([FR-QM-02], [ADR-61], extends [ADR-30]) — count of
 //!    `tarjan_scc` components with `len > 1` **whose members span more than one
 //!    directory** (a cross-module dependency cycle); a singleton self-loop /
@@ -20,14 +21,15 @@
 //!    confined to a single directory (metric-semantics v5, [CR-087]) both count
 //!    zero; normalized `1/(1+cycles)`. The narrowed count is the single source
 //!    the DSM and the `max_cycles` rule read, so the gate and the rule can never
-//!    disagree.
+//!    disagree. Not applicable under Modularity's condition ([FR-QM-18], v8).
 //! 3. **Depth** ([FR-QM-03], [ADR-62], [CR-088]) — longest path (vertex count)
 //!    over the SCC condensation of the **module-rollup graph** (the same
 //!    `directory_of` partition Modularity uses, metric-semantics v5): symbols
 //!    roll up to their directory, so a long call chain inside a single directory
 //!    scores depth 1 and a dependency cycle among directories collapses to one
 //!    layer. It measures architectural layering, not intra-file call length.
-//!    Normalized `1/(1+depth/8)`.
+//!    Normalized `1/(1+depth/8)`. Not applicable under Modularity's condition
+//!    ([FR-QM-18], v8).
 //! 4. **Equality** ([FR-QM-04]) — `1 − Gini` of per-function cyclomatic
 //!    complexity; `n==0`, `n==1`, or `Σx==0` → 1.0.
 //! 5. **Redundancy** ([FR-QM-05]) — `1 − redundant/total` where a function is
@@ -38,8 +40,9 @@
 //!
 //! 6. **Nesting** ([FR-QM-09]) — `1 − deep-nesting ratio`.
 //! 7. **Conciseness** ([FR-QM-10]) — `1 − brain-method ratio`.
-//! 8. **Cohesion** ([FR-QM-11]) — mean of `1/LCOM4` over classes; **n/a
-//!    drop-out** when no class exists.
+//! 8. **Cohesion** ([FR-QM-11]) — mean of `1/LCOM4` over the classes of
+//!    languages declaring `member_access` (v8); **n/a drop-out** when no such
+//!    class exists.
 //! 9. **Focus** ([FR-QM-12]) — `1 − god-container ratio`; **n/a drop-out** when
 //!    no class-like container exists.
 //! 10. **Uniqueness** ([FR-QM-13]) — `1 − near-clone ratio`.
@@ -49,8 +52,8 @@
 //! `signal = exp((Σ ln nᵢ)/k) · 10000` over the **applicable** dimensions in
 //! **canonical order** (the five original metrics, then nesting, conciseness,
 //! cohesion, focus, uniqueness), rounded to an integer ([ADR-08]). `k` is the
-//! count of applicable dimensions (10, or fewer as Modularity, Cohesion and
-//! Focus drop out). Three guards:
+//! count of applicable dimensions (10, or fewer as the graph dimensions,
+//! Cohesion and Focus drop out). Three guards:
 //!
 //! - **Zero short-circuit (applicable original five only)** — if any
 //!   *applicable original* `nᵢ == 0.0` the signal is `0` *before* any `ln` runs
@@ -59,10 +62,11 @@
 //!   signal.
 //! - **Applicability drop-out** — Cohesion/Focus with no construct store NULL +
 //!   a `false` flag and drop out of the denominator ([ADR-21]); a class-less repo
-//!   gets a deterministic 9-dimension mean ([UAT-QM-10]). Modularity on a graph
-//!   with fewer than [`MODULARITY_MIN_EDGES`] edges drops out the same way — out
-//!   of the denominator *and* out of the short-circuit — but keeps its computed
-//!   values beside a `false` `modularity_applicable` flag ([CR-156]).
+//!   gets a deterministic 9-dimension mean ([UAT-QM-10]). Modularity,
+//!   Acyclicity and Depth on a graph with fewer than [`MIN_CROSS_MODULE_EDGES`]
+//!   cross-module edges drop out the same way — out of the denominator *and* out
+//!   of the short-circuit — but keep their computed values beside `false`
+//!   `*_applicable` flags ([FR-QM-18]; Modularity alone since [CR-156]).
 //! - **Empty-graph sentinel** — `node_count == 0` stores `empty = 1`,
 //!   `aggregate_signal = NULL`, and surfaces as `"n/a"` rather than the
 //!   misleading ~8033 a naive mean of the guard values would produce
@@ -109,6 +113,7 @@
 //! [ADR-30]: ../../../docs/specs/architecture/decisions/ADR-30.md
 //! [CR-022]: ../../../docs/requests/CR-022-acyclicity-self-recursion-exclusion.md
 //! [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+//! [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 //! [AA-03]: ../../../docs/specs/architecture.md#24-assumptions
 //! [FR-DB-06]: ../../../docs/specs/requirements/FR-DB-06.md
 //! [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
@@ -141,7 +146,7 @@ use crate::graph_store::{EdgeRow, FunctionMetricRow, NewMetricSnapshot, NodeRow}
 use crate::hydrate::GraphView;
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
-    MetricSnapshot, MetricValue, ModularityNotApplicable, Offender, WorstOffenders,
+    GraphDimensionNotApplicable, MetricSnapshot, MetricValue, Offender, WhereToStart, WorstOffenders,
 };
 use crate::runtime::Runtime;
 
@@ -149,7 +154,9 @@ mod extended;
 use extended::ContainerIndex;
 pub use extended::{GodContainer, Thresholds};
 
-/// The per-dimension worst-offender list cap ([`worst_offenders`], CR-005
+pub mod insight;
+
+/// The per-dimension worst-offender list cap ([`all_offenders`], CR-005
 /// review-phase visibility): the top-N offenders kept per dimension, capping the
 /// `scan` report surface ([NFR-RA-06] determinism, bounded output).
 ///
@@ -165,21 +172,31 @@ mod tests;
 /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
 const UNBOUND_DIR: &str = "<unbound>";
 
-/// The fewest edges Modularity's graph needs for Modularity to apply
-/// ([CR-156], metric-semantics v6).
+/// The fewest **cross-module** edges the production metric graph needs for the
+/// three graph dimensions — Modularity, Acyclicity and Depth — to apply
+/// ([FR-QM-18], [CR-171], metric-semantics v8; Modularity alone, counted over
+/// every edge, since [CR-156], v6).
 ///
-/// Below it Newman's Q has no community structure to measure: a library whose
-/// one to four edges all cross between two directories scores Q = −0.5, which
-/// normalizes to exactly 0 and — through the [ADR-12] short-circuit — zeroed
-/// the whole signal of an ordinary model → enum layering. Such a graph drops
-/// Modularity out of the aggregate instead ([ADR-21] rule 2). A fixed constant
-/// of the metric semantics, deliberately not a `rules.toml` knob: a tunable
-/// threshold on the one dimension that can zero the signal is a gaming surface.
+/// A cross-module edge is one whose two endpoints lie in different directories
+/// (the [`directory_of`] partition all three read), both bound to a file. Below
+/// the threshold the graph carries too little module structure to score: on a
+/// graph whose language binds nothing across files, Acyclicity's `1.0` and
+/// Depth's single layer measure nothing, and Newman's Q is computed over
+/// intra-module self-loops alone — which cleared the v6 count. The three then
+/// drop out of the aggregate together ([ADR-21] rule 2), keeping their computed
+/// values. That is a trade-off, not a claim that every value below the line is
+/// empty: two crossing edges can form a real cross-module cycle, and four can
+/// chain five layers, and those leave the signal too. The `max_cycles` budget
+/// still reads the computed cycle count, so a contract that budgets cycles
+/// keeps catching one. A fixed constant of the metric semantics, deliberately not a
+/// `rules.toml` knob: a tunable threshold on the dimensions that can zero the
+/// signal is a gaming surface.
 ///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
-/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
-pub const MODULARITY_MIN_EDGES: u64 = 5;
+pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 
 /// The metrics-semantics version stamped on every snapshot ([FR-GV-10]).
 ///
@@ -225,8 +242,9 @@ pub const MODULARITY_MIN_EDGES: u64 = 5;
 ///     graph rather than the symbol-level call graph: a long call chain confined
 ///     to one directory rolls up to a single module vertex (depth 1) instead of
 ///     reporting intra-file call length as architectural layering.
-/// - **v6** — Modularity is **not applicable** on a graph with fewer than
-///   [`MODULARITY_MIN_EDGES`] edges ([CR-156], [ADR-21] rule 2): it keeps its
+/// - **v6** — Modularity is **not applicable** on a graph with fewer than five
+///   edges of any kind ([`MIN_CROSS_MODULE_EDGES`]'s value, counted over
+///   cross-module edges only since v8; [CR-156], [ADR-21] rule 2): it keeps its
 ///   computed pair on the snapshot but leaves both the geometric mean and the
 ///   [ADR-12] zero short-circuit, so a small library whose one to four edges all
 ///   cross two directories no longer scores 0. An edgeless non-empty graph drops
@@ -252,7 +270,26 @@ pub const MODULARITY_MIN_EDGES: u64 = 5;
 ///   A `has_body` fact still `NULL` (an upgraded store not yet re-extracted)
 ///   reads as bodied, never bodyless. The Uniqueness offender list's
 ///   order-by-mass (CR-163 §3.2 E) is report order only and needs no bump.
+/// - **v8** — the signal drops the graph dimensions it cannot measure, and
+///   Cohesion counts only languages that capture member access ([CR-171],
+///   [FR-QM-18], S-523); a v7 baseline is incomparable, so the first
+///   post-upgrade gate auto-re-baselines ([FR-GV-10]):
+///   - *Graph-dimension applicability*: Modularity, Acyclicity **and** Depth are
+///     not applicable when the production metric graph has fewer than
+///     [`MIN_CROSS_MODULE_EDGES`] **cross-module** edges. v6 counted every edge
+///     for Modularity alone, so intra-module self-loops cleared it on a graph
+///     with no edge between modules. All three keep their computed pairs and
+///     leave the mean and the [ADR-12] short-circuit together.
+///   - *Member-access Cohesion* ([FR-QM-11]): a class counts only when its
+///     language's plugin declares `member_access` (Java, TypeScript, TSX, PHP —
+///     JavaScript carved out of the TypeScript grammars); a class of any other
+///     language was scored from its intra-class calls alone.
 ///
+///   A graph with at least five cross-module edges whose classes are all in a
+///   declaring language scores byte-identically to v7.
+///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
@@ -276,7 +313,7 @@ pub const MODULARITY_MIN_EDGES: u64 = 5;
 /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
 /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
-pub const METRIC_SEMANTICS_VERSION: i64 = 7;
+pub const METRIC_SEMANTICS_VERSION: i64 = 8;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -298,9 +335,15 @@ pub const METRIC_SEMANTICS_VERSION: i64 = 7;
 /// reported as `test_function_count` ([FR-QM-07], [NFR-CC-04]). There is no
 /// configuration to re-include tests ([BR-18]).
 ///
+/// `member_access` is the set of file extensions whose plugin declares the
+/// `member_access` capability
+/// ([`LanguageRegistry::member_access_extensions`](crate::plugin::LanguageRegistry::member_access_extensions));
+/// Cohesion scores only classes defined in one of them ([CR-171]).
+///
 /// Same inputs always produce the same output, bit for bit — all reductions
 /// run in canonical order ([ADR-08], [NFR-RA-06]).
 ///
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 /// [FR-DB-06]: ../../../docs/specs/requirements/FR-DB-06.md
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
@@ -318,6 +361,7 @@ pub fn compute(
     functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     thresholds: Thresholds,
+    member_access: &HashSet<String>,
 ) -> MetricSnapshot {
     // Production scope (FR-QM-08): the metric graph drops is_test vertices and
     // their incident edges (Modularity/Acyclicity/Depth see only production),
@@ -336,9 +380,12 @@ pub fn compute(
     // Canonical metric order (ADR-08): modularity, acyclicity, depth,
     // equality, redundancy.
     let modularity = modularity(&graph, &dirs);
-    // CR-156: below MODULARITY_MIN_EDGES the graph has no community structure to
-    // measure, so Modularity drops out (ADR-21 rule 2) — its computed pair stays.
-    let modularity_not_applicable = ModularityNotApplicable::for_edges(graph.edge_count() as u64);
+    // FR-QM-18 (v8): below MIN_CROSS_MODULE_EDGES edges between modules the graph
+    // has no module structure to measure, so Modularity, Acyclicity and Depth
+    // drop out together (ADR-21 rule 2) — each keeps its computed pair. One
+    // count, one decision, so the three can never disagree.
+    let cross_module_edges = cross_module_edge_count(&graph, &dirs);
+    let graph_not_applicable = GraphDimensionNotApplicable::for_cross_module_edges(cross_module_edges);
     // Acyclicity counts cross-module SCCs (>1 directory, ADR-61) over the
     // symbol-level SCC set — the single narrowed source the DSM and the
     // `max_cycles` rule read. Depth measures architectural layering over its own
@@ -358,32 +405,17 @@ pub fn compute(
     let conciseness = extended::conciseness(&production, &thresholds);
     let uniqueness = extended::uniqueness(&production);
     let containers = ContainerIndex::build(nodes, edges, functions, test_ids);
-    let cohesion = containers.cohesion();
+    let cohesion = containers.cohesion(member_access);
     let focus = containers.focus(&thresholds);
 
-    let empty = graph.node_count() == 0;
-    let aggregate_signal = if empty {
-        // The ADR-12 empty-graph sentinel: never a misleading number. Unchanged
-        // by CR-005 — an empty production graph is still "n/a".
-        None
-    } else {
-        Some(aggregate(
-            &applicable_original_dimensions(
-                modularity_not_applicable.is_none().then_some(&modularity),
-                &acyclicity,
-                &depth,
-                &equality,
-                &redundancy,
-            ),
-            &applicable_new_dimensions(&nesting, &conciseness, &cohesion, &focus, &uniqueness),
-        ))
-    };
-
-    MetricSnapshot {
+    let mut snapshot = MetricSnapshot {
         modularity,
-        modularity_not_applicable,
+        modularity_not_applicable: graph_not_applicable.clone(),
         acyclicity,
+        acyclicity_not_applicable: graph_not_applicable.clone(),
         depth,
+        depth_not_applicable: graph_not_applicable,
+        cross_module_edge_count: Some(cross_module_edges),
         equality,
         redundancy,
         nesting,
@@ -396,35 +428,62 @@ pub fn compute(
         edge_count: graph.edge_count() as u64,
         function_count: production.len() as u64,
         test_function_count,
-        empty,
-        aggregate_signal,
-    }
+        empty: graph.node_count() == 0,
+        aggregate_signal: None,
+    };
+    snapshot.aggregate_signal = signal_of(&snapshot);
+    snapshot
+}
+
+/// The aggregate signal of a snapshot's dimension values — the one reduction
+/// [`compute`] and the "where to start" counterfactual ([`insight`]) share, so a
+/// counterfactual signal is this very computation over the changed values.
+///
+/// `None` is the [ADR-12] empty-graph sentinel: never a misleading number, and
+/// unchanged by CR-005 — an empty production graph is still "n/a". Otherwise
+/// the geometric mean over the applicable dimensions in canonical order.
+///
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+fn signal_of(m: &MetricSnapshot) -> Option<u32> {
+    (!m.empty).then(|| {
+        aggregate(
+            &applicable_original_dimensions(
+                m.modularity_not_applicable.is_none().then_some(&m.modularity),
+                m.acyclicity_not_applicable.is_none().then_some(&m.acyclicity),
+                m.depth_not_applicable.is_none().then_some(&m.depth),
+                &m.equality,
+                &m.redundancy,
+            ),
+            &applicable_new_dimensions(&m.nesting, &m.conciseness, &m.cohesion, &m.focus, &m.uniqueness),
+        )
+    })
 }
 
 /// The normalized values of the **applicable** original dimensions, in canonical
-/// order (modularity, acyclicity, depth, equality, redundancy) — Modularity
-/// contributes only when applicable ([CR-156]), exactly as Cohesion/Focus do in
-/// [`applicable_new_dimensions`]. Acyclicity, Depth, Equality and Redundancy
-/// always apply. What this returns is both the set the geometric mean spans and
-/// the set the [ADR-12] zero short-circuit inspects, so a not-applicable
-/// Modularity leaves both by one mechanism. `modularity` is `None` when it is
-/// not applicable, the same `Option` shape the sibling takes for Cohesion/Focus.
+/// order (modularity, acyclicity, depth, equality, redundancy) — the three graph
+/// dimensions contribute only when applicable ([FR-QM-18]; Modularity since
+/// [CR-156]), exactly as Cohesion/Focus do in [`applicable_new_dimensions`].
+/// Equality and Redundancy always apply. What this returns is both the set the
+/// geometric mean spans and the set the [ADR-12] zero short-circuit inspects, so
+/// a not-applicable graph dimension leaves both by one mechanism. Each graph
+/// dimension is `None` when it is not applicable, the same `Option` shape the
+/// sibling takes for Cohesion/Focus.
 ///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 fn applicable_original_dimensions(
     modularity: Option<&MetricValue>,
-    acyclicity: &MetricValue,
-    depth: &MetricValue,
+    acyclicity: Option<&MetricValue>,
+    depth: Option<&MetricValue>,
     equality: &MetricValue,
     redundancy: &MetricValue,
 ) -> Vec<f64> {
-    let mut dims = Vec::with_capacity(5);
-    if let Some(m) = modularity {
-        dims.push(m.normalized);
-    }
-    dims.extend([acyclicity, depth, equality, redundancy].map(|v| v.normalized));
-    dims
+    [modularity, acyclicity, depth, Some(equality), Some(redundancy)]
+        .into_iter()
+        .flatten()
+        .map(|v| v.normalized)
+        .collect()
 }
 
 /// The normalized values of the **applicable** new dimensions, in canonical
@@ -466,21 +525,36 @@ pub struct RecordedSnapshot {
     /// The per-dimension lists persisted with the row, from the same read the
     /// metrics were computed on; always [`recorded`](WorstOffenders::recorded).
     pub worst_offenders: WorstOffenders,
+    /// The "where to start" ranking and outlier labels persisted with the row
+    /// ([FR-QM-17]), from the same read; always
+    /// [`recorded`](WhereToStart::recorded).
+    ///
+    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+    pub where_to_start: WhereToStart,
 }
 
-/// Run a full metrics pass: snapshot the store, [`compute`] the metrics and
-/// the [`worst_offenders`] from that one read, and append one
-/// `metric_snapshots` row with its offender lists ([FR-QM-07], [FR-QM-15]).
+/// Run a full metrics pass: snapshot the store, [`compute`] the metrics, the
+/// [`all_offenders`] lists (capped for display by [`WorstOffenders::capped`]) and the [`insight::where_to_start`] ranking from that one
+/// read, and append one `metric_snapshots` row with its offender lists — the
+/// capped display lists and the uncapped ones ([FR-QM-19]) — and ranking
+/// ([FR-QM-07], [FR-QM-15], [FR-QM-17]).
 ///
 /// `view` must be hydrated from the store's current state (the caller — the
 /// governance engine's reconcile-then-score, S-020 — owns that freshness
 /// contract). `thresholds` is the effective CR-005 detection-threshold set the
 /// caller composed from `rules.toml` ([BR-25]); its hash is persisted on the
-/// row, and the offender lists are computed under the same set. This is the
+/// row, and the offender lists are computed under the same set. `member_access`
+/// is the capability set [`compute`] gates Cohesion on, read by the offender
+/// list and the ranking too. This is the
 /// one snapshot-append path, so every caller — `scan`, `gate`,
-/// `session_start`, `session_end` — persists the lists it computed.
+/// `session_start`, `session_end` — persists the lists and the ranking it
+/// computed. The ranking reads the computed metrics and never feeds them back:
+/// it is advisory and never gated ([BR-61]).
 ///
 /// [BR-25]: ../../../docs/specs/software-spec.md#311-quality-metrics
+/// [BR-61]: ../../../docs/specs/software-spec.md#311-quality-metrics
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 ///
 /// # Errors
 /// Returns an error if the snapshot read or the commit batch fails (the batch
@@ -494,8 +568,9 @@ pub fn snapshot(
     view: &GraphView,
     commit_sha: Option<&str>,
     thresholds: Thresholds,
+    member_access: &HashSet<String>,
 ) -> Result<RecordedSnapshot> {
-    let inputs = read_inputs(runtime)?;
+    let inputs = read_inputs(runtime, true)?;
     let computed = compute(
         view,
         &inputs.nodes,
@@ -503,15 +578,29 @@ pub fn snapshot(
         &inputs.functions,
         &inputs.test_ids,
         thresholds,
+        member_access,
     );
-    let offenders = worst_offenders(
+    // Computed uncapped once (FR-QM-19); the display lists are its head.
+    let uncapped = all_offenders(
         view,
         &inputs.nodes,
         &inputs.edges,
         &inputs.functions,
         &inputs.test_ids,
         thresholds,
-        WORST_OFFENDER_CAP,
+        member_access,
+    );
+    let offenders = uncapped.capped(WORST_OFFENDER_CAP);
+    // Computed after — and from — the metrics, never into them (BR-61).
+    let ranking = insight::where_to_start(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.functions,
+        &inputs.test_ids,
+        &inputs.duplicate_groups,
+        thresholds,
+        member_access,
+        &computed,
     );
 
     // created_at is bookkeeping, not part of the deterministic signal
@@ -527,7 +616,7 @@ pub fn snapshot(
     let hash = computed.thresholds_hash.clone();
     // The lists ride into the write closure and back out, so the one batch
     // that appends the row also appends them (NFR-RA-07) without a copy.
-    let (id, worst_offenders) = runtime
+    let (id, worst_offenders, where_to_start) = runtime
         .submit_write(move |writer| {
             let id = writer.insert_metric_snapshot(
                 &NewMetricSnapshot {
@@ -541,13 +630,17 @@ pub fn snapshot(
                     empty: row.empty,
                     modularity_raw: row.modularity.0,
                     modularity_normalized: row.modularity.1,
-                    // Modularity keeps its computed pair even when it is not
-                    // applicable (CR-156); only the flag records the drop-out.
+                    // The graph dimensions keep their computed pairs even when
+                    // not applicable (CR-156, FR-QM-18); only the flags record
+                    // the drop-out, beside the count that decided it.
                     modularity_applicable: Some(row.modularity_applicable),
                     acyclicity_raw: row.acyclicity.0,
                     acyclicity_normalized: row.acyclicity.1,
+                    acyclicity_applicable: Some(row.acyclicity_applicable),
                     depth_raw: row.depth.0,
                     depth_normalized: row.depth.1,
+                    depth_applicable: Some(row.depth_applicable),
+                    cross_module_edges: row.cross_module_edges,
                     equality_raw: row.equality.0,
                     equality_normalized: row.equality.1,
                     redundancy_raw: row.redundancy.0,
@@ -570,8 +663,10 @@ pub fn snapshot(
                     aggregate_signal: row.aggregate_signal,
                 },
                 &offenders,
+                &uncapped,
+                &ranking,
             )?;
-            Ok((id, offenders))
+            Ok((id, offenders, ranking))
         })
         .context("persisting the metric snapshot")?;
 
@@ -579,26 +674,42 @@ pub fn snapshot(
         id,
         metrics: computed,
         worst_offenders,
+        where_to_start,
     })
 }
 
 /// The store facts every metrics pass scores: nodes, edges, per-function
-/// metrics and the persisted `is_test` verdict — read in one `submit_read`.
+/// metrics and the persisted `is_test` verdict — read in one `submit_read` —
+/// plus, for a recording pass, the exact-duplicate groups the ranking reads.
 struct SnapshotInputs {
     nodes: Vec<NodeRow>,
     edges: Vec<EdgeRow>,
     functions: Vec<FunctionMetricRow>,
     test_ids: HashSet<NodeId>,
+    /// The exact-duplicate groups ([`GraphStore::duplicate_groups`](crate::graph_store::GraphStore::duplicate_groups));
+    /// empty unless `with_duplicate_groups` asked for them.
+    duplicate_groups: Vec<Vec<NodeId>>,
 }
 
-fn read_inputs(runtime: &Runtime) -> Result<SnapshotInputs> {
-    let (nodes, edges, functions, test_ids) = runtime
-        .submit_read(|store| {
+/// Read the [`SnapshotInputs`] in one `submit_read`. The reads are separate
+/// statements with no transaction pinning them, so a write committed between
+/// two of them can show through; the ranking therefore checks the duplicate
+/// groups against the function rows it scores rather than trusting them
+/// ([`insight`]). `with_duplicate_groups` is set by the recording pass alone:
+/// the read-only readout ranks nothing.
+fn read_inputs(runtime: &Runtime, with_duplicate_groups: bool) -> Result<SnapshotInputs> {
+    let (nodes, edges, functions, test_ids, duplicate_groups) = runtime
+        .submit_read(move |store| {
             Ok((
                 store.all_nodes()?,
                 store.all_edges()?,
                 store.function_metrics()?,
                 store.test_node_ids()?,
+                if with_duplicate_groups {
+                    store.duplicate_groups()?
+                } else {
+                    Vec::new()
+                },
             ))
         })
         .context("reading the metrics snapshot inputs")?;
@@ -609,6 +720,7 @@ fn read_inputs(runtime: &Runtime) -> Result<SnapshotInputs> {
         edges,
         functions,
         test_ids: test_ids.into_iter().collect(),
+        duplicate_groups,
     })
 }
 
@@ -637,8 +749,9 @@ pub fn compute_snapshot(
     runtime: &Runtime,
     view: &GraphView,
     thresholds: Thresholds,
+    member_access: &HashSet<String>,
 ) -> Result<MetricSnapshot> {
-    let inputs = read_inputs(runtime)?;
+    let inputs = read_inputs(runtime, false)?;
     // The effective CR-005 detection thresholds (BR-25): the governance engine
     // composes the documented defaults with the rules.toml [metric_thresholds]
     // overrides and passes the result here — the single seam S-044 left for
@@ -650,6 +763,7 @@ pub fn compute_snapshot(
         &inputs.functions,
         &inputs.test_ids,
         thresholds,
+        member_access,
     ))
 }
 
@@ -681,33 +795,40 @@ pub fn god_containers(
 
 /// The per-dimension worst-offender lists for nine dimensions — the five CR-005
 /// structural dimensions ([FR-QM-09]..[FR-QM-13], CR-005 §3.2 review-phase
-/// visibility) and Acyclicity, Depth, Equality and Redundancy ([CR-209]) — pure,
-/// no I/O.
+/// visibility) and Acyclicity, Depth, Equality and Redundancy ([CR-209]) —
+/// **uncapped** ([FR-QM-19]); pure, no I/O.
 ///
 /// Each list is **production-scoped** (test functions/containers excluded, so it
-/// agrees with the dimension it explains, [FR-QM-08]), ordered by offending
-/// severity then a stable tie-break, and capped at `cap` ([NFR-RA-06]
-/// determinism, bounded output). The lists are report detail only — they never
-/// enter the aggregate or the gate (exactly as `doc_gaps` is advisory).
-/// `functions` carries the per-function facts; `nodes` supplies the
-/// name/file/line each offender reports (the metric rows omit them); `view` is
-/// the dependency view [`compute`] scores, whose production metric graph
-/// Acyclicity and Depth explain.
+/// agrees with the dimension it explains, [FR-QM-08]) and ordered by offending
+/// severity then a stable tie-break ([NFR-RA-06]). Every entry carries its
+/// symbol identity ([`NodeRow::identity`]), the measure its value counts, the
+/// value, and the effective threshold it met — `value ≥ threshold` wherever
+/// the dimension has one. The snapshot path computes this once and derives the
+/// capped display lists from it ([`WorstOffenders::capped`] at
+/// [`WORST_OFFENDER_CAP`]), so a capped list is always the head of its
+/// uncapped one. The lists are report detail only — they never enter the
+/// aggregate or the gate (exactly as `doc_gaps` is advisory). `functions`
+/// carries the per-function facts; `nodes` supplies the name/file/line each
+/// offender reports (the metric rows omit them); `view` is the dependency view
+/// [`compute`] scores, whose production metric graph Acyclicity and Depth
+/// explain; `member_access` is the capability set Cohesion's list is gated on,
+/// as the dimension is.
 ///
 /// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
 ///
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
 /// [FR-QM-09]: ../../../docs/specs/requirements/FR-QM-09.md
 /// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-pub fn worst_offenders(
+pub fn all_offenders(
     view: &GraphView,
     nodes: &[NodeRow],
     edges: &[EdgeRow],
     functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     thresholds: Thresholds,
-    cap: usize,
+    member_access: &HashSet<String>,
 ) -> WorstOffenders {
     let by_id: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
     // Production scope (FR-QM-08): the offender lists explain the production-scope
@@ -717,55 +838,61 @@ pub fn worst_offenders(
         .filter(|f| !test_ids.contains(&f.id))
         .collect();
 
-    // Enrich a node id + its severity descriptor into an Offender; an id absent
-    // from the node set (never expected) is dropped rather than fabricated.
-    let offender = |id: NodeId, detail: String| -> Option<Offender> {
+    // Enrich a node id + its severity descriptor and measure into an Offender;
+    // an id absent from the node set (never expected) is dropped rather than
+    // fabricated.
+    let offender = |id: NodeId, detail: String, measured: Measured| -> Option<Offender> {
         by_id.get(&id).map(|n| Offender {
             name: n.name.clone(),
             file: n.file_path.clone().unwrap_or_default(),
             line: n.start_line,
             detail,
+            node_id: Some(n.identity().to_string()),
+            measure: Some(measured.measure),
+            value: measured.value,
+            threshold: measured.threshold,
         })
     };
 
     // Nesting (FR-QM-09): deeply-nested functions, deepest first then id asc.
+    // The one predicate the dimension counts (`extended::is_deep`).
     let mut nesting: Vec<(NodeId, i64)> = production
         .iter()
-        .filter_map(|f| {
-            f.max_nesting_depth
-                .filter(|&d| d >= thresholds.nest)
-                .map(|d| (f.id, d))
-        })
+        .filter(|f| extended::is_deep(f, &thresholds))
+        .filter_map(|f| Some((f.id, f.max_nesting_depth?)))
         .collect();
     nesting.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let nesting = nesting
         .into_iter()
-        .take(cap)
-        .filter_map(|(id, depth)| offender(id, format!("nesting depth {depth}")))
+        .filter_map(|(id, depth)| {
+            let measured = Measured::against("nesting_depth", depth, thresholds.nest);
+            offender(id, format!("nesting depth {depth}"), measured)
+        })
         .collect();
 
     // Conciseness (FR-QM-10): brain methods (all three thresholds), highest CC
     // first, then LOC, then id asc.
+    // The one predicate the dimension counts (`extended::is_brain`).
     let mut conciseness: Vec<(NodeId, i64, i64, i64)> = production
         .iter()
+        .filter(|f| extended::is_brain(f, &thresholds))
         .filter_map(|f| {
-            let (cc, loc, nest) = (
+            Some((
+                f.id,
                 f.cyclomatic_complexity?,
                 f.line_count?,
                 f.max_nesting_depth?,
-            );
-            (cc >= thresholds.brain_cc
-                && loc >= thresholds.brain_loc
-                && nest >= thresholds.brain_nest)
-                .then_some((f.id, cc, loc, nest))
+            ))
         })
         .collect();
     conciseness.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
     let conciseness = conciseness
         .into_iter()
-        .take(cap)
         .filter_map(|(id, cc, loc, nest)| {
-            offender(id, format!("CC {cc} · LOC {loc} · nesting {nest}"))
+            // CC is the measure the list ranks by; the brain predicate holds
+            // it at or above `T_cc` alongside the other two floors.
+            let measured = Measured::against("cyclomatic_complexity", cc, thresholds.brain_cc);
+            offender(id, format!("CC {cc} · LOC {loc} · nesting {nest}"), measured)
         })
         .collect();
 
@@ -777,10 +904,12 @@ pub fn worst_offenders(
         .into_iter()
         .flat_map(|g| {
             let detail = g.detail();
-            g.members.into_iter().map(move |id| (id, detail.clone()))
+            let size = g.members.len() as i64;
+            g.members.into_iter().map(move |id| (id, detail.clone(), size))
         })
-        .take(cap)
-        .filter_map(|(id, detail)| offender(id, detail))
+        .filter_map(|(id, detail, size)| {
+            offender(id, detail, Measured::unthresholded("clone_group_size", Some(size)))
+        })
         .collect();
 
     // Cohesion/Focus read the class-like container index (FR-QM-11/12) over
@@ -789,12 +918,15 @@ pub fn worst_offenders(
 
     // Cohesion (FR-QM-11): low-cohesion classes (LCOM4 ≥ 2), most fragmented
     // first then id asc.
-    let mut cohesion = containers.low_cohesion_classes();
+    let mut cohesion = containers.low_cohesion_classes(member_access);
     cohesion.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let cohesion = cohesion
         .into_iter()
-        .take(cap)
-        .filter_map(|(id, lcom4)| offender(id, format!("LCOM4 {lcom4}")))
+        .filter_map(|(id, lcom4)| {
+            let measured =
+                Measured::against("lcom4", lcom4 as i64, extended::LOW_COHESION_LCOM4 as i64);
+            offender(id, format!("LCOM4 {lcom4}"), measured)
+        })
         .collect();
 
     // Focus (FR-QM-12): god containers, most methods first then widest span then
@@ -808,11 +940,20 @@ pub fn worst_offenders(
     });
     let focus = focus
         .into_iter()
-        .take(cap)
         .filter_map(|g| {
+            // A god container crossed `T_m` or `T_span` (`extended::is_god`):
+            // the measure is the one it crossed, the method count first, so
+            // `value ≥ threshold` holds and a review compares like with like.
+            let methods = g.method_count as i64;
+            let measured = if methods >= thresholds.god_methods {
+                Measured::against("methods", methods, thresholds.god_methods)
+            } else {
+                Measured::against("span", g.span, thresholds.god_span)
+            };
             offender(
                 g.id,
                 format!("{} methods · span {}", g.method_count, g.span),
+                measured,
             )
         })
         .collect();
@@ -834,7 +975,6 @@ pub fn worst_offenders(
     cycles.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let acyclicity = cycles
         .into_iter()
-        .take(cap)
         .filter_map(|(size, id, dirs)| {
             // The count is stated, so the directories past the named few are
             // an ellipsis rather than a second count.
@@ -846,19 +986,24 @@ pub fn worst_offenders(
                     dirs.len(),
                     named_directories(&dirs)
                 ),
+                Measured::unthresholded("cycle_size", Some(size as i64)),
             )
         })
         .collect();
 
     // Depth (FR-QM-03): the chain heads of the module-rollup condensation; a
     // chain names directories, not a symbol, so it has no file or line.
-    let depth = depth_chains(&metric.graph, &metric.dirs, cap)
+    let depth = depth_chains(&metric.graph, &metric.dirs)
         .into_iter()
-        .map(|(head, detail)| Offender {
+        .map(|(head, detail, length)| Offender {
             name: head,
             file: String::new(),
             line: None,
             detail,
+            node_id: None,
+            measure: Some("chain_length"),
+            value: Some(length as i64),
+            threshold: None,
         })
         .collect();
 
@@ -880,8 +1025,11 @@ pub fn worst_offenders(
     equality.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let equality = equality
         .into_iter()
-        .take(cap)
-        .filter_map(|(id, cc)| offender(id, format!("complexity {cc}")))
+        .filter_map(|(id, cc)| {
+            // The cut is the mean, not a per-unit threshold: none is stated.
+            let measured = Measured::unthresholded("cyclomatic_complexity", Some(cc));
+            offender(id, format!("complexity {cc}"), measured)
+        })
         .collect();
 
     // Redundancy (FR-QM-05): the dead or duplicate functions `redundancy`
@@ -903,21 +1051,22 @@ pub fn worst_offenders(
     redundancy.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let redundancy = redundancy
         .into_iter()
-        .take(cap)
-        .filter_map(|(id, _, dead, duplicate)| {
+        .filter_map(|(id, lines, dead, duplicate)| {
             let detail = match (dead, duplicate) {
                 (true, true) => "dead, duplicate",
                 (true, false) => "dead",
                 _ => "duplicate",
             };
-            offender(id, detail.to_string())
+            offender(id, detail.to_string(), Measured::unthresholded("line_count", lines))
         })
         .collect();
 
     WorstOffenders {
         // Computed here, so these are the lists — possibly all empty — and not
-        // the "not recorded" default (FR-QM-15).
+        // the "not recorded" default (FR-QM-15), each entry with its values
+        // (FR-QM-19).
         recorded: true,
+        values_recorded: true,
         nesting,
         conciseness,
         cohesion,
@@ -931,6 +1080,39 @@ pub fn worst_offenders(
     }
 }
 
+/// An offender's [`measure`](Offender::measure), [`value`](Offender::value) and
+/// [`threshold`](Offender::threshold) ([FR-QM-19]), built by the two shapes a
+/// dimension has.
+///
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+#[derive(Debug, Clone, Copy)]
+struct Measured {
+    measure: &'static str,
+    value: Option<i64>,
+    threshold: Option<i64>,
+}
+
+impl Measured {
+    /// A value judged against a detection threshold it met.
+    fn against(measure: &'static str, value: i64, threshold: i64) -> Self {
+        debug_assert!(value >= threshold, "{measure} {value} listed below its threshold {threshold}");
+        Self {
+            measure,
+            value: Some(value),
+            threshold: Some(threshold),
+        }
+    }
+
+    /// A value from a dimension with no per-unit threshold.
+    fn unthresholded(measure: &'static str, value: Option<i64>) -> Self {
+        Self {
+            measure,
+            value,
+            threshold: None,
+        }
+    }
+}
+
 /// The [CR-209] lists a recorded snapshot holds no row for although its own
 /// scores say the list is not empty — so the snapshot was written before the
 /// list existed, and a reader must show it as not recorded rather than as
@@ -938,7 +1120,7 @@ pub fn worst_offenders(
 /// store cannot mark these snapshots itself without a migration.
 ///
 /// Exact, never a guess, because each list is empty precisely when its
-/// dimension scores clean ([`worst_offenders`]): no cross-directory cycle
+/// dimension scores clean ([`all_offenders`]): no cross-directory cycle
 /// (Acyclicity 0), no chain of two layers (Depth ≤ 1), no function above the
 /// mean complexity (an even spread, whose Gini computes to exactly 0.0: both
 /// terms are the same correctly-rounded `(n+1)/n`), no dead or duplicate
@@ -1007,15 +1189,29 @@ impl CloneGroupMass {
     /// count states its members alone rather than a fabricated `0 lines`.
     fn detail(&self) -> String {
         let members = self.members.len();
-        if self.measured == 0 {
-            return format!("clone group #{} · {members} members", self.group);
+        match self.mean_lines() {
+            Some(mean) => format!(
+                "clone group #{} · {members} members × {mean} lines",
+                self.group
+            ),
+            None => format!("clone group #{} · {members} members", self.group),
         }
-        let mean = (2 * self.lines + self.measured) / (2 * self.measured);
-        format!(
-            "clone group #{} · {members} members × {mean} lines",
-            self.group
-        )
     }
+
+    /// The mean recorded line count rounded half up ([`rounded_mean`]), `None`
+    /// when no member's line count is recorded.
+    fn mean_lines(&self) -> Option<i64> {
+        rounded_mean(self.lines, self.measured)
+    }
+}
+
+/// `lines / measured` rounded half up, exact in integers; `None` when nothing
+/// was measured — never a fabricated zero ([NFR-CC-04]). The one rounding a
+/// group descriptor and a group-mass outlier measure ([`insight`]) share.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn rounded_mean(lines: i64, measured: i64) -> Option<i64> {
+    (measured > 0).then(|| (2 * lines + measured) / (2 * measured))
 }
 
 /// The production near-clone groups ordered by duplicated mass (`members × mean
@@ -1067,10 +1263,15 @@ struct OwnedSnapshotFields {
     empty: bool,
     modularity: (f64, f64),
     /// `false` = Modularity dropped out of the mean (fewer than
-    /// [`MODULARITY_MIN_EDGES`] edges, CR-156); the pair above is kept.
+    /// [`MIN_CROSS_MODULE_EDGES`] cross-module edges, FR-QM-18); the pair above
+    /// is kept. The same holds for the two flags below.
     modularity_applicable: bool,
     acyclicity: (f64, f64),
+    acyclicity_applicable: bool,
     depth: (f64, f64),
+    depth_applicable: bool,
+    /// The cross-module edge count the three flags were decided on.
+    cross_module_edges: Option<i64>,
     equality: (f64, f64),
     redundancy: (f64, f64),
     nesting: (f64, f64),
@@ -1096,7 +1297,10 @@ impl OwnedSnapshotFields {
             modularity: pair(&snapshot.modularity),
             modularity_applicable: snapshot.modularity_not_applicable.is_none(),
             acyclicity: pair(&snapshot.acyclicity),
+            acyclicity_applicable: snapshot.acyclicity_not_applicable.is_none(),
             depth: pair(&snapshot.depth),
+            depth_applicable: snapshot.depth_not_applicable.is_none(),
+            cross_module_edges: snapshot.cross_module_edge_count.map(|n| n as i64),
             equality: pair(&snapshot.equality),
             redundancy: pair(&snapshot.redundancy),
             nesting: pair(&snapshot.nesting),
@@ -1109,7 +1313,7 @@ impl OwnedSnapshotFields {
     }
 }
 
-/// The production metric graph [`compute`] scores and [`worst_offenders`]
+/// The production metric graph [`compute`] scores and [`all_offenders`]
 /// explains, with two per-vertex facts indexed by vertex index: the directory
 /// community and the node id.
 struct MetricGraph {
@@ -1224,12 +1428,12 @@ fn directory_of(path: &str) -> String {
 /// iterate a `BTreeMap` so the float reduction is canonical ([ADR-08]).
 ///
 /// Always computes the pair, at every size: whether it *applies* is decided
-/// beside it in [`compute`] ([`MODULARITY_MIN_EDGES`], [CR-156]), so a
+/// beside it in [`compute`] ([`MIN_CROSS_MODULE_EDGES`], [FR-QM-18]), so a
 /// not-applicable Modularity still persists the values it would have scored.
 ///
 /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
-/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 fn modularity(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
     let m = graph.edge_count();
     if m == 0 {
@@ -1264,6 +1468,42 @@ fn modularity(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
         raw: q,
         normalized: ((q + 0.5) / 1.5).clamp(0.0, 1.0),
     }
+}
+
+/// Whether the three graph dimensions drop out of the view [`compute`] scores:
+/// the decision it records in `*_not_applicable` ([FR-QM-18]), for a reader
+/// that has [`all_offenders`]' lists but no snapshot.
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+pub(crate) fn graph_dimensions_not_applicable(view: &GraphView, nodes: &[NodeRow], test_ids: &HashSet<NodeId>) -> bool {
+    let MetricGraph { graph, dirs, .. } = metric_graph(view, nodes, test_ids);
+    GraphDimensionNotApplicable::for_cross_module_edges(cross_module_edge_count(&graph, &dirs)).is_some()
+}
+
+/// The edges of the production metric graph that cross a module boundary — the
+/// figure the three graph dimensions' applicability is decided on ([FR-QM-18],
+/// [`MIN_CROSS_MODULE_EDGES`]).
+///
+/// A module is a directory ([`directory_of`]), the partition Modularity,
+/// Acyclicity and Depth all read. An edge counts when its endpoints lie in two
+/// different directories **and both are bound to a file**: a vertex with no
+/// file sits in [`UNBOUND_DIR`], which is no module of the repository, so an
+/// edge into it is no evidence of module structure. Intra-directory edges never
+/// count — they cleared the v6 Modularity threshold on graphs whose language
+/// binds nothing across files, which is the defect [CR-171] removes. Counted
+/// symbol edge by symbol edge, as v6 counted every edge, so parallel edges
+/// between two directories each count.
+///
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+fn cross_module_edge_count(graph: &DiGraph<(), ()>, dirs: &[String]) -> u64 {
+    graph
+        .edge_references()
+        .filter(|edge| {
+            let (src, dst) = (&dirs[edge.source().index()], &dirs[edge.target().index()]);
+            src != dst && src != UNBOUND_DIR && dst != UNBOUND_DIR
+        })
+        .count() as u64
 }
 
 /// Acyclicity — cross-module cycle count from the shared SCC set ([FR-QM-02],
@@ -1305,7 +1545,7 @@ fn acyclicity(sccs: &[Vec<NodeIndex>], dirs: &[String]) -> MetricValue {
 
 /// The SCCs [`acyclicity`] counts as cycles: more than one member, spanning more
 /// than one directory ([ADR-61]). The one filter both the count and the
-/// Acyclicity offender list ([`worst_offenders`], [CR-209]) read, so the list
+/// Acyclicity offender list ([`all_offenders`], [CR-209]) read, so the list
 /// names exactly the cycles the dimension scores.
 ///
 /// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
@@ -1481,7 +1721,8 @@ fn condense(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> Condensation {
 /// The Depth offender rows ([CR-209]): every chain of two or more layers in the
 /// module-rollup condensation [`depth`] measures, one per **chain head** (a
 /// layer nothing else depends on, so no listed chain is the tail of another),
-/// as `(head, "dir1 → dir2 → … (L directories)")`.
+/// as `(head, "dir1 → dir2 → … (L directories)", L)` — `L` the chain's length
+/// in layers, the row's value ([FR-QM-19]).
 ///
 /// Each head spells its longest chain, so the first row is the chain the Depth
 /// value counts. Ranked by length descending, then head label ascending; at a
@@ -1491,8 +1732,9 @@ fn condense(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> Condensation {
 /// than directories ([`layer_label`]).
 ///
 /// [CR-209]: ../../../docs/requests/CR-209-health-records-the-worst-items-of-four-more-dimensions.md
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String], cap: usize) -> Vec<(String, String)> {
+fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String]) -> Vec<(String, String, usize)> {
     let modules = module_rollup(graph, dirs);
     let sccs = tarjan_scc(&modules.graph);
     let Condensation {
@@ -1523,7 +1765,6 @@ fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String], cap: usize) -> Vec<(St
 
     heads
         .into_iter()
-        .take(cap)
         .map(|head| {
             let (mut chain, mut at) = (vec![head], head);
             while let Some(&next) = successors[at].iter().min_by(|a, b| rank(a, b)) {
@@ -1537,7 +1778,7 @@ fn depth_chains(graph: &DiGraph<(), ()>, dirs: &[String], cap: usize) -> Vec<(St
             };
             let spelled: Vec<&str> = chain.iter().map(|&c| labels[c].as_str()).collect();
             let detail = format!("{} ({} {unit})", spelled.join(" → "), chain.len());
-            (labels[head].clone(), detail)
+            (labels[head].clone(), detail, chain.len())
         })
         .collect()
 }
@@ -1629,7 +1870,7 @@ fn equality(functions: &[&FunctionMetricRow]) -> MetricValue {
 /// Whether a function counts as redundant: dead **or** duplicate, on a
 /// `Some(true)` verdict only — a `NULL` verdict (a language with no
 /// reachability verdict) is never redundant. The one predicate [`redundancy`]
-/// counts and the Redundancy offender list ([`worst_offenders`]) lists, so the
+/// counts and the Redundancy offender list ([`all_offenders`]) lists, so the
 /// list names exactly what the dimension scores.
 fn is_redundant(f: &FunctionMetricRow) -> bool {
     f.is_dead == Some(true) || f.is_duplicate == Some(true)
@@ -1643,14 +1884,20 @@ fn is_redundant(f: &FunctionMetricRow) -> bool {
 ///
 /// [FR-QM-05]: ../../../docs/specs/requirements/FR-QM-05.md
 fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
-    let total = functions.len();
+    let redundant = functions.iter().filter(|f| is_redundant(f)).count();
+    redundancy_of(redundant, functions.len())
+}
+
+/// Redundancy's normalization from its two counts: `1 − redundant/total`, a
+/// clean 1.0 with no function. Shared by [`redundancy`] and the "where to
+/// start" counterfactual ([`insight`]).
+fn redundancy_of(redundant: usize, total: usize) -> MetricValue {
     if total == 0 {
         return MetricValue {
             raw: 0.0,
             normalized: 1.0,
         };
     }
-    let redundant = functions.iter().filter(|f| is_redundant(f)).count();
     let ratio = redundant as f64 / total as f64;
     MetricValue {
         raw: ratio,
@@ -1663,7 +1910,7 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 /// [ADR-21], [ADR-08]).
 ///
 /// `original` are the **applicable** original metrics in canonical order
-/// (Modularity omitted when not applicable, [CR-156] —
+/// (a graph dimension omitted when not applicable, [FR-QM-18], [CR-156] —
 /// [`applicable_original_dimensions`]); `new_dims` are the **applicable** new
 /// dimensions in canonical order (Cohesion/Focus omitted when they dropped out,
 /// [ADR-21]). The reduction:
@@ -1672,13 +1919,14 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 ///    any applicable *original* metric is `0.0`, the signal is `0` — a hard zero
 ///    in a systemic-pathology metric collapses the score *and* keeps
 ///    `ln(0) = −∞` out of the reduction. A not-applicable Modularity is not in
-///    `original`, so it cannot trigger this ([CR-156]). The new five are floored
+///    `original`, so it cannot trigger this ([CR-156]); nor can a not-applicable
+///    Acyclicity or Depth ([FR-QM-18]). The new five are floored
 ///    at [`extended::DIMENSION_FLOOR`], never `0`, so they never trigger it —
 ///    they drag but never alone collapse the signal.
 /// 2. **Geometric mean over the applicable dimensions.** Sum `ln nᵢ` over the
 ///    applicable original metrics then the applicable new dims, in canonical
 ///    order, and divide by the *count of applicable dimensions* (10, or fewer as
-///    Modularity, Cohesion and Focus drop out) — a deterministic, honest
+///    the graph dimensions, Cohesion and Focus drop out) — a deterministic, honest
 ///    n-dimension mean ([FR-QM-14], [UAT-QM-10]).
 ///
 /// The empty-graph sentinel is handled by the caller ([ADR-12]); this function
@@ -1690,11 +1938,12 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 fn aggregate(original: &[f64], new_dims: &[f64]) -> u32 {
     // Zero short-circuit scoped to the applicable original metrics (ADR-21,
-    // CR-156): a floored new dimension can never be 0, and a not-applicable
-    // Modularity is not in `original`, so only an applicable original hard zero
-    // collapses here.
+    // CR-156, FR-QM-18): a floored new dimension can never be 0, and a
+    // not-applicable graph dimension is not in `original`, so only an applicable
+    // original hard zero collapses here.
     if original.contains(&0.0) {
         return 0;
     }

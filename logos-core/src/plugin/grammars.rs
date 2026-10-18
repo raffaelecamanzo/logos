@@ -791,7 +791,7 @@ mod tests {
             },
             Row {
                 feature: cfg!(feature = "lang-typescript"),
-                manifest: ("typescript/plugin.toml", 6033, 0x2b0a8f05d13aebce),
+                manifest: ("typescript/plugin.toml", 6736, 0xba51af954b3e8ce7),
                 queries: &[
                     (
                         "queries/symbols.scm",
@@ -821,7 +821,7 @@ mod tests {
             },
             Row {
                 feature: cfg!(feature = "lang-typescript"),
-                manifest: ("tsx/plugin.toml", 4970, 0x44b952aed393d0d5),
+                manifest: ("tsx/plugin.toml", 5653, 0xf09a93022ea5fac0),
                 queries: &[
                     (
                         "queries/symbols.scm",
@@ -887,7 +887,7 @@ mod tests {
             },
             Row {
                 feature: cfg!(feature = "lang-java"),
-                manifest: ("java/plugin.toml", 10265, 0x2a081daa4fe2642b),
+                manifest: ("java/plugin.toml", 10730, 0x7240f6ffa0bb7c5d),
                 queries: &[
                     (
                         "queries/symbols.scm",
@@ -1068,7 +1068,7 @@ mod tests {
             },
             Row {
                 feature: cfg!(feature = "lang-php"),
-                manifest: ("php/plugin.toml", 6446, 0x4cbd56222bb1566e),
+                manifest: ("php/plugin.toml", 6868, 0x674501fd424182b5),
                 queries: &[
                     (
                         "queries/symbols.scm",

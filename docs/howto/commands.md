@@ -1,6 +1,6 @@
 # Command Reference
 
-All subcommands of the `logos` binary (39 top-level commands in the default
+All subcommands of the `logos` binary (42 top-level commands in the default
 build, including the Sprint-55 `xservice` and `workspace` federation groups).
 Every command accepts
 the global flags `--project <PATH>`, `--json`, and `--quiet`; see
@@ -35,11 +35,14 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
 | [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
+| [`offenders`](#offenders---path-glob---dimension-d) | ✅ | Every offender the last snapshot recorded, uncapped, with its symbol id, value and threshold |
+| [`review`](#review---base-ref) | ✅ | The branch delta: every offender and violation classified new, worsened, improved, resolved or unchanged against the merge-base — advisory, never moves `check` or `gate` |
+| [`improvements`](#improvements) | ✅ | Where to start: the ranked fix units the last snapshot recorded, each with its estimated recoverable points — advisory, never gated |
 | [`check`](#check---rules-file---allow-no-rules) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate---save---threshold-n---label-l) | ✅ | CI quality gate on the signal |
 | [`health`](#health) | ✅ | Architecture health — DB integrity, schema, FTS, structural + admission drift |
 | [`session-start`](#session-start--session-end) | ✅ | Record the quality baseline before edits (the CLI half of the session gate) |
-| [`session-end`](#session-start--session-end) | ✅ | Re-score against the baseline; exit 1 on regression |
+| [`session-end`](#session-start--session-end) | ✅ | Re-score against the baseline; exit 1 on regression (5 on a missing required security scan) |
 | [`doctor`](#doctor) | ✅ | Fast structural-integrity + admission tripwire; exit 1 on drift |
 | [`verify`](#verify) | ✅ | Deep reindex-diff consistency check; exit 1 on drift |
 | [`coverage refresh`](#coverage-refresh) | ✅ | Run the configured `refresh_cmd` and ingest what it produced |
@@ -51,7 +54,9 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`hotspots`](#hotspots) | ✅ | Churn × complexity ranking — the non-gated temporal tier |
 | [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura report into the evidence store |
 | [`coverage status`](#coverage-status) | ✅ | Per-file coverage freshness + the overall fraction |
-| [`security scan`](#security-scan---consent) | ✅ | Run the installed, enabled scanners and ingest their SARIF — the first scan needs `--consent` |
+| [`security scan`](#security-scan---consent---install---scanner-name---path-path) | ✅ | Run the installed, enabled scanners and ingest their SARIF — the first scan needs `--consent`; `--install` installs the missing ones first; `--scanner`/`--path` re-scan only what a fix touched |
+| [`security install`](#security-install-scanner--all---update---from-dir---consent---accept-codeql-licence) | ✅ | Download, verify and install scanners under a per-user consent; your own copy wins (CLI-only) |
+| [`security uninstall`](#security-uninstall-scanner--all) | ✅ | Remove Logos-managed scanner copies, never your own (CLI-only) |
 | [`security ingest`](#security-ingest-report) | ✅ | Ingest a SARIF 2.1.0 report from any tool into the evidence store |
 | [`security status`](#security-status) | ✅ | Each scanner's state — not installed, disabled, never run, stale or fresh — and the consent state |
 | [`security findings`](#security-findings) | ✅ | Stored findings with their OWASP categories and suppressions, filtered |
@@ -75,7 +80,7 @@ logos callers helper_beta_only --repo svc-b --json
 [`explore`](#explore), [`node`](#node), [`callers` / `callees`](#callers--callees),
 [`impact`](#impact), [`impact-intersection`](#impact-intersection),
 [`precedent`](#precedent), [`branch-overlap`](#branch-overlap),
-[`health`](#health), [`hotspots`](#hotspots), [`dsm`](#dsm---granularity-g),
+[`health`](#health), [`offenders`](#offenders---path-glob---dimension-d), [`review`](#review---base-ref), [`improvements`](#improvements), [`hotspots`](#hotspots), [`dsm`](#dsm---granularity-g),
 [`evolution`](#evolution), [`coverage status`](#coverage-status),
 [`security status`](#security-status) and [`security findings`](#security-findings). `health` keeps its
 exit code, projected from the member it answered for. The `xservice` and
@@ -91,7 +96,7 @@ the repository they run in, and refuse `--repo` as an unknown argument (exit 2):
 `index`, `sync`, `scan`, `check`, `gate`, `verify`, `doctor`, `session-start`,
 `session-end`, `coverage ingest`, `coverage refresh`, `security scan`, `security ingest`,
 `quality-report` and `hook`. Their
-MCP twins — `scan`, `rescan`, `check_rules`, `verify`, `doctor`, `session_start`,
+MCP twins — `scan`, `rescan`, `check_rules`, `bless_rules`, `verify`, `doctor`, `session_start`,
 `session_end`, `coverage_ingest`, `coverage_refresh`, `security_scan`, `security_ingest` — take no `repo` either, and say they act on
 the default member. `affected`, `implements`, `referencing-docs`, `doc-gaps`,
 `stats` and `languages` have no MCP twin that takes `repo`, so they answer for the
@@ -147,21 +152,25 @@ like any other.
 ### `init [-i] [--hooks] [--workspace] [--yes] [--exclude <GLOB>]`
 
 ```bash
-logos init                     # create .logos/ and the canonical store (bare)
-logos init -i                  # interactive: policy files + .mcp.json + CLAUDE.md
+logos init                     # .logos/: store, config.toml, rules.toml, .gitignore (bare)
+logos init -i                  # interactive: the bare files + .mcp.json + CLAUDE.md + readout hook
 logos init --hooks             # install managed git hooks only
 logos init -i --hooks          # interactive setup plus git hooks
 logos init --workspace         # federate sibling repos into a workspace (prompts per member)
 logos init --workspace --yes   # non-interactive: approve every discovered member
 logos init --workspace --exclude 'vendor-*'  # skip members whose name matches the glob
+logos init --uninstall         # remove everything Logos wrote; .logos/ stays
 ```
 
 Bootstraps the project. All forms are **idempotent and non-clobbering** —
 re-running on an already-initialised project applies any pending migrations
 and leaves existing content untouched.
 
-**Bare (`logos init`)** — creates `.logos/` and `logos.db`; the same implicit
-bootstrap that `logos index` performs.
+**Bare (`logos init`)** — writes only inside `.logos/`: `logos.db`, the starter
+policy templates `config.toml` and `rules.toml` (both commented, enforcing
+nothing until you edit them), and the managed `.logos/.gitignore` block. It is
+not the implicit bootstrap that `logos index` performs, which creates `.logos/`
+and the store with **no contract** and writes no policy file.
 
 **Project identity.** Every form also writes `[project] id` into
 `.logos/config.toml` when the key is absent. The value is the repository's
@@ -179,8 +188,7 @@ When `.logos/config.toml` is git-ignored, the row adds that the id will not
 travel and names the default other checkouts derive. `init` then records the
 coordinate in the store, where `status` reads it.
 
-**Interactive (`-i`)** — additionally writes starter policy templates
-(`config.toml`, `rules.toml`), a managed `.logos/.gitignore` block, a
+**Interactive (`-i`)** — additionally writes, outside `.logos/`, a
 `logos` entry in the project's `.mcp.json`, a managed usage block in
 `CLAUDE.md`, and — default-on —
 the **session-start quality-report** hook
@@ -196,6 +204,9 @@ quality-report hook
 install left one behind. Each step reports its action (`Created` /
 `Updated` / `Unchanged` / `Skipped`). On non-TTY (CI, piped input): safe
 defaults, no prompts.
+
+`-i` does **not** install git hooks: on a terminal it offers them and the default
+is no, and on a non-TTY it never installs them. Pass `--hooks` for them.
 
 **Hooks (`--hooks`)** — installs managed git hook scripts under
 `.logos/hooks/` and sets `core.hooksPath = .logos/hooks` in the project's git
@@ -217,6 +228,40 @@ flavours are installed:
 
 After running `logos init -i`, restart your agent — the `logos:*` MCP tools
 appear automatically.
+
+The plugin's install steps, the Stop check and its off switch, the `/logos:review`
+skill, the guardrail and the trust labels are in
+[The Claude Code plugin and the review loop](plugin.md).
+
+**With the Claude Code plugin enabled** — when `enabledPlugins` holds
+`"logos@logos": true` in the project's `.claude/settings.local.json`, its
+`.claude/settings.json` or your user `settings.json` (under
+`$CLAUDE_CONFIG_DIR`, else `~/.claude`), the most specific of those deciding,
+`-i` lets the plugin carry the agent side
+([FR-IN-12](../specs/requirements/FR-IN-12.md)). It writes the plugin's
+enrolment (`extraKnownMarketplaces.logos` and `enabledPlugins`) into the
+committed `.claude/settings.json`, so every teammate is prompted to install it,
+and writes no `.mcp.json` entry and no readout hook. It removes the ones an
+earlier `init -i` wrote, and a skill copy it materialized, which would otherwise
+list every tool and print the readout twice. Each removal is its own `Removed`
+row. With the plugin absent, `-i` is exactly as described above.
+
+**Uninstall (`--uninstall`)** — removes everything Logos wrote into the
+project: the `CLAUDE.md` managed block, the `logos` `.mcp.json` entry, the
+readout hook entry and its script, the plugin enrolment, skill copies with
+their `.claude/skills` pointers, and the managed git hooks (in every linked
+worktree too), unsetting `core.hooksPath` only if it still points at
+`.logos/hooks`. An entry goes only while it holds exactly what `init` writes,
+and a file or directory only when nothing else is left in it, so foreign
+content stays. `.logos/` stays too: delete it yourself to drop the index. A
+second run reports every row `Unchanged`. Two limits follow from that rule.
+`init` keeps no record of what was there before it, so an empty container you
+had made yourself (an empty `mcpServers`, an empty `.claude/skills/`) goes with
+Logos's last entry in it. And a workspace root's `logos-workspace` `.mcp.json`
+entry and root `.gitignore` block, written by `init --workspace`, are not
+removed. `-i` and `--hooks` add nothing to it
+(`logos init --hooks --uninstall` is the same command); it cannot be combined
+with `--workspace`.
 
 Together these hooks realize the local legs of the **freshen / enforce / report
 / bless** loop: the freshness hooks *freshen*, the `pre-push` gate *enforces*,
@@ -1080,6 +1125,18 @@ long-lived `serve` process may still hold older raw events and cover more.
 Under-stating is deliberate; never read the figure as the coverage actually
 achieved.
 
+**Who invoked the calls.** `calls_by_tool_invoker` splits each tool's calls by
+the invoker the calling process declared in `LOGOS_INVOKER`: the plugin's hooks
+declare `hook:stop`, `hook:pre-tool-use` and `hook:session-start`, its skill
+scripts `skill:logos-review` and `skill:logos-sec-review`. `invoker` is `null`
+for a call that declared none — a direct CLI call, an MCP tool call the agent
+made itself, a web request — and for a value outside the `hook:<name>` /
+`skill:<name>` shape. It is the figure that judges the plugin by what its hooks
+and skills caused rather than by call volume. It has the origin cross-tab's
+limits (raw events only), and one more, stated as
+`null_invoker_includes_pre_stamp_rows`: events written before the stamp existed
+are `null` too, so the historical `null` bucket holds hook and skill calls.
+
 **What the calls answered.** Every usage cell — in `calls_by_tool`,
 `calls_by_tool_origin`, `calls_by_class`, `calls_by_origin` and
 `activity_by_day`, and the same cells of the workspace aggregate — carries
@@ -1139,7 +1196,7 @@ logos serve --mcp --ui [--port <N>]                  # both surfaces in one proc
 
 At least one of `--mcp` / `--ui` is required. `--mcp` starts the MCP server
 over stdio (see [usage.md](usage.md#setting-up-the-mcp-server-ai-agents) for
-host setup, the 25-tool surface, and the stdout-purity / clean-teardown
+host setup, the 33-tool surface, and the stdout-purity / clean-teardown
 guarantees). `--ui` starts the localhost web dashboard (see
 [usage.md](usage.md#the-web-ui-dashboard)); it is not offered in the slim build
 (see the [build matrix](usage.md#build-matrix--dashboard-or-slim-headless)). The dashboard is a single embedded React SPA served at `/`,
@@ -1149,8 +1206,12 @@ build time and embedded in the binary, so a page load fetches nothing from the
 network, and it binds `127.0.0.1` only with a self-only CSP on every response. It
 is read-only except a small, enumerated set of intent-guarded mutating routes —
 the config save and apply routes (`/config/save`, `/config/apply`), the workspace
-manifest and config saves, and the on-demand `verify` (`/api/v1/verify`); every
-other non-GET request is answered `405`. Combined
+manifest and config saves, the on-demand `verify` (`/api/v1/verify`), and the
+Security page's scan start and cancel (`/api/v1/security/scan`,
+`/api/v1/security/scan/cancel`), its scanner install start and cancel
+(`/api/v1/security/install`, `/api/v1/security/install/cancel`) and its suppression writes
+(`/api/v1/security/suppress`, `/api/v1/security/unsuppress`); every other non-GET
+request is answered `405`. Combined
 `--mcp --ui` runs both on one engine and one watcher: stdout stays JSON-RPC-clean
 for the MCP host while the web surface logs to stderr.
 
@@ -1207,7 +1268,7 @@ endpoints under [`serve --ui`](#serve) (both live now) — so the
 coverage/service-map/impact numbers are always the same whichever way you reach
 them. The matching `xservice_*` and `workspace_*` MCP tools are served by
 `serve --mcp` started in a workspace (the build with the web UI): the host then
-sees 34 tools, the 25 single-root ones plus these nine, and the read-only tools
+sees 42 tools, the 33 single-root ones plus these nine, and the read-only tools
 take `repo` ([usage.md](usage.md#asking-about-one-workspace-member-repo)).
 `--standalone`, and the slim headless build, serve the one repository instead.
 
@@ -2499,6 +2560,15 @@ deterministically ordered, top-10 list of the specific functions/containers
 dragging each score (report-only; it never gates). Constraints declared in
 `rules.toml` are not evaluated here — use `check` for that.
 
+On a graph with fewer than 5 cross-module edges, Modularity, Acyclicity and
+Depth are not applicable: `--json` gives each one's reason in `metrics`, under
+`modularity_not_applicable`, `acyclicity_not_applicable` and
+`depth_not_applicable`, and the count as `cross_module_edge_count`. A language
+that is at least 10% of the production callables and binds no call or import
+across files earns a `coverage: …` entry in `warnings`, as it does in `gate`
+and `session-start`; it never changes the exit code. Both are explained in
+[metrics.md](metrics.md#applicability-and-the-na-drop-out).
+
 Since logos 1.9.0 the lists are **persisted with the snapshot** — by `scan`,
 `gate`, `session_start` and `session_end` alike — so the read-only Health page
 (`GET /api/v1/health`) shows exactly what the snapshot computed. `worst_offenders`
@@ -2527,12 +2597,286 @@ before CR-209 also carries `"unrecorded": [...]`, naming each of those four list
 it holds no rows for although its score says the list is not empty. Treat each
 named list as not recorded. The key is absent on every snapshot written since.
 
+Since logos 1.20.0 ([FR-QM-19](../specs/requirements/FR-QM-19.md)) every entry
+also carries four fields, so a review can say which symbol got better or worse:
+
+- `node_id` is the symbol id without its repository coordinate. It is the same
+  identity a `check --bless` entry uses, and it does not change on re-index.
+  It is `null` on a Depth row, which names a chain of directories, not a symbol.
+  An Acyclicity row names its cycle by one member, and a re-index can pick a
+  different member for the same cycle. So compare cycles by their members,
+  not by `node_id`.
+- `value` is the number the entry was judged on, and `measure` says what that
+  number counts: `nesting_depth`, `cyclomatic_complexity`, `lcom4`, `methods`
+  or `span` (Focus names the one its container crossed), `clone_group_size`,
+  `cycle_size`, `chain_length` or `line_count`.
+- `threshold` is the effective detection threshold the value met, so
+  `value ≥ threshold` always holds. It is `null` for Uniqueness, Acyclicity,
+  Depth, Equality and Redundancy, which have no per-unit threshold.
+
+`worst_offenders.values_recorded` is `false` on a snapshot written before
+1.20.0. The four fields are then `null` and mean "not recorded", never `0`. The
+top-10 cap, the signal and the gate are unchanged. Use `offenders` (below) for
+the full lists.
+
+### `offenders [--path <GLOB>] [--dimension <D>]`
+
+```bash
+logos offenders --json [--repo <MEMBER>]               # every offender, every dimension
+logos offenders --path 'src/a/**' --dimension nesting --json
+```
+
+Lists **every** offender the last snapshot recorded, uncapped. These are the
+full lists behind `scan`'s top-10 `worst_offenders`, in the same order:
+dimension, then the list's own order. Each entry has its `dimension`, `node_id`,
+`name`, `file`, `line`, `detail`, `measure`, `value` and `threshold`, as
+described under `scan` above. The MCP twin is the `offenders` tool. Both return
+the same bytes, and a rerun on an unchanged store returns identical output.
+
+- `--path` keeps the entries whose file matches a project-relative glob. `*`
+  stays inside one directory and `**` crosses directories, so `src/a/**`
+  matches everything under `src/a` and nothing under `src/ab`. A path without
+  glob characters names a file or a directory, so `src/a` and `src/a/` mean
+  `src/a/**`; a leading `./` is dropped, `\` reads as `/`, and an empty
+  `--path` is no filter. A Depth row has no file, so a path filter never lists
+  one.
+- `--dimension` keeps one of `nesting`, `conciseness`, `cohesion`, `focus`,
+  `uniqueness`, `acyclicity`, `depth`, `equality` or `redundancy`. Modularity
+  has no list.
+- Both filters together must both match. An unknown dimension, or a glob that
+  does not compile or escapes the project root, exits **2**.
+
+`offenders` reads the last snapshot and writes nothing, so run `scan` (or
+`gate`) first to measure the current tree. When no snapshot exists, or the last
+one was written before 1.20.0, the answer is `recorded: false` with
+`not_recorded_because` set to `never_scanned` or
+`snapshot_predates_uncapped_offenders`. Its empty list means nothing was
+recorded, not that the code is clean.
+
+```json
+{
+  "recorded": true,
+  "not_recorded_because": null,
+  "path": "src/a/**",
+  "dimension": "nesting",
+  "offenders": [
+    {"dimension": "nesting", "name": "deep_one", "file": "src/a/one.rs", "line": 3,
+     "detail": "nesting depth 6", "node_id": "src/a/`one.rs`/deep_one().",
+     "measure": "nesting_depth", "value": 6, "threshold": 4}
+  ]
+}
+```
+
+### `review [--base <REF>]`
+
+```bash
+logos review --json                                    # against the default branch
+logos review --base main --json [--repo <MEMBER>]
+```
+
+Answers "what did this branch change?" per symbol. It compares the working
+tree with the **merge-base** of `HEAD` and `--base` (default: the repository's
+default branch, `origin/HEAD`, else `main`, else `master`) and classifies every
+offender of all nine `offenders` dimensions, and every `check` violation, as:
+
+- `new`: absent at the merge-base;
+- `worsened`: present before, with a higher value now;
+- `improved`: present before, with a lower value now, still at or over its threshold;
+- `resolved`: present before and gone now;
+- `unchanged`.
+
+`offenders` and `violations` list every entry the branch changed. An
+`unchanged` entry is counted in `offender_counts` or `violation_counts` and not
+listed: on a large codebase almost every offender is unchanged, and listing them
+would make the answer too large for an agent to read.
+
+When the module graph has fewer than 5 cross-module edges on the merge-base or
+on the branch, Acyclicity and Depth are outside the signal there
+([metrics.md](metrics.md#applicability-and-the-na-drop-out)), so their
+offenders are dropped from both sides and not classified, and `notes` says so.
+
+Each offender carries `before` and `after` values, the `measure` they count and
+the `threshold`. Offenders are matched by dimension, measure and symbol id: a
+Depth chain by its head, and an Acyclicity cycle by the directories it spans.
+A Focus container that now crosses on its span instead of its method count
+reads as one entry `resolved` and another `new`. A violation is matched by
+rule and subject (the symbol id, a file, a module key, or empty for a
+project-wide count). Its `before` and `after` are the per-subject value of
+`max_cc`, `max_fn_lines`, `no_god_files`, `max_fan_in`, `max_fan_out`,
+`max_nesting_depth` and `no_god_containers`. A violation with no value, such as
+a layer or boundary edge or a project-wide count, is also matched by its message.
+`introduced_clone_groups` lists the near-clone groups whose members no group at
+the merge-base has, and marks each member that was in no group before.
+
+Every entry has a `trust` label:
+
+- `resolved`: the file is indexed as it stands, and its language binds relations
+  across files;
+- `stale`: the file changed on disk since the last sync. `review` reads the graph
+  as it stands and never reconciles, so run `logos sync` first. `stale_files`
+  lists every such file. An entry with no file reads `stale` while any file is;
+- otherwise the `cause` tag of a language the graph binds within files only, as
+  [`status`](#status) reports it (Python's, for one).
+
+**The before-state** (`before_state`) is the merge-base commit and nothing else:
+
+- `recorded-snapshot`: the snapshot `scan`, `gate` or `session-start` recorded
+  at that commit. It is used only when it was scored under the current
+  thresholds and metric semantics, and when the contract evaluates no rule,
+  because a snapshot keeps no violation set.
+- `shadow-index`: otherwise. The merge-base tree is written from the object
+  database to a temporary directory, indexed into a throwaway store, measured
+  under the current contract, and cached as
+  `.logos/review-cache/<commit>.json`, which the generated `.logos/.gitignore`
+  ignores. The first run costs one index of that tree and says so on stderr.
+  Later runs reuse the entry while the contract, thresholds, admission, metric
+  semantics and logos version are unchanged. The newest 16 entries are kept.
+
+A snapshot at any other commit is never used. When the base does not resolve,
+shares no history with `HEAD`, or its merge-base tree cannot be measured (an
+object missing from the repository, say), the answer is `measured: false` with
+`not_measured_because`, nothing is classified, and the command exits **1**.
+Otherwise it exits 0. Like `check`, it re-materialises the graph's derived
+annotations under the current `rules.toml` first. It is advisory: it writes no snapshot or violation set
+and never changes a `check` or `gate` exit code. The MCP twin is the `review`
+tool. Both return the same bytes, and a rerun returns identical output.
+`sections` holds one entry per further delta section: today, `security`.
+
+#### `sections.security`
+
+The security findings the branch introduced, touched or resolved, read from the
+reports `logos security scan` and `security ingest` stored
+([the guide](security.md#the-security-section-of-review---base) explains how to
+read it). Every unsuppressed finding of each scanner's latest report is classified,
+and each entry names its `method`:
+
+- `introduced`: its fingerprint is absent from that scanner's report recorded at the
+  merge-base (`method: "fingerprint"`), or, when none was recorded, it lies inside a
+  hunk the branch changed (`method: "hunk"`; uncommitted and untracked files count);
+- `touched`: in the merge-base report and inside a changed hunk;
+- `resolved`: in the merge-base report, absent from the latest report, on a file that
+  report saw as it stands now;
+- `stale`: as `resolved`, but the file was edited after the latest report, so nothing
+  is claimed;
+- `pre-existing`: anything else.
+
+`scanners` lists each scanner's `method` and the commit of its latest report
+(`latest_head`);
+`counts` has `introduced`, `touched`, `resolved`, `stale`, `pre_existing` and
+`suppressed`; `findings` lists the
+classified entries, ordered by class, path and line. An entry carries `status`,
+`method`, `scanner`, `fingerprint`, `rule_id`, `severity`, `owasp`, `message`
+(the redacted text for a secret-class finding, which `redacted` flags),
+`path`, `start_line`, `end_line`, `freshness`, `reachability` and `confidence`.
+`suppressed` lists the findings an unexpired ignore entry covers, apart, with each
+one's `reason` and `expires` and the class it would otherwise have. The merge-base
+tree is never scanned. With no stored report, or when the findings or the diff
+cannot be read, the section's `measured` is false, `not_measured_because` says
+why, and its lists are empty and mean nothing; the quality half of the answer, and the exit
+code, are unaffected. `notes` records how the answer was produced, for instance
+that a scanner has not re-scanned since the merge-base, that `HEAD` is the
+merge-base, where a scan run now replaces the report recorded there, or that a
+`--path` re-scan rewrote the merge-base report, so its scanner is compared by
+hunks.
+
+```json
+{
+  "base": "main", "base_origin": "stated",
+  "head": "9f2c…", "merge_base": "41d0…",
+  "measured": true, "not_measured_because": null,
+  "before_state": "shadow-index",
+  "offenders": [
+    {"dimension": "nesting", "status": "new", "node_id": "src/`deep.rs`/beta().",
+     "name": "beta", "file": "src/deep.rs", "line": 9, "measure": "nesting_depth",
+     "before": null, "after": 6, "threshold": 4, "detail": "nesting depth 6",
+     "trust": "resolved"}
+  ],
+  "offender_counts": {"new": 1, "worsened": 0, "improved": 0, "resolved": 0, "unchanged": 1},
+  "violations": [],
+  "violation_counts": {"new": 0, "worsened": 0, "improved": 0, "resolved": 0, "unchanged": 0},
+  "introduced_clone_groups": [],
+  "stale_files": [],
+  "sections": {"security": {"measured": true, "not_measured_because": null,
+    "scanners": [{"scanner": "semgrep", "method": "hunk", "latest_head": "9f2c…"}],
+    "findings": [{"status": "introduced", "method": "hunk", "scanner": "semgrep",
+      "fingerprint": "ab12…", "rule_id": "example.shell-injection",
+      "severity": "high", "owasp": ["A05:2025"], "message": "a tainted value reaches a shell command",
+      "redacted": false, "path": "src/deep.rs", "start_line": 9, "end_line": 9,
+      "freshness": "fresh", "reachability": "reachable", "confidence": "resolved"}],
+    "counts": {"introduced": 1, "touched": 0, "resolved": 0, "stale": 0,
+               "pre_existing": 0, "suppressed": 0},
+    "suppressed": [], "notes": []}},
+  "notes": ["after is the graph as last synced, …",
+            "an unchanged entry is counted in offender_counts or violation_counts and not listed"]
+}
+```
+
+### `improvements`
+
+```bash
+logos improvements --json [--repo <MEMBER>]            # where to start, from the last snapshot
+```
+
+Answers "what should I fix first?" from the last snapshot. It prints the
+**where to start** list: at most ten fix units, each the one thing a fix would
+change, ranked by the signal points fixing it would recover. The MCP twin is the
+`improvements` tool, and `GET /api/v1/health` carries the same value as
+`scan.where_to_start`. All three return the same list for one snapshot, and a
+rerun on an unchanged store returns identical output.
+
+- A **unit** is a class (Cohesion, Focus), a function (Nesting, Conciseness), an
+  exact-duplicate group (Redundancy) or a near-clone group (Uniqueness). Each
+  carries its `kind`, `node_id` (the node's numeric id in this index; a
+  duplicate or near-clone group is named by its lowest production member),
+  `name`, `file`, `line`, `dimensions`, `points`, a `detail` describing the
+  offending magnitude, and `outliers`: the measures it is labelled an outlier on.
+- **`points` is an estimate.** It is the quality signal recomputed with that one
+  unit's contribution removed and nothing else changed, minus the current
+  signal. It is not a promise: fixing two units recovers about the sum of their
+  points, not exactly that. The payload's `basis` field says so in words.
+- Units are ordered by points descending, then dimension (Modularity, Acyclicity,
+  Depth, Equality, Redundancy, Nesting, Conciseness, Cohesion, Focus,
+  Uniqueness), then node id. A unit that recovers less than one whole point is
+  not listed. Equality, Depth, Acyclicity and Modularity never appear in `units`,
+  because splitting a function or a module has no single result; their lists are
+  `offenders`.
+- `outliers` lists, for each of seven per-unit measures (`lcom4`, `methods`,
+  `span`, `cc`, `nesting`, `duplicate_mass`, `clone_mass`), how many units the
+  member's own distribution holds (`units`), the upper fence `Q3 + 1.5 × IQR`
+  (`fence`), the detection `threshold`, how many units it labels (`labelled`)
+  and the labelled units (`labels`, capped like the other lists). A unit is
+  labelled only when it is above the fence **and** at or above the threshold.
+  With fewer than 8 units there is no fence and no label (`fence: null`).
+
+The list is advisory. It never enters the signal, the gate verdict or any
+`check` exit code. `improvements` reads the last snapshot and writes nothing, so
+run `scan` (or `gate`) first. When no snapshot exists, or the last one was
+written before 1.20.0, the answer is `recorded: false` with empty lists, which
+mean nothing was recorded. When `recorded` is `true` and `units` is empty, no
+single unit recovers a whole point. That is not the same as clean.
+
+```json
+{
+  "recorded": true,
+  "basis": "estimate: the signal recomputed with this one unit's contribution removed and nothing else changed, minus the current signal; advisory, never gated",
+  "units": [
+    {"kind": "function", "node_id": 10, "name": "deep_one", "file": "src/lib.rs", "line": 49,
+     "dimensions": ["nesting"], "points": 159, "detail": "nesting depth 6", "outliers": ["nesting"]}
+  ],
+  "outliers": [
+    {"measure": "nesting", "units": 9, "fence": 1.0, "threshold": 4, "labelled": 1,
+     "labels": [{"node_id": 10, "name": "deep_one", "file": "src/lib.rs", "line": 49, "value": 6}]}
+  ]
+}
+```
+
 ### `check [--rules <FILE>] [--allow-no-rules]`
 
 ```bash
 logos check                              # use .logos/rules.toml
 logos check --rules path/to/rules.toml
 logos check --allow-no-rules             # exit 0 even with no contract loaded
+logos check --bless                      # bless ratchet debt into .logos/rules-baseline.json, then check
 ```
 
 Architecture-rules compliance check: reconciles the index, then evaluates
@@ -2569,6 +2913,39 @@ and the exit is **1**, not 4. Only the genuinely empty case reports 4.
 
 Pass `--allow-no-rules` to restore exit 0 for callers that have deliberately
 authored no contract yet.
+
+**Ratchet budgets and `--bless`** ([FR-GV-23](../specs/requirements/FR-GV-23.md)).
+A budget declared `{ max = N, ratchet = true }` is classified against the
+checked-in blessed set `.logos/rules-baseline.json`: an offender blessed at or
+below its blessed value is a `warning` (no failure), a new or worsened one is an
+`error` (exit 1), and a blessed offender that no longer violates is listed under
+`ratchet.fixed`. With no blessed file every ratchet offender is an `error` and the
+report names the bless command. `logos check --bless` is the **only** writer of
+that file: it records every current offender of a ratchet budget — sorted and
+deterministic, byte-identical when nothing changed — replacing only the entries
+of the rules the contract it evaluated ratchets (so `--bless --rules FILE` keeps
+the default contract's blessed debt), then reports exactly as
+`check` does against the set it just wrote. `check` and `scan` only read it, and
+`gate` never touches it. The MCP twin is `bless_rules`. The JSON report gains a `ratchet` summary
+(counts, the fixed list, the bless command) and each classified violation a
+`ratchet` mark (`symbol`, `value`, `blessed`, `status`); both are absent when no
+budget is under ratchet, so such a report is unchanged. See
+[configuration.md](configuration.md#ratchet-constraints--adopt-a-budget-on-an-existing-codebase)
+and the adoption recipe in
+[ci-integration.md](ci-integration.md#adopting-budgets-on-an-existing-codebase-the-ratchet).
+
+**A `[security]` table gates on findings, and a missing scan exits 5**
+([FR-SC-10](../specs/requirements/FR-SC-10.md)). With
+[`rules.toml [security]`](configuration.md#security--the-security-gate)
+present, `check` also fails (exit 1) on an unsuppressed finding that is new
+since `gate --save` at or above `ratchet_min_severity` (rule
+`security:ratchet`), or that a cap names (`security:max_severity`,
+`security:fail_on_owasp:<id>`). A scanner in `required_scanners` with no fresh
+scan at HEAD exits **5** instead, and `missing_scans` names it; exit 4 takes
+precedence. Exit 5 outranks a failing rule's exit 1, so read the rules' verdict
+from the `violations` (and `security_violations`): `passed` is false whenever a
+required scan is missing, whatever the rules say. Without the table nothing here runs, and the report is unchanged
+whatever security evidence exists.
 
 **Since logos 1.4.13 a `check` run leaves a record that it happened.** Before
 that the only trace a run left was its violation rows, which are replaced
@@ -2613,6 +2990,14 @@ changed` or `baseline reset: metric thresholds changed`, and passes
 informationally. The next gate compares normally. This is what lets you re-tune
 a `[metric_thresholds]` value without a spurious CI failure — see
 [metrics.md](metrics.md#versioned-baseline--automatic-re-baseline-on-semantics-or-threshold-change).
+
+Under a [`rules.toml [security]`](configuration.md#security--the-security-gate)
+table the gate also judges security findings. `--save` records the fingerprint
+of every unsuppressed stored finding as the ratchet's baseline, beside the
+metric baseline. A compare then fails (exit 1) on a new finding past the ratchet
+or on a cap, listing each under `security_violations`. A required scanner with
+no fresh scan at HEAD exits **5**, listed under `missing_scans`, and a `--save`
+that exits 5 leaves the security baseline unrecorded. The signal never moves.
 
 ### `quality-report [--hook-json]`
 
@@ -2935,6 +3320,14 @@ aggregate regression beyond epsilon — the same verdict projection
 [`gate`](#gate---save---threshold-n---label-l) makes, and what lets a shell
 script or CI step notice a failing gate.
 
+Under a [`rules.toml [security]`](configuration.md#security--the-security-gate)
+table both commands behave as `gate --save` and `gate` do. `session-start` also
+records the security ratchet's baseline, and its message says so. If a required
+scan is missing it says the security baseline was not saved, and it still
+exits 0. `session-end` also fails (exit 1) on a security violation, and exits
+**5** when a required scanner has no fresh scan at HEAD. Every commit makes such
+a scan stale, so re-run the scan before `session-end`.
+
 The baseline lives in the store, not in process memory, so the two commands work
 across separate invocations. Both are payload-identical with their
 `session_start` / `session_end` MCP twins; only the exit-code projection is
@@ -2993,6 +3386,16 @@ disagree about a root. Like `doc_symlink_warnings` it is advisory: it never
 flips `ok`, never changes the exit status, never becomes a rule finding, and
 never moves the quality signal — `doctor` still exits on structural or
 admission drift alone.
+
+`plugin_warnings` is one more diagnostic-only advisory array, empty unless the Claude Code plugin
+is enabled for the project ([FR-IN-12](../specs/requirements/FR-IN-12.md)). It
+names a **duplicate registration** — a `logos` server declared both by
+`.mcp.json` and by the plugin, so every tool is listed twice; `logos init -i`
+removes the legacy entry — and a **version skew**: this binary is older than
+the `minBinaryVersion` in a plugin manifest that applies here (an installed copy
+Claude Code recorded for you or this project, or the repository's own
+`plugins/logos/.claude-plugin/plugin.json`). Like the others it never flips
+`ok` or changes the exit status.
 
 A full `logos index` purges every unadmitted file (its inbound edges return to
 `unresolved_refs`), healing the admission drift.
@@ -3099,6 +3502,7 @@ logos hotspots [--repo <MEMBER>]      # all ranked files
 logos hotspots --limit 20          # top 20 by score
 logos hotspots --untested          # only files with no fresh positive coverage
 logos hotspots --untested --production-scope   # exclude whole test files from the board
+logos hotspots --with-findings     # rank files with a fresh security finding first
 ```
 
 Ranks files high in **both** git churn (change frequency over a HEAD-anchored
@@ -3130,6 +3534,22 @@ The flag composes with `--limit`/`--untested`, is opt-in and **gate-immune** (th
 hotspot tier is non-gated; toggling it never moves a gated signal), and returns
 identical rankings across the CLI, the MCP `hotspots` tool (`production_scope`),
 and the web Files & Risk view.
+
+Once a scan is stored (`security scan` or `security ingest`), each row also
+carries a `findings` cell — `count` of the file's unsuppressed findings and the
+`highest` severity among them — so a churning, untested file with a fresh high
+finding reads as such. A finding whose file changed since the scan is **stale**:
+it is tallied apart as `stale`, never counted, and never lifts `highest`; a
+finding an unexpired entry in `.logos/security-ignore.toml` suppresses is not
+counted either, while an expired entry no longer suppresses. A project with no
+stored scan, or whose only stored scans are `--path` re-scans (no full scan
+behind any report), has no `findings` cell on any row — no column, rather than a
+column of zeros for files nothing scanned — and `--with-findings` then changes
+nothing. `--with-findings` ranks the
+files with a fresh finding ahead of those without — highest severity first, then
+the count, then the usual score and path — and drops no file. The cell is the same
+on the CLI, the MCP `hotspots` tool (`with_findings`) and the web Files & Risk
+view, whose Findings column links each file to `/security?path=<file>`.
 
 Determinism: the window cutoff is computed from the **HEAD committer
 timestamp**, never the wall clock — same HEAD in, byte-identical ranking out.
@@ -3192,29 +3612,46 @@ zero.
 
 ## Security findings
 
+This section is the command reference. The guide to the whole section — the tested
+version of each scanner, consent and the network, reachability confidence, the
+`[security]` gate and the Security page — is [security.md](security.md).
+
 Security scanners report *that* a finding exists; Logos stores each one as
 evidence in `.logos/history.db`, anchored to HEAD, the scanner and the file it
-names, beside coverage. Like the other evidence tiers it is advisory here:
-nothing in this section moves the quality `gate`. No snippet of source is ever
+names, beside coverage. Like the other evidence tiers it is advisory: nothing
+in this section moves the 0–10000 signal, and it gates a merge only under a
+[`[security]` table](configuration.md#security--the-security-gate) in `rules.toml`. No snippet of source is ever
 stored. A secret-class finding's message is replaced before it is written, and
 every other message is stored with anything shaped like a secret masked.
-Each command below has an MCP twin returning the same payload (`security_scan`,
-`security_ingest`, `security_status`, `security_findings`).
+Each command below except `security install` and `security uninstall` has an
+MCP twin returning the same payload (`security_scan`, `security_ingest`,
+`security_status`, `security_findings`).
 
-### `security scan [--consent]`
+### `security scan [--consent] [--install] [--scanner <NAME>]… [--path <PATH>]…`
 
 ```bash
 logos security scan --consent      # the first scan in a project: record consent, then scan
 logos security scan                # later scans
 logos security scan --json         # one outcome per registered scanner
+logos security scan --install --consent   # install the missing scanners, then scan
+logos security scan --scanner semgrep --path src/a.py   # re-scan one file with one scanner
 ```
 
 Runs every installed, enabled scanner — Semgrep, Trivy, Gitleaks, OSV-Scanner,
 Bandit, gosec, Checkov, CodeQL and Dependency-Check — with the fixed commands
 listed in [configuration.md](configuration.md#user-level-config--settings-no-repository-can-choose),
 writes each SARIF report to `.logos/security/` and ingests it as it finishes.
-Logos never installs a scanner; `[security_scan]` in `.logos/config.toml` switches
-one off.
+Without `--install` it runs only what is already there; `[security_scan]` in
+`.logos/config.toml` switches a scanner off.
+
+`--install` first installs the scanners Logos can install that are missing and
+not switched off in this project — never the opt-in Dependency-Check and CodeQL —
+exactly as
+[`security install`](#security-install-scanner--all---update---from-dir---consent---accept-codeql-licence)
+does, then scans; its exit code is the scan's, not the install's. With `--consent` it records both consents — the per-user
+install consent for what it installs, and this project's scan consent — and
+without it, exit 2 names what is awaiting consent and nothing is downloaded. The
+payload is `{install, scan}`: the install payload, then the scan payload below.
 
 The first scan needs `--consent`, because a scanner may reach the network to
 refresh its rules or database; without it the command exits 2 naming the flag and
@@ -3231,6 +3668,7 @@ The payload has one entry per registered scanner, with its `outcome`:
 | `ran` | It ran; `sarif` lists its reports, `findings` counts them, `ingests` holds each ingest summary |
 | `not_installed` | No binary was found |
 | `disabled` | `[security_scan.<scanner>] enabled = false` |
+| `not_selected` | Installed, but `--scanner` did not name it, or a `--path` scan left out a scanner it cannot narrow (below) |
 | `requires_build` | CodeQL only: every language present needs a build; ingest a CI report instead |
 | `not_applicable` | CodeQL only: no file in a language it analyses |
 | `failed` | It produced no report, or one that could not be ingested |
@@ -3248,6 +3686,52 @@ then.
 
 Exit 2 also for an invalid `[security_scan]` table or user-level config; the
 scan then starts nothing.
+
+#### A re-scan of one scanner and some paths
+
+`--scanner <NAME>` (repeatable) runs only the named scanners, each by registry
+name (`semgrep`) or by the report's tool name (`Semgrep OSS`, the name the
+[branch review](#review---base-ref) gives it); every other installed one reads
+`not_selected`. `--path <PATH>` (repeatable) scans only those files or
+directories, so the proof of a security fix takes seconds rather than a full
+scan:
+
+- **Paths** are relative to the project root, or absolute inside it, and
+  literal: a glob is not expanded, so name each file or directory. One that
+  resolves outside the root — `../x`, an absolute path elsewhere, or a symbolic
+  link pointing out — is refused with exit 2 before anything starts, as is one
+  that does not exist, the root itself, or one beginning with `-`. A path inside
+  another given directory is dropped, so nothing is scanned twice. Each path
+  reaches the scanner as one argument, never through a shell.
+- **Semgrep, Gitleaks, Bandit, gosec and Checkov** run on the paths only. Their
+  command is the full scan's with the paths in place of the project: gosec is
+  given each file's package directory, and Gitleaks and Checkov run once per path
+  (Gitleaks with `--no-git`, reading the file as it is now rather than the git
+  history a full scan reads). The report goes to `.logos/security/scoped/`, and
+  its ingest replaces that scanner's findings **only** in those paths: every
+  other file's findings and freshness stay exactly as they were. The same scoped
+  report over the same paths again is a no-op.
+- **Gitleaks** is the exception to "replaces". Its full scan reads git history,
+  so a secret removed from a file is still there, and its findings in the
+  scanned paths are kept. A secret the scoped run finds that is one of them
+  (same file, same rule, same position, or the same column span when its lines
+  moved) keeps that finding's fingerprint, so `check`, `gate` and
+  `.logos/security-ignore.toml` still recognise it. Only a secret with no such
+  match is listed as new.
+- **Trivy, OSV-Scanner and Dependency-Check** read whole manifests, and **CodeQL**
+  a database of every file, so none can be narrowed. Each entry says so in
+  `scope` (`"whole-manifest only"`, or `"whole-project only"` for CodeQL). Named
+  with `--scanner`, it runs on the whole project; otherwise a `--path` scan leaves
+  it out.
+
+Consent is asked exactly as for a full scan, for the scanners this scan starts.
+With `--path`, each entry carries `scope`: `{"kind": "paths", "paths": […]}` for
+a narrowed run, `{"kind": "unscoped", "reason": …}` for one that cannot be. A
+scanner whose only stored report comes from `--path` scans — no full scan behind
+it — reads `stale` (`scoped_only`) in [`security status`](#security-status), and
+one whose full scan is from an earlier commit reads `stale` (`head_moved`), so a
+re-scan of a few files never makes a scanner read fresh for the rest. `--install`
+takes neither flag. The MCP `security_scan` tool takes `scanners` and `paths`.
 
 ### `security ingest <REPORT>`
 
@@ -3280,7 +3764,7 @@ One state per registered scanner:
 | `not_installed` | No binary was found and no report is stored |
 | `disabled` | Switched off in `[security_scan]` |
 | `never_run` | Installed, and no report is stored |
-| `stale` | A report is stored, but HEAD moved since (`because: head_moved`) or a file it anchors changed (`files_changed`) |
+| `stale` | A report is stored, but HEAD moved since the full scan behind it (`because: head_moved`), a file it anchors changed (`files_changed`), or only `--path` re-scans stand behind it (`scoped_only`) |
 | `fresh` | A report is stored at this HEAD and no file holding one of its findings has changed. A report with no findings anchors no file, so only a new HEAD makes it stale |
 
 `never_run` carries no count; `fresh` carries `findings` (unsuppressed) and
@@ -3288,7 +3772,135 @@ One state per registered scanner:
 confused with a scanner that has not run. A stored report counts whether or not
 the scanner is installed here, so a report ingested from CI reads `fresh` or
 `stale`. `consent` lists the scanners consented to and the `pending` ones the
-next scan will ask for. Starts no scanner.
+next scan will ask for.
+
+An installed scanner also carries `installed`: the `copy` that runs —
+`override` (your user-level `path`), `path` (found on `PATH`) or `managed`
+(installed by Logos) — its `binary`, its `version`, and `update_available`, the
+newer version this release pins when the managed copy is older (run
+`logos security install <scanner> --update`). A scanner that is not installed
+and that Logos can install carries `install`, the command that installs it —
+for CodeQL with `--accept-codeql-licence` until its licence is accepted; the
+MCP `security_status` names it the same way, since no MCP tool installs.
+CodeQL's row also carries `licence`, the recorded acknowledgement. Reading
+the versions runs each installed scanner's version command; no scan starts.
+
+### `security install [<SCANNER>…|--all] [--update] [--from <DIR>] [--consent] [--accept-codeql-licence]`
+
+```bash
+logos security install --all                 # exit 2: lists what would be installed, downloads nothing
+logos security install --all --consent       # record the consent, then install
+logos security install trivy gosec --consent # only these
+logos security install trivy --update --consent   # replace an older managed copy
+logos security install --all --from ~/Downloads/logos-tools --consent   # offline
+logos security install dependency-check --consent                  # opt-in, with its Java runtime
+logos security install codeql --accept-codeql-licence --consent    # opt-in, after its licence
+```
+
+Downloads each scanner's release for this platform, checks its SHA-256 against
+the version this Logos release pins, and moves it into the user-level tools
+directory (`$LOGOS_DATA_HOME`, else `$XDG_DATA_HOME/logos/tools`, else
+`~/.local/share/logos/tools`) — never inside a repository. Trivy, Gitleaks,
+OSV-Scanner and gosec install this way; Semgrep, Bandit and Checkov install
+through a managed `uv` (below). Name the scanners, or `--all` for those seven.
+Dependency-Check and CodeQL are opt-in (below): `--all` never installs them, nor
+does `security scan --install`; name them.
+
+**Your own copy wins.** A scanner is installed only when none is usable: a
+user-level `path` override, or a copy on `PATH` at or above the minimum version
+Logos was tested with, is kept and listed under `kept` — never downloaded. A
+`PATH` copy below that minimum is installed over, and the managed copy then
+runs in its place; your copy is never removed.
+
+**Consent.** Installing needs your consent for each tool's pinned version. It
+is recorded per user (`security-install-consent.toml` beside the
+[scan consent](configuration.md#scan-consent)), covers that version in every
+project, and is asked for again when a release pins a new version. Without it
+the command exits 2 naming each tool, version, source host and download size,
+and the command to run, and downloads nothing. `--consent` records it and
+installs. An MCP client cannot give it: no MCP tool installs.
+
+**Update.** When this release pins a newer version than your managed copy,
+`security status` shows `update_available` and the older copy keeps running —
+nothing updates by itself, and a plain `install` leaves it. `--update` asks
+consent for the new version, installs it, and removes the old copy.
+
+**Offline.** `--from <DIR>` reads each artifact from a directory instead of the
+network, under the file name its release URL ends in, with the same checksum
+check. Nothing is downloaded, so `curl` is not needed. An offline
+Dependency-Check also needs the Java runtime archive its release URL names.
+
+**Python scanners.** Semgrep, Bandit and Checkov need no Python on the machine.
+Logos installs its pinned `uv` (a release binary, checked like the others),
+which installs a managed Python and then each scanner into an environment of
+its own, from requirements this release pins: every package at one version,
+with its hashes checked, from wheels only. A package whose hash does not match
+fails that scanner at `checksum` and leaves no environment. The consent names
+`uv` and `python` as lines of their own while they are not installed, and each
+scanner's download from `pypi.org`. Everything stays in the tools directory —
+`uv/`, `python/`, `uv-cache/` and the environments — and nothing is written to
+your own Python, your `PATH` or your home directory. For `--from`, the
+directory also needs `uv-cache/`: copy `<tools dir>/uv-cache` from a machine
+with the same operating system and processor that installed the three — the
+cache holds only that platform's packages and Python — and put the `uv` archive
+its release URL names beside it. Every `uv` step then runs offline. The `uv`
+archive and the Python runtime are checked as online; the packages in
+`uv-cache/` are trusted the way `uv` trusts its own cache, so their files are
+not re-hashed: use a cache you produced yourself.
+
+**Dependency-Check (opt-in).** Installed only when named. It needs no Java on
+the machine: Logos installs a pinned Java runtime (Eclipse Temurin 21, about
+150 MB unpacked) with it, checked like every release, into `java/` in the tools
+directory, and runs the managed Dependency-Check on that runtime whatever your
+own `JAVA_HOME` says. The consent names `java` as a line of its own, with its
+download size, while it is not installed. A Dependency-Check you installed
+yourself still runs on your own Java. Its first scan downloads the NVD data,
+which takes a long time without an NVD API key.
+
+**CodeQL (opt-in, licensed).** Installed only when named, and only once you
+accept its licence: the CodeQL CLI may be used to analyse open-source codebases
+and for academic research; any other use, such as on a closed-source codebase,
+needs a licence from GitHub ([terms](https://github.com/github/codeql-cli-binaries/blob/main/LICENSE.md)).
+Without `--accept-codeql-licence` the command exits 2 showing these terms and
+downloads nothing. With it, the acknowledgement is recorded for that version in
+`security-install-consent.toml` (a `[licence]` table), together with the
+install consent, once the install goes ahead; a release that pins a new
+version asks again. `security status` shows it on CodeQL's row as `licence`:
+the `accepted` versions and whether the pinned one is among them
+(`pinned_accepted`). CodeQL installs as the whole bundle (the CLI with its
+query packs: a 1.3 GB download on macOS), and still never builds your project.
+
+The payload lists `consent_recorded` (the `<tool> <version>` lines this run
+added), `licence_recorded` (the `<tool> <version>` licences it recorded as
+accepted), `kept` (each tool left as it was, with its `copy` and `version`) and
+`tools`, one entry per tool installed or attempted, with its `outcome`:
+`installed`, `already_present`, `unavailable` (no release for this platform) or
+`failed` with the `stage` — `download`, `checksum`, `unpack` or `install` — and
+the `reason`. One tool failing never stops the others, and a failed tool leaves
+nothing behind.
+
+Exit codes: **0** when at least one tool you asked for is in place — installed,
+`already_present`, or kept (your own copy) — however many of the others failed;
+the per-tool `outcome`s say which. **1** when you asked for tools and none ended
+in place: every one `failed` or was `unavailable`, so a script can tell that
+nothing was installed. **2** for a missing consent or licence
+acknowledgement, a name Logos does not install, a platform without managed
+installs (Windows today), or no tools directory.
+
+### `security uninstall [<SCANNER>…|--all]`
+
+```bash
+logos security uninstall --all
+logos security uninstall gosec
+```
+
+Removes the managed copies of the named scanners, every version, from the tools
+directory. A copy you installed yourself — on `PATH` or named by a user-level
+`path` — is never touched; `kept` lists the copies still in use afterwards.
+Removing the last of Semgrep, Bandit and Checkov also removes `uv`, the managed
+Python and `uv-cache/`; removing Dependency-Check also removes the Java runtime,
+which no other scanner needs. `--all` covers Dependency-Check and CodeQL too.
+Each entry in `tools` is `removed`, `not_installed` or `failed` with a `reason`.
 
 ### `security findings`
 

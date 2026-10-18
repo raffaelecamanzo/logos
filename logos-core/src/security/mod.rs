@@ -1,15 +1,22 @@
 //! The security orchestrator ([security-orchestrator], [ADR-80], S-665): runs
-//! the security scanners the user has installed, with commands no repository
+//! the security scanners the user has installed, or the [tool
+//! installer](crate::tools) installed for them, with commands no repository
 //! can choose.
 //!
 //! - [`Orchestrator::detect`] reports each [registered](registry::REGISTRY)
-//!   scanner as installed (with its version), not installed, or disabled. The
-//!   probe is the binary's version command, run with the update-check opt-outs
-//!   the registry sets.
+//!   scanner as installed (with its version and which [copy](CopyKind) it
+//!   is), not installed, or disabled. The probe is the binary's version
+//!   command, run with the update-check opt-outs the registry sets.
 //! - [`Orchestrator::scan`] runs the selected, enabled, installed scanners one
 //!   after the other, each to a SARIF file under `.logos/security/`, and
 //!   reports one [`Outcome`] per scanner. One scanner failing never stops the
 //!   others.
+//! - A scoped run ([FR-SC-17], S-685) puts paths the user named — each
+//!   confined to the root by [`resolve_scope`] before anything starts — in a
+//!   path-capable scanner's fixed [path position](registry::PathSlot), and
+//!   writes its report to [`SCOPED_DIR`], where the watcher never ingests it
+//!   as a whole-project report. A scanner without a path position runs
+//!   unscoped.
 //!
 //! **Command provenance** ([NFR-SE-08]). Every argv comes from a fixed
 //! registry template. The repository config may only enable or disable a
@@ -20,7 +27,10 @@
 //! `PATH` is reduced to its absolute entries outside the project root, both to
 //! find the scanner and as the `PATH` the scanner itself runs with, so neither
 //! the scanner nor a tool it starts by name (`git`, `go`, `java`) is resolved
-//! from the repository.
+//! from the repository. A managed copy is looked for only in the user-level
+//! tools directory, where [`crate::tools::resolve`] names it from the manifest.
+//! A `PATH` copy below the manifest's minimum version does not win over a
+//! managed copy (S-744).
 //!
 //! **No repository-chosen code** ([NFR-SE-02]). A scanner that would run code a
 //! repository config file names is closed off: Checkov is not started while
@@ -40,16 +50,26 @@
 //! [`surface`] module composes it with the evidence store, the consent record
 //! and the suppression file into what `logos security scan|status|findings`
 //! and their MCP twins return (S-667); [`mask`] keeps a failed scanner's
-//! output from carrying a secret into those payloads.
+//! output from carrying a secret into those payloads; [`context`] places each
+//! listed finding in the graph (S-669); [`page`] composes all of it, with the
+//! `[security]` gate's verdict, into what the web UI's Security page reads
+//! (S-670). Every scanner process is started through [`crate::jobs::ChildGuard`],
+//! so a scan the web UI runs as a [job](crate::jobs) is cancelled by killing
+//! each scanner's process group (S-673).
 //!
 //! [security-orchestrator]: ../../../docs/specs/architecture/components/security-orchestrator.md
 //! [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
+//! [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
 //! [NFR-SE-02]: ../../../docs/specs/requirements/NFR-SE-02.md
 //! [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
 
 pub use crate::history::security::mask;
+pub mod context;
+mod gate;
+mod page;
+mod probes;
 pub mod registry;
-mod spawn;
+mod rollup;
 mod surface;
 
 #[cfg(all(test, unix))]
@@ -65,17 +85,26 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::config::{
-    load_config_from_root, load_user_config, user_config_dir, ConfigError, SecurityScan,
-    UserSecurityScan,
+    load_config_from_root, load_user_config, user_config_dir, user_tools_dir, ConfigError,
+    SecurityScan, UserSecurityScan,
 };
-use registry::{Fill, Output, Scanner, CODEQL_LANGUAGES, REGISTRY};
-use spawn::Launch;
+use crate::tools::Manifest;
+use registry::{Fill, Output, Scanner, ScopedPath, CODEQL_LANGUAGES, REGISTRY};
+use crate::jobs::spawn::{self, inside_root, is_executable, usable_path_entries, Launch};
 
-pub use registry::scanner;
+pub use gate::SecurityGateBand;
+pub(crate) use gate::SecurityGateEvidence;
+pub(crate) use page::{editions, listings};
+pub use page::{EditionClassification, SecurityPage};
+pub use registry::{scanner, WHOLE_MANIFEST_ONLY, WHOLE_PROJECT_ONLY};
+pub use rollup::{
+    Excluded, MemberCategory, MemberEdition, MemberScan, MemberSecurity, SeverityCounts,
+};
 pub use surface::{
-    findings, scan, status, ConsentState, FindingsFilter, ListedFinding, RunOutcome, ScanState,
-    ScannedReport, ScannerRun, ScannerStatus, SecurityFindings, SecurityScanSummary,
-    SecurityStatus, StaleBecause, SuppressionFilter, FAILURE_LOG_SUFFIX,
+    consent_pending, findings, scan, status, ConsentState, FindingsFilter, LicenceAcceptance, ListedFinding,
+    RunOutcome, RunScope, ScanProgress, ScanState, ScannedReport, ScannerRun,
+    ScannerStatus, SecurityFindings, SecurityScanSummary, SecurityStatus, StaleBecause,
+    SuppressionFilter, VersionProbes, FAILURE_LOG_SUFFIX,
 };
 
 /// The reason a language that needs a build is not scanned ([FR-SC-05]).
@@ -85,6 +114,11 @@ pub const REQUIRES_BUILD: &str = "requires a build — ingest a CI report";
 
 /// Where scan output lands, relative to the project root.
 pub const OUTPUT_DIR: &str = ".logos/security";
+
+/// Where a scoped run's reports land, inside [`OUTPUT_DIR`]: a subdirectory,
+/// so the watcher — which ingests only a report directly in [`OUTPUT_DIR`] —
+/// never ingests a partial report as a whole-project one.
+pub const SCOPED_DIR: &str = "scoped";
 
 /// The empty config file pinned on scanners that would otherwise auto-load one
 /// from the repository, inside [`OUTPUT_DIR`].
@@ -107,11 +141,29 @@ pub struct ScannerState {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Detection {
     /// Found. `version` is `None` when the version probe failed to start, timed
-    /// out, exited with a failure, or printed no version.
-    Installed { binary: PathBuf, version: Option<String> },
+    /// out, exited with a failure, or printed no version. `copy` says which
+    /// copy `binary` is.
+    Installed {
+        binary: PathBuf,
+        version: Option<String>,
+        copy: CopyKind,
+    },
     NotInstalled,
     /// Disabled by the repository's `[security_scan]`; nothing was probed.
     Disabled,
+}
+
+/// Which copy of a scanner is used ([ADR-88] §5): the first found of the
+/// user-level path override, a copy on the usable `PATH`, and the copy the
+/// [tool installer](crate::tools) manages.
+///
+/// [ADR-88]: ../../../docs/specs/architecture/decisions/ADR-88.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyKind {
+    Override,
+    Path,
+    Managed,
 }
 
 /// Whether a scanner would run here, decided without starting anything: the
@@ -124,7 +176,8 @@ pub enum Availability {
 }
 
 /// Where the security surfaces look for the user-level directory (the
-/// overrides and the consent record) and for scanner binaries.
+/// overrides and the consent record), for scanner binaries, and for the
+/// managed copies the [tool installer](crate::tools) installed.
 ///
 /// [`from_process`](Self::from_process) is what every shipped surface uses.
 /// An embedder or a test passes explicit values instead, so that neither has to
@@ -136,25 +189,96 @@ pub struct ScanEnvironment {
     pub user_dir: Option<PathBuf>,
     /// The executable search path scanners are looked up on.
     pub search_path: Option<OsString>,
+    /// The user-level tools directory, if there is one. One inside the
+    /// project root is ignored.
+    pub tools_dir: Option<PathBuf>,
 }
 
 impl ScanEnvironment {
-    /// [`user_config_dir`] and the process `PATH`.
+    /// [`user_config_dir`], the process `PATH` and [`user_tools_dir`].
     pub fn from_process() -> Self {
         Self {
             user_dir: user_config_dir(),
             search_path: std::env::var_os("PATH"),
+            tools_dir: user_tools_dir(),
         }
     }
 }
 
-/// Which scanners a scan covers.
+/// Which scanners a scan, an install or an uninstall covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
     /// Every registered scanner.
     All,
     /// The named scanners, by registry name.
     Only(Vec<String>),
+}
+
+impl Selection {
+    /// Every scanner when `all`, else the `named` ones — a surface's
+    /// `--all` flag and its name list.
+    pub fn named_or_all(named: Vec<String>, all: bool) -> Self {
+        if all {
+            Selection::All
+        } else {
+            Selection::Only(named)
+        }
+    }
+
+    /// `Ok` when every name is a registered scanner.
+    ///
+    /// # Errors
+    /// [`ConfigError::InvalidValue`] (exit 2) naming the first that is not.
+    pub(crate) fn check_registered(&self) -> Result<(), ConfigError> {
+        let Selection::Only(names) = self else {
+            return Ok(());
+        };
+        match names.iter().find(|n| scanner(n).is_none()) {
+            None => Ok(()),
+            Some(bad) => Err(ConfigError::InvalidValue {
+                key: "scanner".to_string(),
+                message: format!(
+                    "{bad:?} is not a registered scanner (expected one of: {})",
+                    crate::config::SECURITY_SCANNERS.join(", ")
+                ),
+            }),
+        }
+    }
+}
+
+/// Which scanners a scan runs, and on which paths ([FR-SC-17]).
+///
+/// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanRequest {
+    /// The scanners to run.
+    pub scanners: Selection,
+    /// The paths to scan, as the user gave them: relative to the project root,
+    /// or absolute inside it. Empty scans the whole project.
+    pub paths: Vec<String>,
+}
+
+impl ScanRequest {
+    /// Every installed, enabled scanner over the whole project.
+    pub fn full() -> Self {
+        Self { scanners: Selection::All, paths: Vec::new() }
+    }
+
+    /// The `scanners` named — every one when none is — over `paths`, the
+    /// whole project when none is: a surface's `--scanner` and `--path` lists.
+    /// A scanner is named by registry name (`semgrep`) or by the SARIF driver
+    /// name its findings carry (`Semgrep OSS`), as the findings filter takes
+    /// it: a branch review names scanners by driver.
+    pub fn new(scanners: Vec<String>, paths: Vec<String>) -> Self {
+        let scanners: Vec<String> = scanners.into_iter().map(registry_name).collect();
+        let scanners = if scanners.is_empty() { Selection::All } else { Selection::Only(scanners) };
+        Self { scanners, paths }
+    }
+
+    /// Whether the request names `s`, rather than taking every scanner.
+    pub(crate) fn names(&self, s: &Scanner) -> bool {
+        matches!(&self.scanners, Selection::Only(names) if names.iter().any(|n| n == s.name))
+    }
 }
 
 /// A scan's per-scanner results, in registry order.
@@ -223,11 +347,64 @@ pub struct Orchestrator {
     /// [`search_dirs`](Self::search_dirs) joined: the `PATH` every scanner
     /// process runs with (`None` when no entry is usable).
     child_path: Option<OsString>,
+    /// Where managed copies are looked for, if anywhere.
+    tools_dir: Option<PathBuf>,
+    /// The pinned and minimum versions: the [builtin](Manifest::builtin) one
+    /// unless an embedder or a test passes another
+    /// ([`with_manifest`](Self::with_manifest)).
+    manifest: Manifest,
+}
+
+/// The copy of a scanner that is used, as the precedence chose it
+/// ([ADR-88] §5).
+///
+/// [ADR-88]: ../../../docs/specs/architecture/decisions/ADR-88.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledCopy {
+    pub copy: CopyKind,
+    pub binary: PathBuf,
+    /// The version its probe printed; `None` when the probe failed, or when
+    /// none ran ([`unprobed`](Self::unprobed) says why).
+    pub version: Option<String>,
+    /// For a managed copy older than the manifest's pin, the pinned version
+    /// `logos security install --update` would install.
+    pub update_available: Option<String>,
+    /// Why no probe ran, when none did. Absent wherever every copy is probed:
+    /// the CLI, MCP, and every scan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unprobed: Option<Unprobed>,
+}
+
+/// Why a copy's version was not probed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unprobed {
+    /// The project's scan consent does not name the scanner, and a page read
+    /// starts no process for a scanner it does not ([ADR-38], [ADR-80] §4).
+    ///
+    /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
+    /// [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
+    NotConsented,
+    /// The readout asks for each scanner's state alone, which no version
+    /// changes: `check`'s `[security]` evidence.
+    StateOnly,
+}
+
+/// How [`Orchestrator::copy_in_use_with`] reads the version of a copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// Run its version command.
+    Run,
+    /// Run it once per process for each binary, unchanged ([`probes`]).
+    Cached,
+    /// Run nothing: the version is unknown for this reason.
+    Skip(Unprobed),
 }
 
 impl Orchestrator {
     /// Load the repository's `.logos/config.toml`, the user-level config from
-    /// [`user_config_dir`], and the process `PATH`.
+    /// [`user_config_dir`], the process `PATH`, and the tools directory from
+    /// [`user_tools_dir`].
     ///
     /// # Errors
     /// A [`ConfigError`] (exit 2) when either config file is invalid — notably
@@ -242,11 +419,20 @@ impl Orchestrator {
     /// # Errors
     /// As [`open`](Self::open).
     pub fn open_in(root: &Path, env: &ScanEnvironment) -> Result<Self, ConfigError> {
-        Self::open_with(root, env.user_dir.as_deref(), env.search_path.clone())
+        let mut orchestrator =
+            Self::open_with(root, env.user_dir.as_deref(), env.search_path.clone())?;
+        // A tools directory inside the project would let the repository plant
+        // a "managed" scanner, exactly as an in-project `PATH` entry would.
+        let canonical_root = root.canonicalize().ok();
+        orchestrator.tools_dir = env
+            .tools_dir
+            .clone()
+            .filter(|dir| !inside_root(root, canonical_root.as_deref(), dir));
+        Ok(orchestrator)
     }
 
     /// [`open`](Self::open) with the user-level config directory and the
-    /// executable search path given explicitly.
+    /// executable search path given explicitly, and no managed copies.
     ///
     /// # Errors
     /// As [`open`](Self::open).
@@ -267,7 +453,17 @@ impl Orchestrator {
             overrides,
             search_dirs,
             child_path,
+            tools_dir: None,
+            manifest: Manifest::builtin().clone(),
         })
+    }
+
+    /// Resolve managed copies and minimum versions against `manifest` instead
+    /// of the builtin one (tests: a manifest pinning a newer version).
+    #[must_use]
+    pub fn with_manifest(mut self, manifest: Manifest) -> Self {
+        self.manifest = manifest;
+        self
     }
 
     /// Detect every registered scanner, in registry order. A disabled scanner
@@ -290,7 +486,7 @@ impl Orchestrator {
             .map(|s| {
                 let availability = if !self.switches.is_enabled(s.name) {
                     Availability::Disabled
-                } else if self.locate(s).is_some() {
+                } else if self.has_copy(s) {
                     Availability::Installed
                 } else {
                     Availability::NotInstalled
@@ -308,19 +504,22 @@ impl Orchestrator {
     /// [`OUTPUT_DIR`], or an I/O error creating [`OUTPUT_DIR`]. A scanner's own
     /// failure is its [`Outcome::Failed`], never an error.
     pub fn scan(&self, selection: &Selection) -> anyhow::Result<ScanReport> {
+        self.scan_in(selection, None)
+    }
+
+    /// [`scan`](Self::scan), scoped to `scope` when it is given: a scanner
+    /// with a [path position](registry::PathSlot) runs on those paths only,
+    /// one without runs unscoped ([FR-SC-17]).
+    ///
+    /// # Errors
+    /// As [`scan`](Self::scan).
+    ///
+    /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+    pub(crate) fn scan_in(&self, selection: &Selection, scope: Option<&[ScopedPath]>) -> anyhow::Result<ScanReport> {
+        selection.check_registered()?;
         let selected: Vec<&'static Scanner> = match selection {
             Selection::All => REGISTRY.iter().collect(),
             Selection::Only(names) => {
-                if let Some(bad) = names.iter().find(|n| scanner(n).is_none()) {
-                    return Err(ConfigError::InvalidValue {
-                        key: "scanner".to_string(),
-                        message: format!(
-                            "{bad:?} is not a registered scanner (expected one of: {})",
-                            crate::config::SECURITY_SCANNERS.join(", ")
-                        ),
-                    }
-                    .into());
-                }
                 REGISTRY
                     .iter()
                     .filter(|s| names.iter().any(|n| n == s.name))
@@ -339,13 +538,20 @@ impl Orchestrator {
             }
         }
         fs::create_dir_all(&out_dir)?;
+        // Walked once per call, and only when some scanner will run over the
+        // whole project and take them: a run on named paths reads exactly those.
+        let ignored = if selected.iter().any(|s| s.excludes_ignored() && (scope.is_none() || s.path_slot.is_none())) {
+            ignored_dirs(&self.root)
+        } else {
+            Vec::new()
+        };
         let outcomes = selected
             .into_iter()
             .map(|s| {
                 let (version, outcome) = match self.detect_one(s) {
                     Detection::Disabled => (None, Outcome::Disabled),
                     Detection::NotInstalled => (None, Outcome::NotInstalled),
-                    Detection::Installed { binary, version } => {
+                    Detection::Installed { binary, version, .. } => {
                         let outcome = if let Some(file) = self.refusal(s) {
                             Outcome::Failed {
                                 exit_code: None,
@@ -358,7 +564,7 @@ impl Orchestrator {
                         } else if s.per_language() {
                             self.run_codeql(s, &binary, &out_dir)
                         } else {
-                            self.run_single(s, &binary, &out_dir)
+                            self.run_single(s, &binary, &out_dir, scope, &ignored)
                         };
                         (version, outcome)
                     }
@@ -378,6 +584,8 @@ impl Orchestrator {
         Launch {
             cwd: &self.root,
             env: s.env,
+            vars: &[],
+            isolated: None,
             path: self.child_path.as_ref(),
             deadline,
         }
@@ -387,17 +595,62 @@ impl Orchestrator {
         if !self.switches.is_enabled(s.name) {
             return Detection::Disabled;
         }
-        let Some(binary) = self.locate(s) else {
-            return Detection::NotInstalled;
-        };
+        match self.locate(s, Probe::Run) {
+            Some(found) => Detection::Installed {
+                binary: found.binary,
+                version: found.version,
+                copy: found.copy,
+            },
+            None => Detection::NotInstalled,
+        }
+    }
+
+    /// The copy of the registered scanner `name` that would run, whatever the
+    /// repository's switch says (the install surfaces ask per user, not per
+    /// project); `None` when there is none. Probes versions, as
+    /// [`detect`](Self::detect) does.
+    pub fn copy_in_use(&self, name: &str) -> Option<InstalledCopy> {
+        self.copy_in_use_with(name, Probe::Run)
+    }
+
+    /// [`copy_in_use`](Self::copy_in_use), reading versions as `probe` says.
+    /// A copy whose version is not probed is chosen as one whose probe failed:
+    /// a `PATH` copy is not shown to meet the minimum.
+    pub(crate) fn copy_in_use_with(&self, name: &str, probe: Probe) -> Option<InstalledCopy> {
+        scanner(name).and_then(|s| self.locate(s, probe))
+    }
+
+    /// The user-level `path` override for `name`, when one is set — whether
+    /// or not it can run. While it is set no other copy is ever used, so
+    /// nothing should be installed for it.
+    pub fn override_of(&self, name: &str) -> Option<&Path> {
+        self.overrides.get(name).and_then(|o| o.path.as_deref())
+    }
+
+    /// The version `binary`'s version command prints, if it runs, succeeds
+    /// and prints one.
+    fn probe(&self, s: &Scanner, binary: &Path) -> Option<String> {
         let args: Vec<OsString> = s.version_args.iter().map(OsString::from).collect();
-        let version = spawn::run(&binary, &args, &self.launch(s, Some(PROBE_DEADLINE)))
+        let vars = self.runtime_vars(s, binary);
+        let launch = Launch {
+            vars: &vars,
+            ..self.launch(s, Some(PROBE_DEADLINE))
+        };
+        spawn::run(binary, &args, &launch)
             .ok()
             .filter(|f| f.status.is_some_and(|st| st.success()))
             .and_then(|f| {
                 registry::parse_version(&f.stdout).or_else(|| registry::parse_version(&f.stderr))
-            });
-        Detection::Installed { binary, version }
+            })
+    }
+
+    /// `binary`'s version as `probe` reads it.
+    fn version(&self, s: &Scanner, binary: &Path, probe: Probe) -> Option<String> {
+        match probe {
+            Probe::Run => self.probe(s, binary),
+            Probe::Cached => probes::cached(s.name, binary, || self.probe(s, binary)),
+            Probe::Skip(_) => None,
+        }
     }
 
     /// The first of the scanner's [refusal files](Scanner::refuse_if_present)
@@ -409,16 +662,90 @@ impl Orchestrator {
             .find(|f| fs::symlink_metadata(self.root.join(f)).is_ok())
     }
 
-    /// The binary to run: the user-level `path` when set, else the first
-    /// executable match on the [usable](usable_path_entries) `PATH` entries.
-    fn locate(&self, s: &Scanner) -> Option<PathBuf> {
-        if let Some(path) = self.overrides.get(s.name).and_then(|o| o.path.as_ref()) {
-            return is_executable(path).then(|| path.clone());
+    /// Whether any copy of `s` is there, found without starting anything: the
+    /// override when set (and only it), else a `PATH` copy or a managed copy.
+    /// What a scan's consent check sees before any process may start.
+    fn has_copy(&self, s: &Scanner) -> bool {
+        match self.overrides.get(s.name).and_then(|o| o.path.as_ref()) {
+            Some(path) => is_executable(path),
+            None => self.on_path(s).is_some() || self.managed(s).is_some(),
         }
+    }
+
+    /// The copy to run, in precedence order ([ADR-88] §5, [FR-SC-05]):
+    /// 1. the user-level `path`, when set — and nothing else then;
+    /// 2. the first executable match on the [usable](usable_path_entries)
+    ///    `PATH` entries, when its probed version is at or above the
+    ///    manifest's minimum, or when there is no managed copy to prefer;
+    /// 3. the managed copy ([`crate::tools::resolve`]).
+    ///
+    /// A `PATH` copy whose version cannot be read — or that `probe` does not
+    /// probe — is not shown to meet the minimum, so a managed copy wins over it. A scanner the manifest does
+    /// not list has no minimum.
+    ///
+    /// [ADR-88]: ../../../docs/specs/architecture/decisions/ADR-88.md
+    /// [FR-SC-05]: ../../../docs/specs/requirements/FR-SC-05.md
+    fn locate(&self, s: &Scanner, probe: Probe) -> Option<InstalledCopy> {
+        let found = |copy, binary: PathBuf, version| InstalledCopy {
+            copy,
+            binary,
+            version,
+            update_available: None,
+            unprobed: match probe {
+                Probe::Skip(why) => Some(why),
+                Probe::Run | Probe::Cached => None,
+            },
+        };
+        if let Some(path) = self.overrides.get(s.name).and_then(|o| o.path.as_ref()) {
+            return is_executable(path)
+                .then(|| found(CopyKind::Override, path.clone(), self.version(s, path, probe)));
+        }
+        let managed = self.managed(s);
+        if let Some(binary) = self.on_path(s) {
+            let version = self.version(s, &binary, probe);
+            if self.manifest.meets_minimum(s.name, version.as_deref()) || managed.is_none() {
+                return Some(found(CopyKind::Path, binary, version));
+            }
+        }
+        let managed = managed?;
+        let pinned = self.manifest.tool(s.name).map(|e| e.version.as_str());
+        let version = self.version(s, &managed.binary, probe);
+        Some(InstalledCopy {
+            update_available: pinned
+                .filter(|p| !crate::tools::version_at_least(&managed.version, p))
+                .map(str::to_string),
+            ..found(CopyKind::Managed, managed.binary, version)
+        })
+    }
+
+    /// The first executable match for `s` on the usable `PATH` entries.
+    fn on_path(&self, s: &Scanner) -> Option<PathBuf> {
         self.search_dirs
             .iter()
             .flat_map(|dir| s.binaries.iter().map(move |b| dir.join(b)))
             .find(|candidate| is_executable(candidate))
+    }
+
+    /// What `binary` runs with besides the scanner's own variables: for the
+    /// managed copy of a Java tool, the managed Java runtime
+    /// ([`crate::tools::java_env`]); nothing for any other copy, which runs on
+    /// whatever Java the user set it up with.
+    fn runtime_vars(&self, s: &Scanner, binary: &Path) -> Vec<(&'static str, OsString)> {
+        let needs_java = self.manifest.tool(s.name).is_some_and(|t| t.needs_java());
+        let home = self
+            .tools_dir
+            .as_deref()
+            .filter(|_| needs_java)
+            .filter(|_| self.managed(s).is_some_and(|m| m.binary == binary))
+            .and_then(|dir| crate::tools::managed_java_home(dir, &self.manifest));
+        home.map(|home| crate::tools::java_env(&home).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The managed copy of `s` in the tools directory, if there is one.
+    fn managed(&self, s: &Scanner) -> Option<crate::tools::ManagedTool> {
+        let tools_dir = self.tools_dir.as_deref()?;
+        crate::tools::resolve(tools_dir, &self.manifest, s.name)
     }
 
     fn extra_args(&self, s: &Scanner) -> &[String] {
@@ -427,52 +754,96 @@ impl Orchestrator {
             .map_or(&[], |o| o.extra_args.as_slice())
     }
 
-    fn run_single(&self, s: &Scanner, binary: &Path, out_dir: &Path) -> Outcome {
-        let target = out_dir.join(format!("{}.sarif", s.name));
-        let (out_arg, produced) = match s.output {
-            Output::File => (target.clone(), target.clone()),
-            Output::Dir { produced } => {
-                let dir = out_dir.join(s.name);
-                (dir.clone(), dir.join(produced))
-            }
+    /// Run a scanner that writes one report. Scoped, a path-capable scanner
+    /// makes the runs its [slot](registry::PathSlot::runs) needs, in
+    /// [`SCOPED_DIR`], and several runs' reports are merged into one. A
+    /// whole-project run keeps out of the `ignored` directories.
+    fn run_single(
+        &self,
+        s: &Scanner,
+        binary: &Path,
+        out_dir: &Path,
+        scope: Option<&[ScopedPath]>,
+        ignored: &[String],
+    ) -> Outcome {
+        let (dir, runs) = match (scope, s.path_slot) {
+            (Some(scope), Some(slot)) => (out_dir.join(SCOPED_DIR), slot.runs(scope).into_iter().map(Some).collect()),
+            _ => (out_dir.to_path_buf(), vec![None]),
         };
-        // The directory is made real first, so that clearing the previous
-        // report below never deletes through a symlink in its place.
-        if let Output::Dir { .. } = s.output {
-            if let Err(e) = real_dir(&out_arg) {
-                return failed_io("could not create the output directory", &out_arg, &e);
+        if dir != out_dir {
+            if let Err(e) = real_dir(&dir) {
+                return failed_io("could not create the output directory", &dir, &e);
             }
         }
+        let target = dir.join(format!("{}.sarif", s.name));
         // A stale report from an earlier run must never be credited to this one.
-        for stale in [&target, &produced] {
-            if let Err(e) = remove_file_if_present(stale) {
-                return failed_io("could not clear the previous report", stale, &e);
-            }
+        if let Err(e) = remove_file_if_present(&target) {
+            return failed_io("could not clear the previous report", &target, &e);
         }
+        // What the scanner's own `getcwd` reports, which a runner that makes
+        // `.` absolute walks from.
+        let canonical_root = self.root.canonicalize().ok();
         let pinned_config = out_dir.join(PINNED_CONFIG);
         if s.run.contains(&registry::Arg::PinnedConfig) {
             if let Err(e) = write_empty(&pinned_config) {
                 return failed_io("could not write the pinned config", &pinned_config, &e);
             }
         }
-        let fill = Fill {
-            out: &out_arg,
-            extra: self.extra_args(s),
-            scope: None,
-            language: "",
-            database: Path::new(""),
-            pinned_config: &pinned_config,
-        };
-        let code = match self.step(s, binary, s.run, &fill) {
-            Ok(code) => code,
-            Err(outcome) => return outcome,
-        };
-        if produced != target {
-            if !produced.is_file() {
-                return produced_or_failed(s, code, vec![produced], Vec::new());
+        let mut reports = Vec::with_capacity(runs.len());
+        let mut code = 0;
+        for (i, run) in runs.iter().enumerate() {
+            let stem = if runs.len() == 1 { s.name.to_string() } else { format!("{}.{}", s.name, i + 1) };
+            let report = dir.join(format!("{stem}.sarif"));
+            let (out_arg, produced) = match s.output {
+                Output::File => (report.clone(), report.clone()),
+                Output::Dir { produced } => {
+                    let out = dir.join(&stem);
+                    (out.clone(), out.join(produced))
+                }
+            };
+            // The directory is made real first, so that clearing the previous
+            // report below never deletes through a symlink in its place.
+            if let Output::Dir { .. } = s.output {
+                if let Err(e) = real_dir(&out_arg) {
+                    return failed_io("could not create the output directory", &out_arg, &e);
+                }
             }
-            if let Err(e) = fs::rename(&produced, &target) {
-                return failed_io("could not move the report to", &target, &e);
+            for stale in [&report, &produced] {
+                if let Err(e) = remove_file_if_present(stale) {
+                    return failed_io("could not clear the previous report", stale, &e);
+                }
+            }
+            let fill = Fill {
+                out: &out_arg,
+                extra: self.extra_args(s),
+                scope: *run,
+                language: "",
+                database: Path::new(""),
+                pinned_config: &pinned_config,
+                ignored,
+                root: canonical_root.as_deref().and_then(Path::to_str),
+            };
+            code = match self.step(s, binary, s.run, &fill) {
+                Ok(code) => code,
+                Err(outcome) => return outcome,
+            };
+            if produced != report {
+                if !produced.is_file() {
+                    return produced_or_failed(s, code, vec![produced], Vec::new());
+                }
+                if let Err(e) = fs::rename(&produced, &report) {
+                    return failed_io("could not move the report to", &report, &e);
+                }
+            }
+            if !report.is_file() {
+                return produced_or_failed(s, code, vec![report], Vec::new());
+            }
+            reports.push(report);
+        }
+        // One report per scanner: a snapshot holds a scanner's runs together.
+        if reports.len() > 1 {
+            if let Err(e) = merge_sarif_runs(&reports, &target) {
+                return failed_io("could not merge the scoped reports into", &target, &e);
             }
         }
         produced_or_failed(s, code, vec![target], Vec::new())
@@ -526,6 +897,8 @@ impl Orchestrator {
                 language: id,
                 database: &database,
                 pinned_config: Path::new(""),
+                ignored: &[],
+                root: None,
             };
             // The creation template has no extra-flags position: extras go to
             // the analysis only.
@@ -556,7 +929,12 @@ impl Orchestrator {
         fill: &Fill<'_>,
     ) -> Result<i32, Outcome> {
         let argv = s.render(template, fill);
-        let finished = spawn::run(binary, &argv, &self.launch(s, None)).map_err(|e| {
+        let vars = self.runtime_vars(s, binary);
+        let launch = Launch {
+            vars: &vars,
+            ..self.launch(s, None)
+        };
+        let finished = spawn::run(binary, &argv, &launch).map_err(|e| {
             Outcome::Failed {
                 exit_code: None,
                 stderr: format!("could not start {}: {e}", binary.display()),
@@ -576,6 +954,19 @@ impl Orchestrator {
             stderr: stderr.trim().to_string(),
         })
     }
+}
+
+/// The registry name `name` stands for: itself when it is one, else the
+/// scanner whose SARIF driver it names (ASCII case ignored). Anything else is
+/// returned unchanged, for [`Selection::check_registered`] to refuse.
+fn registry_name(name: String) -> String {
+    if scanner(&name).is_some() {
+        return name;
+    }
+    REGISTRY
+        .iter()
+        .find(|s| s.driver.eq_ignore_ascii_case(&name))
+        .map_or(name, |s| s.name.to_string())
 }
 
 /// `Ran` when every reported file exists, else `Failed` naming the first one
@@ -667,45 +1058,96 @@ fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The `PATH` entries a scanner may come from, and the only ones its process
-/// sees: absolute, and not inside the project root (compared both as written
-/// and canonicalised). An empty or relative entry would resolve against the
-/// working directory, which is the repository.
-fn usable_path_entries(root: &Path, search_path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
-    let Some(search_path) = search_path else {
-        return Vec::new();
-    };
-    let canonical_root = root.canonicalize().ok();
-    let inside_root = |dir: &Path| {
-        dir.starts_with(root)
-            || canonical_root.as_ref().is_some_and(|r| {
-                dir.canonicalize().is_ok_and(|d| d.starts_with(r))
-            })
-    };
-    std::env::split_paths(search_path)
-        .filter(|dir| dir.is_absolute() && !inside_root(dir))
-        .collect()
+/// Confine a scoped scan's `paths` to the project `root` ([FR-SC-17],
+/// [NFR-SE-04]) — before any process starts. Each resolves against the root
+/// (an absolute one is taken as written), lexically and then through symbolic
+/// links, and is refused, with exit 2, when it lands outside the root, does
+/// not exist, is the root itself, is not UTF-8, or begins with `-` (a scanner
+/// would read it as a flag). What is kept is each path relative to the root,
+/// `/`-separated, once, in the order given — less any path inside another
+/// given directory, which would only scan the same files twice (and, for a
+/// scanner that runs once per path, report each of their results twice).
+///
+/// # Errors
+/// [`ConfigError::InvalidValue`] naming the first refused path and why.
+///
+/// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+/// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+pub(crate) fn resolve_scope(root: &Path, paths: &[String]) -> Result<Vec<ScopedPath>, ConfigError> {
+    const OUTSIDE: &str = "resolves outside the project root; a scoped scan reads only paths inside it";
+    let canonical_root = root.canonicalize().map_err(|e| ConfigError::InvalidValue {
+        key: "path".to_string(),
+        message: format!("the project root {} cannot be resolved: {e}", root.display()),
+    })?;
+    let mut scope: Vec<ScopedPath> = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let refuse = |why: &str| ConfigError::InvalidValue {
+            key: "path".to_string(),
+            message: format!("{raw:?} {why}"),
+        };
+        if raw.is_empty() {
+            return Err(refuse("is empty"));
+        }
+        let given = Path::new(raw);
+        let joined = if given.is_absolute() { given.to_path_buf() } else { root.join(given) };
+        let lexical = normalize_lexically(&joined).ok_or_else(|| refuse(OUTSIDE))?;
+        if !lexical.starts_with(root) && !lexical.starts_with(&canonical_root) {
+            return Err(refuse(OUTSIDE));
+        }
+        let resolved = lexical.canonicalize().map_err(|_| {
+            if raw.contains(['*', '?', '[', '{']) {
+                refuse("does not exist: a glob is not expanded, so name each file or directory")
+            } else {
+                refuse("does not exist")
+            }
+        })?;
+        let rel = resolved
+            .strip_prefix(&canonical_root)
+            .map_err(|_| refuse("resolves outside the project root through a symbolic link"))?;
+        if rel.as_os_str().is_empty() {
+            return Err(refuse("is the project root itself: run a full scan instead"));
+        }
+        let rel = rel.to_str().ok_or_else(|| refuse("is not UTF-8"))?.replace('\\', "/");
+        if rel.starts_with('-') {
+            return Err(refuse("begins with '-', which a scanner would read as a flag"));
+        }
+        let path = ScopedPath { is_dir: resolved.is_dir(), rel };
+        if !scope.contains(&path) {
+            scope.push(path);
+        }
+    }
+    let dirs: Vec<String> = scope.iter().filter(|p| p.is_dir).map(|p| p.rel.clone()).collect();
+    scope.retain(|p| !dirs.iter().any(|dir| *dir != p.rel && crate::history::security::path_within(&p.rel, dir)));
+    Ok(scope)
+}
+
+/// `path` with every `.` dropped and every `..` applied to what precedes it,
+/// without touching the filesystem; `None` when a `..` climbs above the start.
+fn normalize_lexically(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
 }
 
 /// The CodeQL languages present under `root`: the `(label, --language id)`
 /// pairs Logos runs, and the labels of those that need a build. Each list is
 /// in [`CODEQL_LANGUAGES`] order.
 ///
-/// The walk honours the root's own `.gitignore` and `.ignore` files at every
-/// depth, but not ignore files above the root or the user's global excludes,
-/// so the answer depends on the project alone. Hidden directories are walked;
-/// `.git` and `.logos` are not.
+/// The walk is [`project_walk`]: a file the project ignores is no language.
 fn codeql_languages(root: &Path) -> (Vec<(&'static str, &'static str)>, Vec<String>) {
     let mut present = [false; CODEQL_LANGUAGES.len()];
-    let walk = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .parents(false)
-        .git_global(false)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(|e| e.file_name() != ".logos" && e.file_name() != ".git")
-        .build();
-    for entry in walk.flatten() {
+    for entry in project_walk(root).flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -729,21 +1171,65 @@ fn codeql_languages(root: &Path) -> (Vec<(&'static str, &'static str)>, Vec<Stri
     (runnable, needs_build)
 }
 
-/// A regular file the current user may execute.
-fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() {
-        return false;
+/// A walk of the files the project itself does not ignore: the root's own
+/// `.gitignore` and `.ignore` files at every depth, but not ignore files above
+/// the root or the user's global excludes, so what it yields depends on the
+/// project alone. Hidden directories are walked; `.git` and `.logos` are not.
+fn project_walk(root: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .parents(false)
+        .git_global(false)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|e| !is_logos_or_git(e.file_name()))
+        .build()
+}
+
+fn is_logos_or_git(name: &std::ffi::OsStr) -> bool {
+    name == ".logos" || name == ".git"
+}
+
+/// The top-most directories under `root` that the project's own ignore files
+/// exclude — the ones [`project_walk`] steps over — relative to the root,
+/// `/`-separated, shallowest first and then by name (so a cut to the argument
+/// budget drops the deepest): `target`, never `target/debug` beside it, and
+/// never a file. A directory is found only where its parent is walked, so one
+/// inside an ignored directory is never listed apart from it.
+///
+/// A path a scanner's flag could misread is left out, and that directory is
+/// scanned as before: one that is not UTF-8, starts with `-`, or holds a
+/// comma, a double quote or a control character (Bandit splits a list on
+/// commas, and Trivy reads each value as CSV, keeping its first line), a glob
+/// character or a backslash.
+fn ignored_dirs(root: &Path) -> Vec<String> {
+    // The root itself, whose walk entry is a symlink when the root is one.
+    let mut walked: std::collections::HashSet<PathBuf> = std::collections::HashSet::from([root.to_path_buf()]);
+    for entry in project_walk(root).flatten() {
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            walked.insert(entry.into_path());
+        }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
+    let mut ignored = Vec::new();
+    for dir in &walked {
+        let Ok(children) = fs::read_dir(dir) else { continue };
+        for child in children.flatten() {
+            let path = child.path();
+            if !child.file_type().is_ok_and(|t| t.is_dir())
+                || is_logos_or_git(&child.file_name())
+                || walked.contains(&path)
+            {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
+            let Some(rel) = parts.map(|p| p.join("/")) else { continue };
+            let misread = |c: char| c.is_control() || matches!(c, ',' | '"' | '*' | '?' | '[' | ']' | '{' | '}' | '\\');
+            if !rel.starts_with('-') && !rel.contains(misread) {
+                ignored.push(rel);
+            }
+        }
     }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    ignored.sort_by(|a, b| (a.matches('/').count(), a).cmp(&(b.matches('/').count(), b)));
+    ignored
 }

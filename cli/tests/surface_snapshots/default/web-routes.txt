@@ -16,6 +16,13 @@ GET      /api/v1/overview
 GET      /api/v1/precedent
 GET      /api/v1/query
 GET      /api/v1/search
+GET      /api/v1/security
+GET POST /api/v1/security/install
+POST     /api/v1/security/install/cancel
+GET POST /api/v1/security/scan
+POST     /api/v1/security/scan/cancel
+POST     /api/v1/security/suppress
+POST     /api/v1/security/unsuppress
 GET      /api/v1/statistics
 GET      /api/v1/status
 POST     /api/v1/verify
@@ -33,6 +40,7 @@ GET      /api/v1/workspace/reachability
 GET      /api/v1/workspace/roster
 GET      /api/v1/workspace/route-providers
 GET      /api/v1/workspace/search
+GET      /api/v1/workspace/security
 GET      /api/v1/workspace/statistics
 GET      /api/v1/workspace/status
 POST     /config/apply

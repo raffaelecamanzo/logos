@@ -168,6 +168,98 @@ fi
 and scores the index you just built with `logos index`, so the pipeline does a
 single graph pass. Drop it if you want each command to reconcile defensively.
 
+## Adopting budgets on an existing codebase: the ratchet
+
+An absolute budget such as `max_cc = 15` fails every existing offender the first
+time CI runs it, so a codebase with debt cannot adopt it. Declare the budget as a
+**ratchet** instead, bless today's offenders once, and CI fails only on **new or
+worsened** debt ([FR-GV-23](../specs/requirements/FR-GV-23.md); syntax in
+[configuration.md](configuration.md#ratchet-constraints--adopt-a-budget-on-an-existing-codebase)).
+
+**1. Declare ratchets in the contract.**
+
+```toml
+# .logos/rules.toml
+[constraints]
+max_cc         = { max = 15, ratchet = true }
+max_fn_lines   = { max = 80, ratchet = true }
+max_dead       = { max = 0,  ratchet = true }
+max_duplicates = { max = 0,  ratchet = true }
+max_cycles     = { baseline = 2, delta = 0 }   # no symbol identity: count-delta form
+```
+
+**2. Bless today's debt, locally, and commit the result.**
+
+```bash
+logos check --bless          # writes .logos/rules-baseline.json, then checks against it
+git add .logos/rules.toml .logos/rules-baseline.json
+git commit -m "Adopt ratchet budgets; bless existing debt"
+```
+
+`.logos/rules-baseline.json` is sorted and deterministic — re-blessing an
+unchanged tree is byte-identical — and it must be **tracked**: CI reads it from
+the checkout. The `.logos/.gitignore` that `logos init` generates leaves it
+tracked. If your root `.gitignore` ignores `.logos/` wholesale, ignore its
+contents instead and re-include the policy files:
+
+```gitignore
+.logos/*
+!.logos/rules.toml
+!.logos/rules-baseline.json
+```
+
+**3. CI enforces exactly as before — and never blesses.** The PR pipeline above
+needs no change: `logos check --no-reconcile` reads the blessed set, reports
+blessed debt as `warning`s (exit 0), and fails with exit 1 on any offender that
+is new or worse than its blessed value. `check`, `gate` and `scan` never modify
+the file, so a pipeline cannot bless its own regression. Never add
+`--bless` to a pipeline: blessing debt is a human decision, and the place it
+shows up is the diff of `rules-baseline.json` in code review.
+
+**4. Tighten as debt is paid down.** When an offender is fixed, `check` lists it
+under `ratchet.fixed` in its JSON report. Re-run `logos check --bless` and commit
+the smaller file, so the fixed entry cannot quietly regress. A renamed or moved
+symbol reads as one fixed entry plus one new offender; re-bless in the same
+change.
+
+This bless is **not** the release-time `gate --save` bless in the table at the
+top. `gate --save` moves the *signal* baseline and lives in the store; the
+ratchet's blessed set lists *named offenders*, is checked in, and changes only
+through a reviewed commit.
+
+## Gating on security findings in CI: the baseline is not in the repository
+
+If the rules contract (the tracked file you pass to `--rules`) has a
+[`[security]`](configuration.md#security--the-security-gate)
+table, `logos check` fails on every unsuppressed finding at or above
+`ratchet_min_severity` (default `high`) that is **new** — whose fingerprint is not
+in the set `logos gate --save` recorded. That recorded set lives in
+`.logos/history.db`, which is derived, gitignored and never committed (unlike
+`rules-baseline.json` in the section above). A fresh CI clone therefore starts
+with no recorded set, and **every finding at or above `ratchet_min_severity` reads
+as new**: the first `check` fails on the whole backlog, and keeps failing on each
+run, because a CI checkout never carries the previous run's save.
+
+What works today:
+
+- **Persist `.logos/history.db` between runs** with your CI's cache, restored
+  before `logos check`. Write the cache from a run that stored a scan and then
+  executed `logos gate --save` on the release branch (a `gate --save` that exits 5
+  saves no security baseline) — a restored store with no save in it changes
+  nothing. The stored scans in it are evidence for the commit they were
+  made at, so scan again in the job (`logos security scan --consent`, or
+  `logos security ingest <report>`); only the recorded set is what the cache is for.
+- **Or gate without the ratchet**: run CI's `check` with a rules file that has no
+  `[security]` table (`logos check --rules <file>`). The whole table is skipped,
+  so `max_severity`, `fail_on_owasp` and `required_scanners` stop gating too;
+  review findings with
+  `logos security findings --suppression active` or gate them in another tool.
+  Raising `ratchet_min_severity` only narrows what the ratchet reads; it does
+  not switch it off.
+
+Accepting a finding on purpose is still done in the repository: add its
+fingerprint and a reason to `.logos/security-ignore.toml`, which is committed.
+
 ## Verify the recipe locally
 
 You can reproduce the two load-bearing legs — **enforce fails on a violation**
@@ -237,11 +329,14 @@ refusal (exit 2) follows the build and leaves the unreferenced commit object beh
 **Dry run by default.** Without `--push` the script writes one unreferenced commit
 object and nothing else: no branch, no pull request, no network call. It prints
 the commit id, the message, and the exact `git push origin <sha>:refs/heads/sprint/N`
-and `gh pr create --base main --head sprint/N --fill` it would run. With `--push`
+and `gh pr create --base main --head sprint/N --title '…' --body-file -` it would run. With `--push`
 it needs `gh` on `PATH` (checked before anything is pushed), reads `origin`
 itself: `main` must still equal the local `origin/main`, and `sprint/N` must be absent (it is pushed, never forced) or already the commit built
-(a re-run skips the push and retries the pull request). `--fill` makes the pull
-request's title and body the commit's message.
+(a re-run skips the push and retries the pull request). The pull request's title
+is the commit's subject and its body the commit's body, read from the commit
+object and passed on stdin. It never uses `--fill`, which would read the local
+`sprint/N` branch — the unsquashed sprint history, not the commit the term gate
+scanned.
 
 **Merging it.** The pull request is merged on GitHub with **Rebase and merge**, so
 `origin/main` gains exactly the one commit with its message unchanged. Afterwards
