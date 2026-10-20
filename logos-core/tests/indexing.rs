@@ -23,6 +23,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -635,9 +636,19 @@ enum Edit<'a> {
 /// identical to a full `index` of the post-edit tree — the whole reference
 /// ledger included, so `status` reports the same `refs_total`/`refs_resolved`
 /// (FR-SY-10 as amended by CR-187). Returns the synced arm for any further
-/// assertion.
+/// assertion. One step of [`assert_syncs_match_reindex`].
 fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) -> (TempDir, Engine) {
-    // Arm A — index the initial tree, then sync exactly the edited paths.
+    assert_syncs_match_reindex(initial, &[edits])
+}
+
+/// [FR-SY-10]'s first acceptance criterion as CR-236 amended it: index
+/// `initial`, then apply each step's edits and run **one `sync` per step** over
+/// exactly the paths it edited; the result equals a full `index` of the final
+/// tree, as [`assert_sync_matches_reindex`] states it.
+///
+/// [FR-SY-10]: ../../docs/specs/requirements/FR-SY-10.md
+fn assert_syncs_match_reindex(initial: &[(&str, &str)], steps: &[&[Edit]]) -> (TempDir, Engine) {
+    // Arm A — index the initial tree, then sync each step's edited paths.
     let tmp_a = TempDir::new().expect("temp a");
     for (rel, body) in initial {
         write(tmp_a.path(), rel, body);
@@ -653,26 +664,50 @@ fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) -> (Tem
     // every sync into a silent no-op (the bug the watcher avoids at
     // `watch/mod.rs` for this exact reason).
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root a");
-    let mut changed: Vec<PathBuf> = Vec::new();
-    for edit in edits {
-        match edit {
-            Edit::Put(rel, body) => {
-                write(tmp_a.path(), rel, body);
-                changed.push(root_a.join(rel));
-            }
-            Edit::Del(rel) => {
-                fs::remove_file(tmp_a.path().join(rel)).expect("remove fixture file");
-                changed.push(root_a.join(rel));
-            }
-        }
+    for edits in steps {
+        engine_a.sync(&apply(&root_a, edits));
     }
-    engine_a.sync(&changed);
     let fp_sync = graph_fingerprint(engine_a.runtime().expect("runtime a"));
 
     // Arm B — the post-edit tree indexed from scratch: the oracle.
+    let (_tmp_b, engine_b) = reindexed(initial, steps);
+    assert_eq!(
+        fp_sync,
+        graph_fingerprint(engine_b.runtime().expect("runtime b")),
+        "sync-to-state must equal index-of-state (CR-015 equivalence invariant)"
+    );
+    assert_eq!(
+        status_ref_counts(engine_a.runtime().expect("runtime a")),
+        status_ref_counts(engine_b.runtime().expect("runtime b")),
+        "a synced store reports the ledger counts a fresh index reports (CR-187)"
+    );
+    (tmp_a, engine_a)
+}
+
+/// Apply `edits` under the canonical `root` and return the changed paths, as
+/// the watcher reports them.
+fn apply(root: &Path, edits: &[Edit]) -> Vec<PathBuf> {
+    edits
+        .iter()
+        .map(|edit| match edit {
+            Edit::Put(rel, body) => {
+                write(root, rel, body);
+                root.join(rel)
+            }
+            Edit::Del(rel) => {
+                fs::remove_file(root.join(rel)).expect("remove fixture file");
+                root.join(rel)
+            }
+        })
+        .collect()
+}
+
+/// The oracle: the tree `initial` becomes once every step is applied, indexed
+/// from scratch under the pinned coordinate.
+fn reindexed(initial: &[(&str, &str)], steps: &[&[Edit]]) -> (TempDir, Engine) {
     let mut final_state: std::collections::BTreeMap<&str, &str> =
         initial.iter().copied().collect();
-    for edit in edits {
+    for edit in steps.iter().copied().flatten() {
         match edit {
             Edit::Put(rel, body) => {
                 final_state.insert(rel, body);
@@ -682,25 +717,14 @@ fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) -> (Tem
             }
         }
     }
-    let tmp_b = TempDir::new().expect("temp b");
+    let tmp = TempDir::new().expect("temp b");
     for (rel, body) in &final_state {
-        write(tmp_b.path(), rel, body);
+        write(tmp.path(), rel, body);
     }
-    coordinate::pin(tmp_b.path());
-    let engine_b = Engine::start(tmp_b.path()).expect("engine b starts");
-    engine_b.index();
-    let fp_reindex = graph_fingerprint(engine_b.runtime().expect("runtime b"));
-
-    assert_eq!(
-        fp_sync, fp_reindex,
-        "sync-to-state must equal index-of-state (CR-015 equivalence invariant)"
-    );
-    assert_eq!(
-        status_ref_counts(engine_a.runtime().expect("runtime a")),
-        status_ref_counts(engine_b.runtime().expect("runtime b")),
-        "a synced store reports the ledger counts a fresh index reports (CR-187)"
-    );
-    (tmp_a, engine_a)
+    coordinate::pin(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine b starts");
+    engine.index();
+    (tmp, engine)
 }
 
 /// The `(refs_total, refs_resolved)` pair `status` reports, read from the
@@ -1127,6 +1151,308 @@ fn sync_equiv_a_rival_type_arriving_unbinds_a_type_use() {
         ],
         &[Edit::Put("src/test/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n")],
     );
+}
+
+// ── S-751 / CR-236: one sync per step keeps every inbound edge ───────────────
+//
+// The C1 replays of three real session branches lost the `Calls` and `Imports`
+// edges into a re-extracted file. Two files of a tree can key the same module
+// — `src/lib.rs` and `src/main.rs` both key the crate root, and a nested
+// fixture crate's `web/…/web/src/main.rs` keys the root of crate `web` — and
+// the binder handed that key to the one with the lower node id. A cold index
+// writes files in path order, so `lib.rs` held it; re-extracting `lib.rs`
+// alone gave its nodes fresh, higher ids, `main.rs` took the key, and every
+// path through the crate root (`crate::engine`, `web::router`) stopped
+// binding. Each fixture below syncs one step at a time, in the order C1 did.
+
+/// A crate with both roots. `report.rs` is never edited; `dispatch.rs` is, a
+/// step before `lib.rs` — the two orders C1 lost.
+const BOTH_ROOTS: [(&str, &str); 4] = [
+    ("src/lib.rs", "mod dispatch;\nmod report;\npub enum Commands { Run }\npub fn engine() {}\n"),
+    ("src/main.rs", "fn main() {}\n"),
+    (
+        "src/dispatch.rs",
+        "use crate::{engine, Commands};\npub fn dispatch(c: Commands) { engine(); let _ = c; }\n",
+    ),
+    (
+        "src/report.rs",
+        "use crate::{engine, Commands};\npub fn report(c: Commands) { engine(); let _ = c; }\n",
+    ),
+];
+
+/// `src/lib.rs` edited without changing a declaration.
+const LIB_EDITED: &str = "// edited\nmod dispatch;\nmod report;\npub enum Commands { Run }\npub fn engine() {}\n";
+
+/// `src/dispatch.rs` edited without changing a declaration.
+const DISPATCH_EDITED: &str =
+    "// edited\nuse crate::{engine, Commands};\npub fn dispatch(c: Commands) { engine(); let _ = c; }\n";
+
+/// The steps every arm below replays: the caller's file first, its callee's
+/// a step later, while `report.rs` stays untouched.
+const CALLER_THEN_CALLEE: [&[Edit]; 2] = [
+    &[Edit::Put("src/dispatch.rs", DISPATCH_EDITED)],
+    &[Edit::Put("src/lib.rs", LIB_EDITED)],
+];
+
+/// Whether an edge of `kind` runs between the nodes whose pinned symbols carry
+/// the descriptors `from` and `to` (``src/`lib.rs`/engine().``).
+fn has_symbol_edge(rt: &Runtime, from: &str, to: &str, kind: EdgeKind) -> bool {
+    let (from, to) = (coordinate::symbol(from), coordinate::symbol(to));
+    rt.submit_read(move |store| {
+        let nodes = store.all_nodes()?;
+        let id = |symbol: &str| {
+            nodes
+                .iter()
+                .find(|n| n.symbol.as_str() == symbol)
+                .unwrap_or_else(|| panic!("no node {symbol}"))
+                .id
+        };
+        let (from, to) = (id(&from), id(&to));
+        Ok(store
+            .all_edges()?
+            .iter()
+            .any(|e| e.source == from && e.target == to && e.kind == kind))
+    })
+    .expect("edge read runs")
+}
+
+/// Pattern (a): a `Calls` edge from a file the sync never touches into the
+/// file it re-extracts.
+#[test]
+fn a_sync_keeps_an_untouched_files_calls_into_a_re_extracted_file() {
+    let (_tmp, engine) =
+        assert_syncs_match_reindex(&BOTH_ROOTS, &[&[Edit::Put("src/lib.rs", LIB_EDITED)]]);
+    assert!(has_edge(engine.runtime().unwrap(), "report", "engine", EdgeKind::Calls));
+}
+
+/// Pattern (b): an `Imports` edge likewise — the `use crate::Commands` of a
+/// file the sync never touches.
+#[test]
+fn a_sync_keeps_an_untouched_files_imports_into_a_re_extracted_file() {
+    let (_tmp, engine) =
+        assert_syncs_match_reindex(&BOTH_ROOTS, &[&[Edit::Put("src/lib.rs", LIB_EDITED)]]);
+    assert!(has_symbol_edge(
+        engine.runtime().unwrap(),
+        "src/`report.rs`/",
+        "src/`lib.rs`/Commands#",
+        EdgeKind::Imports
+    ));
+}
+
+/// Pattern (c): the caller's file synced in one step, its callee's file
+/// re-extracted in the next.
+#[test]
+fn a_caller_synced_a_step_before_its_callee_keeps_its_edges() {
+    let (_tmp, engine) = assert_syncs_match_reindex(&BOTH_ROOTS, &CALLER_THEN_CALLEE);
+    let rt = engine.runtime().unwrap();
+    assert!(has_edge(rt, "dispatch", "engine", EdgeKind::Calls));
+    assert!(has_symbol_edge(rt, "src/`dispatch.rs`/", "src/`lib.rs`/engine().", EdgeKind::Imports));
+}
+
+/// [UAT-SY-06]'s other order: the callee's file synced in one step, its
+/// caller's re-extracted in the next.
+///
+/// [UAT-SY-06]: ../../docs/specs/requirements/UAT-SY-06.md
+#[test]
+fn a_callee_synced_a_step_before_its_caller_keeps_its_edges() {
+    let (_tmp, engine) = assert_syncs_match_reindex(
+        &BOTH_ROOTS,
+        &[
+            &[Edit::Put("src/lib.rs", LIB_EDITED)],
+            &[Edit::Put("src/dispatch.rs", DISPATCH_EDITED)],
+        ],
+    );
+    let rt = engine.runtime().unwrap();
+    assert!(has_edge(rt, "dispatch", "engine", EdgeKind::Calls));
+    assert!(has_edge(rt, "report", "engine", EdgeKind::Calls));
+}
+
+/// [FR-SY-10]'s loop with an addition and a deletion among its steps: a new
+/// caller's file arrives, then the crate root is re-extracted to declare it
+/// while an old caller's file leaves, then a remaining caller is edited.
+///
+/// [FR-SY-10]: ../../docs/specs/requirements/FR-SY-10.md
+#[test]
+fn a_loop_of_additions_edits_and_deletions_keeps_every_inbound_edge() {
+    let (_tmp, engine) = assert_syncs_match_reindex(
+        &BOTH_ROOTS,
+        &[
+            &[Edit::Put("src/extra.rs", "use crate::engine;\npub fn extra() { engine(); }\n")],
+            &[
+                Edit::Put(
+                    "src/lib.rs",
+                    "mod dispatch;\nmod extra;\npub enum Commands { Run }\npub fn engine() {}\n",
+                ),
+                Edit::Del("src/report.rs"),
+            ],
+            &[Edit::Put("src/dispatch.rs", DISPATCH_EDITED)],
+        ],
+    );
+    let rt = engine.runtime().unwrap();
+    assert!(has_edge(rt, "extra", "engine", EdgeKind::Calls));
+    assert!(has_edge(rt, "dispatch", "engine", EdgeKind::Calls));
+}
+
+/// S-747's shape: a test fixture nested under crate `web` is itself a crate
+/// named `web`, so its `main.rs` keys the same root as `web/src/lib.rs`, and a
+/// call `web::router()` from another crate is lost once `web/src/lib.rs` is
+/// re-extracted.
+#[test]
+fn a_cross_crate_call_survives_when_a_nested_crate_shares_its_name() {
+    let (_tmp, engine) = assert_syncs_match_reindex(
+        &[
+            ("web/src/lib.rs", "pub fn router() {}\n"),
+            ("web/ui/fixtures/web/src/main.rs", "fn main() {}\n"),
+            ("cli/src/lib.rs", "pub fn serve() { web::router(); }\n"),
+        ],
+        &[&[Edit::Put("web/src/lib.rs", "// edited\npub fn router() {}\n")]],
+    );
+    assert!(has_edge(engine.runtime().unwrap(), "serve", "router", EdgeKind::Calls));
+}
+
+/// Run `git` in `cwd` for a fixture, with automatic maintenance off so it
+/// never races the store, and with no hook or signing a developer's global
+/// config sets, so it runs on their machine as in CI.
+fn sh_git(cwd: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["-c", "user.email=test@logos", "-c", "user.name=logos-test"])
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+        .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath="])
+        .args(args)
+        .output()
+        .expect("git is on PATH");
+    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The same steps from a linked worktree seeded from its primary's store
+/// ([FR-WT-03]) — C1's starting point — equal a fresh index.
+///
+/// [FR-WT-03]: ../../docs/specs/requirements/FR-WT-03.md
+#[test]
+fn a_seeded_worktree_synced_step_by_step_equals_a_fresh_index() {
+    let tmp = TempDir::new().expect("temp root");
+    let main = tmp.path().join("main");
+    for (rel, body) in BOTH_ROOTS {
+        write(&main, rel, body);
+    }
+    write(&main, ".gitignore", ".logos/*.db\n.logos/*.db-*\n");
+    coordinate::pin(&main);
+    sh_git(&main, &["init", "-q", "-b", "main"]);
+    sh_git(&main, &["add", "."]);
+    sh_git(&main, &["commit", "-q", "-m", "initial"]);
+    Engine::start(&main).expect("primary engine starts").index();
+
+    let wt = tmp.path().join("wt");
+    sh_git(&main, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]);
+    let engine = Engine::start(&wt).expect("worktree engine starts");
+    // `status` runs no auto-index, so a populated graph here is the seed.
+    assert!(engine.status().indexed, "the worktree store was seeded from the primary");
+    let root = wt.canonicalize().expect("canonicalize worktree");
+    for edits in CALLER_THEN_CALLEE {
+        engine.sync(&apply(&root, edits));
+    }
+
+    let (_oracle_tmp, oracle) = reindexed(&BOTH_ROOTS, &CALLER_THEN_CALLEE);
+    assert_eq!(
+        graph_fingerprint(engine.runtime().unwrap()),
+        graph_fingerprint(oracle.runtime().unwrap()),
+        "a seeded worktree synced step by step equals a fresh index"
+    );
+}
+
+/// The same steps through the filesystem watcher ([FR-SY-04]), each step
+/// waited for before the next is written, equal a fresh index.
+///
+/// [FR-SY-04]: ../../docs/specs/requirements/FR-SY-04.md
+#[test]
+fn the_watcher_synced_step_by_step_equals_a_fresh_index() {
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path().canonicalize().expect("canonical temp root");
+    write(&root, ".logos/config.toml", "[watcher]\ndebounce_ms = 250\n");
+    coordinate::pin(&root);
+    for (rel, body) in BOTH_ROOTS {
+        write(&root, rel, body);
+    }
+    let engine = std::sync::Arc::new(Engine::start(&root).expect("engine starts"));
+    engine.index();
+    let handle = engine.watch().expect("watcher starts");
+    let mut written = 0;
+    for edits in CALLER_THEN_CALLEE {
+        apply(&root, edits);
+        written += edits.len() as u64;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while handle.stats().files_synced < written {
+            let stats = handle.stats();
+            assert!(Instant::now() < deadline, "the watcher never synced the step: {stats:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    drop(handle);
+
+    let (_oracle_tmp, oracle) = reindexed(&BOTH_ROOTS, &CALLER_THEN_CALLEE);
+    assert_eq!(
+        graph_fingerprint(engine.runtime().unwrap()),
+        graph_fingerprint(oracle.runtime().unwrap()),
+        "the watcher's syncs equal a fresh index"
+    );
+}
+
+/// The one doc edge C1 lost, which a cold index alone kept: a mention binds
+/// to the one `AppState` there is, then the framework pass promotes the
+/// shared-state component `AppState`, the re-bind finds two and leaves the
+/// row unresolved — and a cold index kept the edge the row no longer
+/// produced, where a sync of the doc never bound it.
+#[cfg(feature = "lang-markdown")]
+#[test]
+fn a_doc_mention_a_promotion_makes_ambiguous_keeps_no_edge() {
+    let app = "\
+use axum::extract::State;
+use axum::routing::get;
+
+pub struct AppState { pub hits: u64 }
+
+fn app() {
+    let _ = axum::Router::new().route(\"/\", get(home));
+}
+
+async fn home(State(state): State<AppState>) {}
+";
+    let initial = [
+        ("src/main.rs", app),
+        ("docs/guide.md", "# Guide\n\nThe `AppState` counts hits.\n"),
+    ];
+    let edited = "# Guide\n\nThe `AppState` counts every hit.\n";
+    let steps: &[&[Edit]] = &[&[Edit::Put("docs/guide.md", edited)]];
+    // The cold index first: it is the arm that kept the edge.
+    let (_cold_tmp, cold) = reindexed(&initial, steps);
+    assert_no_doc_edge_and_an_unresolved_mention(cold.runtime().unwrap());
+    let (_tmp, synced) = assert_syncs_match_reindex(&initial, steps);
+    assert_no_doc_edge_and_an_unresolved_mention(synced.runtime().unwrap());
+}
+
+/// No `DocReference` edge, and the one `AppState` mention unresolved: two
+/// nodes carry the name, and neither is guessed ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[cfg(feature = "lang-markdown")]
+fn assert_no_doc_edge_and_an_unresolved_mention(rt: &Runtime) {
+    let (edges, mention) = rt
+        .submit_read(|store| {
+            let edges =
+                store.all_edges()?.iter().filter(|e| e.kind == EdgeKind::DocReference).count();
+            let mention: Vec<bool> = store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.kind == EdgeKind::DocReference && r.target == "AppState")
+                .map(|r| r.resolved)
+                .collect();
+            Ok((edges, mention))
+        })
+        .unwrap();
+    assert_eq!(edges, 0, "an ambiguous mention binds no edge");
+    assert_eq!(mention, [false], "the one mention stays unresolved");
 }
 
 // ── S-586 / CR-187: sync leaves no stale rows in the reference ledger ───────
@@ -2121,7 +2447,10 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 38 (S-523, the graph-dimension flags and cross-module count),
+    // Migrations 40 (S-761, the where-to-start rows' identity; its rebuilt
+    // tables go with migration 36's), 39 (S-755, the baseline's re-bless
+    // record), 38 (S-523, the
+    // graph-dimension flags and cross-module count),
     // 37 (S-676, the offender value columns, the uncapped offender
     // table and their flag column), 36 (S-504, the snapshot where-to-start
     // tables and their flag column), 35 (S-609, the `nodes.uninherited` column), 34 (S-606, the
@@ -2134,7 +2463,10 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
+        "DELETE FROM schema_versions WHERE version = 40; \
+         ALTER TABLE baseline DROP COLUMN attribution; ALTER TABLE baseline DROP COLUMN reason; \
+         DELETE FROM schema_versions WHERE version = 39; \
+         ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
          ALTER TABLE metric_snapshots DROP COLUMN acyclicity_applicable; DELETE FROM schema_versions WHERE version = 38; \
          DROP TABLE metric_snapshot_offenders_uncapped; ALTER TABLE metric_snapshot_offenders DROP COLUMN threshold; \
          ALTER TABLE metric_snapshot_offenders DROP COLUMN value; ALTER TABLE metric_snapshot_offenders DROP COLUMN measure; \

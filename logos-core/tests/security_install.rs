@@ -58,6 +58,8 @@ impl World {
         }
         w.curl_serves();
         fs::write(w.root().join("main.py"), "def main():\n    return 1\n").unwrap();
+        // A Go file too, so gosec has something to scan (S-769).
+        fs::write(w.root().join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
         git(&w.root(), &["init", "-q", "-b", "main"]);
         git(&w.root(), &["add", "."]);
         git(&w.root(), &["commit", "-q", "-m", "seed"]);
@@ -660,4 +662,66 @@ fn scan_install_with_nothing_missing_needs_no_tools_directory() {
     let ran = done["scan"]["scanners"].as_array().unwrap().iter().filter(|r| r["outcome"] == "ran").count();
     assert_eq!(ran, 4, "{done}");
     assert!(w.downloads().is_empty());
+}
+
+/// S-758: an install run where Logos has never run — a repository with no
+/// `.logos/` — installs as before and leaves no lock file, or any `.logos/`,
+/// behind; in a project that has one, the install holds the project's lock,
+/// which is free again once it returns.
+#[test]
+fn an_install_outside_a_logos_project_writes_nothing_into_it() {
+    let w = World::new();
+    let manifest = w.manifest(&[]);
+    let plain = w.base.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("README"), "not a Logos project\n").unwrap();
+    git(&plain, &["init", "-q", "-b", "main"]);
+    let engine = Engine::open(&plain)
+        .with_scan_environment(ScanEnvironment {
+            user_dir: Some(w.user()),
+            search_path: Some(w.bin().into_os_string()),
+            tools_dir: Some(w.tools()),
+        })
+        .with_tools_manifest(manifest.clone());
+
+    let done = json(&engine.security_install(&request(Selection::Only(vec!["gitleaks".into()]), true)).unwrap());
+    assert_eq!(outcomes(&done), vec![("gitleaks".to_string(), "installed".to_string())], "{done}");
+    assert!(!plain.join(".logos").exists(), "the install wrote no .logos/ into a repository Logos never ran in");
+
+    let done = json(&w.engine(&manifest).security_install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap());
+    assert_eq!(outcomes(&done), vec![("trivy".to_string(), "installed".to_string())], "{done}");
+    let lock = w.root().join(".logos/security").join(logos_core::security::LOCK_FILE);
+    assert!(lock.is_file(), "in a Logos project the install took the project lock");
+    assert_eq!(logos_core::jobs::lock::peek(&lock).unwrap(), None, "and released it");
+}
+
+/// S-758: the lock file is never written through a symlinked `.logos`. A scan
+/// is refused before it takes the lock, naming the link; an install, which
+/// writes only to the tools directory, runs unlocked as it did before, since
+/// no scan can run there.
+#[test]
+fn a_symlinked_logos_gets_no_lock_file_written_through_it() {
+    let w = World::new();
+    let manifest = w.manifest(&[]);
+    let linked = w.base.join("linked");
+    let elsewhere = w.base.join("elsewhere");
+    fs::create_dir_all(&linked).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(linked.join("main.py"), "def main():\n    return 1\n").unwrap();
+    git(&linked, &["init", "-q", "-b", "main"]);
+    std::os::unix::fs::symlink(&elsewhere, linked.join(".logos")).unwrap();
+    let engine = Engine::open(&linked)
+        .with_scan_environment(ScanEnvironment {
+            user_dir: Some(w.user()),
+            search_path: Some(w.bin().into_os_string()),
+            tools_dir: Some(w.tools()),
+        })
+        .with_tools_manifest(manifest.clone());
+
+    let scan = engine.security_scan(true).expect_err("a scan through a symlinked .logos is refused");
+    assert!(scan.to_string().contains("is a symbolic link"), "{scan:#}");
+    let done = json(&engine.security_install(&request(Selection::Only(vec!["gitleaks".into()]), true)).unwrap());
+    assert_eq!(outcomes(&done), vec![("gitleaks".to_string(), "installed".to_string())], "{done}");
+    let written: Vec<_> = fs::read_dir(&elsewhere).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(written.is_empty(), "nothing was written through the link: {written:?}");
 }

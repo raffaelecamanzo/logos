@@ -6,12 +6,16 @@
 //! [`findings`](MemberSecurity::findings) is `None` — not a count of zero — and
 //! so is every category's, because no report is there to count from.
 //!
-//! **Only fresh, unsuppressed findings are counted.** A finding counts when the
-//! report it comes from is `fresh` — stored at this HEAD over unchanged files,
-//! [`ScanState::Fresh`], the same state `security status` shows — and no
-//! current entry suppresses it. Everything else is tallied in
-//! [`excluded`](MemberSecurity::excluded), so the counted findings and the
-//! excluded ones add up to every stored finding.
+//! **Only fresh, unsuppressed findings are counted — fresh per finding.** A
+//! finding counts by [`counts`](crate::history::security::counts), the one
+//! definition every security surface shares ([S-760]): no current entry
+//! suppresses it and its own file is unchanged since the scan. A report's own
+//! freshness does not decide it, so a member whose only report is a `--path`
+//! scan still counts the findings in files nothing has touched. Everything
+//! else is tallied in [`excluded`](MemberSecurity::excluded), so the counted
+//! findings and the excluded ones add up to every stored finding. How many
+//! reports are fresh is its own figure ([`reports_fresh`](MemberSecurity::reports_fresh)
+//! of [`reports_stored`](MemberSecurity::reports_stored)).
 //!
 //! A category is covered here only by a **fresh** report from a scanner that
 //! can detect it: the member page's coverage ([`CategoryCoverage`], [BR-66])
@@ -21,6 +25,7 @@
 //! [FR-SC-16]: ../../../docs/specs/requirements/FR-SC-16.md
 //! [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
 //! [S-674]: ../../../docs/planning/journal.md#s-674-the-workspace-rolls-security-up-per-member
+//! [S-760]: ../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
 //! [`CategoryCoverage`]: crate::history::security::owasp::CategoryCoverage
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +34,7 @@ use serde::Serialize;
 
 use super::{ListedFinding, ScanState, ScannerStatus, SecurityFindings, SecurityStatus};
 use crate::history::security::owasp::CoverageState;
-use crate::history::security::{OwaspEdition, Suppression};
+use crate::history::security::OwaspEdition;
 use crate::history::Severity;
 
 /// Whether a member has a current scan at all.
@@ -46,7 +51,8 @@ pub enum MemberScan {
     Fresh,
 }
 
-/// Findings by severity, and their sum.
+/// Findings by severity, and their sum. `unrated` findings have their own
+/// count, never folded into `medium` (S-768).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct SeverityCounts {
     pub critical: usize,
@@ -54,6 +60,7 @@ pub struct SeverityCounts {
     pub medium: usize,
     pub low: usize,
     pub info: usize,
+    pub unrated: usize,
     pub total: usize,
 }
 
@@ -65,6 +72,7 @@ impl SeverityCounts {
             Severity::Medium => &mut self.medium,
             Severity::Low => &mut self.low,
             Severity::Info => &mut self.info,
+            Severity::Unrated => &mut self.unrated,
         } += 1;
         self.total += 1;
     }
@@ -76,6 +84,7 @@ impl SeverityCounts {
         self.medium += other.medium;
         self.low += other.low;
         self.info += other.info;
+        self.unrated += other.unrated;
         self.total += other.total;
     }
 }
@@ -83,10 +92,9 @@ impl SeverityCounts {
 /// The stored findings the counts leave out, by why.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Excluded {
-    /// Findings in a report that is not fresh: stale, or from a scanner the
-    /// member's config now disables.
+    /// Unsuppressed findings whose own file changed since the scan.
     pub not_fresh: usize,
-    /// Findings in a fresh report that a current entry suppresses.
+    /// Findings a current entry suppresses, whatever their file's state.
     pub suppressed: usize,
 }
 
@@ -95,6 +103,34 @@ impl Excluded {
     pub fn absorb(&mut self, other: &Self) {
         self.not_fresh += other.not_fresh;
         self.suppressed += other.suppressed;
+    }
+}
+
+/// Every stored finding of one project, counted or left out by
+/// [`counts`](crate::history::security::counts): what the Security page's
+/// figure and a member's roll-up row both state, so they cannot differ.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct FindingTally {
+    /// The counted findings by severity.
+    pub counted: SeverityCounts,
+    /// The stored findings left out of `counted`, and why.
+    pub excluded: Excluded,
+}
+
+impl FindingTally {
+    /// The tally of `findings` — every stored finding, not a filtered view.
+    pub fn of(findings: &[ListedFinding]) -> Self {
+        let mut tally = Self::default();
+        for item in findings {
+            if item.is_counted() {
+                tally.counted.add(item.finding.severity);
+            } else if item.is_suppressed() {
+                tally.excluded.suppressed += 1;
+            } else {
+                tally.excluded.not_fresh += 1;
+            }
+        }
+        tally
     }
 }
 
@@ -128,15 +164,24 @@ pub struct MemberSecurity {
     pub scan: MemberScan,
     /// Scanners whose stored report is fresh, registered or not.
     pub scanners_fresh: usize,
-    /// Registered scanners the member's config does not disable, plus every
-    /// unregistered tool whose report is stored: the denominator of
+    /// Registered scanners the member's config does not disable and that have
+    /// something to scan there (a `not_applicable` one is no gap, S-769), plus
+    /// every unregistered tool whose report is stored: the denominator of
     /// [`scanners_fresh`](Self::scanners_fresh).
     pub scanners_enabled: usize,
     /// Each scanner's one state, as `security status` reports it: the
     /// registered ones in registry order, then the unregistered tools.
     pub scanners: Vec<ScannerStatus>,
-    /// Fresh, unsuppressed findings by severity; `None` unless
-    /// [`scan`](Self::scan) is `fresh` — nothing current to count.
+    /// Stored reports — a disabled scanner's included: the denominator of
+    /// [`reports_fresh`](Self::reports_fresh).
+    pub reports_stored: usize,
+    /// Stored reports that are fresh at HEAD ([`ScanState::Fresh`]). A disabled
+    /// scanner's report is in [`reports_stored`](Self::reports_stored) and never
+    /// here: `status` reports it `disabled`, not fresh.
+    pub reports_fresh: usize,
+    /// Fresh, unsuppressed findings by severity, counted per finding; `None`
+    /// only when no report is stored ([`MemberScan::NeverRun`]) — nothing to
+    /// count from, which is not a count of zero.
     pub findings: Option<SeverityCounts>,
     /// The stored findings left out of [`findings`](Self::findings).
     pub excluded: Excluded,
@@ -154,11 +199,6 @@ impl MemberSecurity {
         let is_fresh = |s: &ScannerStatus| matches!(s.state, ScanState::Fresh { .. });
         let fresh_drivers: BTreeSet<&str> = scanners.iter().filter(|s| is_fresh(s)).map(|s| s.driver.as_str()).collect();
         let fresh_names: BTreeSet<&str> = scanners.iter().filter(|s| is_fresh(s)).map(|s| s.scanner.as_str()).collect();
-        let counted = |item: &ListedFinding| {
-            fresh_drivers.contains(item.finding.scanner_name.as_str())
-                && !matches!(item.suppression, Some(Suppression::Suppressed { .. }))
-        };
-
         let stored = listings.first().is_some_and(|l| !l.scanned.is_empty());
         let scan = match (fresh_drivers.is_empty(), stored) {
             (false, _) => MemberScan::Fresh,
@@ -168,24 +208,14 @@ impl MemberSecurity {
 
         // Every edition lists the same stored findings, so the first one's
         // tally is the member's.
-        let mut counts = SeverityCounts::default();
-        let mut excluded = Excluded::default();
-        for item in listings.first().map_or(&[][..], |l| &l.findings) {
-            if counted(item) {
-                counts.add(item.finding.severity);
-            } else if fresh_drivers.contains(item.finding.scanner_name.as_str()) {
-                excluded.suppressed += 1;
-            } else {
-                excluded.not_fresh += 1;
-            }
-        }
+        let FindingTally { counted, excluded } = FindingTally::of(listings.first().map_or(&[][..], |l| &l.findings));
 
         let owasp = listings
             .iter()
             .map(|listed| {
                 let mut per_category: BTreeMap<&str, usize> = BTreeMap::new();
                 let mut unclassified = 0;
-                for item in listed.findings.iter().filter(|item| counted(item)) {
+                for item in listed.findings.iter().filter(|item| item.is_counted()) {
                     unclassified += usize::from(item.owasp.is_empty());
                     for id in &item.owasp {
                         *per_category.entry(id).or_default() += 1;
@@ -209,12 +239,15 @@ impl MemberSecurity {
             })
             .collect();
 
-        let enabled = |s: &&ScannerStatus| !matches!(s.state, ScanState::Disabled);
+        let enabled = |s: &&ScannerStatus| !matches!(s.state, ScanState::Disabled | ScanState::NotApplicable { .. });
+        let fresh = scanners.iter().filter(|s| is_fresh(s)).count();
         Self {
             scan,
-            scanners_fresh: scanners.iter().filter(|s| is_fresh(s)).count(),
+            scanners_fresh: fresh,
             scanners_enabled: scanners.iter().filter(enabled).count(),
-            findings: (scan == MemberScan::Fresh).then_some(counts),
+            reports_stored: listings.first().map_or(0, |l| l.scanned.len()),
+            reports_fresh: fresh,
+            findings: (scan != MemberScan::NeverRun).then_some(counted),
             excluded,
             owasp,
             scanners,
@@ -236,20 +269,21 @@ mod tests {
             (Severity::Medium, 3),
             (Severity::Low, 4),
             (Severity::Info, 5),
+            (Severity::Unrated, 6),
         ] {
             for _ in 0..times {
                 counts.add(severity);
             }
         }
-        assert_eq!(counts, SeverityCounts { critical: 1, high: 2, medium: 3, low: 4, info: 5, total: 15 });
+        assert_eq!(counts, SeverityCounts { critical: 1, high: 2, medium: 3, low: 4, info: 5, unrated: 6, total: 21 });
     }
 
     /// Absorbing sums every field, the total included.
     #[test]
     fn absorbing_sums_every_field() {
-        let mut sum = SeverityCounts { critical: 1, high: 2, medium: 3, low: 4, info: 5, total: 15 };
-        sum.absorb(&SeverityCounts { critical: 10, high: 20, medium: 30, low: 40, info: 50, total: 150 });
-        assert_eq!(sum, SeverityCounts { critical: 11, high: 22, medium: 33, low: 44, info: 55, total: 165 });
+        let mut sum = SeverityCounts { critical: 1, high: 2, medium: 3, low: 4, info: 5, unrated: 6, total: 21 };
+        sum.absorb(&SeverityCounts { critical: 10, high: 20, medium: 30, low: 40, info: 50, unrated: 60, total: 210 });
+        assert_eq!(sum, SeverityCounts { critical: 11, high: 22, medium: 33, low: 44, info: 55, unrated: 66, total: 231 });
         let mut excluded = Excluded { not_fresh: 1, suppressed: 2 };
         excluded.absorb(&Excluded { not_fresh: 10, suppressed: 20 });
         assert_eq!(excluded, Excluded { not_fresh: 11, suppressed: 22 });

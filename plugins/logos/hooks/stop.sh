@@ -13,7 +13,9 @@
 #     a regression                           {"decision":"block","reason":…}: each new
 #                                            or worsened entry with its symbol, value,
 #                                            threshold and trust, each failing rule,
-#                                            and a pointer to /logos:review
+#                                            and a pointer to /logos:review; under a
+#                                            rules.toml [review] policy only a gating
+#                                            entry blocks (FR-GV-25)
 #     a new secret, or a new finding at      {"decision":"block","reason":…}: each with
 #       high or above, in a changed file     its rule, file, line and redacted message,
 #                                            and a pointer to /logos:sec-review
@@ -47,7 +49,8 @@
 #     .logos/stop-hook/ready-<merge-base> holding the key it ran under: the logos
 #     version and the contract and configuration files. A changed key means a
 #     before-state `review` would rebuild, so it is cold again;
-#   - or, when `check` evaluated no rule, a snapshot recorded at the merge-base. That
+#   - or, when `check` evaluated no rule and the contract has no [review] table, a
+#     snapshot recorded at the merge-base. That
 #     is what `review` reads first, but only under the thresholds it was recorded
 #     under; a snapshot recorded under other thresholds makes `review` build a
 #     shadow index after all, and the budget then cuts it (the build restarts in the
@@ -234,6 +237,8 @@ run_bounded() {
 FINDINGS=()
 FINDING_COUNT=0
 BLOCK=no
+# yes when the review answer carries a rules.toml [review] policy (leg_review).
+POLICY=no
 UNMEASURED=()
 NO_RECORD=no
 
@@ -307,11 +312,13 @@ marked() {
 # before_state_warm — 0 when `review` can be run now without building a shadow
 # index (see the header). The snapshot probe is one cheap call, bounded like every
 # other, and only asked when `check` evaluated no rule: with a rule to evaluate,
-# `review` ignores a recorded snapshot.
+# `review` ignores a recorded snapshot, and under a rules.toml [review] table
+# (FR-GV-25) it never reads one.
 before_state_warm() {
     [ -n "$MERGE_BASE" ] || return 1
     marked "$READY" && return 0
     [ "$CHECKED_RULES" = 0 ] || return 1
+    grep -Eq '^[[:space:]]*\[review\][[:space:]]*(#.*)?$' "$PROJECT/.logos/rules.toml" 2>/dev/null && return 1
     run_bounded "$BIN" evolution --json --limit 100
     [ "$RB_STATUS" = "done" ] && [[ $RB_OUT == *"\"commit_sha\":\"$MERGE_BASE\""* ]]
 }
@@ -369,7 +376,10 @@ describe_entry() {
 
 # Entries are `new` or `worsened` to count at all; one the graph could not fully
 # resolve (any trust but "resolved", `stale` among them) is listed and never alone
-# blocks.
+# blocks. Under a rules.toml [review] policy (FR-GV-25: the answer carries
+# "policy") only an entry the binary marked "gating":true blocks — an offender in a
+# gating dimension; a distributional entry and a violation are listed (a failing
+# rule still blocks through the check leg).
 review_entries() {
     local what="$1" region_start="$2" region_end="$3" marker="$4" status trust i
     logos_json_region "$RB_OUT" "$region_start" "$region_end" || return 0
@@ -381,6 +391,10 @@ review_entries() {
         describe_entry "$what"
         leg_finding "$LINE"
         leg_pointer "$REVIEW_POINTER"
+        if [ "$POLICY" = yes ]; then
+            case "$CHUNK" in *'"gating":true'*) leg_blocking ;; esac
+            continue
+        fi
         logos_json_str "$CHUNK" trust && trust="$JSON_VALUE" || trust=""
         [ "$trust" = resolved ] && leg_blocking
     done
@@ -472,6 +486,8 @@ leg_review() {
         leg_unmeasured "$reason"
         return 0
     fi
+    POLICY=no
+    [[ $RB_OUT == *'"policy":{"gate_dimensions":'* ]] && POLICY=yes
     review_entries offender '"offenders":[' '"offender_counts"' '{"dimension":'
     review_entries violation '"violations":[' '"violation_counts"' '{"rule":'
     return 0
@@ -497,12 +513,10 @@ leg_review() {
 # consent is not reported, since Semgrep runs only "when installed and consented".
 #
 # New: a finding in a scanned file whose fingerprint the store did not hold before
-# the scan. The scan decides that, not this leg: a secret it finds again keeps its
-# recorded fingerprint (S-685), and only one with no recorded match is stored with
-# a new one. The match is by position, so a secret that moves reads as new again:
-# one only an earlier scoped run recorded, once its line moves; one a full scan
-# recorded, once its line and column both move. Suppressed findings are
-# never listed. Silence is "no new finding in these files", never "clean": a
+# the scan. The scan decides that, not this leg: a secret it finds again has its
+# recorded fingerprint, and only a new secret is stored with a new one. A Gitleaks
+# finding is keyed by its secret, not its position or commit (S-765), so a secret
+# whose line moved is not new. Suppressed findings are never listed. Silence is "no new finding in these files", never "clean": a
 # store resting on scoped runs only stays stale/scoped_only for `security status`.
 #
 # It blocks on a new secret-class finding (stored redacted, whatever its severity:

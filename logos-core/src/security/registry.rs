@@ -8,12 +8,17 @@
 //! user-level config (the extra flags), or, in a scoped run, from the user's
 //! own path arguments, each confined to the project root before any spawn
 //! ([`super::resolve_scope`]). Nothing in the repository fills a placeholder
-//! but the names of the directories its own ignore files exclude
-//! ([`Arg::Ignored`]): each the value of an exclusion flag, so it can only
-//! narrow what is scanned — which the repository's `[security_scan]` switch
-//! can already do wholesale — and a name a flag could misread is never
-//! passed. The scan root is the child's working directory, spelled `.` in
-//! the argv ([NFR-SE-08]).
+//! but what its own ignore files leave in or out, and both can only narrow
+//! what is scanned — which the repository's `[security_scan]` switch can
+//! already do wholesale ([NFR-SE-08]):
+//! - the names of the directories they exclude ([`Arg::Ignored`]), each the
+//!   value of an exclusion flag, a name a flag could misread never passed;
+//! - the paths they leave in ([`Arg::Unignored`]), each a file or directory
+//!   under the root that `.` would have read, never a symbolic link, never
+//!   one starting with `-`, within the same argument budget.
+//!
+//! The scan root is the child's working directory, spelled `.` in the argv
+//! wherever no list of unignored paths takes its place.
 //!
 //! Tested versions — the command lines below were written or last verified
 //! against these, and a scanner whose flags have since changed reports
@@ -57,11 +62,13 @@
 //! from the source, not from a run; the stubbed argv tests pin the shapes, and
 //! a scanner that rejects one reports *failed* with its stderr.
 //!
-//! Ignored directories (HF-5 of sprint 106). A whole-project run keeps out of
-//! the directories the project's own ignore files exclude
-//! ([`super::ignored_dirs`]), each top-most one passed through the scanner's
-//! own flag ([`Arg::Ignored`]) after the `.logos` it already excluded. What
-//! each encodes, read from the source at the pinned version:
+//! Ignored directories (HF-5 of sprint 106, S-772). A whole-project run keeps
+//! out of the directories the project's own ignore files exclude
+//! ([`super::project_ignores`]): each top-most one passed through the
+//! scanner's own flag ([`Arg::Ignored`]) after any `.logos` it already
+//! excluded, or — for the two scanners below whose flags cannot — every path
+//! outside them given as a target ([`Arg::Unignored`]). What each encodes, read
+//! from the source at the pinned version:
 //! - **Trivy 0.74** matches `--skip-dirs` with `doublestar.Match` against the
 //!   whole path relative to the scan root and does not descend into a match,
 //!   so `target` skips `target/` and not `src/target/`. The flag is a pflag
@@ -77,20 +84,73 @@
 //! - **Dependency-Check 13.0** adds each `--exclude` to an Ant
 //!   `DirectoryScanner` based at the scanned directory, so `target/**` is
 //!   anchored there.
-//! - **Semgrep 1.85**, **OSV-Scanner 1.9** and **Gitleaks 8.18** take nothing:
-//!   in a git repository Semgrep's targets are `git ls-files` (tracked, plus
-//!   untracked with `--exclude-standard`), OSV-Scanner skips what the
-//!   repository's `.gitignore` files and `.git/info/exclude` match, and
-//!   Gitleaks reads committed history. Semgrep's `--exclude` would also
-//!   match the name at any depth.
-//! - **gosec 2.21** takes nothing: its `-exclude-dir` is an unanchored
-//!   expression (`target` drops `pkg/mytarget` too), applied after a walk it
-//!   makes anyway. **CodeQL** has no exclusion flag, only the
-//!   `LGTM_INDEX_FILTERS` its extractors read; it analyses only the languages
+//! - **Semgrep 1.85** and **OSV-Scanner 1.9** are given the project's
+//!   unignored paths as their targets instead of `.` ([`Arg::Unignored`],
+//!   S-772). The hand-run harness (S-771,
+//!   `scripts/tests/fixtures/scanner-exclusions/`) shows this is the one
+//!   mechanism that keeps either out of an ignored `target/` and keeps the
+//!   near misses `src/target/` and `targets/`, in a git checkout, a linked
+//!   worktree and a non-git copy alike. Their own selection does not:
+//!   Semgrep reads the ignored directory in a non-git copy, and OSV-Scanner
+//!   in a linked worktree (`.git/info/exclude: not a directory`) and in a
+//!   non-git copy. Semgrep's `--exclude target` and `--exclude /target` both
+//!   drop `src/target/` as well: a leading `/` does not anchor it.
+//! - **gosec 2.21** is given one `-exclude-dir` per directory. It searches
+//!   each expression, wrapped as `([\\/])?<value>([\\/])?` with every `/`
+//!   escaped, in the directory of each `.go` file its walk of `./...` finds,
+//!   relative to `.`, and loads no package whose directory matches (its
+//!   `helpers.go`, read at 2.24.8). So `target` also drops `pkg/mytarget`
+//!   and `src/target`, and `^target$` matches `target` but not
+//!   `target/nested`, whose package the harness's `exclude-dir-anchored` leg
+//!   still reads. `^target(/|$)` ([`Spelling::TreeRegex`]) skips both and
+//!   keeps `src/target/` and `targets/` in all three checkout shapes: the
+//!   harness's `exclude-dir-tree` leg at 2.21.4 (S-773).
+//! - **Gitleaks 8.18** takes nothing: it reads committed history.
+//! - **CodeQL** has no exclusion flag. A Logos-written `paths-ignore` config
+//!   or the `LGTM_INDEX_FILTERS` its extractors read might keep it out, but
+//!   the harness has never run CodeQL (it was not installed), so it takes
+//!   neither and writes no config; it analyses only the languages
 //!   [`super::codeql_languages`] finds in files the project does not ignore.
+//!
+//! Each whole-project run states what it did with the ignored directories
+//! ([`Scanner::coverage`], [FR-SC-26]): `excluded` only by a mechanism the
+//! hand-run harness proves — Semgrep's and OSV-Scanner's unignored targets,
+//! and gosec's tree expressions ([`Scanner::exclusion_evidence`]) — and
+//! otherwise `scanned`, with a one-line note. Trivy, Bandit, Checkov and
+//! Dependency-Check still get their exclusion flags, but the harness has not
+//! run them, so they read `scanned` ([`FLAG_UNPROVEN`]) until it does (BR-97);
+//! so do Gitleaks and CodeQL, which take nothing, a run whose target list
+//! could not be passed, and a gosec run not given every ignored directory.
+//!
+//! Applicability (S-769). gosec reads Go files and Bandit Python files, and
+//! nothing else ([`Scanner::applies_to`]): on a project where no file it does
+//! not ignore has one of those extensions, either is `not applicable` and is
+//! never started, not even probed. Every other scanner reads many languages,
+//! manifests or any file, so no extension rules one out; CodeQL decides per
+//! language instead.
+//!
+//! Severity (S-768). OSV-Scanner's SARIF writer
+//! (`internal/output/sarif.go`) writes `warning` on every result, at 1.9.2 and
+//! still at 2.7.0, so its level rates nothing and a finding it gives no score
+//! reads `unrated`. From 2.0.0 (PR #1587, first in 2.0.0-rc1) a rule carries
+//! the worst CVSS score of its advisories as `security-severity` when one has
+//! a score, which the parser reads as the advisory's rating. The pin stays at
+//! 1.9.2, and the command line is unchanged. Moving it is the owner's call,
+//! because only a real run, which sends the dependency list to the OSV API,
+//! could settle two points. 2.0.0 extracts dependencies with osv-scalibr, so
+//! the harness's proof that the unignored targets keep it out of ignored
+//! paths does not carry over. From 2.3.5 each result carries
+//! `partialFingerprints`, which becomes its identity, so every stored
+//! OSV-Scanner finding, baseline entry and fingerprint suppression would read
+//! as new. A 2.x report ingested from CI is read with its ratings today. A
+//! 2.x copy on `PATH` is used too. At 2.7.0 its root command falls back to
+//! `scan`, whose `source` command still reads `--format`, `--output` (a
+//! deprecated alias of `--output-file`) and `--recursive`. That comes from
+//! the source, not from a run.
 //!
 //! [FR-SC-05]: ../../../docs/specs/requirements/FR-SC-05.md
 //! [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+//! [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
 //! [ADR-83]: ../../../docs/specs/architecture/decisions/ADR-83.md
 //! [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
 //! [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
@@ -123,13 +183,17 @@ pub(crate) enum Arg {
     /// An empty config file Logos writes under `.logos/security/` before the
     /// run, so the scanner never auto-loads one from the repository.
     PinnedConfig,
-    /// The project's ignored directories ([`super::ignored_dirs`]), spelled
+    /// The project's ignored directories ([`super::project_ignores`]), spelled
     /// for this scanner's exclusion flag, in a whole-project run; nothing in a
     /// run on paths the user named, which reads exactly those.
     Ignored(Exclusion),
+    /// The project's unignored paths ([`Targets`]) as the scan targets, in a
+    /// whole-project run; nothing in a path-capable scanner's run on paths the
+    /// user named, which the [`Arg::Paths`] after it reads instead.
+    Unignored,
 }
 
-use Arg::{Database, Extra, Ignored, Language, Lit, Out, Paths, PinnedConfig};
+use Arg::{Database, Extra, Ignored, Language, Lit, Out, Paths, PinnedConfig, Unignored};
 
 /// How [`Arg::Ignored`] passes the ignored directories — the shapes the
 /// [module docs](self) record per scanner and tested version.
@@ -156,14 +220,66 @@ pub(crate) enum Spelling {
     /// or to the absolute root, and no other path that merely contains the
     /// name.
     RootRegex,
+    /// `^target(/|$)`: a regular expression that matches the directory and
+    /// every directory below it, relative to `.` with no `./`, and no other
+    /// directory that merely contains the name — gosec's spelling.
+    TreeRegex,
 }
+
+/// The coverage note of a scanner that takes the ignored directories through
+/// an exclusion flag ([`Arg::Ignored`]) the hand-run harness has not run:
+/// its flag narrows the scan, but no committed evidence shows it is anchored
+/// on the pinned version, so its outcome reads `scanned` (BR-97).
+pub(crate) const FLAG_UNPROVEN: &str = "exclusion flag not proven by the harness";
 
 /// The bytes the ignored directories may add to one scanner's argv. Far
 /// below Linux's 128 KiB limit on one element (Bandit's whole list is one)
 /// and the 1 MiB `ARG_MAX` of macOS, so a project with thousands of ignored
 /// directories still starts every scanner: past it, the deepest are left out
-/// and scanned as before.
+/// and scanned as before. It caps a list of unignored paths
+/// ([`Targets::Paths`]) too: past it, the scanner is given `.` instead, and
+/// its coverage reads `scanned`.
 pub(crate) const IGNORED_ARGV_BUDGET: usize = 64 * 1024;
+
+/// What the project ignores, as a whole-project run passes it
+/// ([`super::project_ignores`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Ignores {
+    /// The top-most ignored directories an exclusion flag can take
+    /// ([`Arg::Ignored`]), shallowest first.
+    pub dirs: Vec<String>,
+    /// How many top-most ignored directories no exclusion flag is given,
+    /// because it could misread the name: a scanner that takes the list reads
+    /// those.
+    pub misread: usize,
+    /// What fills [`Arg::Unignored`].
+    pub targets: Targets,
+}
+
+impl Ignores {
+    /// Nothing ignored — or nothing walked, when no scanner runs over the
+    /// whole project.
+    pub(crate) const NONE: Ignores = Ignores { dirs: Vec::new(), misread: 0, targets: Targets::Root };
+
+    fn is_empty(&self) -> bool {
+        self.dirs.is_empty() && self.misread == 0
+    }
+}
+
+/// What fills [`Arg::Unignored`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Targets {
+    /// The project ignores no directory: `.`.
+    Root,
+    /// The fewest paths, files and directories, that hold every unignored
+    /// path and no ignored directory, relative to the root, sorted:
+    /// `.gitignore app go.mod src targets` beside an ignored `target`. The
+    /// directories holding an ignored one are named by their entries instead.
+    Paths(Vec<String>),
+    /// The paths cannot be passed, for this reason, so `.` is: the scanner
+    /// reads the ignored directories its own selection does not skip.
+    Unpassable(&'static str),
+}
 
 impl Spelling {
     fn write(self, dir: &str, root: Option<&str>) -> String {
@@ -175,8 +291,29 @@ impl Spelling {
                 let root = root.map(|r| format!("|{}/", regex::escape(r))).unwrap_or_default();
                 format!(r"^(\./{root})?{}(/|$)", regex::escape(dir))
             }
+            Spelling::TreeRegex => format!("^{}(/|$)", regex::escape(dir)),
         }
     }
+}
+
+/// The `ignored` directories spelled for `exclusion`, in order, while each
+/// with its flag or separator fits [`IGNORED_ARGV_BUDGET`]; the rest are left
+/// out.
+fn fitting(ignored: &[String], root: Option<&str>, exclusion: Exclusion) -> Vec<String> {
+    let (spell, overhead) = match exclusion {
+        // The flag and the value, each with its terminating NUL.
+        Exclusion::Repeat { flag, spell } => (spell, flag.len() + 2),
+        Exclusion::Append { spell } => (spell, 1),
+    };
+    let mut used = 0;
+    ignored
+        .iter()
+        .map(|dir| spell.write(dir, root))
+        .take_while(|value| {
+            used += overhead + value.len();
+            used <= IGNORED_ARGV_BUDGET
+        })
+        .collect()
 }
 
 /// Where a scanner writes its SARIF.
@@ -305,6 +442,35 @@ pub struct Scanner {
     ///
     /// [NFR-SE-02]: ../../../docs/specs/requirements/NFR-SE-02.md
     pub(crate) refuse_if_present: &'static [&'static str],
+    /// For a scanner a whole-project run passes neither [`Arg::Ignored`] nor
+    /// [`Arg::Unignored`]: why it reads the ignored directories, the coverage
+    /// note its outcome carries ([`Scanner::coverage`]).
+    pub(crate) reads_ignored: Option<&'static str>,
+    /// The files it reads, for a scanner that reads one language's files only:
+    /// without one it has nothing to scan and is not started
+    /// ([`Scanner::not_applicable`], S-769).
+    pub(crate) applies_to: Option<Applies>,
+    /// For a scanner whose [`Arg::Ignored`] flag the hand-run harness proves
+    /// anchored on its pinned version, the mechanism of the
+    /// `scripts/tests/fixtures/scanner-exclusions/verdicts.tsv` rows that show
+    /// it — ignored directories skipped, near misses kept, in a git checkout,
+    /// a linked worktree and a non-git copy — rendered with exactly this
+    /// template's argv. `None` for an unproven flag, which reads `scanned`
+    /// ([`FLAG_UNPROVEN`]), and for a scanner that takes none.
+    pub(crate) exclusion_evidence: Option<&'static str>,
+}
+
+/// The files a single-language scanner reads, by extension, and how its
+/// `not applicable` reason names them. Only gosec and Bandit have one: every
+/// other scanner reads many languages, manifests or any file, so none of its
+/// inputs can be ruled out by extension (CodeQL decides per language,
+/// [`super::codeql_languages`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Applies {
+    /// The extensions, without the dot, as the file name spells them.
+    pub extensions: &'static [&'static str],
+    /// The files, for the reason: `Go source file (.go)`.
+    pub files: &'static str,
 }
 
 /// The nine registered scanners, in [`SECURITY_SCANNERS`](crate::config::SECURITY_SCANNERS) order.
@@ -330,12 +496,17 @@ pub static REGISTRY: [Scanner; 9] = [
             Lit("--exclude"),
             Lit(".logos"),
             Extra,
+            // The whole-project targets; a scoped run's are `Paths`.
+            Unignored,
             Paths,
         ],
         output: Output::File,
         ok_exit: &[0],
-        path_slot: Some(PathSlot { full: &["."], scoped: ScopedPaths::Positional, keeps_full_findings: false }),
+        path_slot: Some(PathSlot { full: &[], scoped: ScopedPaths::Positional, keeps_full_findings: false }),
         refuse_if_present: &[],
+        reads_ignored: None,
+        applies_to: None,
+        exclusion_evidence: None,
     },
     Scanner {
         name: "trivy",
@@ -366,6 +537,9 @@ pub static REGISTRY: [Scanner; 9] = [
         ok_exit: &[0],
         path_slot: None,
         refuse_if_present: &[],
+        reads_ignored: None,
+        applies_to: None,
+        exclusion_evidence: None,
     },
     Scanner {
         name: "gitleaks",
@@ -395,6 +569,9 @@ pub static REGISTRY: [Scanner; 9] = [
             keeps_full_findings: true,
         }),
         refuse_if_present: &[],
+        reads_ignored: Some("it reads the committed history, which holds any file committed inside an ignored directory"),
+        applies_to: None,
+        exclusion_evidence: None,
     },
     Scanner {
         name: "osv-scanner",
@@ -410,13 +587,16 @@ pub static REGISTRY: [Scanner; 9] = [
             Out,
             Extra,
             Lit("--recursive"),
-            Lit("."),
+            Unignored,
         ],
         output: Output::File,
         // 1: vulnerabilities were found, which is a successful scan.
         ok_exit: &[0, 1],
         path_slot: None,
         refuse_if_present: &[],
+        reads_ignored: None,
+        applies_to: None,
+        exclusion_evidence: None,
     },
     Scanner {
         name: "bandit",
@@ -443,6 +623,9 @@ pub static REGISTRY: [Scanner; 9] = [
         ok_exit: &[0],
         path_slot: Some(PathSlot { full: &["."], scoped: ScopedPaths::Positional, keeps_full_findings: false }),
         refuse_if_present: &[],
+        reads_ignored: None,
+        applies_to: Some(Applies { extensions: &["py", "pyw"], files: "Python source file (.py, .pyw)" }),
+        exclusion_evidence: None,
     },
     Scanner {
         name: "gosec",
@@ -459,6 +642,7 @@ pub static REGISTRY: [Scanner; 9] = [
             Out,
             Lit("-no-fail"),
             Lit("-quiet"),
+            Ignored(Exclusion::Repeat { flag: "-exclude-dir", spell: Spelling::TreeRegex }),
             Extra,
             Paths,
         ],
@@ -466,6 +650,9 @@ pub static REGISTRY: [Scanner; 9] = [
         ok_exit: &[0],
         path_slot: Some(PathSlot { full: &["./..."], scoped: ScopedPaths::Packages, keeps_full_findings: false }),
         refuse_if_present: &[],
+        reads_ignored: None,
+        applies_to: Some(Applies { extensions: &["go"], files: "Go source file (.go)" }),
+        exclusion_evidence: Some("exclude-dir-tree"),
     },
     Scanner {
         name: "checkov",
@@ -497,6 +684,9 @@ pub static REGISTRY: [Scanner; 9] = [
         // Checkov auto-loads this from the scanned directory, and it can name
         // external checks — Python that Checkov imports and runs.
         refuse_if_present: &[".checkov.yaml", ".checkov.yml"],
+        reads_ignored: None,
+        applies_to: None,
+        exclusion_evidence: None,
     },
     Scanner {
         name: "codeql",
@@ -530,6 +720,9 @@ pub static REGISTRY: [Scanner; 9] = [
         ok_exit: &[0],
         path_slot: None,
         refuse_if_present: &[],
+        reads_ignored: Some("no exclusion is proven for it, so its database holds the ignored directories' files"),
+        applies_to: None,
+        exclusion_evidence: None,
     },
     Scanner {
         name: "dependency-check",
@@ -561,6 +754,9 @@ pub static REGISTRY: [Scanner; 9] = [
         ok_exit: &[0],
         path_slot: None,
         refuse_if_present: &[],
+        reads_ignored: None,
+        applies_to: None,
+        exclusion_evidence: None,
     },
 ];
 
@@ -594,6 +790,10 @@ pub(crate) struct Fill<'a> {
     /// The project's ignored directories (only read by [`Arg::Ignored`], and
     /// only when `scope` is `None`).
     pub ignored: &'a [String],
+    /// The project's unignored paths (only read by [`Arg::Unignored`]: in a
+    /// path-capable scanner's run, only when `scope` is `None`; a scanner with
+    /// no path position takes them whatever the scope).
+    pub targets: &'a Targets,
     /// The project root as the scanner's working directory reports it
     /// (canonical); `None` when it is not UTF-8. Only read by
     /// [`Spelling::RootRegex`].
@@ -622,39 +822,35 @@ impl Scanner {
                 Database => argv.push(fill.database.as_os_str().to_owned()),
                 PinnedConfig => argv.push(fill.pinned_config.as_os_str().to_owned()),
                 Ignored(_) if fill.scope.is_some() => {}
-                Ignored(Exclusion::Repeat { flag, spell }) => {
-                    // The flag and the value, each with its terminating NUL.
-                    for value in self.budgeted(fill, spell, flag.len() + 2) {
+                // A scoped run's paths are the path position's; a scanner
+                // without one runs whole whatever the scope.
+                Unignored if fill.scope.is_some() && self.path_slot.is_some() => {}
+                Ignored(exclusion @ Exclusion::Repeat { flag, .. }) => {
+                    for value in self.budgeted(fill, exclusion) {
                         argv.push(OsString::from(flag));
                         argv.push(OsString::from(value));
                     }
                 }
-                Ignored(Exclusion::Append { spell }) => {
+                Ignored(exclusion @ Exclusion::Append { .. }) => {
                     let last = argv.last_mut().expect("a comma list follows the flag's first value");
-                    for value in self.budgeted(fill, spell, 1) {
+                    for value in self.budgeted(fill, exclusion) {
                         last.push(",");
                         last.push(value);
                     }
                 }
+                Unignored => match fill.targets {
+                    Targets::Paths(paths) => argv.extend(paths.iter().map(OsString::from)),
+                    Targets::Root | Targets::Unpassable(_) => argv.push(OsString::from(".")),
+                },
             }
         }
         argv
     }
 
-    /// The ignored directories spelled, in order, while each with its
-    /// `overhead` fits [`IGNORED_ARGV_BUDGET`]; the rest are left out, with a
-    /// warning.
-    fn budgeted(&self, fill: &Fill<'_>, spell: Spelling, overhead: usize) -> Vec<String> {
-        let mut used = 0;
-        let values: Vec<String> = fill
-            .ignored
-            .iter()
-            .map(|dir| spell.write(dir, fill.root))
-            .take_while(|value| {
-                used += overhead + value.len();
-                used <= IGNORED_ARGV_BUDGET
-            })
-            .collect();
+    /// [`fitting`] the ignored directories, with a warning when some are left
+    /// out.
+    fn budgeted(&self, fill: &Fill<'_>, exclusion: Exclusion) -> Vec<String> {
+        let values = fitting(fill.ignored, fill.root, exclusion);
         if values.len() < fill.ignored.len() {
             tracing::warn!(
                 target: "logos::security",
@@ -667,9 +863,81 @@ impl Scanner {
         values
     }
 
-    /// Whether a whole-project run passes the project's ignored directories.
-    pub(crate) fn excludes_ignored(&self) -> bool {
-        self.run.iter().any(|a| matches!(a, Ignored(_)))
+    /// How a whole-project run passes the ignored directories to an exclusion
+    /// flag ([`Arg::Ignored`]), when it does.
+    fn exclusion(&self) -> Option<Exclusion> {
+        self.run.iter().find_map(|a| match *a {
+            Ignored(exclusion) => Some(exclusion),
+            _ => None,
+        })
+    }
+
+    /// Whether a whole-project run passes the ignored directories to an
+    /// exclusion flag ([`Arg::Ignored`]).
+    #[cfg(test)]
+    pub(crate) fn takes_exclusion_flag(&self) -> bool {
+        self.exclusion().is_some()
+    }
+
+    /// What a whole-project run with this argv does with the project's
+    /// ignored directories ([FR-SC-26]), from the same [`Ignores`] the run is
+    /// [rendered](Self::render) with: `excluded` when the project ignores
+    /// none, when its [`Arg::Unignored`] targets could be passed, or when its
+    /// exclusion flag ([`Arg::Ignored`]) is proven
+    /// ([`exclusion_evidence`](Self::exclusion_evidence)) and given every
+    /// ignored directory — none left out for a misreadable name or past the
+    /// budget; otherwise `scanned`, with why. An unproven flag reads `scanned`
+    /// ([`FLAG_UNPROVEN`]) however much of the list it is given.
+    ///
+    /// The budget is measured without the root, which only
+    /// [`Spelling::RootRegex`] — no proven flag's — spells.
+    ///
+    /// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+    pub(crate) fn coverage(&self, ignores: &Ignores) -> super::Coverage {
+        if ignores.is_empty() {
+            return super::Coverage::EXCLUDED;
+        }
+        if let Some(note) = self.reads_ignored {
+            return super::Coverage::scanned(note.to_string());
+        }
+        if self.run.contains(&Unignored) {
+            return match ignores.targets {
+                Targets::Unpassable(why) => super::Coverage::scanned(format!(
+                    "it is given the whole project, because {why}"
+                )),
+                Targets::Root | Targets::Paths(_) => super::Coverage::EXCLUDED,
+            };
+        }
+        let Some(exclusion) = self.exclusion().filter(|_| self.exclusion_evidence.is_some()) else {
+            return super::Coverage::scanned(FLAG_UNPROVEN.to_string());
+        };
+        if ignores.misread > 0 {
+            return super::Coverage::scanned(format!(
+                "it is not given {} ignored director{} whose name an exclusion flag could misread",
+                ignores.misread,
+                if ignores.misread == 1 { "y" } else { "ies" }
+            ));
+        }
+        let given = fitting(&ignores.dirs, None, exclusion).len();
+        if given < ignores.dirs.len() {
+            let cut = ignores.dirs.len() - given;
+            return super::Coverage::scanned(format!(
+                "it is not given {cut} ignored director{} past the 64 KiB argument budget",
+                if cut == 1 { "y" } else { "ies" }
+            ));
+        }
+        super::Coverage::EXCLUDED
+    }
+
+    /// Why this scanner has nothing to scan, when it does not: its
+    /// [`applies_to`](Self::applies_to) names extensions and `has_file_with`
+    /// finds no file the project keeps with one of them. `None` — it may
+    /// run — for a scanner without a rule, and `has_file_with` is then not
+    /// asked.
+    pub(crate) fn not_applicable(&self, has_file_with: impl FnOnce(&[&str]) -> bool) -> Option<String> {
+        let applies = self.applies_to?;
+        (!has_file_with(applies.extensions))
+            .then(|| format!("no {} among the files the project does not ignore", applies.files))
     }
 
     /// Whether this scanner runs once per CodeQL language.

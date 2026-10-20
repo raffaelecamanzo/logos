@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -57,6 +57,7 @@ use axum::{
 };
 use logos_core::config::{ConfigError, PolicyFile};
 use logos_core::federation::{discover, Backing, BuildDependencies, ContractBridge, EngineRegistry};
+use logos_core::jobs::ScanJobs;
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::observability::{in_surface, Surface};
@@ -106,6 +107,11 @@ pub const DEFAULT_PORT: u16 = 4983;
 const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
                    frame-ancestors 'none'; object-src 'none'";
 
+/// How long a stopping `serve` waits for its cancelled jobs to end (S-759).
+/// Their children are killed at once, so this bounds only each job's own
+/// cleanup, such as an install removing its partial download.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
 // ── Surface orchestration (FR-UI-01) ───────────────────────────────────────
 
 /// Run the requested surface combination in **one process** (FR-UI-01, ADR-04),
@@ -126,6 +132,18 @@ const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
 ///   the single/default engine (its federation wiring is a later story).
 /// - `serve --mcp` (no `--ui`) → delegates to the MCP loop, same as the
 ///   default-build path.
+///
+/// SIGINT (the terminal's Ctrl-C) or SIGTERM also stops the serve, with or
+/// without `--ui`. However it stops, every scan and install job the web
+/// surface still runs is then cancelled through the jobs' own cancel path, and
+/// the serve waits up to [`SHUTDOWN_GRACE`] in all for them to end before it
+/// returns: no `curl`, `uv` or scanner of theirs outlives it, and no partial
+/// download stays in staging (S-759). A scan or install the MCP surface runs
+/// is a [foreground run](logos_core::jobs::foreground), not a job: its
+/// children are killed too, though the serve does not wait for its work to
+/// return. A second signal during that wait is not acted on. SIGKILL, or any
+/// other signal, stops the process as before, running none of this, and
+/// leaves its scanners running.
 ///
 /// Both surfaces compose `host`'s active extensions ([FR-DS-04], [ADR-74]): their
 /// routes join the web surface, their tools the MCP roster.
@@ -201,20 +219,83 @@ pub fn serve_surfaces_with_assets(
         .enable_all()
         .build()
         .context("building the serve I/O runtime")?;
-    runtime.block_on(async move {
+    // The web surface's detached jobs, held here so that they are stopped
+    // however the serve loops end.
+    let jobs = Arc::new(ScanJobs::new());
+    let web_jobs = Arc::clone(&jobs);
+    // `signalled` is whether a stop signal, rather than a serve loop, ended
+    // the serve.
+    let (served, signalled) = runtime.block_on(async move {
         match (mcp, ui) {
             // Both: race the two serve loops on one runtime (NFR-RA-01 — MCP
             // keeps stdout; the web surface is stderr-only).
             (true, true) => tokio::select! {
-                r = serve_web(Arc::clone(&backing), port, host, assets) => r,
-                r = mcp::serve_stdio_on(Arc::clone(&backing), host) => r,
+                r = serve_web(Arc::clone(&backing), port, host, assets, web_jobs) => (r, false),
+                r = mcp::serve_stdio_on(Arc::clone(&backing), host) => (r, false),
+                () = stop_signal() => (Ok(()), true),
             },
-            (false, true) => serve_web(backing, port, host, assets).await,
-            (true, false) => mcp::serve_stdio_on(backing, host).await,
+            (false, true) => tokio::select! {
+                r = serve_web(backing, port, host, assets, web_jobs) => (r, false),
+                () = stop_signal() => (Ok(()), true),
+            },
+            (true, false) => tokio::select! {
+                r = mcp::serve_stdio_on(backing, host) => (r, false),
+                () = stop_signal() => (Ok(()), true),
+            },
             // clap guarantees at least one of --mcp/--ui; defend anyway.
-            (false, false) => anyhow::bail!("serve needs --mcp and/or --ui"),
+            (false, false) => (Err(anyhow::anyhow!("serve needs --mcp and/or --ui")), false),
         }
-    })
+    });
+    stop_jobs(&jobs, SHUTDOWN_GRACE);
+    // A scan or install the MCP surface runs is no job but a foreground run on
+    // a blocking thread: its children are killed too, before its lock is freed.
+    logos_core::jobs::cancel_foreground();
+    if signalled {
+        // Dropping the runtime waits for every blocking task, and the MCP
+        // transport's stdin read ends only when its input does: a serve
+        // stopped by a signal leaves such tasks to the process's exit.
+        runtime.shutdown_background();
+    }
+    served
+}
+
+/// Resolves once the process is asked to stop: SIGINT (the terminal's Ctrl-C)
+/// or SIGTERM. Never resolves if the handlers cannot be installed — the
+/// process then stops as it would without them.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (Ok(mut interrupt), Ok(mut terminate)) =
+            (signal(SignalKind::interrupt()), signal(SignalKind::terminate()))
+        else {
+            tracing::warn!(target: "logos::web", "no stop-signal handler: a signal stops serve without cancelling its jobs");
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+    tracing::info!(target: "logos::web", "stop signal received: serve is stopping");
+}
+
+/// Cancel every job `jobs` still runs and wait up to `grace` for each to end
+/// — what a stopping serve does last ([S-759]).
+///
+/// [S-759]: ../../../docs/planning/journal.md#s-759-stopping-serve-cancels-its-running-scan-and-install-jobs
+fn stop_jobs(jobs: &ScanJobs, grace: Duration) {
+    if !jobs.shutdown(grace) {
+        tracing::warn!(
+            target: "logos::web",
+            grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+            "a cancelled job had not ended when serve stopped"
+        );
+    }
 }
 
 /// Resolve the serve [`Backing`] from workspace discovery ([FR-WS-06], [ADR-52])
@@ -260,6 +341,7 @@ async fn serve_web(
     port: u16,
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
+    jobs: Arc<ScanJobs>,
 ) -> Result<()> {
     let listener = bind(port)?;
     let addr = listener
@@ -288,21 +370,22 @@ async fn serve_web(
         .context("switching the web listener to non-blocking")?;
     let listener = tokio::net::TcpListener::from_std(listener)
         .context("adopting the loopback listener into tokio")?;
-    axum::serve(listener, serving_router(backing, host, assets)?)
+    axum::serve(listener, serving_router(backing, host, assets, jobs)?)
         .await
         .context("the web serve loop failed")
 }
 
 /// The router [`serve_web`] serves: a fresh session [`IntentToken`], `host`'s
-/// active extensions and the SPA from `assets` — split from the socket so the
-/// composition `serve_surfaces_with_assets` hands down is testable without
-/// binding one.
+/// active extensions, the SPA from `assets` and the serve's `jobs` — split from
+/// the socket so the composition `serve_surfaces_with_assets` hands down is
+/// testable without binding one.
 fn serving_router(
     backing: Arc<Backing<Engine>>,
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
+    jobs: Arc<ScanJobs>,
 ) -> Result<Router> {
-    hosted_router_with_assets(backing, IntentToken::generate(), host, assets)
+    hosted_router_with_jobs(backing, IntentToken::generate(), host, assets, jobs)
 }
 
 /// Bind the loopback listener on [`BIND_ADDR`] at `port` — the **single bind
@@ -523,10 +606,11 @@ pub(crate) struct WebState {
     /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
     spa: Arc<dyn SpaAssets>,
     /// The detached jobs this serve runs (S-673): the Security page's scan and
-    /// its scanner install (S-747), one of each kind per member at a time. Dropping the router drops it and cancels whatever
-    /// still runs; a serve killed by a signal runs no destructor, so its
-    /// running scanners finish on their own ([`logos_core::jobs::ScanJobs`]).
-    jobs: Arc<logos_core::jobs::ScanJobs>,
+    /// its scanner install (S-747), one of each kind per member at a time. A
+    /// stopping [`serve_surfaces`] cancels whatever still runs and waits for
+    /// it to end (S-759); a router dropped elsewhere cancels it on drop
+    /// ([`logos_core::jobs::ScanJobs`]).
+    jobs: Arc<ScanJobs>,
 }
 
 impl FromRef<WebState> for Arc<Engine> {
@@ -565,7 +649,7 @@ impl FromRef<WebState> for Arc<dyn SpaAssets> {
     }
 }
 
-impl FromRef<WebState> for Arc<logos_core::jobs::ScanJobs> {
+impl FromRef<WebState> for Arc<ScanJobs> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.jobs)
     }
@@ -634,9 +718,25 @@ pub fn hosted_router_with_assets(
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
 ) -> Result<Router> {
+    hosted_router_with_jobs(backing, intent, host, assets, Arc::new(ScanJobs::new()))
+}
+
+/// [`hosted_router_with_assets`] running its detached jobs on `jobs`, which
+/// the caller holds to stop them when the serve ends ([`serve_surfaces`]).
+///
+/// # Errors
+/// As [`router_for_backing`].
+fn hosted_router_with_jobs(
+    backing: Arc<Backing<Engine>>,
+    intent: IntentToken,
+    host: &ExtensionHost,
+    assets: Arc<dyn SpaAssets>,
+    jobs: Arc<ScanJobs>,
+) -> Result<Router> {
     let engine = backing.default_engine()?;
     let mut state = make_state(engine, backing, intent, host);
     state.spa = assets;
+    state.jobs = jobs;
     Ok(build_router(state))
 }
 
@@ -685,7 +785,7 @@ fn make_state(
         intent,
         host: host.clone(),
         spa: Arc::new(EmbeddedSpa),
-        jobs: Arc::new(logos_core::jobs::ScanJobs::new()),
+        jobs: Arc::new(ScanJobs::new()),
     }
 }
 
@@ -2359,7 +2459,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let engine = Arc::new(Engine::start(tmp.path()).expect("engine"));
         let backing = Arc::new(Backing::Single(engine));
-        let router = serving_router(backing, &ExtensionHost::new(), Arc::new(Injected))
+        let router = serving_router(backing, &ExtensionHost::new(), Arc::new(Injected), Arc::new(ScanJobs::new()))
             .expect("the serving router builds");
         let response = router
             .oneshot(

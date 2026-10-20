@@ -151,7 +151,8 @@
           "last_failure": null
         }
       ],
-      "other_reports": []
+      "other_reports": [],
+      "suppressions": []
     },
     "findings": {
       "edition": "2025",
@@ -190,6 +191,7 @@
           "end_line": null,
           "end_column": null,
           "freshness": "fresh",
+          "anchor": null,
           "owasp": [
             "A05:2025"
           ],
@@ -255,6 +257,7 @@
           "end_line": null,
           "end_column": null,
           "freshness": "fresh",
+          "anchor": null,
           "owasp": [
             "A07:2025"
           ],
@@ -473,6 +476,21 @@
         }
       ],
       "suppressions": []
+    },
+    "counts": {
+      "counted": {
+        "critical": 0,
+        "high": 2,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+        "unrated": 0,
+        "total": 2
+      },
+      "excluded": {
+        "not_fresh": 0,
+        "suppressed": 0
+      }
     },
     "editions": [
       {

@@ -62,10 +62,19 @@
 //! # A failed scanner's output ([CR-217])
 //! A failed scanner's whole bounded output is written to
 //! `.logos/security/<scanner>.failed.log`. The payload names that log and
-//! carries the exit status and a short [masked](super::mask) excerpt, so no
-//! secret the scanner echoed reaches a payload. The log is removed when the
-//! scanner next runs cleanly, so its presence is what [`status`] reports as
-//! the last run having failed.
+//! carries the exit status, a short [masked](super::mask) excerpt, so no
+//! secret the scanner echoed reaches a payload, and the [cause](failure_cause)
+//! in one masked line taken from it (S-769). The log is removed when the
+//! scanner next runs cleanly or is found to have nothing to scan, so its presence is what [`status`] reports as
+//! the last run having failed, with the same cause read back from it.
+//!
+//! # A scanner with nothing to scan (S-769)
+//! A scanner that reads one language's files and finds none the project
+//! keeps ([`Orchestrator::not_applicable`]) is [`RunOutcome::NotApplicable`]:
+//! the scan reports it without a start and spawns nothing for it, and
+//! [`status`] reads it [`ScanState::NotApplicable`] while no report of it is
+//! stored — a state the `[security]` gate and the workspace roll-up never
+//! count against the project.
 //!
 //! [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
 //! [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
@@ -89,8 +98,8 @@ use super::context::FindingContext;
 use super::mask;
 use super::registry::{Scanner, ScopedPath, REGISTRY};
 use super::{
-    is_symlink, remove_file_if_present, resolve_scope, write_new, Availability, InstalledCopy,
-    Orchestrator, Outcome, Probe, ScanEnvironment, ScanRequest, Selection, Unprobed, OUTPUT_DIR,
+    is_symlink, project_ignores, remove_file_if_present, resolve_scope, write_new, Availability, Coverage,
+    InstalledCopy, Orchestrator, Outcome, Probe, ScanEnvironment, ScanRequest, Selection, Unprobed, OUTPUT_DIR,
 };
 use crate::config::{load_install_consent, load_scan_consent, record_scan_consent, ConfigError};
 use crate::history::security::owasp::{CategoryCoverage, Unclassified};
@@ -146,6 +155,13 @@ pub struct ScannerRun {
     /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<RunScope>,
+    /// What its whole-project run did with the project's ignored directories
+    /// ([FR-SC-26]): `ignored_paths` and, when it read them, `coverage_note`.
+    /// Absent when it did not run, or ran on the paths a scoped scan named.
+    ///
+    /// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+    #[serde(flatten)]
+    pub coverage: Option<Coverage>,
 }
 
 /// How a scoped scan treated one scanner ([FR-SC-17]).
@@ -189,7 +205,9 @@ pub enum RunOutcome {
         languages: Vec<String>,
         reason: &'static str,
     },
-    /// CodeQL only: no file in a language it analyses; nothing ran.
+    /// Nothing to scan, so nothing started: CodeQL with no file in a language
+    /// it analyses, or a single-language scanner with none of its files
+    /// (S-769).
     NotApplicable { reason: String },
     /// It produced no report, or a report that could not be ingested. Its
     /// previous snapshot is kept.
@@ -201,6 +219,9 @@ pub enum RunOutcome {
         log: Option<String>,
         /// The output's last lines, secrets masked.
         stderr: String,
+        /// Why it failed, in one masked line of that output
+        /// ([`failure_cause`], S-769).
+        cause: String,
     },
 }
 
@@ -245,7 +266,7 @@ pub fn scan(
     let starting: Vec<_> =
         plan.iter().filter(|(_, _, p)| p.runs).map(|(s, availability, _)| (*s, *availability)).collect();
     let consented = load_scan_consent(env.user_dir.as_deref())?.consented(root);
-    let missing = pending_consent(&starting, &consented);
+    let missing = pending_consent(&orchestrator, &starting, &consented);
     if !missing.is_empty() && !consent {
         return Err(ConfigError::InvalidValue {
             key: "consent".to_string(),
@@ -273,10 +294,16 @@ pub fn scan(
             Availability::Disabled => unrun(s, RunOutcome::Disabled),
             Availability::NotInstalled => unrun(s, RunOutcome::NotInstalled),
             Availability::Installed if !plan.runs => unrun(s, RunOutcome::NotSelected),
-            Availability::Installed => {
-                progress(&ScanProgress::Started { scanner: s.name });
-                run_one(root, &orchestrator, s, plan.scope, &mut ingest)?
-            }
+            Availability::Installed => match orchestrator.not_applicable(s) {
+                Some(reason) => {
+                    clear_failure_log(&failure_log(root, s.name));
+                    unrun(s, RunOutcome::NotApplicable { reason })
+                }
+                None => {
+                    progress(&ScanProgress::Started { scanner: s.name });
+                    run_one(root, &orchestrator, s, plan.scope, &mut ingest)?
+                }
+            },
         };
         run.scope = plan.note;
         if let RunOutcome::Ran { findings, .. } = &run.outcome {
@@ -329,18 +356,22 @@ fn plan<'a>(request: &ScanRequest, scope: Option<&'a [ScopedPath]>, s: &Scanner)
 pub fn consent_pending(root: &Path, env: &ScanEnvironment, manifest: &Manifest) -> Result<Vec<&'static str>> {
     let orchestrator = Orchestrator::open_in(root, env)?.with_manifest(manifest.clone());
     let consented = load_scan_consent(env.user_dir.as_deref())?.consented(root);
-    Ok(pending_consent(&orchestrator.availability(), &consented))
+    Ok(pending_consent(&orchestrator, &orchestrator.availability(), &consented))
 }
 
-/// The installed, enabled scanners `consented` does not name: what a scan asks
-/// consent for, and what `status` reports as pending — one rule for both.
+/// The installed, enabled scanners `consented` does not name and that have
+/// something to scan: what a scan asks consent for, and what `status` reports
+/// as pending — one rule for both. A `not_applicable` one starts nothing, so
+/// it is asked for once the project gives it something to scan (S-769).
 fn pending_consent(
+    orchestrator: &Orchestrator,
     availability: &[(&'static Scanner, Availability)],
     consented: &BTreeSet<String>,
 ) -> Vec<&'static str> {
     availability
         .iter()
         .filter(|(s, a)| *a == Availability::Installed && !consented.contains(s.name))
+        .filter(|(s, _)| orchestrator.not_applicable(s).is_none())
         .map(|(s, _)| s.name)
         .collect()
 }
@@ -352,6 +383,7 @@ fn unrun(s: &'static Scanner, outcome: RunOutcome) -> ScannerRun {
         version: None,
         outcome,
         scope: None,
+        coverage: None,
     }
 }
 
@@ -374,7 +406,7 @@ fn run_one(
     let Some(ran) = report.outcomes.into_iter().next() else {
         anyhow::bail!("the scan of {} reported no outcome", s.name);
     };
-    let log = root.join(OUTPUT_DIR).join(format!("{}{FAILURE_LOG_SUFFIX}", s.name));
+    let log = failure_log(root, s.name);
     // Killed by a cancel: what it left is no failure of the scanner's, so no
     // log is written and the previous snapshot stays as it was.
     if matches!(ran.outcome, Outcome::Failed { .. }) && crate::jobs::cancelled() {
@@ -383,9 +415,7 @@ fn run_one(
     let outcome = match ran.outcome {
         Outcome::Ran { sarif, requires_build } => match ingest_all(&sarif, scope, ingest) {
             Ok(ingests) => {
-                if let Err(e) = remove_file_if_present(&log) {
-                    warn_log_io("clear", &log, &e);
-                }
+                clear_failure_log(&log);
                 RunOutcome::Ran {
                     sarif: sarif.iter().map(|p| relative(root, p)).collect(),
                     requires_build,
@@ -399,7 +429,10 @@ fn run_one(
         Outcome::NotInstalled => RunOutcome::NotInstalled,
         Outcome::Disabled => RunOutcome::Disabled,
         Outcome::RequiresBuild { languages, reason } => RunOutcome::RequiresBuild { languages, reason },
-        Outcome::NotApplicable { reason } => RunOutcome::NotApplicable { reason },
+        Outcome::NotApplicable { reason } => {
+            clear_failure_log(&log);
+            RunOutcome::NotApplicable { reason }
+        }
     };
     let (token, exit_code, findings) = match &outcome {
         RunOutcome::Ran { findings, .. } => ("ran", None, *findings),
@@ -424,6 +457,7 @@ fn run_one(
         version: ran.version,
         outcome,
         scope: None,
+        coverage: ran.coverage,
     })
 }
 
@@ -451,6 +485,70 @@ fn failed(root: &Path, log: &Path, exit_code: Option<i32>, output: &str) -> RunO
         exit_code,
         log: written,
         stderr: mask::excerpt(output),
+        cause: failure_cause(output),
+    }
+}
+
+/// The cause a failed scanner's outcome names when its output is empty.
+pub(crate) const NO_OUTPUT: &str = "the scanner printed nothing on stderr or stdout";
+
+/// The longest cause, in characters: one line a table cell can hold.
+pub(crate) const CAUSE_CHARS: usize = 240;
+
+/// Why a scanner failed, in one line of its `output` — what its log holds —
+/// with secrets [masked](mask::mask_secrets) (S-769): the first line holding
+/// the word `error`, `fatal` or `panic` (any case, a whole word, so `0 errors`
+/// is none), else the last line that is not blank, else [`NO_OUTPUT`].
+/// Trimmed, and cut to [`CAUSE_CHARS`] with a closing `…`. One failure is
+/// named whole instead: the NVD API rejecting a missing or invalid key
+/// ([`NVD_KEY_CAUSE`]), whose first error line says only that the update failed.
+pub(crate) fn failure_cause(output: &str) -> String {
+    let masked = mask::mask_secrets(output);
+    if masked.lines().any(rejects_nvd_api_key) {
+        return NVD_KEY_CAUSE.to_string();
+    }
+    let lines = || masked.lines().map(str::trim).filter(|l| !l.is_empty());
+    let reports_error = |line: &&str| {
+        line.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| ["error", "fatal", "panic"].iter().any(|w| word.eq_ignore_ascii_case(w)))
+    };
+    let Some(line) = lines().find(reports_error).or_else(|| lines().next_back()) else {
+        return NO_OUTPUT.to_string();
+    };
+    if line.chars().count() <= CAUSE_CHARS {
+        return line.to_string();
+    }
+    let mut cut: String = line.chars().take(CAUSE_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// The cause of a Dependency-Check run the NVD API refused for want of a key:
+/// Dependency-Check 13 needs one and its own first error line does not say so.
+/// The route is the user-level `config.toml`, the only tier whose
+/// `[security_scan.<scanner>]` may set `extra_args`. A fixed sentence: the
+/// value of a rejected key is never echoed.
+pub(crate) const NVD_KEY_CAUSE: &str = "the NVD API key is missing or rejected: get a free key at \
+     https://nvd.nist.gov/developers/request-an-api-key and set [security_scan.dependency-check] \
+     extra_args = [\"--nvdApiKey\", \"<key>\"] in the user config";
+
+/// Whether `line` is the NVD client's exception for a key it will not take:
+/// an `NvdApiException` that names the API key.
+fn rejects_nvd_api_key(line: &str) -> bool {
+    line.contains("NvdApiException") && line.to_ascii_lowercase().contains("api key")
+}
+
+/// Where `scanner`'s failure log lives: `<OUTPUT_DIR>/<scanner>.failed.log`.
+fn failure_log(root: &Path, scanner: &str) -> PathBuf {
+    root.join(OUTPUT_DIR).join(format!("{scanner}{FAILURE_LOG_SUFFIX}"))
+}
+
+/// Remove a failure log that no longer describes the scanner's last run: it
+/// ran cleanly, or it had nothing to scan (S-769), so `status` reports no
+/// failure for it. A log that cannot be removed is a warning, never an error.
+fn clear_failure_log(log: &Path) {
+    if let Err(e) = remove_file_if_present(log) {
+        warn_log_io("clear", log, &e);
     }
 }
 
@@ -483,6 +581,11 @@ pub struct SecurityStatus {
     /// Stored reports from tools that are not registered scanners (a SARIF
     /// ingested by hand), by driver name.
     pub other_reports: Vec<ScannerStatus>,
+    /// Every entry of `.logos/security-ignore.toml` with the findings it
+    /// suppresses counted, expired and orphaned flagged ([S-770]).
+    ///
+    /// [S-770]: ../../../docs/planning/journal.md#s-770-a-suppression-can-cover-a-path
+    pub suppressions: Vec<EntryStatus>,
 }
 
 /// The project's scan consent ([FR-SC-07]).
@@ -534,6 +637,22 @@ pub struct ScannerStatus {
     pub opt_in: bool,
     /// The failure log, when its last scan failed.
     pub last_failure: Option<String>,
+    /// Why that scan failed, in one masked line read back from the log
+    /// ([`failure_cause`], S-769); absent when there is no failure log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_cause: Option<String>,
+    /// What a whole-project scan of the tree as it is now would do with the
+    /// project's ignored directories ([FR-SC-26]) — a forecast, not the stored
+    /// report's — for an installed, enabled scanner: `ignored_paths` and, when
+    /// it would read them, `coverage_note`. Absent for any other row, for a
+    /// scanner the repository's config refuses or that has nothing to scan
+    /// ([`ScanState::NotApplicable`]), and from a readout that did
+    /// not ask for it ([`status`]'s `coverage`). CodeQL's row states it even
+    /// when the scan would find no language to analyse.
+    ///
+    /// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+    #[serde(flatten)]
+    pub coverage: Option<Coverage>,
 }
 
 /// A licensed scanner's acknowledgement, as recorded per user with the install
@@ -558,6 +677,10 @@ pub enum ScanState {
     Disabled,
     /// Installed, enabled, and no report is stored.
     NeverRun,
+    /// Installed, enabled, no report is stored, and it has nothing to scan
+    /// here: none of the files it reads is one the project keeps (S-769). No
+    /// scan is missing, so no surface counts it as one.
+    NotApplicable { reason: String },
     /// A report is stored, but HEAD moved since the full scan behind it, a
     /// file it anchors changed, or no full scan stands behind it. Its
     /// `snapshot_head` is that full scan's HEAD, when there is one.
@@ -615,7 +738,14 @@ pub enum VersionProbes {
 /// Per-scanner state, the copy in use, and consent ([FR-SC-07], [FR-SC-08],
 /// [FR-SC-22]). Starts no process but `git` for HEAD and the version probes
 /// `probes` allows — which is what the copy's version, and the choice between
-/// a `PATH` copy and a managed one, need. No scanner runs.
+/// a `PATH` copy and a managed one, need. No scanner runs. With `coverage`,
+/// each installed scanner's row also states what a whole-project scan of the
+/// tree as it is now does with the ignored directories ([FR-SC-26]), which
+/// walks the tree once: the CLI, MCP and the Security page ask for it; the
+/// workspace roll-up and `check`, which never read it, do not. Every readout,
+/// those two included, walks it for an installed single-language scanner with
+/// no stored report or a stale one, stopping at the first file it reads:
+/// whether it is `not_applicable` decides what they count as missing (S-769).
 ///
 /// # Errors
 /// A [`ConfigError`] (exit 2) for an invalid config, consent record or
@@ -624,12 +754,14 @@ pub enum VersionProbes {
 /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
 /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
 /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
 pub fn status(
     root: &Path,
     env: &ScanEnvironment,
     manifest: &Manifest,
     today: NaiveDate,
     probes: VersionProbes,
+    coverage: bool,
 ) -> Result<SecurityStatus> {
     let orchestrator = Orchestrator::open_in(root, env)?.with_manifest(manifest.clone());
     let availability = orchestrator.availability();
@@ -637,7 +769,7 @@ pub fn status(
     let install_consent = load_install_consent(env.user_dir.as_deref())?;
     let ignore = IgnoreFile::load(root)?;
     let view = read_latest(root)?;
-    let labelled = label(&view.findings, &ignore, today);
+    let labelled = label(&view.findings, &ignore, root, today);
     let head_sha = crate::history::head_sha(root);
 
     // Per driver: unsuppressed and suppressed counts, and whether a file moved.
@@ -670,14 +802,37 @@ pub fn status(
         })
     };
 
+    // Walked once, and only for a readout that shows the coverage of a scanner
+    // that would run.
+    let ignores = (coverage && availability.iter().any(|(_, a)| *a == Availability::Installed))
+        .then(|| project_ignores(root));
+    let coverage_of = |s: &Scanner| {
+        let ignores = ignores.as_ref()?;
+        // A scan does not start one the repository's config refuses.
+        if orchestrator.refusal(s).is_some() {
+            return None;
+        }
+        Some(s.coverage(ignores))
+    };
+
     let log_of = |name: &str| {
-        let log = root.join(OUTPUT_DIR).join(format!("{name}{FAILURE_LOG_SUFFIX}"));
-        (log.is_file() && !is_symlink(&log)).then(|| relative(root, &log))
+        let log = failure_log(root, name);
+        (log.is_file() && !is_symlink(&log)).then_some(log)
     };
     let scanners = availability
         .iter()
         .map(|(s, availability)| {
+            let stored = state_of(s.driver);
+            // Decided before any probe: a scanner with nothing to scan here
+            // is started by no readout, its version command included (S-769).
+            // A fresh report outranks it; a stale one does not, since no scan
+            // here can refresh it.
+            let nothing_to_scan = match (availability, &stored) {
+                (Availability::Installed, None | Some(ScanState::Stale { .. })) => orchestrator.not_applicable(s),
+                _ => None,
+            };
             let probe = match probes {
+                _ if nothing_to_scan.is_some() => Probe::Skip(Unprobed::NothingToScan),
                 VersionProbes::Every => Probe::Run,
                 VersionProbes::Consented if consented.contains(s.name) => Probe::Cached,
                 VersionProbes::Consented => Probe::Skip(Unprobed::NotConsented),
@@ -709,20 +864,30 @@ pub fn status(
                 .unwrap_or_default();
             let install = ((missing || below_minimum) && entry.is_some())
                 .then(|| format!("logos security install {}{licence_flag}", s.name));
+            let state = match (availability, stored, nothing_to_scan) {
+                (Availability::Disabled, _, _) => ScanState::Disabled,
+                (_, _, Some(reason)) => ScanState::NotApplicable { reason },
+                (_, Some(stored), None) => stored,
+                (Availability::NotInstalled, None, None) => ScanState::NotInstalled,
+                (Availability::Installed, None, None) => ScanState::NeverRun,
+            };
+            let log = log_of(s.name);
             ScannerStatus {
                 scanner: s.name.to_string(),
                 driver: s.driver.to_string(),
-                state: match (availability, state_of(s.driver)) {
-                    (Availability::Disabled, _) => ScanState::Disabled,
-                    (_, Some(stored)) => stored,
-                    (Availability::NotInstalled, None) => ScanState::NotInstalled,
-                    (Availability::Installed, None) => ScanState::NeverRun,
-                },
                 installed,
                 install,
                 licence,
                 opt_in: entry.is_some_and(|e| !e.is_default()),
-                last_failure: log_of(s.name),
+                last_failure: log.as_deref().map(|log| relative(root, log)),
+                last_failure_cause: log.as_deref().and_then(read_cause),
+                // A scan would start nothing for a scanner with nothing to scan.
+                coverage: match (availability, &state) {
+                    (Availability::Installed, ScanState::NotApplicable { .. }) => None,
+                    (Availability::Installed, _) => coverage_of(s),
+                    _ => None,
+                },
+                state,
             }
         })
         .collect();
@@ -740,10 +905,12 @@ pub fn status(
                 licence: None,
                 opt_in: false,
                 last_failure: None,
+                last_failure_cause: None,
+                coverage: None,
             })
         })
         .collect();
-    let pending = pending_consent(&availability, &consented)
+    let pending = pending_consent(&orchestrator, &availability, &consented)
         .into_iter()
         .map(str::to_string)
         .collect();
@@ -755,7 +922,19 @@ pub fn status(
         },
         scanners,
         other_reports,
+        suppressions: labelled.entries,
     })
+}
+
+/// The [`failure_cause`] of the failure log at `log`, read up to both
+/// captured streams' caps — more than a scan ever writes there, but bounded
+/// whatever else put a file in its place; `None` when it cannot be read.
+fn read_cause(log: &Path) -> Option<String> {
+    use std::io::Read;
+    let cap = crate::jobs::spawn::STDOUT_CAP + crate::jobs::spawn::STDERR_CAP;
+    let mut bytes = Vec::new();
+    std::fs::File::open(log).ok()?.take(cap as u64).read_to_end(&mut bytes).ok()?;
+    Some(failure_cause(&String::from_utf8_lossy(&bytes)))
 }
 
 // ── findings ─────────────────────────────────────────────────────────────────
@@ -766,7 +945,9 @@ pub fn status(
 /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FindingsFilter {
-    /// The least severity listed (`high` lists high and critical).
+    /// The least severity listed (`high` lists high and critical), compared
+    /// as a gate compares it: an `unrated` finding as `medium`. `unrated`
+    /// itself lists the unrated findings alone.
     pub severity: Option<Severity>,
     /// A registry name (`semgrep`) or a driver name (`Semgrep OSS`), either
     /// case.
@@ -811,7 +992,7 @@ impl FindingsFilter {
         let severity = severity
             .map(|t| {
                 Severity::from_str_stored(&t.to_ascii_lowercase())
-                    .ok_or_else(|| bad("severity", t, "critical, high, medium, low, info"))
+                    .ok_or_else(|| bad("severity", t, "critical, high, medium, low, info, unrated"))
             })
             .transpose()?;
         let suppression = suppression
@@ -850,8 +1031,9 @@ pub struct SecurityFindings {
     /// nothing was ever scanned or ingested — distinct from a report with no
     /// findings, which is listed here with `findings: 0`.
     pub scanned: Vec<ScannedReport>,
-    /// Installed, enabled scanners with no stored report — `status`'s
-    /// `never_run`, never a disabled or absent scanner.
+    /// Installed, enabled scanners with no stored report and something to
+    /// scan — `status`'s `never_run`, never a disabled, absent or
+    /// `not_applicable` scanner.
     pub never_run: Vec<&'static str>,
     /// Said when nothing was ever scanned or ingested.
     pub notice: Option<&'static str>,
@@ -883,6 +1065,10 @@ pub struct ScannedReport {
 pub struct ListedFinding {
     #[serde(flatten)]
     pub finding: SecurityFinding,
+    /// Why its severity reads as it does, when that is not plain: `unrated`'s
+    /// "the scanner gave none" ([`Severity::reason`]); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity_reason: Option<&'static str>,
     /// The categories it falls under, in OWASP's order.
     pub owasp: Vec<&'static str>,
     /// Why it falls under none, when it does not.
@@ -894,6 +1080,19 @@ pub struct ListedFinding {
     ///
     /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
     pub context: FindingContext,
+}
+
+impl ListedFinding {
+    /// Whether an unexpired entry suppresses it.
+    pub fn is_suppressed(&self) -> bool {
+        matches!(self.suppression, Some(Suppression::Suppressed { .. }))
+    }
+
+    /// Whether it counts, by [`counts`](crate::history::security::counts): the
+    /// one definition every security surface shares.
+    pub fn is_counted(&self) -> bool {
+        crate::history::security::counts(&self.finding, self.suppression.as_ref())
+    }
 }
 
 /// The notice a findings list carries when nothing is stored at all.
@@ -933,7 +1132,7 @@ pub fn findings(
         .map(|(s, _)| s.name)
         .collect();
     let owasp = classify(&view.findings, filter.edition, &looking);
-    let labelled = label(&view.findings, &ignore, today);
+    let labelled = label(&view.findings, &ignore, root, today);
 
     let total = labelled.findings.len();
     let kept: Vec<_> = labelled
@@ -954,6 +1153,7 @@ pub fn findings(
         .into_iter()
         .zip(contexts)
         .map(|((item, class), context)| ListedFinding {
+            severity_reason: item.finding.severity.reason(),
             finding: item.finding,
             owasp: class.categories,
             unclassified: class.unclassified,
@@ -974,9 +1174,13 @@ pub fn findings(
                 findings: s.finding_count,
             })
             .collect(),
+        // A scanner with nothing to scan here is `status`'s `not_applicable`,
+        // never `never_run` (S-769).
         never_run: availability
             .iter()
-            .filter(|(s, a)| *a == Availability::Installed && !stored.contains(s.driver))
+            .filter(|(s, a)| {
+                *a == Availability::Installed && !stored.contains(s.driver) && orchestrator.not_applicable(s).is_none()
+            })
             .map(|(s, _)| s.name)
             .collect(),
         notice: view.snapshots.is_empty().then_some(NOTHING_SCANNED),
@@ -995,7 +1199,10 @@ fn keeps(
     owasp: &[&'static str],
     suppression: Option<&Suppression>,
 ) -> bool {
-    let severity = filter.severity.is_none_or(|least| finding.severity >= least);
+    let severity = filter.severity.is_none_or(|least| match least {
+        Severity::Unrated => finding.severity == Severity::Unrated,
+        rated => finding.severity.gated_as() >= rated,
+    });
     let scanner = filter.scanner.as_deref().is_none_or(|want| {
         finding.scanner_name.eq_ignore_ascii_case(want)
             || super::scanner(&want.to_ascii_lowercase()).is_some_and(|s| s.driver == finding.scanner_name)

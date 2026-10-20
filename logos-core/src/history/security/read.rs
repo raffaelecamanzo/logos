@@ -12,7 +12,8 @@
 //! - **Freshness per file, by content hash** ([FR-CV-05] reapplied): a bound
 //!   finding is `fresh` while its file's current blake3 equals the anchor written
 //!   at ingest and `stale` once the file moved (or vanished); an unbound,
-//!   unmatched or ambiguous finding is `n/a` — there is no file to compare.
+//!   unmatched, ambiguous or historical finding is `n/a` — there is no file to
+//!   compare.
 //!
 //! Every read is ordered, so the result is byte-identical across runs for the
 //! same store and tree ([NFR-RA-06]).
@@ -29,7 +30,7 @@ use anyhow::{Context, Result};
 
 use rusqlite::OptionalExtension;
 
-use super::{ScannerSnapshot, SecurityBaseline, SecurityFinding, SecurityView};
+use super::{CommitAnchor, ScannerSnapshot, SecurityBaseline, SecurityFinding, SecurityView};
 use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE};
 
 /// Read every scanner's latest snapshot under `root`, findings freshness-resolved.
@@ -133,12 +134,15 @@ fn read_where(root: &Path, filter: &str, param: Option<&str>, with_findings: boo
                 message: row.message,
                 redacted: row.redacted,
                 binding: row.binding,
-                report_path: row.report_path,
                 path: row.path,
                 start_line: row.region.start_line,
                 start_column: row.region.start_column,
                 end_line: row.region.end_line,
                 end_column: row.region.end_column,
+                anchor: row.anchor_commit.zip(row.report_path.as_deref()).map(|(commit, path)| CommitAnchor::new(commit, path)),
+                report_path: row.report_path,
+                commits: row.commits,
+                legacy_fingerprints: row.legacy_fingerprints,
                 freshness,
             });
         }

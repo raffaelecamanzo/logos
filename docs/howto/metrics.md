@@ -394,10 +394,14 @@ When `gate` finds a baseline whose `metric_version` differs from the engine's
 current version, comparing the two numbers would be meaningless — so instead of
 failing against an incomparable baseline, the gate **re-baselines
 automatically**: it records a fresh baseline, reports `baseline reset: metric
-semantics changed`, and passes informationally. The analogous case for a changed
-`thresholds_hash` reports `baseline reset: metric thresholds changed`. Either
-way, the *next* gate finds a matching version/hash and compares normally — so an
-existing project can upgrade across a semantics change, or an operator can re-tune
+semantics changed (v7 8292 → v8 8295)` — the version and signal of the baseline
+it replaced, then of the run — and passes informationally. The analogous case
+for a changed `thresholds_hash` reports `baseline reset: metric thresholds
+changed (v8 8292 → v8 8295)`. A side with no signal to score shows its version
+alone. `--json` carries the same figures as `baseline_reset` (`cause`, and
+`from` / `to`, each with `metric_version` and `signal`). The exit code is the
+pass it always was. Either way, the *next* gate finds a matching version/hash
+and compares normally — so an existing project can upgrade across a semantics change, or an operator can re-tune
 a threshold, without a spurious gate failure. (The version guard is checked
 first, so a pre-v3 baseline re-baselines once on the upgrade, not twice.)
 
@@ -418,10 +422,10 @@ another non-declaring language loses Cohesion (or keeps it only over its
 declaring-language classes). A graph with at least five cross-module edges whose
 classes are all in a declaring language scores exactly as under v7.
 
-**What you see on upgrade.** The first `gate` (or `session_start`) after the
-upgrade reports `baseline reset: metric semantics changed` and passes
-informationally; the next one compares normally. Nothing is re-extracted: the
-next `scan` scores under v8.
+**What you see on upgrade.** The first `gate` (or `session_end`) after the
+upgrade reports `baseline reset: metric semantics changed (v7 8292 → v8 8295)`
+and passes informationally; the next one compares normally. Nothing is
+re-extracted: the next `scan` scores under v8.
 
 ### Metric semantics version 7 — declarative code stops counting
 
@@ -449,10 +453,10 @@ bodyless callables and no exact duplicate shorter than the floor scores as
 before. The Uniqueness value is unchanged; only its offender list is reordered (largest
 duplicated mass first).
 
-**What you see on upgrade.** The first `gate` (or `session_start`) after the
-upgrade reports `baseline reset: metric semantics changed` and passes
-informationally; the next one compares normally. Nothing needs re-blessing by
-hand. The upgrade also re-extracts every file once to record which callables
+**What you see on upgrade.** The first `gate` (or `session_end`) after the
+upgrade reports `baseline reset: metric semantics changed (v6 8290 → v7 8291)`
+(figures illustrative) and passes informationally; the next one compares
+normally. Nothing needs re-blessing by hand. The upgrade also re-extracts every file once to record which callables
 have a body: until a file is re-extracted its callables count as **bodied**
 (never as bodyless), so the scores move only as the fact is recorded — run
 `logos scan` (or `logos index`) once to score the whole tree under v7. A bare

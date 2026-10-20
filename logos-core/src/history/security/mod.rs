@@ -10,9 +10,13 @@
 //!    ([FR-SC-03]).
 //! 2. **bind** — each report path binds to one indexed file through the binder
 //!    coverage uses ([`PathMapper`]); an ambiguous path is unmatched with its
-//!    candidates count, never guessed ([FR-SC-02]).
+//!    candidates count, never guessed ([FR-SC-02]). A history-mode Gitleaks
+//!    result keeps its binding only where today's line still holds its
+//!    secret; otherwise it is `historical`, anchored to its commit (S-767).
 //! 3. **fingerprint + anchor + persist** ([store]) — each finding is keyed by its
-//!    fingerprint ([`fingerprint`]); each bound file is anchored by content hash;
+//!    fingerprint ([`fingerprint`]; a Gitleaks one by its secret,
+//!    [`secret_fingerprint`], so the per-commit repeats of one secret are one
+//!    finding listing its commits); each bound file is anchored by content hash;
 //!    the snapshot is anchored to HEAD and the scanner ([FR-SC-02]).
 //!
 //! [`read_latest`] is the reader the later stories build on. There is no CLI, MCP
@@ -39,9 +43,16 @@ pub mod owasp;
 mod parse;
 mod read;
 mod redact;
+mod secret;
 mod store;
 mod suppress;
 
+#[cfg(test)]
+mod anchor_tests;
+#[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
+mod path_suppress_tests;
 #[cfg(test)]
 mod suppress_tests;
 #[cfg(test)]
@@ -60,8 +71,8 @@ pub use owasp::{classify, OwaspEdition, OwaspReport};
 pub use parse::{ParsedFinding, ParsedRun, Region, SecurityFormat};
 pub use read::{latest_snapshots, read_at, read_baseline, read_latest};
 pub use suppress::{
-    label, parse_expires, suppress, unsuppress, EntryStatus, IgnoreEntry, IgnoreFile, IgnoreWrite, Labelled, LabelledFinding,
-    Suppression, IGNORE_FILE,
+    canonical_path, counts, label, parse_expires, project_location, suppress, unsuppress, EntryMatcher, EntryStatus,
+    IgnoreEntry, IgnoreFile, IgnoreWrite, Labelled, LabelledFinding, Selector, Suppression, IGNORE_FILE,
 };
 
 /// Detect, parse and validate a security report's text — the parser on its own,
@@ -93,6 +104,7 @@ impl Severity {
         Some(match token {
             "info" => Severity::Info,
             "low" => Severity::Low,
+            "unrated" => Severity::Unrated,
             "medium" => Severity::Medium,
             "high" => Severity::High,
             "critical" => Severity::Critical,
@@ -102,8 +114,13 @@ impl Severity {
 
     /// The severity a SARIF result states: its `security-severity` CVSS score
     /// when one is given (the bands GitHub code scanning uses), else its level
-    /// (`error` high, `warning` medium, `note` low, `none` info), else SARIF's
-    /// default level, `warning`.
+    /// (`error` high, `warning` medium, `note` low, `none` info). `level` is
+    /// `None` when the result's level is no rating: SARIF's implicit default
+    /// (no result level and no rule `defaultConfiguration.level`, which does
+    /// rate), or the level its scanner writes on every result ([`parse`]
+    /// decides). It reads `unrated`, never `medium` ([S-768]).
+    ///
+    /// [S-768]: ../../../../docs/planning/journal.md#s-768-osv-scanner-severities-are-never-made-up
     pub(crate) fn from_sarif(cvss: Option<f64>, level: Option<&str>) -> Self {
         if let Some(score) = cvss {
             return if score >= 9.0 {
@@ -120,9 +137,10 @@ impl Severity {
         }
         match level {
             Some("error") => Severity::High,
+            Some("warning") => Severity::Medium,
             Some("note") => Severity::Low,
             Some("none") => Severity::Info,
-            _ => Severity::Medium,
+            _ => Severity::Unrated,
         }
     }
 }
@@ -141,6 +159,14 @@ pub enum FindingBinding {
     Ambiguous,
     /// The result has no physical location. Kept and listed, never dropped.
     Unbound,
+    /// A history-mode result whose secret is not on its line in the current
+    /// tree — its file is gone, or the line holds other text now — or could not
+    /// be read to tell: anchored to its commit ([`SecurityFinding::anchor`])
+    /// instead, never to today's file and line ([S-767], history.db
+    /// migration 8). It still counts.
+    ///
+    /// [S-767]: ../../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
+    Historical,
 }
 
 impl FindingBinding {
@@ -151,6 +177,7 @@ impl FindingBinding {
             FindingBinding::Unmatched => "unmatched",
             FindingBinding::Ambiguous => "ambiguous",
             FindingBinding::Unbound => "unbound",
+            FindingBinding::Historical => "historical",
         }
     }
 
@@ -161,6 +188,7 @@ impl FindingBinding {
             "unmatched" => FindingBinding::Unmatched,
             "ambiguous" => FindingBinding::Ambiguous,
             "unbound" => FindingBinding::Unbound,
+            "historical" => FindingBinding::Historical,
             _ => return None,
         })
     }
@@ -204,6 +232,21 @@ pub struct SecurityFinding {
     pub end_line: Option<i64>,
     /// 1-based end column, as the report gave it.
     pub end_column: Option<i64>,
+    /// The commits the secret was found in, newest first — one finding per
+    /// secret however many commits hold it ([FR-SC-02]); empty when the report
+    /// named none (a scoped Gitleaks run, every other scanner).
+    pub commits: Vec<String>,
+    /// The fingerprints this finding's results had before a Gitleaks finding
+    /// was keyed by its secret (history.db migration 7), sorted: what names
+    /// the fingerprint an ignore entry written under the old identity should
+    /// name instead ([`suppress::label`]). Not serialised.
+    #[serde(skip)]
+    pub legacy_fingerprints: Vec<String>,
+    /// The commit a history-mode finding is anchored to — the one whose place
+    /// its region and report path are — and its path there (history.db
+    /// migration 8); `None` when the report named no commit. Every surface
+    /// shows its [`short_commit`](CommitAnchor::short_commit).
+    pub anchor: Option<CommitAnchor>,
     /// `"fresh"`, `"stale"` (the file moved since ingest) or `"n/a"` (no bound
     /// file), decided at read time.
     pub freshness: &'static str,
@@ -217,6 +260,32 @@ impl SecurityFinding {
         self.path
             .clone()
             .or_else(|| self.report_path.as_deref().map(normalise_report_path))
+    }
+}
+
+/// The commit a history-mode finding is anchored to ([S-767]). No author,
+/// email or commit message is in it, nor stored anywhere ([FR-SC-03]).
+///
+/// [S-767]: ../../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommitAnchor {
+    /// The full commit id.
+    pub commit: String,
+    /// Its first [`SHORT_COMMIT`] digits: the one spelling the CLI, MCP and
+    /// the Security page show.
+    pub short_commit: String,
+    /// The path the report named at that commit, separator-normalised.
+    pub path: String,
+}
+
+/// How many digits of a commit id every surface shows.
+pub const SHORT_COMMIT: usize = 7;
+
+impl CommitAnchor {
+    /// The anchor at `commit`, where the report named `path`.
+    pub(crate) fn new(commit: String, path: &str) -> Self {
+        let short_commit = commit.chars().take(SHORT_COMMIT).collect();
+        Self { commit, short_commit, path: normalise_report_path(path) }
     }
 }
 
@@ -342,6 +411,9 @@ pub struct SecurityIngestSummary {
     pub bound: usize,
     /// Findings with no physical location — kept, listed as unbound.
     pub unbound: usize,
+    /// History-mode findings anchored to their commit, not to the current tree
+    /// ([`FindingBinding::Historical`]).
+    pub historical: usize,
     /// Secret-class findings whose message was redacted.
     pub redacted: usize,
     /// Report paths that bound to no single indexed file, with candidate counts.
@@ -423,16 +495,23 @@ pub fn ingest_scoped(
     let mapper = PathMapper::new(indexed_paths, &[]);
     let mut anchors: HashMap<String, Option<String>> = HashMap::new();
     let mut unmatched: BTreeSet<UnmatchedPath> = BTreeSet::new();
-    let (mut total, mut bound, mut unbound, mut redacted) = (0, 0, 0, 0);
+    let (mut total, mut bound, mut unbound, mut historical, mut redacted) = (0, 0, 0, 0, 0);
     let mut batches = Vec::with_capacity(grouped.len());
+    // Opened once, for a report that holds Gitleaks results.
+    let mut digests = grouped
+        .keys()
+        .any(|name| redact::is_gitleaks(name))
+        .then(|| secret::SecretDigests::open(root))
+        .flatten();
     for (name, (version, parsed)) in grouped {
         let mut files: BTreeMap<String, String> = BTreeMap::new();
         let mut seen: HashMap<String, usize> = HashMap::new();
-        let mut findings = Vec::with_capacity(parsed.len());
+        let mut keyed: Vec<KeyedResult> = Vec::with_capacity(parsed.len());
+        let gitleaks = redact::is_gitleaks(&name);
         for f in parsed {
             // Bind without side effects first: a scoped report's finding outside
             // its scope leaves no anchor and no unmatched entry behind.
-            let ReportBinding { binding, path, anchor, miss } = match f.report_path.as_deref() {
+            let ReportBinding { mut binding, mut path, mut anchor, miss } = match f.report_path.as_deref() {
                 None => ReportBinding::unbound(),
                 Some(report) => bind_report_path(root, &mapper, &mut anchors, report),
             };
@@ -442,31 +521,55 @@ pub fn ingest_scoped(
                     continue;
                 }
             }
-            if let Some((indexed, hash)) = anchor {
-                files.insert(indexed, hash);
-            }
             if let Some(miss) = miss {
                 unmatched.insert(miss);
             }
-            total += 1;
-            bound += usize::from(binding == FindingBinding::Bound);
-            unbound += usize::from(binding == FindingBinding::Unbound);
-            redacted += usize::from(f.redacted);
 
-            let fingerprint = occurrence(&mut seen, fingerprint(&f, path.as_deref()));
-            findings.push(FindingRow {
-                fingerprint,
-                rule_id: f.rule_id,
-                severity: f.severity,
-                cwes: f.cwes,
-                message: f.message,
-                redacted: f.redacted,
-                binding,
-                report_path: f.report_path,
-                path,
-                region: f.region,
-                scoped: scope.is_some(),
+            // Keyed by the path as it bound, historical or not, so a finding
+            // keeps its key when it turns historical. A limitation: a result
+            // whose file is gone binds by path suffix to whatever indexed file
+            // shares it, so a history-only secret's key can change when such a
+            // file is added or removed (sprint 107 review, D4; the owner's).
+            let report_key = occurrence(&mut seen, fingerprint(&f, path.as_deref()));
+            let secret_key = gitleaks
+                .then_some(digests.as_mut())
+                .flatten()
+                .and_then(|digests| secret_fingerprint(digests, &f, path.as_deref()));
+            if f.commit.is_some() && !still_on_its_line(digests.as_mut(), &f, path.as_deref()) {
+                (binding, path, anchor) = (FindingBinding::Historical, None, None);
+            }
+            if let Some((indexed, hash)) = anchor {
+                files.insert(indexed, hash);
+            }
+            keyed.push(KeyedResult {
+                secret_key,
+                report_key,
+                committed_at: f.committed_at,
+                row: FindingRow {
+                    fingerprint: String::new(),
+                    rule_id: f.rule_id,
+                    severity: f.severity,
+                    cwes: f.cwes,
+                    message: f.message,
+                    redacted: f.redacted,
+                    binding,
+                    report_path: f.report_path,
+                    path,
+                    region: f.region,
+                    scoped: scope.is_some(),
+                    anchor_commit: f.commit.clone(),
+                    commits: f.commit.into_iter().collect(),
+                    legacy_fingerprints: Vec::new(),
+                },
             });
+        }
+        let findings = collapse(keyed);
+        for f in &findings {
+            total += 1;
+            bound += usize::from(f.binding == FindingBinding::Bound);
+            unbound += usize::from(f.binding == FindingBinding::Unbound);
+            historical += usize::from(f.binding == FindingBinding::Historical);
+            redacted += usize::from(f.redacted);
         }
         batches.push(ScannerBatch {
             name,
@@ -499,6 +602,7 @@ pub fn ingest_scoped(
         findings: total,
         bound,
         unbound,
+        historical,
         redacted,
         unmatched: unmatched.into_iter().collect(),
         already_ingested: outcome.already_ingested,
@@ -606,7 +710,9 @@ fn occurrence(seen: &mut HashMap<String, usize>, base: String) -> String {
 /// when it gives one, otherwise its region — in **both** cases hashed together
 /// with the rule id and the path, so the stored key is a fixed-length blake3 hex
 /// that holds none of the report's fingerprint values (Gitleaks' carry commit
-/// authors and messages).
+/// authors and messages). A Gitleaks finding whose secret can be read is keyed
+/// by [`secret_fingerprint`] instead, and keeps this key only as a legacy
+/// fingerprint: the one it had before history.db migration 7.
 ///
 /// - The **rule id** is folded in because a report fingerprint can be shared
 ///   across rules: CodeQL's line hash is, when two rules fire on one line.
@@ -646,6 +752,127 @@ pub(crate) fn fingerprint(f: &ParsedFinding, bound_path: Option<&str>) -> String
         )
     };
     blake3::hash(canonical.as_bytes()).to_hex().to_string()
+}
+
+/// A Gitleaks finding's identity ([FR-SC-02] as amended by CR-238 Amendment 1,
+/// [ADR-79]): the rule, the path — as [`fingerprint`] spells it — and the
+/// keyed digest of the secret ([`secret`]), hashed together. The report's own
+/// fingerprint differs per commit and is left out, so every commit that holds
+/// one secret, and a scoped run's reading of it, give one key; its position is
+/// left out, so a moved line keeps it. `None` when the secret cannot be read:
+/// the result keeps its report-keyed identity.
+fn secret_fingerprint(digests: &mut secret::SecretDigests, f: &ParsedFinding, bound_path: Option<&str>) -> Option<String> {
+    const SEP: char = '\u{1f}';
+    let report_path = f.report_path.as_deref().map(normalise_report_path)?;
+    // A history-mode result is read where the commit had it, a scoped one where
+    // the scan read it: the bound file, else the path as reported.
+    let source = match (&f.commit, bound_path) {
+        (None, Some(bound)) => bound.to_string(),
+        _ => report_path.clone(),
+    };
+    let digest = digests.digest(f.commit.as_deref(), &source, &f.region)?;
+    let path = bound_path.map_or(report_path, str::to_string);
+    let canonical = format!(
+        "logos-finding-v2{SEP}secret{SEP}{}{SEP}{path}{SEP}{}",
+        f.rule_id,
+        blake3::Hash::from(digest).to_hex()
+    );
+    Some(blake3::hash(canonical.as_bytes()).to_hex().to_string())
+}
+
+/// Whether a history-mode result's secret is still on its line in the
+/// current tree ([S-767]): in the indexed file its report path bound to, else
+/// in the file the report names — a file outside the index (a `.env`) that still holds
+/// it is no secret found only in history. `false` when that file is gone, its
+/// secret cannot be read, or the line holds other text now — it is then
+/// [`FindingBinding::Historical`].
+///
+/// [S-767]: ../../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
+fn still_on_its_line(digests: Option<&mut secret::SecretDigests>, f: &ParsedFinding, bound_path: Option<&str>) -> bool {
+    let (Some(digests), Some(commit), Some(report)) = (digests, f.commit.as_deref(), f.report_path.as_deref()) else {
+        return false;
+    };
+    let report = normalise_report_path(report);
+    let tree = bound_path.unwrap_or(&report);
+    digests.still_on_its_line(commit, &report, tree, &f.region) == Some(true)
+}
+
+/// One result of a report, keyed both ways before [`collapse`].
+struct KeyedResult {
+    /// Its secret-keyed identity ([`secret_fingerprint`]); `None` when it has none.
+    secret_key: Option<String>,
+    /// Its report-keyed identity ([`fingerprint`] with its occurrence suffix):
+    /// the key it had before history.db migration 7.
+    report_key: String,
+    /// Its commit's date, which orders a secret's commits.
+    committed_at: Option<String>,
+    /// The row, its fingerprint not yet set.
+    row: FindingRow,
+}
+
+/// One finding per identity: the results that share a secret-keyed identity
+/// are one finding listing their commits newest first, at the place the newest
+/// commit holds the secret — the newest whose place still holds it today, when
+/// one does, so the finding is bound wherever the secret is still on its line
+/// ([S-767]) — with every report key among them recorded as a
+/// legacy fingerprint. A result with no secret key is a finding of its own,
+/// keyed by its report, as every other scanner's. In report order of each
+/// finding's first result.
+fn collapse(results: Vec<KeyedResult>) -> Vec<FindingRow> {
+    let mut groups: Vec<Vec<KeyedResult>> = Vec::new();
+    let mut by_key: HashMap<String, usize> = HashMap::new();
+    for result in results {
+        match result.secret_key.clone() {
+            None => groups.push(vec![result]),
+            Some(key) => match by_key.get(&key) {
+                Some(&at) => groups[at].push(result),
+                None => {
+                    by_key.insert(key, groups.len());
+                    groups.push(vec![result]);
+                }
+            },
+        }
+    }
+    groups
+        .into_iter()
+        .map(|mut group| {
+            // Newest commit first (an ISO date sorts as text; none last), then
+            // by commit and position, so the answer is the same in any report
+            // order.
+            group.sort_by(|a, b| {
+                b.committed_at
+                    .is_some()
+                    .cmp(&a.committed_at.is_some())
+                    .then_with(|| b.committed_at.cmp(&a.committed_at))
+                    .then_with(|| a.row.commits.cmp(&b.row.commits))
+                    .then_with(|| region_key(&a.row.region).cmp(&region_key(&b.row.region)))
+            });
+            let mut commits: Vec<String> = Vec::new();
+            for commit in group.iter().flat_map(|r| r.row.commits.iter()) {
+                if !commits.contains(commit) {
+                    commits.push(commit.clone());
+                }
+            }
+            let legacy: BTreeSet<String> = group.iter().map(|r| r.report_key.clone()).collect();
+            let place = group.iter().position(|r| r.row.binding != FindingBinding::Historical).unwrap_or(0);
+            let first = group.swap_remove(place);
+            let mut row = first.row;
+            match first.secret_key {
+                Some(key) => {
+                    row.fingerprint = key;
+                    row.legacy_fingerprints = legacy.into_iter().collect();
+                }
+                None => row.fingerprint = first.report_key,
+            }
+            row.commits = commits;
+            row
+        })
+        .collect()
+}
+
+/// A region as an ordering key.
+fn region_key(r: &Region) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    (r.start_line, r.start_column, r.end_line, r.end_column)
 }
 
 /// Whether `path` — project-relative, `/`-separated — is one of a scoped run's

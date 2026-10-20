@@ -4095,6 +4095,195 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 38");
     }
 
+    /// Migration 39 ([FR-GV-16], S-755) adds the re-bless record — `reason` and
+    /// `attribution` — to `baseline`: forward-only and purely additive, so the
+    /// saved anchor crosses 38 → 39 byte for byte with both new columns `NULL`.
+    ///
+    /// [FR-GV-16]: ../../../../docs/specs/requirements/FR-GV-16.md
+    #[test]
+    fn migration_39_adds_the_baseline_record_and_keeps_the_anchor() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..38]).unwrap();
+        conn.execute(
+            "INSERT INTO metric_snapshots (
+                 id, created_at, node_count, edge_count, function_count,
+                 test_function_count, metric_version, empty,
+                 modularity_raw, modularity_normalized,
+                 acyclicity_raw, acyclicity_normalized,
+                 depth_raw, depth_normalized,
+                 equality_raw, equality_normalized,
+                 redundancy_raw, redundancy_normalized,
+                 thresholds_hash, aggregate_signal)
+             VALUES (7, 1000, 14, 40, 9, 2, 8, 0,
+                     0.2, 0.46, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0, 'h', 8000)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO baseline (scope, snapshot_id, created_at) VALUES ('project', 7, 1001)", [])
+            .unwrap();
+        let before = read_table(&conn, "baseline", "scope");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..39]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 39, "38 → 39, exactly one step");
+        let after = read_table(&conn, "baseline", "scope");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].len(), before[0].len() + 2, "exactly two columns added");
+        assert_eq!(&after[0][..before[0].len()], &before[0][..], "the anchor verbatim");
+        assert!(after[0][before[0].len()..].iter().all(|v| v == "NULL"), "nothing back-filled: {after:?}");
+        let appended: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('baseline') ORDER BY cid DESC LIMIT 2")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(appended, ["attribution", "reason"]);
+
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 39", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 39 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 39");
+    }
+
+    /// Migration 40 ([FR-QM-17], [CR-238] D7, S-761) rebuilds the two insight
+    /// tables with `node_id TEXT`: every pre-migration row crosses 39 → 40 in
+    /// rank order with every other column verbatim, and its storage id cleared
+    /// to `NULL` — read back through the store's own read as "not recorded",
+    /// never as an identity. The rebuilt tables keep their keys, checks and
+    /// snapshot reference, and admit an identity.
+    ///
+    /// [FR-QM-17]: ../../../../docs/specs/requirements/FR-QM-17.md
+    /// [CR-238]: ../../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+    #[test]
+    fn migration_40_gives_the_insight_rows_an_identity_and_clears_the_storage_ids() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..39]).unwrap();
+        conn.execute(
+            "INSERT INTO metric_snapshots (
+                 id, created_at, node_count, edge_count, function_count,
+                 test_function_count, metric_version, empty,
+                 modularity_raw, modularity_normalized,
+                 acyclicity_raw, acyclicity_normalized,
+                 depth_raw, depth_normalized,
+                 equality_raw, equality_normalized,
+                 redundancy_raw, redundancy_normalized,
+                 thresholds_hash, aggregate_signal, insight_recorded)
+             VALUES (7, 1000, 14, 40, 9, 2, 8, 0,
+                     0.2, 0.46, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0, 'h', 8000, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO metric_snapshot_fix_units
+                 (snapshot_id, rank, kind, node_id, name, file, line, dimensions, points, detail, outliers)
+             VALUES (7, 1, 'function', 49, 'deep', 'src/d.rs', 3, 'nesting', 4, 'nesting depth 6', 'nesting'),
+                    (7, 2, 'class', 12, 'C', NULL, NULL, 'cohesion,focus', 2, 'LCOM4 3', '');
+             INSERT INTO metric_snapshot_outlier_measures (snapshot_id, measure, units, fence, threshold, labelled)
+             VALUES (7, 'nesting', 9, 2.5, 4, 1);
+             INSERT INTO metric_snapshot_outlier_labels (snapshot_id, measure, rank, node_id, name, file, line, value)
+             VALUES (7, 'nesting', 1, 49, 'deep', 'src/d.rs', 3, 6);",
+        )
+        .unwrap();
+        let units_before = read_table(&conn, "metric_snapshot_fix_units", "snapshot_id, rank");
+        let labels_before = read_table(&conn, "metric_snapshot_outlier_labels", "snapshot_id, measure, rank");
+        let measures_before = read_table(&conn, "metric_snapshot_outlier_measures", "snapshot_id, measure");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..40]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 40, "39 → 40, exactly one step");
+        // Every column verbatim but `node_id` (column 3 of both), which is cleared.
+        let cleared = |rows: &[Vec<String>]| -> Vec<Vec<String>> {
+            rows.iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    r[3] = "NULL".to_string();
+                    r
+                })
+                .collect()
+        };
+        assert_eq!(
+            read_table(&conn, "metric_snapshot_fix_units", "snapshot_id, rank"),
+            cleared(&units_before),
+            "the units cross verbatim, their storage ids cleared"
+        );
+        assert_eq!(
+            read_table(&conn, "metric_snapshot_outlier_labels", "snapshot_id, measure, rank"),
+            cleared(&labels_before),
+            "the labels cross verbatim, their storage ids cleared"
+        );
+        assert_eq!(
+            read_table(&conn, "metric_snapshot_outlier_measures", "snapshot_id, measure"),
+            measures_before,
+            "the measures are untouched"
+        );
+        for table in ["metric_snapshot_fix_units", "metric_snapshot_outlier_labels"] {
+            let (column, ty, not_null): (String, String, bool) = conn
+                .query_row(
+                    &format!("SELECT name, type, \"notnull\" FROM pragma_table_info('{table}') WHERE cid = 3"),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((column.as_str(), ty.as_str(), not_null), ("node_id", "TEXT", false), "{table}");
+            let leftovers: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = ?1",
+                    [format!("{table}_v39")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(leftovers, 0, "the set-aside copy of {table} is dropped");
+        }
+
+        // Read back through the store's own read: the old rows say "not
+        // recorded", never a storage id reread as an identity.
+        let mut old = crate::models::quality::WhereToStart::recorded();
+        super::super::read_snapshot_insight(&conn, 7, &mut old).unwrap();
+        assert_eq!(old.units.len(), 2);
+        assert!(old.units.iter().all(|u| u.node_id.is_none()), "{:?}", old.units);
+        let label = &old.outliers[0].labels[0];
+        assert_eq!((label.node_id.as_deref(), label.value), (None, 6));
+        // And the payload says so: `"node_id": null`, never an absent key.
+        let json = serde_json::to_value(&old).unwrap();
+        assert_eq!(json["units"][0].get("node_id"), Some(&serde_json::Value::Null), "{json}");
+        assert_eq!(json["outliers"][0]["labels"][0].get("node_id"), Some(&serde_json::Value::Null), "{json}");
+
+        // The rebuilt tables keep their key, checks and snapshot reference, and
+        // admit an identity.
+        let unit = |snapshot: i64, rank: i64, points: i64| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_fix_units
+                     (snapshot_id, rank, kind, node_id, name, dimensions, points, detail, outliers)
+                 VALUES (?1, ?2, 'function', 'src/`d.rs`/deep().', 'deep', 'nesting', ?3, '', '')",
+                rusqlite::params![snapshot, rank, points],
+            )
+        };
+        unit(7, 3, 5).expect("an identity is admitted");
+        assert!(unit(7, 3, 5).is_err(), "a (snapshot, rank) is unique");
+        assert!(unit(7, 0, 5).is_err(), "ranks are 1-based");
+        assert!(unit(7, 4, 0).is_err(), "a ranked unit recovers at least one point");
+        assert!(unit(99, 1, 5).is_err(), "a unit names an existing snapshot");
+        let label = |snapshot: i64, rank: i64| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_outlier_labels (snapshot_id, measure, rank, node_id, name, value)
+                 VALUES (?1, 'nesting', ?2, 'clone_group:0123456789abcdef', 'g', 9)",
+                rusqlite::params![snapshot, rank],
+            )
+        };
+        label(7, 2).expect("a group identity is admitted");
+        assert!(label(7, 2).is_err(), "a (snapshot, measure, rank) is unique");
+        assert!(label(7, 0).is_err(), "ranks are 1-based");
+        assert!(label(99, 1).is_err(), "a label names an existing snapshot");
+
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 40", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 40 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 40");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

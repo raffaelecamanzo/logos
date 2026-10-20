@@ -60,7 +60,7 @@ pub struct SymbolContext {
 impl Default for SymbolContext {
     fn default() -> Self {
         Self {
-            scheme: "logos".to_string(),
+            scheme: LogosSymbol::SCHEME.to_string(),
             manager: String::new(),
             package: String::new(),
             version: String::new(),
@@ -263,7 +263,7 @@ pub(crate) fn build_symbol(
     scope_chain: &[String],
 ) -> anyhow::Result<LogosSymbol> {
     let mut raw = String::new();
-    raw.push_str(field(&ctx.scheme, "logos"));
+    raw.push_str(field(&ctx.scheme, LogosSymbol::SCHEME));
     raw.push(' ');
     raw.push_str(dot(&ctx.manager));
     raw.push(' ');

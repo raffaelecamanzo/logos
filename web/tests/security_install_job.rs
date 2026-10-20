@@ -37,7 +37,7 @@ use axum::{
 use http_body_util::BodyExt;
 use logos_core::config::{load_scan_consent, INSTALL_CONSENT_FILE};
 use logos_core::security::{scanner, ScanEnvironment};
-use logos_core::tools::{sha256_file, Layout, Manifest, Platform, CODEQL_LICENCE};
+use logos_core::tools::{sha256_file, Layout, Manifest, Platform, ToolEntry, CODEQL_LICENCE};
 use logos_core::Engine;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -81,6 +81,8 @@ impl World {
             w.server().display()
         ));
         fs::write(w.root().join("main.py"), "def main():\n    return 1\n").unwrap();
+        // A Go file too, so gosec has something to scan (S-769).
+        fs::write(w.root().join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
         git(&w.root(), &["init", "-q", "-b", "main"]);
         git(&w.root(), &["add", "."]);
         git(&w.root(), &["commit", "-q", "-m", "seed"]);
@@ -144,6 +146,25 @@ impl World {
 
     fn downloads(&self) -> Vec<String> {
         fs::read_to_string(self.rec().join("curl.log"))
+            .map(|t| t.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Put a user's own copy of `tool` on the search path, printing `version`
+    /// and recording each invocation, the version probe included, in
+    /// `rec/<tool>.calls`.
+    fn own_copy(&self, tool: &str, version: &str) {
+        let body = scanner_script(tool, version).replacen(
+            "#!/bin/sh\n",
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/{tool}.calls'\n", self.rec().display()),
+            1,
+        );
+        script(&self.bin().join(tool), &body);
+    }
+
+    /// Every invocation of the user's own copy of `tool`, one line each.
+    fn calls(&self, tool: &str) -> Vec<String> {
+        fs::read_to_string(self.rec().join(format!("{tool}.calls")))
             .map(|t| t.lines().map(str::to_string).collect())
             .unwrap_or_default()
     }
@@ -487,7 +508,9 @@ async fn cancelling_mid_download_leaves_no_partial_tool_and_reports_what_was_ins
             assert!(Instant::now() < deadline, "the download never started hanging");
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
-        assert_eq!(w.staging().len(), 1, "the half download sits in staging: {:?}", w.staging());
+        // Beside its lock file, which marks the download as a running install's.
+        let downloads: Vec<PathBuf> = w.staging().into_iter().filter(|p| p.extension().is_none_or(|e| e != "lock")).collect();
+        assert_eq!(downloads.len(), 1, "the half download sits in staging: {:?}", w.staging());
 
         let (status, refused) = page.post("/api/v1/security/scan", &json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "a scan beside the install is refused: {refused}");
@@ -560,6 +583,67 @@ async fn a_scan_refused_beside_an_install_records_no_consent() {
         assert!(refused["error"].as_str().unwrap().contains("being installed"), "{refused}");
         let consented = load_scan_consent(Some(&w.user())).unwrap().consented(&w.root());
         assert!(consented.is_empty(), "a refused scan records no consent: {consented:?}");
+
+        page.post("/api/v1/security/install/cancel", &json!({})).await;
+        assert_eq!(page.ended().await["state"], "cancelled");
+    })
+    .await;
+}
+
+/// S-758 AC 3: while the web UI installs a scanner, a scan of the project is
+/// refused on every other surface, naming the install job — an MCP scan in
+/// the same `serve`, a CLI scan and a CLI install on an engine of their own —
+/// and none of them starts a process: not even the user's own scanner's
+/// version probe.
+#[tokio::test]
+async fn beside_a_web_install_mcp_and_cli_scans_and_installs_are_refused_naming_it() {
+    bounded(async {
+        let w = World::new();
+        let manifest = w.manifest(&[]);
+        w.own_copy("bandit", "1.7.10");
+        logos_core::config::record_scan_consent(Some(&w.user()), &w.root(), &["bandit"]).unwrap();
+        let page = w.page(&manifest);
+        let tool = manifest.tools.iter().find(|t| t.is_default()).unwrap().tool.clone();
+        w.curl("/bin/sleep 60 & wait");
+        let (_, asked) = page.post("/api/v1/security/install", &json!({ "tools": [tool] })).await;
+        let (status, started) =
+            page.post("/api/v1/security/install", &json!({ "tools": [tool], "consent": accepted(&asked["plan"]) })).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let job = started["job"]["id"].as_u64().unwrap();
+        let deadline = Instant::now() + JOB_WAIT;
+        while w.downloads().is_empty() {
+            assert!(Instant::now() < deadline, "the install never started its download");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let named = format!(
+            "a scanner install is already running on this project: job {job}, started from the web UI by Logos process {} ",
+            std::process::id()
+        );
+
+        let engine = Arc::clone(&page.engine);
+        let mcp = tokio::task::spawn_blocking(move || {
+            logos_core::observability::in_surface(logos_core::observability::Surface::Mcp, || {
+                engine.security_scan_selected(false, &logos_core::security::ScanRequest::full(), |_| {})
+            })
+        })
+        .await
+        .unwrap()
+        .expect_err("an MCP scan beside the install is refused");
+        assert!(mcp.to_string().starts_with(&named), "{mcp}");
+
+        let cli = w.page(&manifest).engine;
+        let (scan, install) = tokio::task::spawn_blocking(move || {
+            logos_core::observability::in_surface(logos_core::observability::Surface::Cli, || {
+                (cli.security_scan(false).map(|_| ()), cli.security_scan_install(true).map(|_| ()))
+            })
+        })
+        .await
+        .unwrap();
+        for refused in [scan.expect_err("a CLI scan is refused"), install.expect_err("a CLI install & scan is refused")] {
+            assert!(refused.to_string().starts_with(&named), "{refused}");
+        }
+        assert_eq!(w.calls("bandit"), Vec::<String>::new(), "no refused scan started a process");
+        assert_eq!(w.downloads().len(), 1, "only the web install downloads: {:?}", w.downloads());
 
         page.post("/api/v1/security/install/cancel", &json!({})).await;
         assert_eq!(page.ended().await["state"], "cancelled");
@@ -784,6 +868,130 @@ async fn install_and_scan_again_asks_only_what_is_missing() {
         assert_eq!(job["state"], "completed", "{job}");
         assert_eq!(job["result"]["install"]["tools"][0]["tool"], gitleaks.tool.as_str(), "{job}");
         assert_eq!(job["result"]["install"]["tools"][0]["outcome"], "installed", "{job}");
+    })
+    .await;
+}
+
+/// Admission decides on recorded state only (S-766, [FR-SC-24]): until the
+/// consent dialog is answered, Install & scan starts no process, not even the
+/// version probe of the user's own copy on the search path. The dialog shows
+/// the lines it always showed: that copy kept, each missing tool, the opt-in
+/// pair offered, the Java runtime and the CodeQL licence. Once the dialog is
+/// answered, the job runs that copy as any scan does.
+#[tokio::test]
+async fn admission_starts_no_process_before_consent_and_shows_the_same_lines() {
+    bounded(async {
+        let w = World::new();
+        let manifest = w.manifest(&[]);
+        let page = w.page(&manifest);
+        let platform = Platform::current().unwrap();
+        let defaults: Vec<&str> = manifest.tools.iter().filter(|t| t.is_default()).map(|t| t.tool.as_str()).collect();
+        let own = defaults[0];
+        w.own_copy(own, &manifest.tool(own).unwrap().version);
+
+        let (status, asked) = page.post("/api/v1/security/install", &json!({ "scan": true })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{asked}");
+        let plan = &asked["plan"];
+        // The install lines answered, the network consent not: asked again.
+        let (status, again) = page.post("/api/v1/security/install", &json!({ "scan": true, "consent": accepted(plan) })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{again}");
+
+        // The dialog's lines, as before admission stopped probing.
+        let tool_line = |entry: &ToolEntry, offered: bool| {
+            json!({
+                "line": "tool",
+                "tool": entry.tool,
+                "version": entry.version,
+                "source": entry.artifact(platform).unwrap().host(),
+                "size": entry.download_size(platform),
+                "recorded": false,
+                "offered": offered,
+            })
+        };
+        let mut expected: Vec<Value> =
+            defaults.iter().filter(|t| **t != own).map(|t| tool_line(manifest.tool(t).unwrap(), false)).collect();
+        expected.extend(["codeql", "dependency-check"].map(|t| tool_line(manifest.tool(t).unwrap(), true)));
+        let java = manifest.java.artifact(platform).unwrap();
+        expected.push(json!({
+            "line": "support",
+            "tool": manifest.java.tool,
+            "version": manifest.java.version,
+            "source": java.host(),
+            "size": java.size,
+            "recorded": false,
+            "for_tools": ["dependency-check"],
+        }));
+        expected.push(json!({
+            "line": "licence",
+            "tool": "codeql",
+            "version": manifest.tool("codeql").unwrap().version,
+            "terms": CODEQL_LICENCE.terms,
+            "flag": CODEQL_LICENCE.flag,
+        }));
+        assert_eq!(plan["lines"], Value::Array(expected), "{plan}");
+        let kept: Vec<(&str, &str)> = plan["kept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| (k["tool"].as_str().unwrap(), k["copy"].as_str().unwrap()))
+            .collect();
+        assert_eq!(kept, [(own, "path")], "the user's own copy is kept: {plan}");
+        assert!(w.downloads().is_empty(), "nothing is fetched before the consent");
+        assert_eq!(w.calls(own), Vec::<String>::new(), "admission started the user's own {own}");
+
+        // Answered: the job installs the others and scans with the user's copy.
+        let answer = json!({ "scan": true, "consent": accepted(plan), "scan_consent": defaults });
+        let (status, started) = page.post("/api/v1/security/install", &answer).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let job = page.ended().await;
+        assert_eq!(job["state"], "completed", "{job}");
+        let installed: Vec<&str> =
+            job["result"]["install"]["tools"].as_array().unwrap().iter().map(|t| t["tool"].as_str().unwrap()).collect();
+        assert_eq!(installed, defaults[1..], "{job}");
+        let run = job["result"]["scan"]["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == own).unwrap();
+        assert_eq!(run["outcome"], "ran", "{run}");
+        assert!(!w.calls(own).is_empty(), "the job ran the user's own {own} once consent was given");
+    })
+    .await;
+}
+
+/// Every admission starts nothing before its dialog is answered (S-766): a
+/// row's Install, a row's Update beside the user's own copy, and Install &
+/// scan's opt-in offer, each over a user's own copy that records every
+/// invocation.
+#[tokio::test]
+async fn a_row_install_an_update_and_the_opt_in_offer_start_no_process_before_consent() {
+    bounded(async {
+        let w = World::new();
+        let manifest = w.manifest(&[]);
+        let page = w.page(&manifest);
+        let defaults: Vec<&str> = manifest.tools.iter().filter(|t| t.is_default()).map(|t| t.tool.as_str()).collect();
+        let (own, missing) = (defaults[0], defaults[1]);
+        // A managed copy of `own` first, then the user's own copy beside it.
+        let (_, asked) = page.post("/api/v1/security/install", &json!({ "tools": [own] })).await;
+        let answer = json!({ "tools": [own], "consent": accepted(&asked["plan"]) });
+        assert_eq!(page.post("/api/v1/security/install", &answer).await.0, StatusCode::OK);
+        assert_eq!(page.ended().await["state"], "completed");
+        w.own_copy(own, &manifest.tool(own).unwrap().version);
+        w.own_copy("codeql", &manifest.tool("codeql").unwrap().version);
+
+        // A row's Install, held at its dialog by the tool still missing.
+        let (status, asked) = page.post("/api/v1/security/install", &json!({ "tools": [own, missing] })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{asked}");
+        assert_eq!(w.calls(own), Vec::<String>::new(), "a row's Install started the user's own {own}");
+
+        // Install & scan, offering the opt-in pair: CodeQL has a copy here.
+        let (status, asked) = page.post("/api/v1/security/install", &json!({ "scan": true })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{asked}");
+        assert_eq!(w.calls("codeql"), Vec::<String>::new(), "the opt-in offer started the user's own codeql");
+        assert_eq!(w.calls(own), Vec::<String>::new(), "Install & scan started the user's own {own}");
+
+        // A row's Update, once a newer version is pinned.
+        let pinned = w.page(&w.manifest(&[(own, "99.0.0")]));
+        let (status, asked) = pinned.post("/api/v1/security/install", &json!({ "tools": [own], "update": true })).await;
+        assert_eq!(w.calls(own), Vec::<String>::new(), "an Update started the user's own {own}");
+        assert_eq!(status, StatusCode::CONFLICT, "{asked}");
+        assert_eq!(w.downloads().len(), 1, "only the first install was fetched: {:?}", w.downloads());
     })
     .await;
 }

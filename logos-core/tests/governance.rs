@@ -32,7 +32,7 @@ use std::process::Command;
 use logos_core::graph_store::{
     CheckRunRow, NewCheckRun, ViolationRow, CHECK_RUN_OP_CHECK, CHECK_RUN_OP_SCAN,
 };
-use logos_core::model::NodeKind;
+use logos_core::model::{EdgeKind, NodeKind};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
@@ -504,6 +504,16 @@ fn verify_reports_ok_on_a_clean_freshly_indexed_graph() {
     );
     assert!(report.leaked_total == 0 && report.leaked_symbols.is_empty());
     assert!(report.orphaned_total == 0 && report.orphaned_symbols.is_empty());
+    assert!(
+        report.lost_edges_total == 0 && report.lost_edges.is_empty(),
+        "no lost edges on a clean graph: {:?}",
+        report.lost_edges
+    );
+    assert!(
+        report.extra_edges_total == 0 && report.extra_edges.is_empty(),
+        "no extra edges on a clean graph: {:?}",
+        report.extra_edges
+    );
     assert!(report.structural.ok, "the embedded structural check is ok");
     assert_eq!(
         report.live, report.reindex,
@@ -662,6 +672,252 @@ fn verify_fails_on_embedded_structural_drift_even_when_counts_match() {
     );
 }
 
+// ── CR-236 / S-752: `verify` names the drifted edges ────────────────────────
+
+/// Open the live store directly, as a sync defect would leave it: the tests below
+/// drop or add an edge row with SQL so the graph drifts from a fresh reindex by
+/// edges alone, with node, file and symbol sets untouched.
+fn live_db(root: &Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db"))
+        .expect("open the store directly");
+    conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    conn
+}
+
+/// The rowid of the single node named `name`.
+fn node_named(conn: &rusqlite::Connection, name: &str) -> i64 {
+    conn.query_row("SELECT id FROM nodes WHERE name = ?1", [name], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("exactly one node named {name}: {e}"))
+}
+
+#[test]
+fn verify_lists_a_lost_edge_with_its_kind_symbols_and_files() {
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+
+    // Drop the `api -> helper` call from the live graph only — the CR-236 shape:
+    // an edge a fresh reindex has and the live graph lost.
+    let conn = live_db(tmp.path());
+    let (api, helper) = (node_named(&conn, "api"), node_named(&conn, "helper"));
+    let dropped = conn
+        .execute(
+            "DELETE FROM edges WHERE source = ?1 AND target = ?2 AND kind = 2",
+            [api, helper],
+        )
+        .unwrap();
+    assert_eq!(dropped, 1, "the fixture binds exactly one api -> helper Calls edge");
+
+    let report = engine.verify().expect("verify runs");
+    assert!(!report.ok, "a lost edge is drift: {}", report.message);
+    assert_eq!(
+        (report.node_delta, report.file_delta, report.edge_delta),
+        (0, 0, -1),
+        "the drift is one edge and nothing else"
+    );
+    assert_eq!(report.lost_edges_total, 1, "{:?}", report.lost_edges);
+    let lost = &report.lost_edges[0];
+    assert_eq!(lost.kind, EdgeKind::Calls);
+    assert!(lost.source_symbol.contains("api"), "{}", lost.source_symbol);
+    assert!(lost.target_symbol.contains("helper"), "{}", lost.target_symbol);
+    assert_eq!(lost.source_file.as_deref(), Some("src/lib.rs"));
+    assert_eq!(lost.target_file.as_deref(), Some("src/lib.rs"));
+    assert!(
+        report.extra_edges_total == 0 && report.extra_edges.is_empty(),
+        "nothing extra: {:?}",
+        report.extra_edges
+    );
+    assert!(
+        report.message.contains("1 lost edge"),
+        "the message names the lost edge: {}",
+        report.message
+    );
+}
+
+#[test]
+fn verify_names_a_swapped_edge_pair_though_the_edge_counts_match() {
+    // One edge dropped, a different one added: `edge_delta` is 0, so counts alone
+    // read clean. The edge lists must still flag the drift, and `ok` must fail on
+    // it — parity with the symbol sets, which already fail `ok` on a same-size swap.
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+
+    let conn = live_db(tmp.path());
+    let (api, helper) = (node_named(&conn, "api"), node_named(&conn, "helper"));
+    conn.execute(
+        "DELETE FROM edges WHERE source = ?1 AND target = ?2 AND kind = 2",
+        [api, helper],
+    )
+    .unwrap();
+    // `helper -> api` as a Calls edge the source never had.
+    conn.execute(
+        "INSERT INTO edges (source, target, kind) VALUES (?1, ?2, 2)",
+        [helper, api],
+    )
+    .unwrap();
+
+    let report = engine.verify().expect("verify runs");
+    assert_eq!(report.edge_delta, 0, "the edge counts match");
+    assert!(!report.ok, "a swapped edge is drift: {}", report.message);
+    assert_eq!(report.lost_edges_total, 1);
+    assert_eq!(report.extra_edges_total, 1);
+    let (lost, extra) = (&report.lost_edges[0], &report.extra_edges[0]);
+    assert!(lost.source_symbol.contains("api") && lost.target_symbol.contains("helper"));
+    assert!(
+        extra.source_symbol.contains("helper") && extra.target_symbol.contains("api"),
+        "the extra edge is the live-only helper -> api: {extra:?}"
+    );
+    assert_eq!(extra.kind, EdgeKind::Calls);
+    assert_eq!(extra.source_file.as_deref(), Some("src/lib.rs"));
+}
+
+#[test]
+fn verify_names_a_kind_only_drift_between_the_same_endpoints() {
+    // `api -> helper` already has a Calls edge; a live-only References edge between
+    // the same two nodes differs from a fresh reindex by kind alone. The edge key
+    // must carry the kind, or the extra list reads empty while `edge_delta` is 1.
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+
+    let conn = live_db(tmp.path());
+    let (api, helper) = (node_named(&conn, "api"), node_named(&conn, "helper"));
+    conn.execute(
+        "INSERT INTO edges (source, target, kind) VALUES (?1, ?2, ?3)",
+        [api, helper, i64::from(EdgeKind::References.as_i32())],
+    )
+    .unwrap();
+
+    let report = engine.verify().expect("verify runs");
+    assert_eq!(report.edge_delta, 1, "{}", report.message);
+    assert_eq!(report.extra_edges_total, 1, "{:?}", report.extra_edges);
+    assert_eq!(report.extra_edges[0].kind, EdgeKind::References);
+    assert_eq!(report.lost_edges_total, 0, "{:?}", report.lost_edges);
+    assert!(
+        report.message.contains("1 extra edge"),
+        "the message names the extra edge: {}",
+        report.message
+    );
+}
+
+#[test]
+fn verify_attributes_a_cross_file_edge_to_its_source_and_target_files() {
+    // Every other edge test uses same-file endpoints, where swapping the two file
+    // fields is invisible. Drop one edge whose endpoints live in different files
+    // and require each file on the right side.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", "mod a;\nmod b;\n");
+    write(
+        tmp.path(),
+        "src/a.rs",
+        "use crate::b::callee;\npub fn caller() { callee(); }\n",
+    );
+    write(tmp.path(), "src/b.rs", "pub fn callee() {}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+
+    let conn = live_db(tmp.path());
+    let (id, kind, source_file, target_file): (i64, i64, String, String) = conn
+        .query_row(
+            "SELECT e.id, e.kind, sf.path, tf.path FROM edges e \
+             JOIN nodes sn ON sn.id = e.source JOIN files sf ON sf.id = sn.file_id \
+             JOIN nodes tn ON tn.id = e.target JOIN files tf ON tf.id = tn.file_id \
+             WHERE sf.path <> tf.path ORDER BY e.id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("the fixture binds at least one cross-file edge");
+    conn.execute("DELETE FROM edges WHERE id = ?1", [id]).unwrap();
+
+    let report = engine.verify().expect("verify runs");
+    assert_eq!(report.lost_edges_total, 1, "{:?}", report.lost_edges);
+    let lost = &report.lost_edges[0];
+    assert_eq!(lost.source_file.as_deref(), Some(source_file.as_str()));
+    assert_eq!(lost.target_file.as_deref(), Some(target_file.as_str()));
+    assert_ne!(lost.source_file, lost.target_file, "the edge crosses files");
+    assert_eq!(i64::from(lost.kind.as_i32()), kind, "the dropped edge's own kind");
+}
+
+#[test]
+fn verify_lists_the_extra_edges_of_an_orphan_file_leak() {
+    // The Channel-B leak keeps the deleted file's edges (at least its containment
+    // edges) in the live graph: edges a fresh reindex does not have are *extra*,
+    // and each names the file it hangs off.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/keep.rs", "pub fn keep() {}\n");
+    write(tmp.path(), "src/gone.rs", "pub fn gone() {}\npub fn also_gone() {}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    fs::remove_file(tmp.path().join("src/gone.rs")).unwrap();
+
+    let leak = engine.verify().expect("verify runs");
+    assert!(leak.extra_edges_total >= 1, "{}", leak.message);
+    assert_eq!(leak.lost_edges_total, 0, "a pure leak loses no edge");
+    assert!(
+        leak.extra_edges
+            .iter()
+            .all(|e| e.source_file.as_deref() == Some("src/gone.rs")
+                || e.target_file.as_deref() == Some("src/gone.rs")),
+        "every extra edge hangs off the deleted file: {:?}",
+        leak.extra_edges
+    );
+}
+
+#[test]
+fn verify_lists_the_lost_edges_of_a_file_added_without_a_sync() {
+    // The mirror of the leak: a file added on disk with no sync is unknown to the
+    // live store, so a fresh reindex has edges the live graph lacks — *lost*, each
+    // naming the new file — and the live graph has no extra edge.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/first.rs", "pub fn first() {}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    write(tmp.path(), "src/added.rs", "pub fn added() {}\n");
+
+    let report = engine.verify().expect("verify runs");
+    assert!(report.lost_edges_total >= 1, "{}", report.message);
+    assert!(
+        report.lost_edges.iter().all(|e| e.source_file.as_deref() == Some("src/added.rs")
+            || e.target_file.as_deref() == Some("src/added.rs")),
+        "every lost edge hangs off the new file: {:?}",
+        report.lost_edges
+    );
+    assert_eq!(report.extra_edges_total, 0, "{:?}", report.extra_edges);
+}
+
+#[test]
+fn verify_caps_the_edge_lists_but_keeps_exact_totals_and_a_stable_order() {
+    // 60 call edges, all dropped from the live graph: the list holds the first 50
+    // in (kind, source, target) order and the total still reads 60.
+    let mut src = String::from("fn target() {}\n");
+    for i in 0..60 {
+        src.push_str(&format!("pub fn caller_{i:02}() {{ target(); }}\n"));
+    }
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", &src);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let dropped = live_db(tmp.path())
+        .execute("DELETE FROM edges WHERE kind = 2", [])
+        .unwrap();
+    assert_eq!(dropped, 60, "the fixture binds one Calls edge per caller");
+
+    let report = engine.verify().expect("verify runs");
+    assert_eq!(report.lost_edges_total, 60, "the total is exact");
+    assert_eq!(report.lost_edges.len(), 50, "the list is capped like the symbol lists");
+    let sources: Vec<&str> = report.lost_edges.iter().map(|e| e.source_symbol.as_str()).collect();
+    let mut sorted = sources.clone();
+    sorted.sort_unstable();
+    assert_eq!(sources, sorted, "ordered by source symbol within a kind");
+    assert!(sources[0].contains("caller_00") && sources[49].contains("caller_49"));
+    assert_eq!(report.extra_edges_total, 0);
+
+    // The same drift reads the same twice (the shadow store tears down cleanly).
+    let again = engine.verify().expect("verify runs again");
+    assert_eq!(again.lost_edges, report.lost_edges);
+}
+
 // ── FR-GV-04/05 / UAT-GV-03/04: the gate ────────────────────────────────────
 
 #[test]
@@ -780,15 +1036,118 @@ fn session_start_saves_the_baseline_session_end_compares() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
+    // First run: no baseline yet, so the session's snapshot becomes it.
+    assert_eq!(baseline_row(tmp.path()), None, "a fresh project has no baseline");
     let session = engine.session_start().expect("session_start runs");
     assert!(!session.session_id.is_empty());
     assert!(session.started_at > 0);
     assert!(session.signal.is_some());
+    let row = baseline_row(tmp.path()).expect("the first session records the baseline");
+    let id: i64 = session.session_id.parse().expect("the session handle is a snapshot id");
+    assert_eq!(row[1], rusqlite::types::Value::Integer(id), "the session's snapshot is the baseline: {row:?}");
+    assert!(session.message.contains("baseline saved"), "{}", session.message);
 
     // An unchanged session passes its end gate.
     let end = engine.session_end().expect("session_end runs");
     assert!(end.passed, "{}", end.message);
     assert_eq!(end.baseline_signal, session.signal);
+}
+
+/// [CR-238] / [S-763]: with a gate baseline present, `session_start` records a
+/// session snapshot and leaves the baseline row — anchor, timestamp, reason and
+/// attribution — byte-identical, so only the guarded `gate --save` moves it.
+/// `session_end` then compares against the baseline that was blessed.
+///
+/// [CR-238]: ../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+/// [S-763]: ../../docs/planning/journal.md#s-763-session_start-never-moves-an-existing-baseline
+#[test]
+fn session_start_leaves_an_existing_gate_baseline_byte_identical() {
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let saved = engine
+        .gate_with_reason(None, true, true, Some("fixture: accepted"))
+        .expect("gate --save runs");
+    // Backdated, so a rewrite within the same second still shows.
+    live_db(tmp.path()).execute("UPDATE baseline SET created_at = 1", []).unwrap();
+    let blessed = baseline_row(tmp.path()).expect("gate --save records the baseline");
+
+    // The code moves, so a session_start that re-saved would anchor elsewhere.
+    write(
+        tmp.path(),
+        "src/branchy.rs",
+        "pub fn branchy(x: i32) -> i32 {\n    if x > 0 { 1 } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\n",
+    );
+    let session = engine.session_start().expect("session_start runs");
+    assert_ne!(session.signal, saved.signal, "the fixture moved the signal");
+    assert_eq!(baseline_row(tmp.path()), Some(blessed.clone()), "the baseline is untouched");
+    assert!(session.message.contains("baseline kept"), "{}", session.message);
+
+    // The session's own snapshot is recorded, and it is not the baseline.
+    let id: i64 = session.session_id.parse().expect("the session handle is a snapshot id");
+    let recorded: i64 = live_db(tmp.path())
+        .query_row("SELECT COUNT(*) FROM metric_snapshots WHERE id = ?1", [id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(recorded, 1, "session snapshot #{id} is recorded");
+    assert_ne!(rusqlite::types::Value::Integer(id), blessed[1]);
+
+    let end = engine.session_end().expect("session_end runs");
+    assert_eq!(end.baseline_signal, saved.signal, "session_end compares against the blessed baseline");
+    assert_eq!(end.baseline_reason.as_deref(), Some("fixture: accepted"), "{end:#?}");
+}
+
+/// [FR-GV-10] under [S-763]: a baseline that no longer compares — recorded
+/// under another metric-semantics version or other thresholds — is reset by
+/// `session_start` with the announced notice, before the edits. Kept instead,
+/// `session_end` would take the gate's auto-re-baseline on the post-edit
+/// snapshot and bless whatever the session did.
+///
+/// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
+/// [S-763]: ../../docs/planning/journal.md#s-763-session_start-never-moves-an-existing-baseline
+#[test]
+fn session_start_resets_an_incomparable_baseline_before_the_edits() {
+    let tmp = thresholds_project("[metric_thresholds]\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    for (why, make_incomparable) in [
+        ("metric semantics changed", (|root: &Path| downgrade_all_snapshots_to(root, 1)) as fn(&Path)),
+        ("metric thresholds changed", |root: &Path| {
+            write(root, ".logos/rules.toml", "[metric_thresholds]\nnesting_depth = 5\n")
+        }),
+    ] {
+        engine.gate(None, true, true).expect("gate --save runs");
+        make_incomparable(tmp.path());
+
+        let session = engine.session_start().expect("session_start runs");
+        assert!(session.message.contains(&format!("baseline reset: {why}")), "{why}: {}", session.message);
+        let id: i64 = session.session_id.parse().expect("the session handle is a snapshot id");
+        let row = baseline_row(tmp.path()).expect("a baseline row");
+        assert_eq!(row[1], rusqlite::types::Value::Integer(id), "{why}: the reset anchors the pre-edit snapshot");
+
+        // The session's edit is judged against that anchor, not re-blessed.
+        write(
+            tmp.path(),
+            "src/branchy.rs",
+            "pub fn branchy(x: i32) -> i32 {\n    if x > 0 { 1 } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\n",
+        );
+        let end = engine.session_end().expect("session_end runs");
+        assert!(!end.saved && !end.message.contains("baseline reset"), "{why}: {}", end.message);
+        assert_eq!(end.baseline_signal, session.signal, "{why}");
+        assert_eq!(baseline_row(tmp.path()).map(|r| r[1].clone()), Some(rusqlite::types::Value::Integer(id)), "{why}");
+        fs::remove_file(tmp.path().join("src/branchy.rs")).unwrap();
+    }
+}
+
+/// Every column of the project's gate baseline row, as stored, or `None`
+/// without one.
+fn baseline_row(root: &Path) -> Option<Vec<rusqlite::types::Value>> {
+    use rusqlite::OptionalExtension;
+    live_db(root)
+        .query_row(
+            "SELECT scope, snapshot_id, created_at, reason, attribution FROM baseline WHERE scope = 'project'",
+            [],
+            |r| (0..5).map(|i| r.get(i)).collect(),
+        )
+        .optional()
+        .unwrap()
 }
 
 // ── FR-GV-10 / UAT-GV-06: versioned baseline auto-re-baseline ────────────────
@@ -852,6 +1211,186 @@ fn first_gate_after_a_semantics_change_auto_re_baselines_then_compares() {
         second.baseline_signal, first.signal,
         "the second gate compares against the snapshot the first gate re-based to"
     );
+}
+
+/// The reset notice's tail and the JSON beside it, as [S-762] states them:
+/// `(v7 8292 → v8 8295)` — the replaced baseline's metric-semantics version and
+/// signal, then the run's. `None` signals are left out of the text and are
+/// `null` in the JSON.
+///
+/// [S-762]: ../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+fn reset_figures(from: (i64, Option<u32>), to: (i64, Option<u32>)) -> String {
+    let stamp = |(version, signal): (i64, Option<u32>)| match signal {
+        Some(signal) => format!("v{version} {signal}"),
+        None => format!("v{version}"),
+    };
+    format!("({} → {})", stamp(from), stamp(to))
+}
+
+fn reset_json(cause: &str, from: (i64, Option<u32>), to: (i64, Option<u32>)) -> serde_json::Value {
+    let stamp = |(version, signal): (i64, Option<u32>)| {
+        serde_json::json!({ "metric_version": version, "signal": signal })
+    };
+    serde_json::json!({ "cause": cause, "from": stamp(from), "to": stamp(to) })
+}
+
+/// A source edit that moves the signal, so a reset's two values differ.
+fn move_the_signal(root: &Path) {
+    write(
+        root,
+        "src/branchy.rs",
+        "pub fn branchy(x: i32) -> i32 {\n    if x > 0 { 1 } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\n",
+    );
+}
+
+/// [S-762] / [FR-GV-10]: the announced re-baseline names what it replaced — both
+/// metric-semantics versions and both values, in the notice and in `--json` —
+/// and the verdict is what it was: a pass, exit 0. A gate that compares carries
+/// no reset.
+///
+/// [S-762]: ../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+/// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
+#[test]
+fn a_semantics_reset_names_both_versions_and_values_and_keeps_its_exit_code() {
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+
+    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
+    let old = now - 1;
+    downgrade_all_snapshots_to(tmp.path(), old);
+    move_the_signal(tmp.path());
+
+    let first = engine.gate(None, false, true).expect("gate runs");
+    assert!(first.signal.is_some() && saved.signal.is_some(), "the fixture scores: {first:#?}");
+    assert_ne!(saved.signal, first.signal, "the two ends differ, so a swap shows");
+    let (from, to) = ((old, saved.signal), (now, first.signal));
+    assert_eq!(
+        first.message,
+        format!("baseline reset: metric semantics changed {}", reset_figures(from, to)),
+    );
+    let json = serde_json::to_value(&first).expect("the verdict serialises");
+    assert_eq!(json["baseline_reset"], reset_json("metric semantics changed", from, to), "{json:#}");
+    assert!(first.passed && first.saved, "{}", first.message);
+    assert_eq!(first.exit_code(), 0, "the exit code is unchanged by the richer notice");
+    assert_eq!(first.baseline_signal, first.signal, "`baseline_signal` still names the baseline now held");
+
+    let second = engine.gate(None, false, true).expect("gate runs");
+    let json = serde_json::to_value(&second).expect("the verdict serialises");
+    assert!(json.get("baseline_reset").is_none(), "a compare carries no reset: {json:#}");
+}
+
+/// [S-762]: the thresholds reset takes the same notice, with both values; the
+/// version is the same on both sides, and the notice says so rather than
+/// dropping it.
+#[test]
+fn a_thresholds_reset_names_both_versions_and_values() {
+    let tmp = thresholds_project("[metric_thresholds]\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    write(tmp.path(), ".logos/rules.toml", "[metric_thresholds]\nnesting_depth = 5\n");
+    move_the_signal(tmp.path());
+
+    let first = engine.gate(None, false, true).expect("gate runs");
+    assert_ne!(saved.signal, first.signal, "the two ends differ, so a swap shows");
+    let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
+    let (from, to) = ((now, saved.signal), (now, first.signal));
+    assert_eq!(
+        first.message,
+        format!("baseline reset: metric thresholds changed {}", reset_figures(from, to)),
+    );
+    let json = serde_json::to_value(&first).expect("the verdict serialises");
+    assert_eq!(json["baseline_reset"], reset_json("metric thresholds changed", from, to), "{json:#}");
+    assert_eq!(first.exit_code(), 0);
+}
+
+/// [S-762]: a baseline that is incomparable for BOTH reasons — another
+/// semantics version and other thresholds — is announced once, as the semantics
+/// change, with the version it was recorded under (the precedence
+/// `incomparable_because` has always had).
+#[test]
+fn a_reset_for_both_causes_names_the_semantics_change() {
+    let tmp = thresholds_project("[metric_thresholds]\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
+    let old = now - 1;
+    downgrade_all_snapshots_to(tmp.path(), old);
+    write(tmp.path(), ".logos/rules.toml", "[metric_thresholds]\nnesting_depth = 5\n");
+    move_the_signal(tmp.path());
+
+    let first = engine.gate(None, false, true).expect("gate runs");
+    let (from, to) = ((old, saved.signal), (now, first.signal));
+    assert_eq!(
+        first.message,
+        format!("baseline reset: metric semantics changed {}", reset_figures(from, to)),
+    );
+    let json = serde_json::to_value(&first).expect("the verdict serialises");
+    assert_eq!(json["baseline_reset"], reset_json("metric semantics changed", from, to), "{json:#}");
+}
+
+/// [S-762]: a side with no signal to name — a project with nothing in
+/// production scope scores none — shows its version alone and is `null` in the
+/// JSON, on both ends of the reset. Never a made-up zero.
+#[test]
+fn a_reset_with_no_signal_on_either_side_names_the_versions_alone() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "NOTES.md", "nothing to score here\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    assert_eq!(saved.signal, None, "the fixture scores no signal: {saved:#?}");
+    let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
+    let old = now - 1;
+    downgrade_all_snapshots_to(tmp.path(), old);
+
+    let first = engine.gate(None, false, true).expect("gate runs");
+    assert_eq!(first.message, format!("baseline reset: metric semantics changed (v{old} → v{now})"));
+    let json = serde_json::to_value(&first).expect("the verdict serialises");
+    assert_eq!(
+        json["baseline_reset"],
+        reset_json("metric semantics changed", (old, None), (now, None)),
+        "{json:#}"
+    );
+    assert_eq!(first.exit_code(), 0);
+}
+
+/// [S-762] on the path [S-763] added: `session_start` resets an incomparable
+/// baseline itself, so its notice names both versions and values too — in the
+/// message and in `--json`. A first run and a kept baseline reset nothing.
+///
+/// [S-762]: ../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+/// [S-763]: ../../docs/planning/journal.md#s-763-session_start-never-moves-an-existing-baseline
+#[test]
+fn session_start_reset_names_both_versions_and_values() {
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let first_run = engine.session_start().expect("session_start runs");
+    let json = serde_json::to_value(&first_run).expect("the session serialises");
+    assert!(json.get("baseline_reset").is_none(), "a first run replaces nothing: {json:#}");
+
+    let kept = engine.session_start().expect("session_start runs");
+    let json = serde_json::to_value(&kept).expect("the session serialises");
+    assert!(json.get("baseline_reset").is_none(), "a kept baseline is not a reset: {json:#}");
+
+    let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
+    let old = now - 1;
+    downgrade_all_snapshots_to(tmp.path(), old);
+    move_the_signal(tmp.path());
+    let session = engine.session_start().expect("session_start runs");
+    assert!(session.signal.is_some() && first_run.signal.is_some(), "the fixture scores");
+    assert_ne!(first_run.signal, session.signal, "the two ends differ, so a swap shows");
+    let (from, to) = ((old, first_run.signal), (now, session.signal));
+    let notice = format!("baseline reset: metric semantics changed {}", reset_figures(from, to));
+    assert_eq!(
+        session.message,
+        format!(
+            "session started — {notice} (snapshot #{}); `session_end` compares against it",
+            session.session_id
+        ),
+    );
+    let json = serde_json::to_value(&session).expect("the session serialises");
+    assert_eq!(json["baseline_reset"], reset_json("metric semantics changed", from, to), "{json:#}");
 }
 
 /// Rewrite every persisted `metric_snapshots` row to an older semantics
@@ -1815,7 +2354,7 @@ fn health_reports_store_integrity_and_counts() {
     // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 38, "migration 38 applied");
+    assert_eq!(health.schema_version, 40, "migration 40 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

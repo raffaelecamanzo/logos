@@ -22,6 +22,7 @@ import {
   optSignal,
   passFloor,
   shortSha,
+  signedPoints,
   snapshotStaleness,
   unitLocation,
   whereToStart,
@@ -636,7 +637,7 @@ describe("snapshotStaleness", () => {
 function unit(over: Partial<FixUnit> = {}): FixUnit {
   return {
     kind: "function",
-    node_id: 1,
+    node_id: "src/`lib.rs`/deep_one().",
     name: "deep_one",
     file: "src/lib.rs",
     line: 49,
@@ -709,5 +710,17 @@ describe("whereToStart (S-505, FR-QM-17)", () => {
     expect(unitLocation("src/lib.rs", null)).toBe("src/lib.rs");
     expect(unitLocation("", null)).toBe("");
     expect(unitLocation("", 3)).toBe("");
+  });
+});
+
+describe("signedPoints (FR-GV-26)", () => {
+  it.each([
+    [0.41, "+0.41"],
+    [-2.28, "-2.28"],
+    [0, "0.00"],
+    [3, "+3.00"],
+    [null, "—"],
+  ] as const)("states %s as %s", (value, text) => {
+    expect(signedPoints(value)).toBe(text);
   });
 });

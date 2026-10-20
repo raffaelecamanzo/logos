@@ -98,12 +98,15 @@
               "last_failure": null
             }
           ],
+          "reports_stored": 2,
+          "reports_fresh": 1,
           "findings": {
             "critical": 0,
             "high": 1,
             "medium": 1,
             "low": 0,
             "info": 0,
+            "unrated": 0,
             "total": 2
           },
           "excluded": {
@@ -306,6 +309,8 @@
               "last_failure": null
             }
           ],
+          "reports_stored": 0,
+          "reports_fresh": 0,
           "findings": null,
           "excluded": {
             "not_fresh": 0,
@@ -436,12 +441,15 @@
     "members_read": 2,
     "members_never_scanned": 1,
     "members_counted": 1,
+    "reports_stored": 2,
+    "reports_fresh": 1,
     "totals": {
       "critical": 0,
       "high": 1,
       "medium": 1,
       "low": 0,
       "info": 0,
+      "unrated": 0,
       "total": 2
     },
     "excluded": {

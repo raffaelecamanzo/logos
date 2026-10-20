@@ -10,7 +10,9 @@
 //! - [`Orchestrator::scan`] runs the selected, enabled, installed scanners one
 //!   after the other, each to a SARIF file under `.logos/security/`, and
 //!   reports one [`Outcome`] per scanner. One scanner failing never stops the
-//!   others.
+//!   others. A scanner with nothing to scan here is
+//!   [`Outcome::NotApplicable`] and is never started
+//!   ([`Orchestrator::not_applicable`], S-769).
 //! - A scoped run ([FR-SC-17], S-685) puts paths the user named — each
 //!   confined to the root by [`resolve_scope`] before anything starts — in a
 //!   path-capable scanner's fixed [path position](registry::PathSlot), and
@@ -77,6 +79,7 @@ mod surface_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -89,16 +92,16 @@ use crate::config::{
     SecurityScan, UserSecurityScan,
 };
 use crate::tools::Manifest;
-use registry::{Fill, Output, Scanner, ScopedPath, CODEQL_LANGUAGES, REGISTRY};
+use registry::{Fill, Ignores, Output, Scanner, ScopedPath, Targets, CODEQL_LANGUAGES, REGISTRY};
 use crate::jobs::spawn::{self, inside_root, is_executable, usable_path_entries, Launch};
 
-pub use gate::SecurityGateBand;
+pub use gate::{SecurityBless, SecurityGateBand};
 pub(crate) use gate::SecurityGateEvidence;
 pub(crate) use page::{editions, listings};
 pub use page::{EditionClassification, SecurityPage};
 pub use registry::{scanner, WHOLE_MANIFEST_ONLY, WHOLE_PROJECT_ONLY};
 pub use rollup::{
-    Excluded, MemberCategory, MemberEdition, MemberScan, MemberSecurity, SeverityCounts,
+    Excluded, FindingTally, MemberCategory, MemberEdition, MemberScan, MemberSecurity, SeverityCounts,
 };
 pub use surface::{
     consent_pending, findings, scan, status, ConsentState, FindingsFilter, LicenceAcceptance, ListedFinding,
@@ -123,6 +126,64 @@ pub const SCOPED_DIR: &str = "scoped";
 /// The empty config file pinned on scanners that would otherwise auto-load one
 /// from the repository, inside [`OUTPUT_DIR`].
 const PINNED_CONFIG: &str = "empty-config.yaml";
+
+/// The project's scan-or-install lock file, inside [`OUTPUT_DIR`]: every scan
+/// and every scanner install of the project holds it (S-758,
+/// [`crate::jobs::lock`]).
+pub const LOCK_FILE: &str = "run.lock";
+
+/// What holds the [lock file](LOCK_FILE): a scan or an install, the job
+/// kinds of the same name.
+pub(crate) use crate::jobs::JobKind as RunKind;
+
+/// The [lock file](LOCK_FILE) under `root`, its directory created.
+///
+/// # Errors
+/// As [`output_dir`].
+pub(crate) fn lock_file(root: &Path) -> anyhow::Result<PathBuf> {
+    Ok(output_dir(root)?.join(LOCK_FILE))
+}
+
+/// Run `f` holding the project's [lock file](LOCK_FILE) as a `kind`, or
+/// straight away on a thread that already holds it
+/// ([`crate::jobs::lock::exclusively`]), as a [foreground run](crate::jobs::foreground)
+/// outside a job: a stop signal or a stopping `serve` kills its children
+/// before the lock is released.
+///
+/// # Errors
+/// As [`output_dir`]; the lock's `Busy`, naming the scan or install that
+/// holds it, with nothing run; else `f`'s error.
+pub(crate) fn exclusively<T>(root: &Path, kind: RunKind, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    crate::jobs::foreground(|| crate::jobs::lock::exclusively(&lock_file(root)?, kind, f))
+}
+
+/// Run `f` — an install where no scan can run, so no lock is taken — as a
+/// [foreground run](crate::jobs::foreground), so a stop signal still kills
+/// its children.
+pub(crate) fn unlocked<T>(f: impl FnOnce() -> T) -> T {
+    crate::jobs::foreground(f)
+}
+
+/// [`OUTPUT_DIR`] under `root`, created. A symlink committed in place of
+/// `.logos` or of it would send every report, every file Logos writes for a
+/// scanner and the [lock file](LOCK_FILE) outside the project, so either is
+/// refused.
+///
+/// # Errors
+/// Either directory is a symlink, or [`OUTPUT_DIR`] cannot be created.
+pub(crate) fn output_dir(root: &Path) -> anyhow::Result<PathBuf> {
+    let out_dir = root.join(OUTPUT_DIR);
+    for dir in [root.join(".logos"), out_dir.clone()] {
+        if is_symlink(&dir) {
+            anyhow::bail!(
+                "{} is a symbolic link; refusing to write scan output through it",
+                dir.display()
+            );
+        }
+    }
+    fs::create_dir_all(&out_dir)?;
+    Ok(out_dir)
+}
 
 /// How long a version probe may take before its process group is killed.
 const PROBE_DEADLINE: Duration = Duration::from_secs(30);
@@ -298,6 +359,43 @@ pub struct ScannerOutcome {
     pub version: Option<String>,
     #[serde(flatten)]
     pub outcome: Outcome,
+    /// What a whole-project run did with the project's ignored directories;
+    /// `None` when it did not run, or ran on paths the user named.
+    #[serde(flatten)]
+    pub coverage: Option<Coverage>,
+}
+
+/// What a whole-project run did with the project's ignored directories
+/// ([FR-SC-26]): the coverage fact every scan surface carries, as
+/// `ignored_paths` and, when it read them, `coverage_note`.
+///
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Coverage {
+    pub ignored_paths: IgnoredPaths,
+    /// Why it read them, in one line; absent when `excluded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_note: Option<String>,
+}
+
+/// Whether a whole-project run kept out of the project's ignored directories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IgnoredPaths {
+    /// It read none of them, by a mechanism the hand-run harness proves for
+    /// its pinned version — or the project ignores none.
+    Excluded,
+    /// It read them, or may have: no mechanism the harness proves kept it
+    /// out, and `coverage_note` says why.
+    Scanned,
+}
+
+impl Coverage {
+    pub(crate) const EXCLUDED: Coverage = Coverage { ignored_paths: IgnoredPaths::Excluded, coverage_note: None };
+
+    pub(crate) fn scanned(note: String) -> Self {
+        Self { ignored_paths: IgnoredPaths::Scanned, coverage_note: Some(note) }
+    }
 }
 
 /// What happened to one scanner ([ADR-80] §7).
@@ -320,7 +418,9 @@ pub enum Outcome {
         languages: Vec<String>,
         reason: &'static str,
     },
-    /// CodeQL only: no file in a language it analyses; nothing ran.
+    /// Nothing to scan, so nothing ran: CodeQL with no file in a language it
+    /// analyses, or a scanner whose [`applies_to`](registry::Scanner::applies_to)
+    /// finds none of its files (S-769), which is never even probed.
     NotApplicable { reason: String },
     /// It did not produce a report: it exited with a code its template does not
     /// accept, wrote no SARIF, could not be started, or was not started because
@@ -385,9 +485,14 @@ pub enum Unprobed {
     /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
     /// [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
     NotConsented,
-    /// The readout asks for each scanner's state alone, which no version
-    /// changes: `check`'s `[security]` evidence.
+    /// The caller decides on each scanner's state alone: `check`'s
+    /// `[security]` evidence, which no version changes, and the Security
+    /// page's install admission, which starts nothing before its consent
+    /// dialog is answered (S-766).
     StateOnly,
+    /// It has nothing to scan here (S-769): no readout starts it, its version
+    /// command included.
+    NothingToScan,
 }
 
 /// How [`Orchestrator::copy_in_use_with`] reads the version of a copy.
@@ -526,47 +631,51 @@ impl Orchestrator {
                     .collect()
             }
         };
-        // A symlink committed in place of either directory would send every
-        // report, and every file Logos writes for a scanner, outside the project.
-        let out_dir = self.root.join(OUTPUT_DIR);
-        for dir in [self.root.join(".logos"), out_dir.clone()] {
-            if is_symlink(&dir) {
-                anyhow::bail!(
-                    "{} is a symbolic link; refusing to write scan output through it",
-                    dir.display()
-                );
-            }
-        }
-        fs::create_dir_all(&out_dir)?;
+        let out_dir = output_dir(&self.root)?;
         // Walked once per call, and only when some scanner will run over the
-        // whole project and take them: a run on named paths reads exactly those.
-        let ignored = if selected.iter().any(|s| s.excludes_ignored() && (scope.is_none() || s.path_slot.is_none())) {
-            ignored_dirs(&self.root)
-        } else {
-            Vec::new()
-        };
+        // whole project: a run on named paths reads exactly those.
+        let whole = |s: &Scanner| scope.is_none() || s.path_slot.is_none();
+        let ignores = if selected.iter().any(|s| whole(s)) { project_ignores(&self.root) } else { Ignores::NONE };
+        // What the scanner's own `getcwd` reports, which a runner that makes
+        // `.` absolute walks from.
+        let canonical_root = self.root.canonicalize().ok();
+        let root = canonical_root.as_deref().and_then(Path::to_str);
         let outcomes = selected
             .into_iter()
             .map(|s| {
-                let (version, outcome) = match self.detect_one(s) {
-                    Detection::Disabled => (None, Outcome::Disabled),
-                    Detection::NotInstalled => (None, Outcome::NotInstalled),
+                // Decided before the version probe: a scanner with nothing to
+                // scan starts no process at all.
+                if let Some(reason) = self.nothing_to_scan(s) {
+                    let outcome = Outcome::NotApplicable { reason };
+                    return ScannerOutcome { scanner: s.name, driver: s.driver, version: None, outcome, coverage: None };
+                }
+                let (version, outcome, coverage) = match self.detect_one(s) {
+                    Detection::Disabled => (None, Outcome::Disabled, None),
+                    Detection::NotInstalled => (None, Outcome::NotInstalled, None),
                     Detection::Installed { binary, version, .. } => {
-                        let outcome = if let Some(file) = self.refusal(s) {
-                            Outcome::Failed {
+                        let (outcome, coverage) = if let Some(file) = self.refusal(s) {
+                            let outcome = Outcome::Failed {
                                 exit_code: None,
                                 stderr: format!(
                                     "not run: the repository's {file} can make {} run code it \
                                      names; remove it, or run {} in CI and ingest its SARIF",
                                     s.name, s.name
                                 ),
-                            }
-                        } else if s.per_language() {
-                            self.run_codeql(s, &binary, &out_dir)
+                            };
+                            (outcome, None)
                         } else {
-                            self.run_single(s, &binary, &out_dir, scope, &ignored)
+                            // Whether a scanner process started: not when
+                            // CodeQL found nothing to analyse, nor when Logos
+                            // failed to prepare the run or to start it.
+                            let mut started = false;
+                            let outcome = if s.per_language() {
+                                self.run_codeql(s, &binary, &out_dir, &mut started)
+                            } else {
+                                self.run_single(s, &binary, &out_dir, scope, &ignores, root, &mut started)
+                            };
+                            (outcome, (started && whole(s)).then(|| s.coverage(&ignores)))
                         };
-                        (version, outcome)
+                        (version, outcome, coverage)
                     }
                 };
                 ScannerOutcome {
@@ -574,6 +683,7 @@ impl Orchestrator {
                     driver: s.driver,
                     version,
                     outcome,
+                    coverage,
                 }
             })
             .collect();
@@ -651,6 +761,21 @@ impl Orchestrator {
             Probe::Cached => probes::cached(s.name, binary, || self.probe(s, binary)),
             Probe::Skip(_) => None,
         }
+    }
+
+    /// Why `s` has nothing to scan in this project, when it does not
+    /// ([`Scanner::not_applicable`], S-769): decided from the files the
+    /// project does not ignore, before anything starts. Walks the tree only
+    /// for a scanner with a rule, and stops at the first file it reads.
+    pub(crate) fn not_applicable(&self, s: &Scanner) -> Option<String> {
+        s.not_applicable(|extensions| has_file_with(&self.root, extensions))
+    }
+
+    /// [`not_applicable`](Self::not_applicable) for a scanner a scan would
+    /// otherwise start — enabled, with a copy to run — and `None` for any
+    /// other, which keeps its `disabled` or `not_installed`.
+    pub(crate) fn nothing_to_scan(&self, s: &Scanner) -> Option<String> {
+        (self.switches.is_enabled(s.name) && self.has_copy(s)).then(|| self.not_applicable(s)).flatten()
     }
 
     /// The first of the scanner's [refusal files](Scanner::refuse_if_present)
@@ -757,14 +882,19 @@ impl Orchestrator {
     /// Run a scanner that writes one report. Scoped, a path-capable scanner
     /// makes the runs its [slot](registry::PathSlot::runs) needs, in
     /// [`SCOPED_DIR`], and several runs' reports are merged into one. A
-    /// whole-project run keeps out of the `ignored` directories.
+    /// whole-project run keeps out of the directories `ignores` names, as its
+    /// template can; `root` is the canonical root. `started` is set once a
+    /// scanner process starts ([`step`](Self::step)).
+    #[allow(clippy::too_many_arguments)]
     fn run_single(
         &self,
         s: &Scanner,
         binary: &Path,
         out_dir: &Path,
         scope: Option<&[ScopedPath]>,
-        ignored: &[String],
+        ignores: &Ignores,
+        root: Option<&str>,
+        started: &mut bool,
     ) -> Outcome {
         let (dir, runs) = match (scope, s.path_slot) {
             (Some(scope), Some(slot)) => (out_dir.join(SCOPED_DIR), slot.runs(scope).into_iter().map(Some).collect()),
@@ -780,9 +910,6 @@ impl Orchestrator {
         if let Err(e) = remove_file_if_present(&target) {
             return failed_io("could not clear the previous report", &target, &e);
         }
-        // What the scanner's own `getcwd` reports, which a runner that makes
-        // `.` absolute walks from.
-        let canonical_root = self.root.canonicalize().ok();
         let pinned_config = out_dir.join(PINNED_CONFIG);
         if s.run.contains(&registry::Arg::PinnedConfig) {
             if let Err(e) = write_empty(&pinned_config) {
@@ -820,10 +947,11 @@ impl Orchestrator {
                 language: "",
                 database: Path::new(""),
                 pinned_config: &pinned_config,
-                ignored,
-                root: canonical_root.as_deref().and_then(Path::to_str),
+                ignored: &ignores.dirs,
+                targets: &ignores.targets,
+                root,
             };
-            code = match self.step(s, binary, s.run, &fill) {
+            code = match self.step(s, binary, s.run, &fill, started) {
                 Ok(code) => code,
                 Err(outcome) => return outcome,
             };
@@ -849,7 +977,7 @@ impl Orchestrator {
         produced_or_failed(s, code, vec![target], Vec::new())
     }
 
-    fn run_codeql(&self, s: &Scanner, binary: &Path, out_dir: &Path) -> Outcome {
+    fn run_codeql(&self, s: &Scanner, binary: &Path, out_dir: &Path, started: &mut bool) -> Outcome {
         let (runnable, needs_build) = codeql_languages(&self.root);
         if runnable.is_empty() {
             return if needs_build.is_empty() {
@@ -898,12 +1026,13 @@ impl Orchestrator {
                 database: &database,
                 pinned_config: Path::new(""),
                 ignored: &[],
+                targets: &Targets::Root,
                 root: None,
             };
             // The creation template has no extra-flags position: extras go to
             // the analysis only.
             for step in [s.prepare, s.run] {
-                code = match self.step(s, binary, step, &fill) {
+                code = match self.step(s, binary, step, &fill, started) {
                     Ok(code) => code,
                     Err(outcome) => return outcome,
                 };
@@ -920,13 +1049,15 @@ impl Orchestrator {
     }
 
     /// Spawn one template step in the root: `Ok` with the accepted exit code,
-    /// or `Err` carrying the failed outcome.
+    /// or `Err` carrying the failed outcome. `started` is set once the process
+    /// has started, whatever it then does.
     fn step(
         &self,
         s: &Scanner,
         binary: &Path,
         template: &[registry::Arg],
         fill: &Fill<'_>,
+        started: &mut bool,
     ) -> Result<i32, Outcome> {
         let argv = s.render(template, fill);
         let vars = self.runtime_vars(s, binary);
@@ -940,6 +1071,7 @@ impl Orchestrator {
                 stderr: format!("could not start {}: {e}", binary.display()),
             }
         })?;
+        *started = true;
         let code = finished.status.and_then(|st| st.code());
         if let Some(code) = code.filter(|c| s.ok_exit.contains(c)) {
             return Ok(code);
@@ -1171,6 +1303,16 @@ fn codeql_languages(root: &Path) -> (Vec<(&'static str, &'static str)>, Vec<Stri
     (runnable, needs_build)
 }
 
+/// Whether a file the project does not ignore ([`project_walk`]) ends in
+/// `.<ext>` for one of `extensions`; the walk stops at the first. A directory
+/// named so (`x.go/`) is no such file.
+fn has_file_with(root: &Path, extensions: &[&str]) -> bool {
+    project_walk(root).flatten().any(|entry| {
+        entry.file_type().is_some_and(|t| t.is_file())
+            && entry.path().extension().and_then(|e| e.to_str()).is_some_and(|ext| extensions.contains(&ext))
+    })
+}
+
 /// A walk of the files the project itself does not ignore: the root's own
 /// `.gitignore` and `.ignore` files at every depth, but not ignore files above
 /// the root or the user's global excludes, so what it yields depends on the
@@ -1190,46 +1332,104 @@ fn is_logos_or_git(name: &std::ffi::OsStr) -> bool {
     name == ".logos" || name == ".git"
 }
 
-/// The top-most directories under `root` that the project's own ignore files
-/// exclude — the ones [`project_walk`] steps over — relative to the root,
-/// `/`-separated, shallowest first and then by name (so a cut to the argument
-/// budget drops the deepest): `target`, never `target/debug` beside it, and
-/// never a file. A directory is found only where its parent is walked, so one
-/// inside an ignored directory is never listed apart from it.
+/// What the project's own ignore files exclude, as a whole-project run passes
+/// it ([`Ignores`]): the walk is [`project_walk`].
 ///
-/// A path a scanner's flag could misread is left out, and that directory is
-/// scanned as before: one that is not UTF-8, starts with `-`, or holds a
+/// [`Ignores::dirs`] are the top-most excluded directories — the ones the walk
+/// steps over — relative to the root, `/`-separated, shallowest first and then
+/// by name (so a cut to the argument budget drops the deepest): `target`,
+/// never `target/debug` beside it, and never a file. A directory is found only
+/// where its parent is walked, so one inside an ignored directory is never
+/// listed apart from it. A name an exclusion flag could misread is counted in
+/// [`Ignores::misread`] instead, and that directory is scanned by a scanner
+/// that takes the list: one that is not UTF-8, starts with `-`, or holds a
 /// comma, a double quote or a control character (Bandit splits a list on
 /// commas, and Trivy reads each value as CSV, keeping its first line), a glob
 /// character or a backslash.
-fn ignored_dirs(root: &Path) -> Vec<String> {
+///
+/// [`Ignores::targets`] name every walked path and no ignored directory: the
+/// entries of each directory that holds an ignored one, from the root down,
+/// and the others whole ([`Targets::Paths`]), all from the one walk. A
+/// symbolic link is never named: Semgrep refuses one given as a target (exit
+/// 2), and neither scanner follows one when it walks `.` itself, so naming it
+/// could only widen the scan. A target is a positional argument, so none may
+/// start with `-`; past [`registry::IGNORED_ARGV_BUDGET`] the list is not
+/// passed either ([`Targets::Unpassable`]).
+fn project_ignores(root: &Path) -> Ignores {
     // The root itself, whose walk entry is a symlink when the root is one.
-    let mut walked: std::collections::HashSet<PathBuf> = std::collections::HashSet::from([root.to_path_buf()]);
+    let mut walked_dirs: HashSet<PathBuf> = HashSet::from([root.to_path_buf()]);
+    // Every other walked entry but a symlink: what a target may name.
+    let mut nameable: Vec<PathBuf> = Vec::new();
     for entry in project_walk(root).flatten() {
-        if entry.file_type().is_some_and(|t| t.is_dir()) {
-            walked.insert(entry.into_path());
+        let kind = entry.file_type();
+        if kind.is_some_and(|t| t.is_dir()) {
+            walked_dirs.insert(entry.path().to_path_buf());
+        }
+        if entry.depth() > 0 && !kind.is_some_and(|t| t.is_symlink()) {
+            nameable.push(entry.into_path());
         }
     }
-    let mut ignored = Vec::new();
-    for dir in &walked {
+    let mut ignored: Vec<PathBuf> = Vec::new();
+    for dir in &walked_dirs {
         let Ok(children) = fs::read_dir(dir) else { continue };
         for child in children.flatten() {
             let path = child.path();
-            if !child.file_type().is_ok_and(|t| t.is_dir())
-                || is_logos_or_git(&child.file_name())
-                || walked.contains(&path)
+            if child.file_type().is_ok_and(|t| t.is_dir())
+                && !is_logos_or_git(&child.file_name())
+                && !walked_dirs.contains(&path)
             {
-                continue;
-            }
-            let Ok(rel) = path.strip_prefix(root) else { continue };
-            let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
-            let Some(rel) = parts.map(|p| p.join("/")) else { continue };
-            let misread = |c: char| c.is_control() || matches!(c, ',' | '"' | '*' | '?' | '[' | ']' | '{' | '}' | '\\');
-            if !rel.starts_with('-') && !rel.contains(misread) {
-                ignored.push(rel);
+                ignored.push(path);
             }
         }
     }
-    ignored.sort_by(|a, b| (a.matches('/').count(), a).cmp(&(b.matches('/').count(), b)));
-    ignored
+    let mut dirs = Vec::with_capacity(ignored.len());
+    let mut misread = 0;
+    for path in &ignored {
+        let misreads = |c: char| c.is_control() || matches!(c, ',' | '"' | '*' | '?' | '[' | ']' | '{' | '}' | '\\');
+        match rel_utf8(root, path) {
+            Some(rel) if !rel.starts_with('-') && !rel.contains(misreads) => dirs.push(rel),
+            _ => misread += 1,
+        }
+    }
+    dirs.sort_by(|a, b| (a.matches('/').count(), a).cmp(&(b.matches('/').count(), b)));
+    // Every directory with an ignored one below it, up to the root.
+    let holding: HashSet<&Path> =
+        ignored.iter().flat_map(|p| p.ancestors().skip(1).take_while(|a| a.starts_with(root))).collect();
+    let targets = if holding.is_empty() { Targets::Root } else { unignored_targets(root, &holding, &nameable) };
+    Ignores { dirs, misread, targets }
+}
+
+/// [`Ignores::targets`] for a project with something ignored, sorted: each
+/// `nameable` entry that sits in a `holding` directory without holding an
+/// ignored one itself.
+fn unignored_targets(root: &Path, holding: &HashSet<&Path>, nameable: &[PathBuf]) -> Targets {
+    let mut targets = Vec::new();
+    for path in nameable {
+        if holding.contains(path.as_path()) || !path.parent().is_some_and(|dir| holding.contains(dir)) {
+            continue;
+        }
+        let Some(rel) = rel_utf8(root, path) else {
+            return Targets::Unpassable("a path outside the ignored directories is not UTF-8");
+        };
+        if rel.starts_with('-') {
+            return Targets::Unpassable("a path outside the ignored directories begins with '-', which it would read as a flag");
+        }
+        targets.push(rel);
+    }
+    targets.sort();
+    if targets.is_empty() {
+        return Targets::Unpassable("no path lies outside the ignored directories");
+    }
+    // Each target with its terminating NUL.
+    if targets.iter().map(|t| t.len() + 1).sum::<usize>() > registry::IGNORED_ARGV_BUDGET {
+        return Targets::Unpassable("the paths outside the ignored directories exceed the 64 KiB argument budget");
+    }
+    Targets::Paths(targets)
+}
+
+/// `path` relative to `root`, `/`-separated; `None` when it is not UTF-8.
+fn rel_utf8(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
+    parts.map(|p| p.join("/"))
 }

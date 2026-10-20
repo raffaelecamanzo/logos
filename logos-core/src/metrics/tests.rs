@@ -2663,13 +2663,16 @@ fn a_zero_short_circuits_only_from_an_applicable_original() {
         originals[zeroed] = v(0.0);
         let [m, a, d, e, r] = &originals;
         for graph_applicable in [true, false] {
-            let applicable = super::applicable_original_dimensions(
+            let applicable: Vec<f64> = super::applicable_original_dimensions(
                 graph_applicable.then_some(m),
                 graph_applicable.then_some(a),
                 graph_applicable.then_some(d),
                 e,
                 r,
-            );
+            )
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
             let signal = super::aggregate(&applicable, &new_dims);
             if graph_applicable || zeroed >= 3 {
                 assert_eq!(signal, 0, "a zero at applicable original position {} short-circuits", zeroed + 1);
@@ -3454,4 +3457,55 @@ fn the_cap_keeps_the_top_ranked_rows_of_each_cr209_list() {
         ["h4", "h3", "h2"],
         "the longest chains"
     );
+}
+
+/// The review's before-state cache keeps the signal terms bit for bit
+/// (S-755, [NFR-RA-06]): a value `serde_json` would read back one bit off — the
+/// Sprint 106 merge-base's Equality — makes the cached rerun's attribution
+/// differ from the run that built the cache.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[test]
+fn signal_terms_round_trip_the_cache_bit_for_bit() {
+    use std::borrow::Cow;
+    let terms = super::SignalTerms {
+        original: vec![(Cow::Borrowed("equality"), 0.493_762_423_907_422_75)],
+        extended: vec![(Cow::Borrowed("uniqueness"), 0.964_548_494_983_277_5)],
+    };
+    let text = serde_json::to_string(&terms).unwrap();
+    let back: super::SignalTerms = serde_json::from_str(&text).unwrap();
+    let bits = |t: &super::SignalTerms| t.all().map(|(name, n)| (name.to_string(), n.to_bits())).collect::<Vec<_>>();
+    assert_eq!(bits(&back), bits(&terms), "{text}");
+}
+
+/// Each signal term carries its own dimension's value (S-755, [FR-GV-26]): the
+/// attribution charges a share, and picks its drivers, by the term's name, so
+/// a name paired with a neighbour's value would charge the wrong dimension.
+///
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+#[test]
+fn every_signal_term_is_named_by_its_own_dimension() {
+    use crate::models::quality::{FixUnit, MetricSnapshot, MetricValue};
+    let v = |normalized: f64| MetricValue { raw: 0.0, normalized };
+    let m = MetricSnapshot {
+        modularity: v(0.91),
+        acyclicity: v(0.92),
+        depth: v(0.93),
+        equality: v(0.94),
+        redundancy: v(0.95),
+        nesting: v(0.96),
+        conciseness: v(0.97),
+        cohesion: Some(v(0.98)),
+        focus: Some(v(0.99)),
+        uniqueness: v(0.90),
+        ..MetricSnapshot::default()
+    };
+    let named: Vec<(String, f64)> =
+        super::signal_terms(&m).expect("non-empty").all().map(|(n, v)| (n.to_string(), *v)).collect();
+    let expected: Vec<(String, f64)> = FixUnit::DIMENSIONS
+        .iter()
+        .zip([0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 0.90])
+        .map(|(n, v)| (n.to_string(), v))
+        .collect();
+    assert_eq!(named, expected);
 }

@@ -65,8 +65,10 @@ breakdown for the project in front of you.
 
 Wrap every editing session in the quality gate:
 
-1. Call `session_start` BEFORE making any edits — it records the quality
-   baseline.
+1. Call `session_start` BEFORE making any edits — it saves the quality
+   baseline when none exists and never moves an existing one, except one that
+   no longer compares (other metric semantics or thresholds): that one it
+   resets before the edits, and says so.
 2. Make your edits.
 3. Call `session_end` AFTER the edits. If it fails (quality regressed below
    the baseline), STOP and fix the regression before continuing — do not pile

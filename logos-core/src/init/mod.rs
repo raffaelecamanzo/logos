@@ -1445,4 +1445,19 @@ mod tests {
             crate::governance::ratchet::BLESSED_FILE_REL
         );
     }
+
+    /// The security ratchet's checked-in baseline ([FR-SC-25]) travels for the
+    /// same reason: a CI clone reads it, and blessing a finding must show up in
+    /// review. `security bless` writes it, never `init`.
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    #[test]
+    fn the_block_leaves_the_checked_in_security_baseline_tracked() {
+        let patterns: Vec<String> = ignored_state().into_iter().map(String::from).collect();
+        let ignored = crate::config::globs::compile(&patterns).expect("the block's globs compile");
+        assert!(ignored.is_match("baseline.json"), "the near miss — the gate baseline — is ignored");
+        let file = crate::governance::security::CHECKED_IN_FILE_REL;
+        let name = file.strip_prefix(".logos/").expect("under .logos/");
+        assert!(!ignored.is_match(name), "the block must not ignore {file}");
+    }
 }

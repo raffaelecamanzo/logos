@@ -25,8 +25,9 @@
 //! - `unbound` — there is no enclosing symbol: the finding has no location,
 //!   its path is not an indexed file (a lockfile, excluded by default, keeps
 //!   its manifest line in [`line`](FindingContext::line)), its file changed
-//!   since the scan, or its line is in no code symbol. A stale finding is
-//!   never bound: its line may now point at a different symbol.
+//!   since the scan, its line is in no code symbol, or it is a secret found
+//!   only in history (`historical`, anchored to its commit). A stale finding
+//!   is never bound: its line may now point at a different symbol.
 //! - `resolved` — the per-language resolution denominator has a cross-file
 //!   `calls` figure for the enclosing file's language: the graph binds calls
 //!   across files there.
@@ -92,6 +93,10 @@ pub enum UnboundBecause {
     Stale,
     /// Its line lies in no code symbol's span.
     NoSymbol,
+    /// A secret found only in history: its file is gone, or its line holds
+    /// other text now, so it is anchored to its commit and no symbol of
+    /// today's tree is claimed for it (S-767).
+    Historical,
 }
 
 /// Why the graph cannot rule out a route reaching a symbol: a way in that no
@@ -354,6 +359,7 @@ fn anchor(f: &SecurityFinding) -> Result<(&str, u32), UnboundBecause> {
         .and_then(|l| u32::try_from(l).ok())
         .filter(|&l| l > 0);
     match (f.binding, f.path.as_deref(), line) {
+        (FindingBinding::Historical, _, _) => Err(UnboundBecause::Historical),
         (FindingBinding::Unbound, _, _) | (_, _, None) => Err(UnboundBecause::NoLocation),
         (FindingBinding::Unmatched | FindingBinding::Ambiguous, _, _) | (_, None, _) => {
             Err(UnboundBecause::NotIndexed)

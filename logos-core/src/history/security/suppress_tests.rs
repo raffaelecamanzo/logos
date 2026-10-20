@@ -20,6 +20,10 @@ const FP_A: &str = "0a7c3e51d9b84f26a1c05e8d7b3f9246e1d08a5c7b2f4963d8e0a1b5c7f9
 const FP_B: &str = "6b1f9d04a2c85e37b9d1f06a4c8e2b75d3a9f0c1e6b84a27d5c3f8e90a1b7d62";
 const FP_C: &str = "f3d5a8c1e07b4926d1a3f58c0e9b7d24a6c1e5f83b0d9472e8a5c3f1b6d07e94";
 
+/// The project root the labeller is given: the in-memory findings name
+/// project-relative paths, so it only matters to an absolute report path.
+const ROOT: &str = "/work/project";
+
 fn day(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
@@ -42,6 +46,9 @@ fn finding(fingerprint: &str) -> SecurityFinding {
         start_column: None,
         end_line: None,
         end_column: None,
+        commits: Vec::new(),
+        legacy_fingerprints: Vec::new(),
+        anchor: None,
         freshness: "fresh",
     }
 }
@@ -183,7 +190,7 @@ fn a_lenient_file_parses_sorted_with_native_and_quoted_dates() {
     let got: Vec<_> = file
         .entries()
         .iter()
-        .map(|e| (e.fingerprint.as_str(), e.reason.as_str(), e.expires))
+        .map(|e| (e.selector.fingerprint().unwrap(), e.reason.as_str(), e.expires))
         .collect();
     assert_eq!(
         got,
@@ -324,12 +331,12 @@ fn file_with_expiry(expires: &str) -> IgnoreFile {
 #[test]
 fn a_matching_entry_suppresses_the_finding_and_the_reason_rides_with_it() {
     let file = file_with_expiry("2026-12-31");
-    let labelled = label(&[finding(FP_A), finding(FP_B)], &file, day(2026, 10, 16));
+    let labelled = label(&[finding(FP_A), finding(FP_B)], &file, Path::new(ROOT), day(2026, 10, 16));
 
     assert!(labelled.findings[0].is_suppressed());
     assert_eq!(
         labelled.findings[0].suppression,
-        Some(Suppression::Suppressed { reason: "accepted".into(), expires: Some(day(2026, 12, 31)) })
+        Some(Suppression::Suppressed { reason: "accepted".into(), expires: Some(day(2026, 12, 31)), by: FP_A.into() })
     );
     assert!(!labelled.findings[1].is_suppressed());
     assert_eq!(labelled.findings[1].suppression, None);
@@ -344,20 +351,20 @@ fn an_entry_stops_suppressing_the_day_after_its_expiry() {
     let file = file_with_expiry("2026-12-31");
     let findings = [finding(FP_A)];
 
-    let before = label(&findings, &file, day(2026, 12, 30));
+    let before = label(&findings, &file, Path::new(ROOT), day(2026, 12, 30));
     assert!(before.findings[0].is_suppressed());
     assert!(!before.entries[0].expired);
 
     // Through the expiry date inclusive.
-    let on = label(&findings, &file, day(2026, 12, 31));
+    let on = label(&findings, &file, Path::new(ROOT), day(2026, 12, 31));
     assert!(on.findings[0].is_suppressed());
     assert!(!on.entries[0].expired);
 
-    let after = label(&findings, &file, day(2027, 1, 1));
+    let after = label(&findings, &file, Path::new(ROOT), day(2027, 1, 1));
     assert!(!after.findings[0].is_suppressed(), "an expired entry no longer suppresses");
     assert_eq!(
         after.findings[0].suppression,
-        Some(Suppression::Expired { reason: "accepted".into(), expires: Some(day(2026, 12, 31)) }),
+        Some(Suppression::Expired { reason: "accepted".into(), expires: Some(day(2026, 12, 31)), by: FP_A.into() }),
         "the finding returns, and says its entry expired"
     );
     assert!(after.entries[0].expired);
@@ -367,7 +374,7 @@ fn an_entry_stops_suppressing_the_day_after_its_expiry() {
 #[test]
 fn an_entry_without_an_expiry_never_expires() {
     let file = IgnoreFile::parse(&entry(FP_A, "reason = \"forever\"\n")).unwrap();
-    let labelled = label(&[finding(FP_A)], &file, day(2999, 1, 1));
+    let labelled = label(&[finding(FP_A)], &file, Path::new(ROOT), day(2999, 1, 1));
     assert!(labelled.findings[0].is_suppressed());
     assert!(!labelled.entries[0].expired);
 }
@@ -380,9 +387,9 @@ fn an_entry_that_matches_no_finding_is_orphaned() {
         entry(FP_B, "reason = \"fixed long ago\"\n")
     );
     let file = IgnoreFile::parse(&text).unwrap();
-    let labelled = label(&[finding(FP_A), finding(FP_C)], &file, day(2026, 10, 16));
+    let labelled = label(&[finding(FP_A), finding(FP_C)], &file, Path::new(ROOT), day(2026, 10, 16));
 
-    let status: Vec<_> = labelled.entries.iter().map(|e| (e.entry.fingerprint.as_str(), e.orphaned, e.expired)).collect();
+    let status: Vec<_> = labelled.entries.iter().map(|e| (e.entry.selector.fingerprint().unwrap(), e.orphaned, e.expired)).collect();
     assert_eq!(status, [(FP_A, false, false), (FP_B, true, false)]);
     // An unnamed finding is neither suppressed nor labelled.
     assert_eq!(labelled.findings[1].suppression, None);
@@ -392,7 +399,7 @@ fn an_entry_that_matches_no_finding_is_orphaned() {
 fn an_entry_matching_only_a_later_finding_is_not_an_orphan() {
     let file = IgnoreFile::parse(&entry(FP_B, "reason = \"r\"\n")).unwrap();
     for findings in [[finding(FP_A), finding(FP_B)], [finding(FP_B), finding(FP_A)]] {
-        let labelled = label(&findings, &file, day(2026, 10, 16));
+        let labelled = label(&findings, &file, Path::new(ROOT), day(2026, 10, 16));
         assert!(!labelled.entries[0].orphaned);
     }
 }
@@ -400,7 +407,7 @@ fn an_entry_matching_only_a_later_finding_is_not_an_orphan() {
 #[test]
 fn an_entry_can_be_both_expired_and_orphaned() {
     let file = file_with_expiry("2026-01-01");
-    let labelled = label(&[], &file, day(2026, 10, 16));
+    let labelled = label(&[], &file, Path::new(ROOT), day(2026, 10, 16));
     assert!(labelled.entries[0].expired);
     assert!(labelled.entries[0].orphaned);
 }
@@ -410,49 +417,52 @@ fn one_entry_suppresses_every_finding_that_carries_its_fingerprint() {
     // Two scanners reporting the same fingerprint are one accepted risk.
     let mut other = finding(FP_A);
     other.scanner_name = "Bandit".into();
-    let labelled = label(&[finding(FP_A), other], &file_with_expiry("2026-12-31"), day(2026, 10, 16));
+    let labelled = label(&[finding(FP_A), other], &file_with_expiry("2026-12-31"), Path::new(ROOT), day(2026, 10, 16));
     assert!(labelled.findings.iter().all(|f| f.is_suppressed()));
     assert!(!labelled.entries[0].orphaned);
 }
 
 #[test]
 fn no_file_labels_nothing_and_reports_no_entries() {
-    let labelled = label(&[finding(FP_A)], &IgnoreFile::default(), day(2026, 10, 16));
+    let labelled = label(&[finding(FP_A)], &IgnoreFile::default(), Path::new(ROOT), day(2026, 10, 16));
     assert_eq!(labelled.findings[0].suppression, None);
     assert!(labelled.entries.is_empty());
 }
 
 #[test]
 fn the_label_serialises_with_a_state_tag_and_iso_dates() {
-    let labelled = label(&[finding(FP_A)], &file_with_expiry("2026-12-31"), day(2027, 2, 1));
+    let labelled = label(&[finding(FP_A)], &file_with_expiry("2026-12-31"), Path::new(ROOT), day(2027, 2, 1));
     let json = serde_json::to_value(&labelled).unwrap();
     assert_eq!(
         json["findings"][0]["suppression"],
-        serde_json::json!({"state": "expired", "reason": "accepted", "expires": "2026-12-31"})
+        serde_json::json!({"state": "expired", "reason": "accepted", "expires": "2026-12-31", "by": {"fingerprint": FP_A}})
     );
     assert_eq!(json["entries"][0]["entry"]["expires"], "2026-12-31");
+    assert_eq!(json["entries"][0]["entry"]["fingerprint"], FP_A, "the selector is flattened into the entry");
     assert_eq!(json["entries"][0]["expired"], true);
     assert_eq!(json["entries"][0]["orphaned"], false);
+    assert_eq!(json["entries"][0]["suppressed"], 0, "an expired entry suppresses nothing");
 }
 
 #[test]
 fn a_suppressed_label_serialises_with_its_tag_and_a_null_expiry() {
     let file = IgnoreFile::parse(&entry(FP_A, "reason = \"forever\"\n")).unwrap();
-    let json = serde_json::to_value(label(&[finding(FP_A)], &file, day(2026, 10, 16))).unwrap();
+    let json = serde_json::to_value(label(&[finding(FP_A)], &file, Path::new(ROOT), day(2026, 10, 16))).unwrap();
     assert_eq!(
         json["findings"][0]["suppression"],
-        serde_json::json!({"state": "suppressed", "reason": "forever", "expires": null})
+        serde_json::json!({"state": "suppressed", "reason": "forever", "expires": null, "by": {"fingerprint": FP_A}})
     );
     assert_eq!(json["entries"][0]["entry"]["expires"], serde_json::Value::Null);
+    assert_eq!(json["entries"][0]["suppressed"], 1);
 
-    let unlabelled = serde_json::to_value(label(&[finding(FP_B)], &file, day(2026, 10, 16))).unwrap();
+    let unlabelled = serde_json::to_value(label(&[finding(FP_B)], &file, Path::new(ROOT), day(2026, 10, 16))).unwrap();
     assert_eq!(unlabelled["findings"][0]["suppression"], serde_json::Value::Null);
 }
 
 #[test]
 fn findings_come_back_in_input_order_not_fingerprint_order() {
     let file = IgnoreFile::parse(&entry(FP_B, "reason = \"r\"\n")).unwrap();
-    let labelled = label(&[finding(FP_C), finding(FP_A), finding(FP_B)], &file, day(2026, 10, 16));
+    let labelled = label(&[finding(FP_C), finding(FP_A), finding(FP_B)], &file, Path::new(ROOT), day(2026, 10, 16));
     let order: Vec<_> = labelled
         .findings
         .iter()
@@ -659,9 +669,32 @@ fn concurrent_suppressions_keep_every_entry() {
     std::thread::scope(|scope| {
         for i in 0..32u32 {
             let root = dir.path();
-            scope.spawn(move || suppress(root, &format!("{i:064x}"), "r", None, today()).unwrap());
+            scope.spawn(move || suppress(root, format!("{i:064x}"), "r", None, today()).unwrap());
         }
     });
     let file = IgnoreFile::load(dir.path()).unwrap();
     assert_eq!(file.len(), 32, "every concurrent suppression is in the file");
+}
+
+/// An orphaned entry naming a key a finding had before history.db migration 7
+/// names that finding's fingerprint — the lowest when two carry the old key —
+/// and still suppresses nothing; an entry that matches, or an orphan no finding
+/// knows, names none.
+#[test]
+fn an_orphaned_entry_under_an_old_key_names_the_fingerprint_it_should_name() {
+    let mut rekeyed = finding(FP_B);
+    rekeyed.legacy_fingerprints = vec![FP_A.to_string()];
+    let mut twin = finding(FP_C);
+    twin.legacy_fingerprints = vec![FP_A.to_string()];
+    let typo = "e".repeat(64);
+    let text = [entry(FP_A, "reason = \"old key\"\n"), entry(FP_B, "reason = \"current\"\n"), entry(&typo, "reason = \"typo\"\n")].join("\n");
+    let ignore = IgnoreFile::parse(&text).unwrap();
+    let labelled = label(&[twin, rekeyed], &ignore, Path::new(ROOT), day(2026, 10, 18));
+    let named: Vec<(&str, bool, Option<&str>)> = labelled
+        .entries
+        .iter()
+        .map(|e| (e.entry.selector.fingerprint().unwrap(), e.orphaned, e.should_name.as_deref()))
+        .collect();
+    assert_eq!(named, [(FP_A, true, Some(FP_B)), (FP_B, false, None), (typo.as_str(), true, None)]);
+    assert!(labelled.findings.iter().find(|f| f.finding.fingerprint == FP_C).is_some_and(|f| f.suppression.is_none()), "the old key suppresses nothing");
 }

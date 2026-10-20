@@ -4,15 +4,19 @@
 # never relaxes its own quality contract unseen. The host asks the human first
 # when an agent tool call would
 #
-#   write, edit or delete    .logos/rules.toml, .logos/rules-baseline.json or
-#                            .logos/security-ignore.toml (any .logos/, so a
+#   write, edit or delete    .logos/rules.toml, .logos/rules-baseline.json,
+#                            .logos/security-ignore.toml or
+#                            .logos/security-baseline.json (any .logos/, so a
 #                            workspace member's contract is guarded too)
 #   run                      logos gate --save  or  logos check --bless, as a
 #                            shell command, or check --bless's MCP twin
 #                            bless_rules (gate has no MCP twin); or
 #                            logos security ingest, as a shell command or its
 #                            MCP twin security_ingest — an empty report clears a
-#                            failing [security] gate, required scanners included
+#                            failing [security] gate, required scanners included;
+#                            or logos security bless, as a shell command (it has
+#                            no MCP twin) — it rewrites the checked-in security
+#                            baseline
 #
 #   not enrolled (no .logos/)   exit 0, no output
 #   a guarded action            one PreToolUse JSON object: permissionDecision
@@ -62,7 +66,7 @@ set -f
 # macOS and Windows file systems fold case: .LOGOS/Rules.toml is the same file.
 shopt -s nocasematch
 
-GUARDED_NAMES="rules.toml rules-baseline.json security-ignore.toml"
+GUARDED_NAMES="rules.toml rules-baseline.json security-ignore.toml security-baseline.json"
 # Commands that never write the files they are given. Anything else that names a
 # guarded file asks. sed, find and git are readers only on conditions (reader_cmd);
 # less (-o) and xxd (-r) are left out because they can write.
@@ -94,7 +98,7 @@ ask() {
 }
 
 malformed() {
-    decide_ask "the PreToolUse payload could not be read ($1), so this call cannot be shown to leave the quality contract (.logos/rules.toml, .logos/rules-baseline.json, .logos/security-ignore.toml) untouched. A human decides."
+    decide_ask "the PreToolUse payload could not be read ($1), so this call cannot be shown to leave the quality contract (.logos/rules.toml, .logos/rules-baseline.json, .logos/security-ignore.toml, .logos/security-baseline.json) untouched. A human decides."
 }
 
 # split_on CHARS TEXT — PARTS: TEXT cut at every one of CHARS, empty fields kept
@@ -268,7 +272,7 @@ maybe_guarded() {
 # is turned away before any path work.
 mention() {
     case "$1" in
-        *.logos* | *rules.toml* | *rules-baseline.json* | *security-ignore.toml*) ;;
+        *.logos* | *rules.toml* | *rules-baseline.json* | *security-ignore.toml* | *security-baseline.json*) ;;
         *[\*\?\[\{]*) [ "$DOT_LOGOS" = yes ] || return 1 ;;
         *) return 1 ;;
     esac
@@ -381,6 +385,8 @@ shell_segment() {
                 # value can be the word logos (`$L security --project logos ingest`).
                 ingest) [ "$security_at" -ge 0 ] &&
                     ask "the command runs \`logos security ingest\`, which stores a SARIF report as the security evidence: an empty one clears a failing [security] gate." ;;
+                bless) [ "$security_at" -ge 0 ] &&
+                    ask "the command runs \`logos security bless\`, which rewrites .logos/security-baseline.json, the security ratchet's checked-in baseline." ;;
                 --save) [ "$gate_at" -gt "$logos_at" ] &&
                     ask "the command runs \`logos gate --save\`, which replaces the blessed quality baseline." ;;
                 --bless) [ "$check_at" -gt "$logos_at" ] &&
@@ -431,9 +437,11 @@ shell_command() {
         *) BIN_NAMED=no ;;
     esac
     # Nothing guarded is named and nothing blessed, saved or ingested: the call passes
-    # without the word-by-word walk, so a long heredoc costs one test.
+    # without the word-by-word walk, so a long heredoc costs one test. `*bless*`
+    # covers both `check --bless` and `security bless`.
     case "$c" in
-        *.logos* | *rules.toml* | *rules-baseline.json* | *security-ignore.toml* | *--save* | *--bless* | *ingest*) ;;
+        *.logos* | *rules.toml* | *rules-baseline.json* | *security-ignore.toml* | *security-baseline.json* | \
+            *--save* | *bless* | *ingest*) ;;
         *) return 0 ;;
     esac
     split_on $';&|()`\n' "$c"

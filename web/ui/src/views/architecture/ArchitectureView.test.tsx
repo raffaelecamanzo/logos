@@ -5,6 +5,7 @@ import type { ArchitectureModel } from "../../api/types.ts";
 import { cycles, dependencyMatrix } from "../../copy/architecture.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
+import { HOSTILE_NAME } from "../../test/renderedChart.ts";
 import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { ArchitectureView } from "./ArchitectureView.tsx";
 import { MATRIX_MODULE_THRESHOLD } from "./dsmModel.ts";
@@ -117,6 +118,21 @@ describe("ArchitectureView over mocked /api/v1 (S-189, FR-UI-06)", () => {
     render(<ArchitectureView />);
     const note = await screen.findByText(/the matrix is unreadable at this size/i);
     expect(note.textContent).not.toMatch(/cycle list/i);
+  });
+});
+
+describe("the dependency matrix renders a module name as text (S-776, NFR-SE-11)", () => {
+  it("shows a name carrying markup as that literal text in its row head and titles", async () => {
+    const model = withCycle();
+    model.dsm.rows = [{ name: HOSTILE_NAME, layer: null }, { name: "db", layer: null }];
+    stub(model);
+    render(<ArchitectureView />);
+    const matrix = await screen.findByRole("table");
+    const rowHead = within(matrix).getAllByRole("rowheader")[0];
+    expect(rowHead).toHaveTextContent(`1. ${HOSTILE_NAME}`);
+    expect(rowHead).toHaveAttribute("title", HOSTILE_NAME);
+    expect(within(matrix).getAllByRole("columnheader")[0]).toHaveAttribute("title", HOSTILE_NAME);
+    expect(document.querySelector("img")).toBeNull();
   });
 });
 

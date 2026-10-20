@@ -23,6 +23,7 @@ import type {
   MetricValue,
   Offender,
   ScanResult,
+  SignalAttribution,
   StatusInfo,
   WhereToStart,
   WorstOffenders,
@@ -485,10 +486,54 @@ export function optSignal(value: number | null): string {
   return value === null ? "n/a" : String(value);
 }
 
-/** Render a signed signal delta, or `—` for the first point / an n/a edge. */
-export function optDelta(value: number | null): string {
+/** Render a signed signal delta, or `—` for the first point / an n/a edge;
+ *  `fractionDigits` fixes the decimals (attribution points, FR-GV-26). */
+export function optDelta(value: number | null, fractionDigits?: number): string {
   if (value === null) return "—";
-  return value > 0 ? `+${value}` : String(value);
+  const text = fractionDigits === undefined ? String(value) : value.toFixed(fractionDigits);
+  return value > 0 ? `+${text}` : text;
+}
+
+/** One driver of a Signal change row: a symbol at its place, or a near-clone
+ *  group by its members' names. */
+export interface ChangeDriver {
+  readonly name: string;
+  readonly status: string;
+  readonly location: string;
+  /** A near-clone group's member names; `null` for a symbol. */
+  readonly members: readonly string[] | null;
+}
+
+/** One row of the Signal change table (FR-GV-26): a dimension that moved, its
+ *  share in signal points, its listed drivers, and how many the cap left out. */
+export interface ChangeRow {
+  readonly dimension: string;
+  readonly points: number;
+  readonly drivers: readonly ChangeDriver[];
+  readonly more: number;
+}
+
+/** The dimensions an attribution says moved, in its own order (largest share
+ *  first); a dimension whose share rounds to zero is not a row. */
+export function changeRows(attribution: SignalAttribution): ChangeRow[] {
+  return attribution.contributions
+    .filter((c) => c.points !== 0)
+    .map((c) => ({
+      dimension: c.dimension,
+      points: c.points,
+      drivers: c.drivers.map((d) => ({
+        name: d.name,
+        status: d.status,
+        location: unitLocation(d.file, d.line),
+        members: d.members === undefined ? null : d.members.map((m) => m.name),
+      })),
+      more: c.driver_count - c.drivers.length,
+    }));
+}
+
+/** A signed figure to two decimals (`+0.41`, `-2.28`); `—` when absent. */
+export function signedPoints(value: number | null): string {
+  return optDelta(value, 2);
 }
 
 /** First 9 chars of a commit sha (abbreviated; the full sha is in the read-model);

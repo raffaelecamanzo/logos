@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::history::{DegradedReason, FileTemporal};
+use crate::model::EdgeKind;
 use crate::models::outcome::OutcomeCounts;
 use crate::models::pipeline::{PersistenceHealth, RelationCoverage};
 
@@ -1209,18 +1210,20 @@ pub struct ListedOffender {
 /// tree, classified per symbol against the **merge-base** of `HEAD` and the
 /// base ref ([ADR-82]).
 ///
-/// Advisory: it never moves an exit code of `check` or `gate`. With
+/// Advisory: it never moves an exit code of `check` or `gate` by itself; under a
+/// `rules.toml [review]` table `gate` judges the same delta ([FR-GV-25]). With
 /// `measured: false` nothing is classified — every list is `[]` and means
 /// nothing, and `not_measured_because` says why ([NFR-CC-04]). A rerun over an
 /// unchanged tree and store is byte-identical ([NFR-RA-06]): no field carries
 /// a time or a storage id, and every list is ordered by identity.
 ///
 /// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
+/// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
 /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 /// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct BranchReview {
     /// The ref the branch is compared against, as stated or as the default
     /// branch resolved to.
@@ -1264,11 +1267,48 @@ pub struct BranchReview {
     pub sections: ReviewSections,
     /// Advisory notes on how the answer was produced.
     pub notes: Vec<String>,
+    /// The `rules.toml [review]` policy the entries were judged under
+    /// ([FR-GV-25]): which dimensions gate and how many listed entries do.
+    /// `None` — and elided, so the answer is byte-identical to before —
+    /// without the table, or when nothing was measured.
+    ///
+    /// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ReviewPolicy>,
+    /// The aggregate's change from the merge-base to the branch, broken down
+    /// per dimension with the symbols that drive each part ([FR-GV-26]).
+    /// `None` — and elided — only when nothing was measured.
+    ///
+    /// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<SignalAttribution>,
+    /// The `rules.toml [review]` trend warnings ([FR-GV-27]): a distributional
+    /// dimension that declined in each of the last `trend_window` recorded
+    /// snapshots. Advisory; empty — and elided — without the table.
+    ///
+    /// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// Whether this run built the shadow before-state, reused the cached one,
     /// or used neither. Not serialized, so a cached rerun is byte-identical
     /// to the run that built the cache.
     #[serde(skip)]
     pub before_state_cache: BeforeStateCache,
+}
+
+/// The `[review]` policy a [`BranchReview`] was judged under ([FR-GV-25],
+/// [ADR-89]). `gate_dimensions` stays the first field: the Stop hook detects
+/// the policy by the bytes `"policy":{"gate_dimensions":`
+/// (`cli/tests/review_policy_cli.rs` pins them).
+///
+/// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+/// [ADR-89]: ../../../docs/specs/architecture/decisions/ADR-89.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ReviewPolicy {
+    /// The dimensions whose `new`/`worsened` entries gate, as declared.
+    pub gate_dimensions: Vec<String>,
+    /// How many listed offenders carry [`ReviewedOffender::gating`].
+    pub gating: u64,
 }
 
 impl BranchReview {
@@ -1313,6 +1353,166 @@ impl BeforeStateCache {
             Self::Reused => Some("merge-base before-state read from the cache"),
         }
     }
+}
+
+/// What `logos review --base <ref> --branches <b1> <b2> …` and its MCP twin
+/// return ([FR-GV-28], S-757): each branch's delta against `base`, summed and
+/// projected onto the shared limits — every declared per-subject and
+/// project-wide `[constraints]` budget ([FR-GV-11]) and a numeric `[review]
+/// drift_budget` — listing each limit the combined merge would exceed, with
+/// every branch's share of it.
+///
+/// Report only: no surface moves an exit code by it. A branch that cannot be
+/// measured is named in `branches` and left out of the sum. With `measured:
+/// false` nothing was projected — `exceeded` is `[]` and means nothing — and
+/// `not_measured_because` says why ([NFR-CC-04]). Byte-stable over unchanged
+/// commits ([NFR-RA-06]): every side is a committed tree, and no field carries
+/// a time or a storage id.
+///
+/// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
+/// [FR-GV-11]: ../../../docs/specs/requirements/FR-GV-11.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BranchesProjection {
+    /// The ref every branch is compared against, as stated or as the default
+    /// branch resolved to.
+    pub base: String,
+    /// Where `base` came from: [`BranchReview::STATED`] or
+    /// [`BranchReview::DEFAULT_BRANCH`].
+    pub base_origin: &'static str,
+    /// `base`'s commit — the tree each projected value starts from.
+    pub base_commit: Option<String>,
+    /// `true` when the base was measured and at least one branch was summed.
+    pub measured: bool,
+    /// Why nothing was projected; `None` when `measured`.
+    pub not_measured_because: Option<String>,
+    /// Every branch asked for, in the order given, measured or not.
+    pub branches: Vec<ProjectedBranch>,
+    /// The limits projected, in canonical order: the declared `[constraints]`
+    /// budgets, then `drift_budget` when it is numeric.
+    pub limits: Vec<String>,
+    /// Declared limits the projection does not judge, each with why.
+    pub not_projected: Vec<UnprojectedLimit>,
+    /// The denominator: how many (limit, subject) pairs were evaluated — each
+    /// module, function or file with a value above 0 on some side, and every
+    /// project-wide count, at 0 too.
+    pub subjects: u64,
+    /// Every `[constraints]` limit the summed shares take past its ceiling,
+    /// in [`limits`](Self::limits) order, then by subject.
+    pub exceeded: Vec<ExceededLimit>,
+    /// The signal drop the summed shares take past a numeric `drift_budget`;
+    /// `None` — and elided — when no combination exceeds it, or there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<ProjectedDrift>,
+    /// Advisory notes on how the answer was produced.
+    pub notes: Vec<String>,
+}
+
+/// One branch of a [`BranchesProjection`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProjectedBranch {
+    /// The branch as named.
+    pub name: String,
+    /// Its tip commit, when it resolves.
+    pub commit: Option<String>,
+    /// The merge-base of its tip and the base — the before-state of its share,
+    /// unless it is stacked on another branch.
+    pub merge_base: Option<String>,
+    /// The summed branch whose tip it is built on: its share is measured from
+    /// that tip, so their shared commits count once. Elided when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stacked_on: Option<String>,
+    /// `true` when its delta is in the sum.
+    pub measured: bool,
+    /// Why it is left out of the sum; `None` when `measured`.
+    pub not_measured_because: Option<String>,
+}
+
+/// A declared limit the projection does not judge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct UnprojectedLimit {
+    /// The `rules.toml` key.
+    pub rule: String,
+    /// Why it is not projected.
+    pub reason: String,
+}
+
+/// One limit the summed branch shares exceed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ExceededLimit {
+    /// The `[constraints]` key.
+    pub rule: String,
+    /// What the limit holds: a module key, a function's symbol id or a file —
+    /// as `check` names it under ratchet — or `""` for a project-wide count.
+    pub subject: String,
+    /// The subject's file; `""` for a project-wide count.
+    pub file: String,
+    /// The file's trust label ([`BranchReview::TRUST_RESOLVED`], or the tag of
+    /// a language the graph binds within files only): a coupling budget
+    /// counts cross-file edges, which such a language does not bind.
+    pub trust: String,
+    /// The ceiling a value must not exceed.
+    pub limit: u64,
+    /// The value at the base commit.
+    pub base: u64,
+    /// `base` plus every share: what the combined merge is projected to measure.
+    pub projected: i64,
+    /// Each branch that moved the value, in the order given.
+    pub shares: Vec<BranchShare>,
+}
+
+/// One branch's part of a projected limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BranchShare {
+    /// The branch as named.
+    pub branch: String,
+    /// Its tip's value minus its merge-base's — for the drift, its signal drop.
+    pub share: i64,
+    /// `true` when this share alone, on the base, already exceeds the limit.
+    pub exceeds_alone: bool,
+}
+
+/// The projected signal drop past a numeric `drift_budget`: the drift as
+/// `gate` judges one, from the reference signal (`baseline`) to the projected
+/// one (`current`, the base commit's signal less every branch's drop), with
+/// each branch's drop and the reference it was judged from.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProjectedDrift {
+    #[serde(flatten)]
+    pub drift: SignalDrift,
+    /// Each branch that moved the signal, in the order given.
+    pub shares: Vec<BranchShare>,
+    /// What `baseline` is: this checkout's blessed gate baseline, or the base
+    /// commit's signal when no comparable one exists.
+    pub reference: DriftReference,
+}
+
+/// The signal a projected drift is judged from ([FR-GV-28], [CR-237] §3.2):
+/// the gate's blessed baseline whenever a comparable one is saved — the
+/// reference the gate after the merge would judge by — else the base commit's
+/// signal. A baseline is store state, so another checkout can answer
+/// differently.
+///
+/// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
+/// [CR-237]: ../../../docs/requests/CR-237-branch-delta-gating-attribution-and-budgets.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DriftReference {
+    /// [`BASELINE`](Self::BASELINE) or [`BASE`](Self::BASE).
+    pub kind: &'static str,
+    /// The blessed baseline's snapshot id; elided for `base`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<i64>,
+    /// Why no baseline was used; elided for `baseline`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl DriftReference {
+    /// `kind`: this checkout's comparable blessed gate baseline.
+    pub const BASELINE: &'static str = "baseline";
+    /// `kind`: the base commit's own signal.
+    pub const BASE: &'static str = "base";
 }
 
 /// The class of one reviewed entry ([FR-GV-24]).
@@ -1391,6 +1591,14 @@ pub struct ReviewedOffender {
     ///
     /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     pub trust: String,
+    /// `true` when a `rules.toml [review]` policy gates on this entry
+    /// ([FR-GV-25]): it is `new` or `worsened`, its dimension is in
+    /// `gate_dimensions`, and its trust is [`BranchReview::TRUST_RESOLVED`].
+    /// Elided when `false`, so an answer without the table is unchanged.
+    ///
+    /// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gating: bool,
 }
 
 /// One `check` violation of the branch review.
@@ -1574,6 +1782,10 @@ pub struct SecurityDeltaEntry {
     pub fingerprint: String,
     pub rule_id: String,
     pub severity: crate::model::Severity,
+    /// Why its severity reads as it does, when that is not plain: an `unrated`
+    /// finding's "the scanner gave none" (S-768); absent for a rating.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity_reason: Option<&'static str>,
     /// Its OWASP categories under the review's edition, in OWASP's order.
     pub owasp: Vec<String>,
     /// The stored message: fixed redacted text for a secret-class finding.
@@ -1643,7 +1855,7 @@ pub struct WhereToStart {
     #[serde(skip_serializing_if = "str::is_empty")]
     pub basis: &'static str,
     /// The ranked fix units: recoverable points descending, then dimension
-    /// canonical order, then node id; at most
+    /// canonical order, then [`node_id`](FixUnit::node_id); at most
     /// [`WHERE_TO_START_CAP`](crate::metrics::insight::WHERE_TO_START_CAP).
     pub units: Vec<FixUnit>,
     /// One entry per per-unit measure, in
@@ -1716,10 +1928,20 @@ impl FixUnitKind {
 pub struct FixUnit {
     /// What the unit is.
     pub kind: FixUnitKind,
-    /// The unit's node id: the class's or function's own, or a group's lowest
-    /// production member — the symbol the entry is named by.
-    pub node_id: i64,
-    /// That node's name.
+    /// The unit's identity, stable across re-indexing where the storage id is
+    /// not ([CR-238] D7). A class's or function's is its symbol id without the
+    /// repository coordinate — [`Offender::node_id`]'s, which `node` and
+    /// `impact` resolve. A group's is derived from its production members'
+    /// identities, sorted: `<kind>:<digest>`, the same while the member set is.
+    /// `None` on a snapshot written before migration 40, whose rows held a
+    /// storage id — "not recorded", never that id reread as an identity
+    /// ([NFR-CC-04]).
+    ///
+    /// [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub node_id: Option<String>,
+    /// The name of the symbol the entry is named by: the class or function
+    /// itself, or a group's production member first in identity order.
     pub name: String,
     /// That node's defining file, when bound to one.
     pub file: String,
@@ -1786,7 +2008,8 @@ pub struct OutlierMeasure {
     pub threshold: Option<i64>,
     /// How many units the measure labels, uncapped.
     pub labelled: u64,
-    /// The labelled units, value descending, then node id, capped at
+    /// The labelled units, value descending, then
+    /// [`node_id`](OutlierLabel::node_id), capped at
     /// [`WORST_OFFENDER_CAP`](crate::metrics::WORST_OFFENDER_CAP); a ranked
     /// [`FixUnit`] carries its own labels whatever the cap left out.
     pub labels: Vec<OutlierLabel>,
@@ -1812,9 +2035,12 @@ impl OutlierMeasure {
 /// One unit labelled an outlier on one measure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OutlierLabel {
-    /// The labelled unit's node id (a group's lowest production member).
-    pub node_id: i64,
-    /// That node's name.
+    /// The labelled unit's identity — [`FixUnit::node_id`]'s, so a label and
+    /// the ranked unit it belongs to carry one id. `None` on a snapshot
+    /// written before migration 40.
+    pub node_id: Option<String>,
+    /// The name of the symbol the label is named by (a group's production
+    /// member first in identity order).
     pub name: String,
     /// That node's defining file, when bound to one.
     pub file: String,
@@ -2160,7 +2386,12 @@ pub struct MetricValue {
 ///
 /// The gate fails iff `current < baseline − epsilon` (aggregate-regression
 /// only, DL-04); per-metric regressions are detail, never an independent
-/// failure. No baseline → informational pass.
+/// failure. No baseline → informational pass. Under a `rules.toml [review]`
+/// table ([FR-GV-25]) it fails instead on a gating branch-delta entry
+/// (`gating_entries`), and on the aggregate only past its drift budget
+/// (`drift`).
+///
+/// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
 #[derive(Debug, Default, Serialize)]
 pub struct GateResult {
     pub passed: bool,
@@ -2232,6 +2463,224 @@ pub struct GateResult {
     /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_scans: Vec<MissingScan>,
+    /// Under a `rules.toml [review]` table ([FR-GV-25]): the branch delta's
+    /// gating entries — `new` or `worsened` offenders in a gating dimension,
+    /// each with its value, threshold and trust. Any entry fails the gate.
+    /// Empty and elided without the table.
+    ///
+    /// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gating_entries: Vec<ReviewedOffender>,
+    /// Under a `rules.toml [review]` table ([FR-GV-25]): the signal's drift
+    /// against the baseline, judged by `drift_budget` in place of
+    /// `baseline − ε`. `None` and elided without the table, or when there was
+    /// no comparable baseline to drift from.
+    ///
+    /// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<SignalDrift>,
+    /// Under a `rules.toml [review]` table ([FR-GV-26]): the signal's change
+    /// from the baseline, broken down per dimension with its driving symbols —
+    /// on `gate --save`, the change being blessed, which the baseline record
+    /// stores ([FR-GV-16]). `None` and elided without the table, or when there
+    /// was no comparable baseline to change from.
+    ///
+    /// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+    /// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<SignalAttribution>,
+    /// The `--reason` the baseline was blessed with ([FR-GV-16]): on `gate
+    /// --save`, the one this run stored; on a compare, the one the baseline it
+    /// compared against carries. Elided when there is none.
+    ///
+    /// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_reason: Option<String>,
+    /// The announced re-baseline this run took ([FR-GV-10], [S-762]): what the
+    /// baseline it replaced was scored as, beside what it was replaced with.
+    /// Elided when the run compared (or found no baseline).
+    ///
+    /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+    /// [S-762]: ../../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_reset: Option<BaselineReset>,
+}
+
+/// An announced re-baseline ([FR-GV-10], [S-762]): a baseline that no longer
+/// compares — scored under another metric-semantics version or other
+/// thresholds — replaced by the run's own snapshot, with both ends named so the
+/// old value is not erased from view.
+///
+/// [`notice`](Self::notice) is the one spelling of the message `gate`,
+/// `session_end` and `session_start` print.
+///
+/// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+/// [S-762]: ../../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BaselineReset {
+    /// What made the baseline incomparable: `metric semantics changed` or
+    /// `metric thresholds changed`.
+    pub cause: String,
+    /// The baseline that was replaced.
+    pub from: BaselineStamp,
+    /// The snapshot it was replaced with.
+    pub to: BaselineStamp,
+}
+
+/// A snapshot as the re-baseline names it: the metric-semantics version it was
+/// scored under and the 0–10000 signal it scored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BaselineStamp {
+    pub metric_version: i64,
+    /// `None` when nothing was in production scope to score ([ADR-12]).
+    ///
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+    pub signal: Option<u32>,
+}
+
+impl BaselineStamp {
+    /// `v7 8292`, or `v7` alone when there is no signal to name.
+    fn figure(&self) -> String {
+        match self.signal {
+            Some(signal) => format!("v{} {signal}", self.metric_version),
+            None => format!("v{}", self.metric_version),
+        }
+    }
+}
+
+impl BaselineReset {
+    /// `baseline reset: metric semantics changed (v7 8292 → v8 8295)`.
+    pub fn notice(&self) -> String {
+        format!("baseline reset: {} ({} → {})", self.cause, self.from.figure(), self.to.figure())
+    }
+}
+
+/// The aggregate's change between two measurements, attributed per dimension
+/// ([FR-GV-26], [ADR-89]).
+///
+/// The signal is a geometric mean, so it decomposes additively in log space:
+/// `ln S = Σ ln nᵢ / k`. Each dimension's share of `Δ ln S` is its own term's
+/// change, and the logarithmic mean of the two exact signals converts the
+/// shares to points, so the contributions sum to the exact (unrounded) change
+/// — a dimension that entered or left the mean included. The integer signals
+/// round that change: `rounding` states by how much (under one point by
+/// construction), and `residual` what the contributions leave of the exact
+/// change once each is rounded to two decimals.
+///
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+/// [ADR-89]: ../../../docs/specs/architecture/decisions/ADR-89.md
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SignalAttribution {
+    /// The 0–10000 signal before; `None` is "n/a" ([ADR-12]).
+    ///
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+    pub before: Option<u32>,
+    /// The signal after.
+    pub after: Option<u32>,
+    /// `after − before`, as the two integer signals read; `None` when either
+    /// is n/a.
+    pub change: Option<i64>,
+    /// The change between the two unrounded signals, to two decimals — what
+    /// the contributions sum to. `None` when the change is not attributable.
+    pub exact_change: Option<f64>,
+    /// `change − exact_change`: what rounding each signal to an integer added.
+    /// `None` when the change is not attributable.
+    pub rounding: Option<f64>,
+    /// One entry per dimension applicable on either side, largest share first
+    /// (canonical order breaks ties). Empty when the change is not attributable.
+    pub contributions: Vec<DimensionContribution>,
+    /// `exact_change − Σ points`: the part of the change the contributions do
+    /// not carry. `None` when the change is not attributable.
+    pub residual: Option<f64>,
+    /// Why the change cannot be attributed — an n/a signal, or a signal the
+    /// [ADR-12] zero short-circuit collapsed, whose log is not finite.
+    ///
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_attributable_because: Option<String>,
+    /// Why no contribution names its drivers although the change is
+    /// attributed: a side whose offender values were never recorded (a
+    /// snapshot that predates [FR-QM-19]) has nothing to classify against.
+    ///
+    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drivers_not_named_because: Option<String>,
+}
+
+impl SignalAttribution {
+    /// How many drivers each contribution lists; `driver_count` counts them all.
+    pub const DRIVER_CAP: usize = 5;
+}
+
+/// One dimension's share of a [`SignalAttribution`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DimensionContribution {
+    /// One of [`FixUnit::DIMENSIONS`].
+    pub dimension: String,
+    /// The normalized value before; `None` when the dimension was not
+    /// applicable there.
+    pub before: Option<f64>,
+    /// The normalized value after; `None` when not applicable.
+    pub after: Option<f64>,
+    /// The signal points this dimension moved, to two decimals.
+    pub points: f64,
+    /// The offenders that pushed this dimension the way it moved, largest
+    /// change first: `new` and `worsened` ones for a fall, `resolved` and
+    /// `improved` ones for a rise; for Uniqueness, the near-clone groups that
+    /// appeared or went. At most [`SignalAttribution::DRIVER_CAP`]. Modularity
+    /// lists no offenders, so it names none.
+    pub drivers: Vec<AttributionDriver>,
+    /// How many drivers there were before the cap.
+    pub driver_count: u64,
+}
+
+/// One symbol, or one near-clone group, behind a [`DimensionContribution`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttributionDriver {
+    /// How the entry moved.
+    pub status: ReviewStatus,
+    /// The symbol's name; a near-clone group's first member's.
+    pub name: String,
+    /// As [`ReviewedOffender::node_id`].
+    pub node_id: Option<String>,
+    pub file: String,
+    pub line: Option<i64>,
+    /// What `before` and `after` count, as [`ReviewedOffender::measure`]; a
+    /// near-clone group's is its size.
+    pub measure: Option<String>,
+    pub before: Option<i64>,
+    pub after: Option<i64>,
+    /// A near-clone group's members, by file and line; empty — and elided — for
+    /// a symbol.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<DriverMember>,
+}
+
+/// One member of a near-clone group an [`AttributionDriver`] names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DriverMember {
+    pub node_id: Option<String>,
+    pub name: String,
+    pub file: String,
+    pub line: Option<i64>,
+}
+
+/// The aggregate's movement against the baseline under a `[review]` drift
+/// budget ([FR-GV-25]).
+///
+/// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SignalDrift {
+    /// The baseline signal.
+    pub baseline: u32,
+    /// The signal now.
+    pub current: u32,
+    /// `baseline − current`: how far the signal fell; negative when it rose.
+    pub drop: i64,
+    /// The `drift_budget` in points; `None` is `"report"`, which never fails.
+    pub budget: Option<f64>,
+    /// `true` when `drop` is over `budget`, which fails the gate.
+    pub exceeded: bool,
 }
 
 impl GateResult {
@@ -2719,6 +3168,28 @@ pub struct VerifyCensus {
     pub edges: u64,
 }
 
+/// One edge that differs between the live graph and a fresh reindex, as listed
+/// by the deep [`VerifyReport`] ([FR-GV-19], [CR-236]): its kind, the canonical
+/// symbols of its two endpoints, and the files those endpoints are defined in —
+/// enough to see which file's re-extraction lost or kept it. An endpoint not
+/// bound to a file serialises its file as `null`.
+///
+/// [FR-GV-19]: ../../../docs/specs/requirements/FR-GV-19.md
+/// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DriftedEdge {
+    /// The relationship kind (`calls`, `imports`, …).
+    pub kind: EdgeKind,
+    /// The canonical SCIP symbol of the source endpoint.
+    pub source_symbol: String,
+    /// The canonical SCIP symbol of the target endpoint.
+    pub target_symbol: String,
+    /// The defining file of the source endpoint.
+    pub source_file: Option<String>,
+    /// The defining file of the target endpoint.
+    pub target_file: Option<String>,
+}
+
 /// The on-demand **deep-`verify`** verdict (CR-052, [FR-GV-19], [NFR-RA-06],
 /// [ADR-46]): the live graph diffed against a throwaway shadow store reindexed
 /// via the always-purge [`index`](../../../docs/specs/requirements/FR-IX-01.md)
@@ -2731,7 +3202,10 @@ pub struct VerifyCensus {
 /// `leaked_symbols`) is the drift signature — stale rows the live store leaked;
 /// `orphaned_symbols` are reindex-only symbols the live graph is missing. The
 /// symbol samples are lexically ordered and capped for a bounded read-model
-/// ([NFR-RA-06]); the `*_total` counts are exact.
+/// ([NFR-RA-06]); the `*_total` counts are exact. `lost_edges` / `extra_edges`
+/// name the edges that differ by `(kind, source symbol, target symbol)` — a
+/// count delta says the graph drifted, the lists say where ([CR-236]) — capped
+/// and ordered the same way, with exact totals beside each.
 ///
 /// `verify` exits 1 on `ok == false` on the CLI ([FR-GV-19]); the MCP tool and
 /// the web read-model ([FR-UI-25]) serialize this report verbatim.
@@ -2741,6 +3215,7 @@ pub struct VerifyCensus {
 /// [FR-UI-25]: ../../../docs/specs/requirements/FR-UI-25.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
+/// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
 #[derive(Debug, Default, Serialize)]
 pub struct VerifyReport {
     /// `true` when the live graph matches a fresh reindex: zero count deltas, an
@@ -2770,6 +3245,22 @@ pub struct VerifyReport {
     /// A deterministic, lexically-ordered, capped sample of `orphaned_total`
     /// ([NFR-RA-06]).
     pub orphaned_symbols: Vec<String>,
+    /// Edges present in a fresh reindex but absent from the live graph — the
+    /// live graph *lost* them ([CR-236]: an incremental sync that drops an
+    /// inbound edge). Exact count of edges keyed by `(kind, source symbol,
+    /// target symbol)`; `0` on a clean graph.
+    ///
+    /// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
+    pub lost_edges_total: u64,
+    /// A deterministic, capped sample of `lost_edges_total`, ordered by kind
+    /// then source then target symbol ([NFR-RA-06]). Empty on a clean graph.
+    pub lost_edges: Vec<DriftedEdge>,
+    /// Edges present in the live graph but absent from a fresh reindex — stale
+    /// edges the live graph *kept*. Exact count; `0` on a clean graph.
+    pub extra_edges_total: u64,
+    /// A deterministic, capped sample of `extra_edges_total`, ordered like
+    /// `lost_edges` ([NFR-RA-06]). Empty on a clean graph.
+    pub extra_edges: Vec<DriftedEdge>,
     /// The embedded fast structural check on the live graph ([FR-GV-18]) — the
     /// same verdict `doctor` reports, folded into the deep check.
     pub structural: DoctorReport,
@@ -2778,15 +3269,19 @@ pub struct VerifyReport {
 
 /// Session lifecycle info — `session_start` (FR-GV-04).
 ///
-/// `session_start` is the MCP spelling of `gate --save`: it computes a fresh
-/// snapshot and upserts the baseline; `session_end` returns a [`GateResult`].
+/// `session_start` computes a fresh snapshot and, on a first run only, saves
+/// it as the baseline — an existing one is never moved, unless it no longer
+/// compares, which it resets with the announced notice
+/// ([`baseline_reset`](Self::baseline_reset)); `session_end` returns a
+/// [`GateResult`].
 #[derive(Debug, Default, Serialize)]
 pub struct SessionInfo {
-    /// The baseline snapshot's row id, as the session handle.
+    /// The row id of the snapshot the session recorded, as the session handle
+    /// — the baseline itself on a first run.
     pub session_id: String,
-    /// Unix-seconds timestamp the session (baseline) was recorded at.
+    /// Unix-seconds timestamp the session was recorded at.
     pub started_at: i64,
-    /// The signal recorded as the baseline; `None` = "n/a" (empty graph).
+    /// The signal of the session's snapshot; `None` = "n/a" (empty graph).
     pub signal: Option<u32>,
     /// The FR-RC-03 freshness line.
     pub freshness: String,
@@ -2799,6 +3294,13 @@ pub struct SessionInfo {
     /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The announced re-baseline this start took when the baseline no longer
+    /// compared ([FR-GV-10], [S-762]); elided otherwise.
+    ///
+    /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+    /// [S-762]: ../../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_reset: Option<BaselineReset>,
 }
 
 /// Observability stats — usage/perf telemetry from `telemetry.db`
@@ -3261,5 +3763,26 @@ mod tests {
         assert_eq!(gate(false, Vec::new()).exit_code(), 1);
         assert_eq!(gate(false, missing()).exit_code(), 5);
         assert_eq!(gate(true, missing()).exit_code(), 5);
+    }
+
+    /// [S-762]: the notice names the replaced baseline and the run, each as
+    /// `v<version> <signal>`; a side with no signal shows its version alone —
+    /// never a made-up zero — and the JSON keeps it `null`.
+    ///
+    /// [S-762]: ../../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+    #[test]
+    fn a_reset_notice_names_both_versions_and_values() {
+        let stamp = |metric_version, signal| BaselineStamp { metric_version, signal };
+        let reset = BaselineReset {
+            cause: "metric semantics changed".to_string(),
+            from: stamp(7, Some(8292)),
+            to: stamp(8, Some(8295)),
+        };
+        assert_eq!(reset.notice(), "baseline reset: metric semantics changed (v7 8292 → v8 8295)");
+
+        let no_signal = BaselineReset { from: stamp(7, None), to: stamp(8, None), ..reset };
+        assert_eq!(no_signal.notice(), "baseline reset: metric semantics changed (v7 → v8)");
+        let json = serde_json::to_value(&no_signal).expect("the reset serialises");
+        assert_eq!(json["from"], serde_json::json!({ "metric_version": 7, "signal": null }));
     }
 }

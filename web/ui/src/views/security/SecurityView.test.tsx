@@ -7,17 +7,21 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ImpactResult, SecurityFinding, SecurityGateBand, SecurityModel, SecurityPage } from "../../api/types.ts";
+import type { ImpactResult, SecurityEntryStatus, SecurityFinding, SecurityGateBand, SecurityModel, SecurityPage } from "../../api/types.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import {
+  ANCHOR_TEXT,
   CONTEXT_TEXT,
   COPY_TEXT,
+  IGNORED_PATHS_TEXT,
+  FINDING_COUNT_TEXT,
   INSTALL_JOB_TEXT,
   OWASP_TEXT,
   REDACTED,
   SECURITY_ABSENCE,
   SECURITY_GATE_TEXT,
   SUPPRESS_TEXT,
+  SUPPRESSIONS_TEXT,
   UNCLASSIFIED_TEXT,
   findingDetail,
   owaspView,
@@ -26,15 +30,19 @@ import {
   securityFindings,
   securityGate,
 } from "../../copy/security.copy.ts";
+import { SCOPED_ONLY_COUNTED, SCOPED_ONLY_EXCLUDED } from "../../test/scopedOnlyProject.ts";
 import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import real from "./fixtures/security.real.json";
+import { FindingDetail } from "./FindingDetail.tsx";
 import { SecurityView } from "./SecurityView.tsx";
+import styles from "./SecurityView.module.css";
 
 const REAL = real as unknown as SecurityModel & { gate_band: SecurityGateBand };
 const PLANTED = "PLANTED-snippet-text-0123456789";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
@@ -59,8 +67,8 @@ const IMPACT: ImpactResult = {
 };
 
 /** Stubs fetch: `/api/v1/security` answers `page`, `/api/v1/impact` answers
- *  {@link IMPACT}. Returns the URLs fetched, in order. */
-function stub(page: SecurityModel): string[] {
+ *  `impact` (default {@link IMPACT}). Returns the URLs fetched, in order. */
+function stub(page: SecurityModel, impact: ImpactResult = IMPACT): string[] {
   const calls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -70,15 +78,15 @@ function stub(page: SecurityModel): string[] {
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ job: null }) } as Response);
       }
       calls.push(url);
-      const body = url.startsWith("/api/v1/impact") ? IMPACT : page;
+      const body = url.startsWith("/api/v1/impact") ? impact : page;
       return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
     }),
   );
   return calls;
 }
 
-async function mount(page: SecurityModel) {
-  const calls = stub(page);
+async function mount(page: SecurityModel, impact: ImpactResult = IMPACT) {
+  const calls = stub(page, impact);
   const view = render(<SecurityView />);
   await screen.findByRole("heading", { name: "Scanners" });
   return { calls, root: view.container };
@@ -138,6 +146,56 @@ describe("SecurityView over the real payload", () => {
     }
     // While a default scanner is missing, the panel's action is Install & scan.
     expect(within(widgetTitled(root, "Run a scan")).getByRole("button", { name: INSTALL_JOB_TEXT.installAndScan })).toBeInTheDocument();
+  });
+
+  it("states each scanner's coverage of the ignored directories, with the note when it read them (FR-SC-26)", async () => {
+    const [semgrep, trivy, gitleaks, ...rest] = REAL.security.status.scanners;
+    const note = "it reads the committed history, which holds any file committed inside an ignored directory";
+    const scanners = [
+      { ...semgrep, ignored_paths: "excluded" },
+      trivy,
+      { ...gitleaks, ignored_paths: "scanned", coverage_note: note },
+      ...rest,
+    ];
+    const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
+    const matrix = widgetTitled(root, "Scanners");
+    expect(within(matrix).getByRole("columnheader", { name: "Ignored paths" })).toBeInTheDocument();
+    const cellOf = (name: string) => {
+      const row = within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
+      const header = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent === "Ignored paths");
+      return readerText(row.querySelectorAll("td")[header] as HTMLElement);
+    };
+    expect(cellOf("semgrep")).toBe(IGNORED_PATHS_TEXT.excluded);
+    expect(cellOf("gitleaks")).toBe(`${IGNORED_PATHS_TEXT.scanned} ${note}`);
+    // Not installed here: no whole-project run to state, never a guess.
+    expect(cellOf("trivy")).toBe(IGNORED_PATHS_TEXT.absent);
+  });
+
+  it("reads a scanner with nothing to scan as not applicable, and names a failed scan's cause (S-769)", async () => {
+    const scanners = REAL.security.status.scanners.map((row) => {
+      if (row.scanner === "gosec") {
+        return { ...row, state: "not_applicable", reason: "no Go source file (.go) among the files the project does not ignore", installed: null, install: null };
+      }
+      if (row.scanner === "dependency-check") {
+        return { ...row, last_failure: ".logos/security/dependency-check.failed.log", last_failure_cause: "[ERROR] Error updating the NVD Data" };
+      }
+      return row;
+    });
+    const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
+    const matrix = widgetTitled(root, "Scanners");
+    const cellOf = (name: string, column: string) => {
+      const row = within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
+      // A sortable header carries its sort control's text after its name.
+      const header = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent?.startsWith(column));
+      return readerText(row.querySelectorAll("td")[header] as HTMLElement);
+    };
+    expect(cellOf("gosec", "State")).toBe("not applicable");
+    expect(cellOf("gosec", "What it means")).toBe("Nothing to scan: no Go source file (.go) among the files the project does not ignore.");
+    expect(cellOf("dependency-check", "What it means")).toContain(
+      "last scan failed [ERROR] Error updating the NVD Data — the output is in .logos/security/dependency-check.failed.log.",
+    );
+    // A row without a failure log says nothing of one.
+    expect(cellOf("semgrep", "What it means")).not.toContain("last scan failed");
   });
 
   it("starts a row's Install and Update through the install endpoint, with the intent token (S-747)", async () => {
@@ -223,9 +281,48 @@ describe("no snippet, and secrets redacted (FR-SC-03, ADR-79 §2)", () => {
   });
 });
 
+describe("a secret found only in history (S-767)", () => {
+  const COMMIT = "05ea98774379a22652c0c3b1b69faf9506c34b2d";
+
+  it("labels a historical finding and shows the payload's short commit beside its location", async () => {
+    const base = finding("generic.secrets.hardcoded-key");
+    const anchor = { commit: COMMIT, short_commit: "05ea987", path: "legacy/client.py" };
+    const historical: SecurityFinding = {
+      ...base,
+      binding: "historical",
+      report_path: "legacy/client.py",
+      path: null,
+      start_line: 1,
+      anchor,
+    };
+    const bound: SecurityFinding = { ...finding("rust.lang.security.formatted-sql"), anchor: { ...anchor, path: "src/lib.rs" } };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [bound, historical] } }));
+    const table = within(widgetTitled(root, "Findings")).getByRole("table");
+    const rowOf = (rule: string) => within(table).getByRole("button", { name: new RegExp(`Show ${rule}`) }).closest("tr") as HTMLElement;
+
+    const row = rowOf("generic\\.secrets\\.hardcoded-key");
+    expect(row.textContent).toContain("legacy/client.py:1");
+    expect(within(row).getByText(ANCHOR_TEXT.historical)).toBeInTheDocument();
+    const commit = within(row).getByText(anchor.short_commit);
+    expect(commit).toHaveAttribute("title", ANCHOR_TEXT.commit(anchor));
+    expect(row.textContent).not.toContain(COMMIT);
+
+    const other = rowOf("rust\\.lang\\.security\\.formatted-sql");
+    expect(within(other).getByText(anchor.short_commit)).toBeInTheDocument();
+    expect(within(other).queryByText(ANCHOR_TEXT.historical)).toBeNull();
+  });
+
+  it("shows no label and no commit for a finding no commit names", async () => {
+    const { root } = await mount(model());
+    const table = within(widgetTitled(root, "Findings")).getByRole("table");
+    expect(within(table).queryByText(ANCHOR_TEXT.historical)).toBeNull();
+    expect(table.querySelector("[data-commit]")).toBeNull();
+  });
+});
+
 describe("suppression", () => {
   it("badges a suppressed finding's row, and only that row", async () => {
-    const secret = { ...finding("generic.secrets.hardcoded-key"), suppression: { state: "suppressed" as const, reason: "test key", expires: null } };
+    const secret = { ...finding("generic.secrets.hardcoded-key"), suppression: { state: "suppressed" as const, reason: "test key", expires: null, by: { fingerprint: finding("generic.secrets.hardcoded-key").fingerprint } } };
     const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [finding("rust.lang.security.formatted-sql"), secret] } }));
     const table = within(widgetTitled(root, "Findings")).getByRole("table");
     const rowOf = (loc: string) => within(table).getByText(loc).closest("tr") as HTMLElement;
@@ -234,8 +331,8 @@ describe("suppression", () => {
   });
 
   it("labels a suppressed finding with its reason, and an expired one with when it lapsed (S-672)", async () => {
-    const secret = { ...finding("generic.secrets.hardcoded-key"), suppression: { state: "suppressed" as const, reason: "rotated test key", expires: "2027-01-31" } };
-    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "expired" as const, reason: "legacy path", expires: "2026-01-31" } };
+    const secret = { ...finding("generic.secrets.hardcoded-key"), suppression: { state: "suppressed" as const, reason: "rotated test key", expires: "2027-01-31", by: { fingerprint: finding("generic.secrets.hardcoded-key").fingerprint } } };
+    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "expired" as const, reason: "legacy path", expires: "2026-01-31", by: { fingerprint: finding("rust.lang.security.formatted-sql").fingerprint } } };
     const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [sql, secret] } }));
     const table = within(widgetTitled(root, "Findings")).getByRole("table");
     const rowOf = (loc: string) => within(table).getByText(loc).closest("tr") as HTMLElement;
@@ -291,7 +388,7 @@ describe("triage (S-672, FR-SC-12)", () => {
   it("suppresses from the dialog with an intent-guarded POST, then reloads and shows the reason", async () => {
     const sql = finding("rust.lang.security.formatted-sql");
     const after = model({
-      findings: { ...REAL.security.findings, findings: [{ ...sql, suppression: { state: "suppressed", reason: "constant query", expires: null } }] },
+      findings: { ...REAL.security.findings, findings: [{ ...sql, suppression: { state: "suppressed", reason: "constant query", expires: null, by: { fingerprint: sql.fingerprint } } }] },
     });
     const written = { file: ".logos/security-ignore.toml", entry: { fingerprint: sql.fingerprint, reason: "constant query", expires: null }, entries: 1 };
     const sent = stubTriage([model({ findings: { ...REAL.security.findings, findings: [sql] } }), after], { status: 200, body: written });
@@ -319,7 +416,7 @@ describe("triage (S-672, FR-SC-12)", () => {
   });
 
   it("unsuppresses with an intent-guarded POST and reloads", async () => {
-    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "suppressed" as const, reason: "r", expires: null } };
+    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "suppressed" as const, reason: "r", expires: null, by: { fingerprint: finding("rust.lang.security.formatted-sql").fingerprint } } };
     const written = { file: ".logos/security-ignore.toml", entry: { fingerprint: sql.fingerprint, reason: "r", expires: null }, entries: 0 };
     const sent = stubTriage([model({ findings: { ...REAL.security.findings, findings: [sql] } }), model({ findings: { ...REAL.security.findings, findings: [{ ...sql, suppression: null }] } })], { status: 200, body: written });
     render(<SecurityView />);
@@ -335,7 +432,7 @@ describe("triage (S-672, FR-SC-12)", () => {
   });
 
   it("sends one unsuppress for a double click, and states no error for a removal that succeeded", async () => {
-    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "suppressed" as const, reason: "r", expires: null } };
+    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "suppressed" as const, reason: "r", expires: null, by: { fingerprint: finding("rust.lang.security.formatted-sql").fingerprint } } };
     const page = model({ findings: { ...REAL.security.findings, findings: [sql] } });
     let posts = 0;
     let reads = 0;
@@ -367,7 +464,7 @@ describe("triage (S-672, FR-SC-12)", () => {
   });
 
   it("states a refused unsuppress with the server's reason and keeps the row as it was", async () => {
-    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "suppressed" as const, reason: "r", expires: null } };
+    const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "suppressed" as const, reason: "r", expires: null, by: { fingerprint: finding("rust.lang.security.formatted-sql").fingerprint } } };
     const refusal = "invalid value for .logos/security-ignore.toml: the file is not in the canonical spelling Logos writes";
     stubTriage([model({ findings: { ...REAL.security.findings, findings: [sql] } })], { status: 422, body: { error: refusal } });
     const { container: root } = render(<SecurityView />);
@@ -377,6 +474,106 @@ describe("triage (S-672, FR-SC-12)", () => {
     const alert = await within(widgetTitled(root, "Findings")).findByRole("alert");
     expect(alert.textContent).toBe(SUPPRESS_TEXT.removeFailed(refusal));
     expect(screen.getByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` })).toBeInTheDocument();
+  });
+});
+
+describe("path suppressions (S-770)", () => {
+  const sqlLoc = "src/lib.rs:3";
+  const under = { path: "src" };
+  /** Both findings, each suppressed by the one `src` path entry when `entry` holds it. */
+  function page(entry: SecurityEntryStatus | null, extra: SecurityEntryStatus[] = []): SecurityModel {
+    const by = entry ? { state: "suppressed" as const, reason: "generated", expires: null, by: under } : null;
+    const findings = [finding("rust.lang.security.formatted-sql"), finding("generic.secrets.hardcoded-key")].map((f) => ({ ...f, suppression: by }));
+    return model({ findings: { ...REAL.security.findings, findings, suppressions: [...(entry ? [entry] : []), ...extra] } });
+  }
+  const entry: SecurityEntryStatus = { entry: { path: "src", reason: "generated", expires: null }, expired: false, orphaned: false, suppressed: 2, should_name: null };
+  const orphan: SecurityEntryStatus = { entry: { path: "tests/fixtures", scanner: "gitleaks", reason: "planted", expires: null }, expired: false, orphaned: true, suppressed: 0, should_name: null };
+
+  it("suppresses everything under a path from the dialog, and Unsuppress sends back the same selector", async () => {
+    const written = { file: ".logos/security-ignore.toml", entry: entry.entry, entries: 1 };
+    const sent = stubTriage([page(null), page(entry), page(null)], { status: 200, body: written });
+    const { container: root } = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+
+    await userEvent.click(screen.getByRole("button", { name: `Suppress rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    const dialog = screen.getByRole("dialog", { name: SUPPRESS_TEXT.title });
+    await userEvent.click(within(dialog).getByRole("radio", { name: SUPPRESS_TEXT.scopePath }));
+    await userEvent.type(within(dialog).getByRole("textbox", { name: SUPPRESS_TEXT.reason }), "generated");
+    await userEvent.click(within(dialog).getByRole("button", { name: SUPPRESS_TEXT.confirm }));
+
+    // Both rows the entry covers say so, and the entry is listed with its count.
+    const table = await within(widgetTitled(root, "Findings")).findByRole("table");
+    await vi.waitFor(() => expect(table.querySelectorAll("[data-suppression-reason]").length).toBe(2));
+    for (const note of table.querySelectorAll("[data-suppression-reason]")) {
+      expect(note.textContent).toBe("generated — covers everything under src");
+    }
+    const suppressions = widgetTitled(root, SUPPRESSIONS_TEXT.title);
+    expect(suppressions.textContent).toContain(SUPPRESSIONS_TEXT.figure(1, 2));
+    expect(suppressions.textContent).toContain(SUPPRESSIONS_TEXT.count(2));
+
+    await userEvent.click(screen.getByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    await screen.findByRole("button", { name: `Suppress rust.lang.security.formatted-sql at ${sqlLoc}` });
+    const posts = sent.filter((r) => r.method === "POST");
+    expect(posts.map((r) => [r.url, r.intent, r.body])).toEqual([
+      ["/api/v1/security/suppress", "test-intent-token", JSON.stringify({ path: "src", reason: "generated", expires: null })],
+      // The removal names exactly the entry that was written: the server's
+      // add-then-remove restores the file byte for byte (web/tests/api_v1.rs).
+      ["/api/v1/security/unsuppress", "test-intent-token", JSON.stringify({ path: "src" })],
+    ]);
+    expect(screen.queryByRole("heading", { name: SUPPRESSIONS_TEXT.title })).toBeNull();
+  });
+
+  it("disables every row one path entry covers while its removal is in flight", async () => {
+    stubTriage([page(entry)], { status: 200, body: {} });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init: RequestInit = {}) => {
+        if ((init.method ?? "GET") === "POST") return new Promise<Response>(() => {});
+        const body = url.startsWith("/api/v1/security/scan") || url.startsWith("/api/v1/security/install") ? { job: null } : page(entry);
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+      }),
+    );
+    render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    await userEvent.click(screen.getByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    for (const button of screen.getAllByRole("button", { name: /^Unsuppress |^Remove the entry/ })) {
+      expect(button).toBeDisabled();
+    }
+  });
+
+  it("lists a fingerprint entry by its fingerprint, flags it expired with the one it should name, and removes it by fingerprint", async () => {
+    const fp = "0123456789abcdef".repeat(4);
+    const now = "fedcba9876543210".repeat(4);
+    const lapsed: SecurityEntryStatus = { entry: { fingerprint: fp, reason: "rotated", expires: "2026-01-31" }, expired: true, orphaned: false, suppressed: 0, should_name: null };
+    const renamed: SecurityEntryStatus = { entry: { fingerprint: now.replace("f", "e"), reason: "old key", expires: null }, expired: false, orphaned: true, suppressed: 0, should_name: now };
+    const sent = stubTriage([page(null, [lapsed, renamed])], { status: 200, body: { file: ".logos/security-ignore.toml", entry: lapsed.entry, entries: 1 } });
+    const { container: root } = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    const widget = widgetTitled(root, SUPPRESSIONS_TEXT.title);
+    const row = within(widget).getByText("fingerprint 0123456789ab…").closest("tr") as HTMLElement;
+    expect(within(row).getByText("expired")).toBeInTheDocument();
+    expect(row.textContent).toContain("2026-01-31");
+    const orphan = within(widget).getByText(SUPPRESSIONS_TEXT.shouldName(now)).closest("tr") as HTMLElement;
+    expect(within(orphan).getByText("orphaned")).toBeInTheDocument();
+
+    await userEvent.click(within(row).getByRole("button", { name: SUPPRESSIONS_TEXT.remove({ fingerprint: fp }) }));
+    await vi.waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toBe(JSON.stringify({ fingerprint: fp }));
+  });
+
+  it("lists an orphaned glob as orphaned with no count, and removes it by its own selector", async () => {
+    const sent = stubTriage([page(entry, [orphan])], { status: 200, body: { file: ".logos/security-ignore.toml", entry: orphan.entry, entries: 1 } });
+    const { container: root } = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    const widget = widgetTitled(root, SUPPRESSIONS_TEXT.title);
+    const row = within(widget).getByText("everything under tests/fixtures, scanner gitleaks").closest("tr") as HTMLElement;
+    expect(within(row).getByText("orphaned")).toBeInTheDocument();
+    expect(row.textContent).toContain(SUPPRESSIONS_TEXT.count(0));
+    expect(widget.textContent).toContain(SUPPRESSIONS_TEXT.figure(2, 2));
+
+    await userEvent.click(within(row).getByRole("button", { name: SUPPRESSIONS_TEXT.remove({ path: "tests/fixtures", scanner: "gitleaks" }) }));
+    await vi.waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toBe(JSON.stringify({ path: "tests/fixtures", scanner: "gitleaks" }));
   });
 });
 
@@ -399,6 +596,45 @@ describe("the edition switch (FR-SC-04)", () => {
     await userEvent.click(screen.getByRole("button", { name: "2025" }));
     expect(within(table()).getByText("A05:2025")).toBeInTheDocument();
     expect(calls, "switching edition fetches nothing").toEqual(["/api/v1/security"]);
+  });
+});
+
+describe("the finding count (S-760)", () => {
+  it("states the real payload's count and what it leaves out", async () => {
+    const { root } = await mount(model());
+    const text = readerText(widgetTitled(root, "Findings"));
+    expect(text).toContain(FINDING_COUNT_TEXT.totals(0, 2, 0, 0, 0, 0));
+    expect(text).toContain(FINDING_COUNT_TEXT.excluded(0, 0));
+  });
+
+  it("puts each severity and each left-out figure in its own place, in the spelling the manual gives", async () => {
+    // Six distinct figures and two distinct exclusions, so no slot can be
+    // swapped unnoticed; the literals are the definition's wording, not the
+    // catalogue's own constants.
+    const counted = { critical: 1, high: 2, medium: 3, low: 4, info: 5, unrated: 6, total: 21 };
+    const { root } = await mount(model({ counts: { counted, excluded: { not_fresh: 7, suppressed: 9 } } }));
+    const text = readerText(widgetTitled(root, "Findings"));
+    expect(text).toContain("1 critical · 2 high · 3 medium · 4 low · 5 info · 6 unrated — fresh, unsuppressed findings only");
+    expect(text).toContain("Left out: 7 findings in files changed since the scan, and 9 suppressed.");
+  });
+
+  it("reads a scoped-only project's count from its findings, though no report is fresh", async () => {
+    const stale = REAL.security.status.scanners.map((s) =>
+      s.scanner === "semgrep"
+        ? { ...s, state: "stale" as const, because: "scoped_only" as const, snapshot_head: "abc", version: "1.85.0", findings: 2, suppressed: 0 }
+        : s,
+    );
+    const { root } = await mount(
+      model({
+        status: { ...REAL.security.status, scanners: stale },
+        counts: { counted: SCOPED_ONLY_COUNTED, excluded: SCOPED_ONLY_EXCLUDED },
+      }),
+    );
+    const findings = readerText(widgetTitled(root, "Findings"));
+    const { critical, high, medium, low, info, unrated } = SCOPED_ONLY_COUNTED;
+    expect(findings).toContain(FINDING_COUNT_TEXT.totals(critical, high, medium, low, info, unrated));
+    expect(findings).toContain(FINDING_COUNT_TEXT.excluded(0, 0));
+    expect(readerText(widgetTitled(root, "Scanners"))).toContain("0 of 9 scanners fresh at HEAD");
   });
 });
 
@@ -453,6 +689,27 @@ describe("filters", () => {
     await userEvent.selectOptions(screen.getByLabelText("Least severity"), "high");
     expect(readerText(widgetTitled(root, "Findings"))).toContain("1 of 2 findings shown");
   });
+
+  it("lists an unrated finding with its reason and narrows to the unrated ones alone (S-768)", async () => {
+    const unrated = {
+      ...finding("rust.lang.security.formatted-sql"),
+      severity: "unrated" as const,
+      severity_reason: "the scanner gave none",
+    };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [unrated, finding("generic.secrets.hardcoded-key")] } }));
+    const row = screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }).closest("tr") as HTMLElement;
+    expect(within(row).getByText("unrated").closest("[title]")).toHaveAttribute("title", "the scanner gave none");
+    const options = within(screen.getByLabelText("Least severity")).getAllByRole("option").map((o) => o.textContent);
+    expect(options).toEqual(["Any", "critical", "high", "medium", "unrated only", "low", "info"]);
+    await userEvent.selectOptions(screen.getByLabelText("Least severity"), "unrated");
+    expect(readerText(widgetTitled(root, "Findings"))).toContain("1 of 2 findings shown");
+    expect(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ })).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Least severity"), "medium");
+    expect(readerText(widgetTitled(root, "Findings"))).toContain("2 of 2 findings shown");
+    await userEvent.selectOptions(screen.getByLabelText("Least severity"), "high");
+    expect(readerText(widgetTitled(root, "Findings"))).toContain("1 of 2 findings shown");
+    expect(screen.queryByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ })).toBeNull();
+  });
 });
 
 describe("unclassified findings (FR-SC-04)", () => {
@@ -492,6 +749,19 @@ describe("the finding detail (FR-SC-13)", () => {
     expect(await within(detail).findByText("caller")).toBeInTheDocument();
     const seeds = calls.filter((u) => u.startsWith("/api/v1/impact?")).map((u) => new URLSearchParams(u.split("?")[1]).get("seed"));
     expect(seeds).toEqual(["logos . project . src/`lib.rs`/find()."]);
+  });
+
+  it("states an unrated finding's reason, and no severity line for a rating (S-768)", async () => {
+    const unrated = {
+      ...finding("rust.lang.security.formatted-sql"),
+      severity: "unrated" as const,
+      severity_reason: "the scanner gave none",
+    };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [unrated, finding("generic.secrets.hardcoded-key")] } }));
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    expect(readerText(widgetTitled(root, "Finding detail"))).toContain("unrated: the scanner gave none");
+    await userEvent.click(screen.getByRole("button", { name: /Show generic\.secrets\.hardcoded-key/ }));
+    expect(within(widgetTitled(root, "Finding detail")).queryByText("Severity")).toBeNull();
   });
 
   it("states that the impact lists are unknown when the symbol no longer resolves — never empty", async () => {
@@ -557,6 +827,139 @@ describe("the finding detail (FR-SC-13)", () => {
     const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [reachable] } }));
     await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang/ }));
     expect(readerText(widgetTitled(root, "Finding detail"))).toContain("Reachable from GET /users/:id, 2 calls away.");
+  });
+});
+
+describe("showing the finding detail (HF-1)", () => {
+  /** Records every `scrollIntoView` call with the element it was called on. */
+  function spyScroll() {
+    const calls: { el: Element; arg: ScrollIntoViewOptions }[] = [];
+    vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element, arg?: boolean | ScrollIntoViewOptions) {
+      calls.push({ el: this, arg: arg as ScrollIntoViewOptions });
+    });
+    return calls;
+  }
+  const show = (rule: string) => userEvent.click(screen.getByRole("button", { name: new RegExp(`Show ${rule.replace(/\./g, "\\.")}`) }));
+
+  it("scrolls the detail into view, smoothly, and moves focus to its heading when Show is pressed", async () => {
+    const scrolls = spyScroll();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { root } = await mount(model());
+    expect(scrolls).toEqual([]); // nothing on mount: no finding is shown yet
+    await show("rust.lang.security.formatted-sql");
+    expect(scrolls).toHaveLength(1);
+    const detail = widgetTitled(root, "Finding detail");
+    expect(detail.closest(`.${styles.detail}`)).toBe(scrolls[0].el);
+    expect(scrolls[0].arg).toEqual({ behavior: "smooth", block: "start" });
+    const heading = screen.getByRole("heading", { name: "Finding detail" });
+    expect(document.activeElement).not.toBe(heading);
+    expect(heading.contains(document.activeElement)).toBe(true);
+    expect(detail.contains(document.activeElement)).toBe(true);
+    // Moved to, never tabbed to; and its ring is drawn inside the clipped title.
+    expect(document.activeElement).toHaveAttribute("tabindex", "-1");
+    expect(document.activeElement?.classList).toContain(styles.detailTitle);
+    // Focus must not jump the page before the smooth scroll starts.
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+  });
+
+  it("scrolls without animation when the user prefers reduced motion", async () => {
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) => ({ matches: query === "(prefers-reduced-motion: reduce)", media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList,
+    );
+    const scrolls = spyScroll();
+    await mount(model());
+    await show("rust.lang.security.formatted-sql");
+    expect(scrolls.map((s) => s.arg)).toEqual([{ behavior: "auto", block: "start" }]);
+  });
+
+  it("scrolls again for a different finding, and again when Show is pressed on the one already shown", async () => {
+    const scrolls = spyScroll();
+    await mount(model());
+    await show("rust.lang.security.formatted-sql");
+    await show("generic.secrets.hardcoded-key");
+    await show("generic.secrets.hardcoded-key");
+    expect(scrolls).toHaveLength(3);
+  });
+
+  it("does not scroll or take focus when the page reloads under a finding already shown", async () => {
+    const sql = finding("rust.lang.security.formatted-sql");
+    const suppressed = { ...sql, suppression: { state: "suppressed" as const, reason: "r", expires: null, by: { fingerprint: sql.fingerprint } } };
+    const written = { file: ".logos/security-ignore.toml", entry: { fingerprint: sql.fingerprint, reason: "r", expires: null }, entries: 0 };
+    // Two reads of the page — the second returns fresh finding objects, as a real refetch does.
+    stubTriage(
+      [model({ findings: { ...REAL.security.findings, findings: [suppressed] } }), model({ findings: { ...REAL.security.findings, findings: [{ ...suppressed, suppression: null }] } })],
+      { status: 200, body: written },
+    );
+    const page = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) =>
+        url.startsWith("/api/v1/impact") ? Promise.resolve({ ok: true, json: () => Promise.resolve(IMPACT) } as Response) : page(url, init),
+      ),
+    );
+    const scrolls = spyScroll();
+    render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    await show("rust.lang.security.formatted-sql");
+    expect(scrolls).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Unsuppress rust.lang.security.formatted-sql at src/lib.rs:3" }));
+    await screen.findByRole("button", { name: "Suppress rust.lang.security.formatted-sql at src/lib.rs:3" }); // the reloaded page
+    expect(scrolls).toHaveLength(1);
+  });
+
+  it("scrolls on a change of `shown` only — a remount under a stale count replays nothing", () => {
+    // SecurityContent keeps the count while a reload with no findings unmounts the detail.
+    const scrolls = spyScroll();
+    const view = render(<FindingDetail finding={null} classification={null} shown={1} />);
+    expect(scrolls).toEqual([]);
+    view.rerender(<FindingDetail finding={null} classification={null} shown={2} />);
+    expect(scrolls).toHaveLength(1);
+  });
+
+  it("gives each impact section — its title and table, or its empty sentence — its own spaced section", async () => {
+    const both: ImpactResult = {
+      ...IMPACT,
+      upstream_label: "Breaks if changed",
+      downstream_label: "Depends on",
+      downstream: [{ symbol: "s:callee", name: "callee", kind: "function", file: "src/util.rs", line: 9, distance: 1 }],
+    };
+    const { root } = await mount(model(), both);
+    await show("rust.lang.security.formatted-sql");
+    const detail = widgetTitled(root, "Finding detail");
+    await within(detail).findByText("caller");
+    const sections = Array.from(detail.querySelectorAll<HTMLElement>(`.${styles.impactSection}`));
+    expect(sections).toHaveLength(2);
+    expect(sections[0].nextElementSibling).toBe(sections[1]); // the `+` selector that spaces them needs them adjacent
+    expect(within(sections[0]).getByText("Breaks if changed")).toBeInTheDocument();
+    expect(within(sections[1]).getByText("Depends on")).toBeInTheDocument();
+  });
+
+  it("spaces an empty-state sentence from the next section's title", async () => {
+    const owner: ImpactResult = {
+      ...IMPACT,
+      upstream: [],
+      downstream_label: "Depends on",
+      downstream: [{ symbol: "s:callee", name: "callee", kind: "function", file: "src/util.rs", line: 9, distance: 1 }],
+    };
+    const { root } = await mount(model(), owner);
+    await show("rust.lang.security.formatted-sql");
+    const detail = widgetTitled(root, "Finding detail");
+    const sentence = await within(detail).findByText("Nothing depends on it.");
+    const title = within(detail).getByText("Depends on");
+    const section = (el: HTMLElement) => el.closest(`.${styles.impactSection}`);
+    expect(section(sentence)).not.toBeNull();
+    expect(section(title)).not.toBeNull();
+    expect(section(sentence)).not.toBe(section(title));
+    expect(section(sentence)?.nextElementSibling).toBe(section(title));
+  });
+
+  it("leaves the unresolved-impact message unspaced by the section rule: it is one block, not two sections", async () => {
+    const gone: ImpactResult = { ...IMPACT, resolved: null, upstream: [], downstream: [], warnings: ["symbol not found"] };
+    const { root } = await mount(model(), gone);
+    await show("rust.lang.security.formatted-sql");
+    const detail = widgetTitled(root, "Finding detail");
+    await within(detail).findByText(CONTEXT_TEXT.impactUnresolved);
+    expect(detail.querySelector(`.${styles.impactSection}`)).toBeNull();
   });
 });
 

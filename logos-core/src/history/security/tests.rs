@@ -125,7 +125,7 @@ fn ingest_fixture(root: &Path, name: &str) -> SecurityIngestSummary {
 
 /// Every row of every table in `history.db`, each rendered as one line — the
 /// full-store view the byte-identity and planted-secret checks read.
-fn dump(root: &Path) -> Vec<String> {
+pub(super) fn dump(root: &Path) -> Vec<String> {
     let conn = Connection::open(crate::history::db_path(root)).unwrap();
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -243,9 +243,9 @@ fn each_scanner_shape_reads_back_with_its_severity_cwes_and_binding() {
     assert_eq!(f.path.as_deref(), Some("Dockerfile"));
     // Gitleaks: every finding is secret-class.
     assert!(view.findings.iter().filter(|f| f.scanner_name == "gitleaks").all(|f| f.redacted));
-    // OSV: an absolute `file://` URI binds by suffix; no level → medium.
+    // OSV: an absolute `file://` URI binds by suffix; no level and no score → unrated.
     let f = find("osv-scanner", "PYSEC-2018-28");
-    assert_eq!((f.binding, f.path.as_deref(), f.severity), (FindingBinding::Bound, Some("requirements.txt"), Severity::Medium));
+    assert_eq!((f.binding, f.path.as_deref(), f.severity), (FindingBinding::Bound, Some("requirements.txt"), Severity::Unrated));
     // Bandit: `external/cwe/cwe-259` → CWE-259 → secret-class; B608 keeps its message.
     let f = find("Bandit", "B105");
     assert_eq!((f.cwes.as_slice(), f.redacted, f.severity), (&["CWE-259".to_string()][..], true, Severity::Low));
@@ -273,8 +273,8 @@ fn each_scanner_shape_reads_back_with_its_severity_cwes_and_binding() {
 
 /// Severity bands at their edges: a CVSS score of exactly 9.0, 7.0 or 4.0
 /// opens the higher band, 0 is info; without a score each level maps to its
-/// band and no level is SARIF's `warning`. The captured Trivy report pins the
-/// 4.0 edge on real data.
+/// band, and no rating level is `unrated`, never SARIF's default `warning`
+/// (S-768). The captured Trivy report pins the 4.0 edge on real data.
 #[test]
 fn severity_bands_hold_at_their_edges() {
     let cases: &[(Option<f64>, Option<&str>, Severity)] = &[
@@ -291,7 +291,7 @@ fn severity_bands_hold_at_their_edges() {
         (None, Some("warning"), Severity::Medium),
         (None, Some("note"), Severity::Low),
         (None, Some("none"), Severity::Info),
-        (None, None, Severity::Medium),
+        (None, None, Severity::Unrated),
     ];
     for &(score, level, want) in cases {
         assert_eq!(Severity::from_sarif(score, level), want, "{score:?} / {level:?}");
@@ -302,6 +302,152 @@ fn severity_bands_hold_at_their_edges() {
     let view = read_latest(&r).unwrap();
     let edge = view.findings.iter().find(|f| f.rule_id == "CVE-2025-48432").unwrap();
     assert_eq!(edge.severity, Severity::Medium, "Trivy's security-severity \"4.0\" is medium");
+}
+
+/// S-768: OSV-Scanner's severities are never made up. Upstream's own SARIF
+/// test output for one scan at 1.9.2 and at 2.7.0 (the fixtures' README): at
+/// 1.9.2 no rule carries a score and every result reads `warning`, so both
+/// advisories read `unrated` with their reason; at 2.7.0 the rule whose
+/// advisory has a CVSS score carries it as `security-severity` and reads its
+/// band, and the one without still reads `unrated`. No finding reads `medium`.
+/// Upstream's sample reports CVE-2022-24713 twice in each version, and both
+/// results are kept.
+#[test]
+fn osv_scanner_reads_the_advisorys_rating_or_unrated_never_a_made_up_medium() {
+    let read = |name: &str| {
+        let (_t, r) = repo();
+        ingest_fixture(&r, name);
+        let mut got: Vec<(String, Severity, Option<&str>)> = read_latest(&r)
+            .unwrap()
+            .findings
+            .into_iter()
+            .map(|f| (f.rule_id, f.severity, f.severity.reason()))
+            .collect();
+        got.sort();
+        got
+    };
+    let unrated = Some("the scanner gave none");
+    assert_eq!(
+        read("osv-scanner-1.9.2.sarif"),
+        [
+            ("CVE-2021-3121".to_string(), Severity::Unrated, unrated),
+            ("CVE-2022-24713".to_string(), Severity::Unrated, unrated),
+            ("CVE-2022-24713".to_string(), Severity::Unrated, unrated),
+        ],
+        "1.9.2 gives no rating: every result reads `warning`, no rule a score"
+    );
+    assert_eq!(
+        read("osv-scanner-2.7.0.sarif"),
+        [
+            ("CVE-2021-3121".to_string(), Severity::Unrated, unrated),
+            ("CVE-2022-24713".to_string(), Severity::High, None),
+            ("CVE-2022-24713".to_string(), Severity::High, None),
+        ],
+        "2.7.0's rule `security-severity` 7.5 is the advisory's rating"
+    );
+}
+
+/// history.db 8 → 9: `unrated` joins the severities. A `medium` row of an
+/// OSV-Scanner 1.x snapshot or of a Gitleaks one reads `unrated` — neither
+/// report ever carries a score or a level of its own, so its `medium` came
+/// from a default level — and each near miss keeps its severity: a 2.x
+/// snapshot, a `10.x` version, another severity, another scanner, a driver
+/// one word from Gitleaks. Every other column is copied, every snapshot's
+/// report hash is marked so its own report re-ingests, and the CHECK still
+/// refuses a token Logos never writes.
+#[test]
+fn migration_9_reads_a_stored_osv_scanner_1x_or_gitleaks_medium_as_unrated_and_nothing_else() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("history.db");
+    let snapshots = [
+        (1, "osv-scanner", "1.9.2"),
+        (2, " OSV-Scanner ", "v1.8.5"),
+        (3, "osv-scanner", "2.7.0"),
+        (4, "osv-scanner", "10.1.0"),
+        (5, "Semgrep OSS", "1.85.0"),
+        (6, " Gitleaks ", "v8.18.4"),
+        (7, "gitleaks-wrapper", "1.0.0"),
+    ];
+    {
+        let conn = crate::history::db::open_at_version(&path, 8).unwrap();
+        for (id, name, version) in snapshots {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'sarif', 1, ?2)",
+                rusqlite::params![id, format!("head{id}"), name, version, format!("hash{id}")],
+            )
+            .unwrap();
+        }
+        // Every row differs from the others in every column a copy could drop
+        // or swap, none of them NULL or at its default.
+        let rows = [(1, "a", "medium"), (1, "b", "high"), (2, "c", "medium"), (3, "d", "medium"), (4, "e", "medium"), (5, "f", "medium"),
+                    (6, "g", "medium"), (6, "h", "low"), (7, "i", "medium")];
+        for (n, (id, fingerprint, severity)) in (0_i64..).zip(rows) {
+            conn.execute(
+                "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+                     report_path, path, start_line, start_column, end_line, end_column, scoped, commits, legacy_fingerprints,
+                     anchor_commit)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'bound', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                rusqlite::params![
+                    id, fingerprint, format!("rule-{fingerprint}"), severity, format!("CWE-{n}"), format!("msg {fingerprint}"),
+                    n % 2, format!("lib/{fingerprint}.lock"), format!("src/{fingerprint}.lock"), 10 + n, 20 + n, 30 + n, 40 + n,
+                    (n + 1) % 2, format!("c-{fingerprint}"), format!("old-{fingerprint}"), format!("anchor-{fingerprint}")
+                ],
+            )
+            .unwrap();
+        }
+    }
+    // Every column but `severity`, quoted, row by row in key order.
+    let columns = |conn: &Connection| -> Vec<String> {
+        const COLUMNS: [&str; 17] = [
+            "snapshot_id", "fingerprint", "rule_id", "cwes", "message", "redacted", "binding", "report_path", "path",
+            "start_line", "start_column", "end_line", "end_column", "scoped", "commits", "legacy_fingerprints", "anchor_commit",
+        ];
+        let row = COLUMNS.map(|c| format!("quote({c})")).join(" || '|' || ");
+        conn.prepare(&format!("SELECT {row} FROM security_findings ORDER BY snapshot_id, fingerprint"))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let before = columns(&Connection::open(&path).unwrap());
+
+    let migrated = crate::history::db::open(&path).unwrap();
+    assert_eq!(crate::history::db::current_version(&migrated).unwrap(), 9);
+    assert_eq!(columns(&migrated), before, "every other column of every row is copied as it was");
+    let severities: Vec<(String, String)> = migrated
+        .prepare("SELECT fingerprint, severity FROM security_findings ORDER BY fingerprint")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let want = [
+        ("a", "unrated"), ("b", "high"), ("c", "unrated"), ("d", "medium"), ("e", "medium"), ("f", "medium"),
+        ("g", "unrated"), ("h", "low"), ("i", "medium"),
+    ];
+    assert_eq!(severities, want.map(|(f, s)| (f.to_string(), s.to_string())));
+    let hashes: Vec<String> = migrated
+        .prepare("SELECT report_hash FROM security_snapshots ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(hashes, (1..=7).map(|id| format!("pre-9:hash{id}")).collect::<Vec<_>>(), "every snapshot is marked");
+    for (severity, accepted) in [("unrated", true), ("bogus", false)] {
+        let inserted = migrated.execute(
+            "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding)
+             VALUES (5, ?1, 'r', ?1, '', 'm', 0, 'unbound')",
+            [severity],
+        );
+        assert_eq!(inserted.is_ok(), accepted, "{severity}: {inserted:?}");
+    }
+    let index: i64 = migrated
+        .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'security_findings_path'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(index, 1, "the path index is rebuilt with the table");
 }
 
 // ── FR-SC-01: atomic rejection that names the defect ───────────────────────
@@ -1198,21 +1344,25 @@ fn a_scoped_ingest_replaces_only_the_scanned_files_findings_and_every_other_row_
     assert_eq!(semgrep.finding_count, 4);
 }
 
-/// [FR-SC-14] and [NFR-CC-04]: a store holding only `--path` scans has no
-/// findings column on Files & Risk and the hotspots — a file outside their paths
-/// was never scanned, so it never reads `0` — until a full scan stands behind a
-/// report.
+/// [FR-SC-14] and [S-760]: a store holding only `--path` scans still has its
+/// findings column. Freshness is the finding's own, so a scoped report's finding
+/// in an untouched file counts exactly as on the Security page and in the
+/// workspace roll-up; only a store with no report at all has no column.
 ///
 /// [FR-SC-14]: ../../../../docs/specs/requirements/FR-SC-14.md
-/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [S-760]: ../../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
 #[test]
-fn a_store_of_scoped_scans_alone_has_no_findings_column() {
+fn a_store_of_scoped_scans_alone_counts_its_findings_per_file() {
     let (_t, r) = repo();
     let one = |name: &str, uri: &str| write(&r, name, &semgrep_report(&[(uri, "r.one", 1)]));
     let today = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    assert_eq!(super::path_findings(&r, today).unwrap(), None, "nothing stored: no column, not a column of 0");
+
     let db = vec!["app/db.py".to_string()];
     super::ingest_scoped(&r, &one("a.sarif", "app/db.py"), &indexed(), Some(super::IngestScope::replacing(&db))).unwrap();
-    assert_eq!(super::path_findings(&r, today).unwrap(), None, "views.py was never scanned: no column, not a 0");
+    let cells = super::path_findings(&r, today).unwrap().expect("a stored report has a column");
+    assert_eq!(cells["app/db.py"].count, 1, "its finding is in an untouched file: fresh");
+    assert!(!cells.contains_key("app/views.py"), "a file with no finding has no cell");
 
     ingest(&r, &one("full.sarif", "app/views.py"), &indexed()).unwrap();
     let cells = super::path_findings(&r, today).unwrap().expect("a full scan stands behind the report");
@@ -1359,11 +1509,15 @@ fn secret_row(fingerprint: &str, line: i64, start: i64, end: i64) -> super::stor
         path: None,
         region: super::Region { start_line: Some(line), start_column: Some(start), end_line: Some(line), end_column: Some(end) },
         scoped: false,
+        anchor_commit: None,
+        commits: Vec::new(),
+        legacy_fingerprints: Vec::new(),
     }
 }
 
-/// How a scoped Gitleaks finding is told to be a kept history finding (the
-/// coordinator's S-685 decision): the same file, rule and whole position;
+/// How a scoped Gitleaks finding is told to be a kept history finding stored
+/// before migration 7, still keyed by its report (the coordinator's S-685
+/// decision): the same file, rule and whole position;
 /// else, for a secret whose lines moved, the same column span when exactly one
 /// finding on each side has it. Ties go to the lowest fingerprint, and a
 /// different rule or file never matches.
@@ -1387,4 +1541,9 @@ fn a_scoped_secret_matches_a_kept_one_by_position_then_by_a_unique_span() {
     let mut other_file = secret_row("y", 4, 14, 45);
     other_file.report_path = Some("app/config.py".to_string());
     assert!(matches_kept(&[other_rule, other_file], &kept).is_empty());
+    // A kept row keyed by its secret (migration 7) is never matched by position:
+    // a scoped finding of that secret has its very fingerprint.
+    let mut secret_keyed = secret_row("d-hist", 4, 14, 45);
+    secret_keyed.legacy_fingerprints = vec!["old".to_string()];
+    assert!(matches_kept(&[secret_row("x", 4, 14, 45)], &[secret_keyed]).is_empty());
 }

@@ -33,12 +33,23 @@
 //! members, and a Cohesion unit re-reduces the class mean.
 //!
 //! Units are ordered by points descending, then the canonical order of their
-//! first dimension, then node id ([NFR-RA-06]), and capped at
+//! first dimension, then identity ([NFR-RA-06]), and capped at
 //! [`WHERE_TO_START_CAP`]. A unit whose fix recovers no whole point is not
 //! ranked: the signal is an integer, and ranking zeros would present the
 //! tie-break order as a priority. Equality and Depth have no unique
 //! counterfactual — splitting a function or a module has no single result — so
 //! they never enter the ranking; Acyclicity and Modularity neither.
+//!
+//! # Identity
+//!
+//! Every unit and label carries an identity that a re-index keeps ([CR-238]
+//! D7): the storage id is renumbered on every full index, so it can neither
+//! name a unit to come back to nor break a tie. A class or function is known
+//! by [`NodeRow::identity`], the coordinate-free id an offender carries and
+//! `node`/`impact` resolve. A group is known by [`group_identity`], derived
+//! from its production members' identities sorted, and named by the member
+//! first in that order. So the whole list — which units, their order, the
+//! cap's cut and the names shown — is a function of the identities alone.
 //!
 //! # The outlier labels
 //!
@@ -62,6 +73,7 @@
 //! [BR-56]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [BR-61]: ../../../docs/specs/software-spec.md#311-quality-metrics
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+//! [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
 
 use std::collections::{HashMap, HashSet};
 
@@ -116,9 +128,9 @@ pub fn where_to_start(
 ) -> WhereToStart {
     let inputs = Inputs::new(nodes, edges, functions, test_ids, duplicate_groups, member_access);
     let outliers = outlier_measures(&inputs, &thresholds);
-    let labelled: HashSet<(&str, NodeId)> = outliers
+    let labelled: HashSet<(&str, &str)> = outliers
         .iter()
-        .flat_map(|m| m.labelled.iter().map(move |&(id, _)| (m.measure, id)))
+        .flat_map(|m| m.labelled.iter().map(move |p| (m.measure, p.identity)))
         .collect();
     let mut units = match current.aggregate_signal {
         Some(signal) => rank(&inputs, &thresholds, current, i64::from(signal), &labelled),
@@ -129,7 +141,7 @@ pub fn where_to_start(
         units,
         outliers: outliers
             .into_iter()
-            .map(|m: Calibrated| m.into_measure(&inputs))
+            .map(|m: Calibrated<'_>| m.into_measure(&inputs))
             .collect(),
         ..WhereToStart::recorded()
     }
@@ -143,9 +155,43 @@ struct Inputs<'a> {
     /// Every class-like container's facts, in the order Cohesion reduces in.
     containers: Vec<ContainerFacts>,
     /// Exact-duplicate groups' production members whose scored row carries the
-    /// duplicate verdict (id ascending), groups with none dropped, ordered by
-    /// lowest member.
-    duplicates: Vec<Vec<&'a FunctionMetricRow>>,
+    /// duplicate verdict, each group with its key, groups with none dropped.
+    duplicates: Vec<(Vec<&'a FunctionMetricRow>, GroupKey)>,
+    /// The production near-clone groups by mass, each with its key.
+    clone_groups: Vec<(CloneGroupMass, GroupKey)>,
+}
+
+/// What a group unit is known and named by: its [`group_identity`], and the
+/// member first in identity order, whose name, file and line it shows.
+struct GroupKey {
+    identity: String,
+    named_by: NodeId,
+}
+
+/// A group unit's identity ([FR-QM-17], [CR-238]): its kind, then a digest of
+/// its members' identities sorted — `duplicate_group:<16 hex digits>`. It
+/// survives a re-index, which renumbers storage ids but keeps identities, and
+/// changes exactly when the member set does: one member more, fewer or renamed
+/// is another group. The kind keeps an exact-duplicate group and a near-clone
+/// group of the same members apart. A group id is never a symbol identity:
+/// it ends in a hex digit, where every descriptor tail ends in a descriptor
+/// suffix, so `node` and `impact` resolve it to nothing rather than to a
+/// symbol. Each
+/// identity is hashed behind its length, so no two member lists hash one byte
+/// stream; 64 bits of BLAKE3 make a collision among one snapshot's groups
+/// negligible.
+///
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+/// [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+fn group_identity(kind: FixUnitKind, members: &[&str]) -> String {
+    let mut sorted = members.to_vec();
+    sorted.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for identity in sorted {
+        hasher.update(&(identity.len() as u64).to_le_bytes());
+        hasher.update(identity.as_bytes());
+    }
+    format!("{}:{}", kind.as_str(), &hasher.finalize().to_hex()[..16])
 }
 
 impl<'a> Inputs<'a> {
@@ -163,30 +209,64 @@ impl<'a> Inputs<'a> {
             .collect();
         let row_of: HashMap<NodeId, &FunctionMetricRow> =
             production.iter().map(|f| (f.id, *f)).collect();
-        let mut duplicates: Vec<Vec<&FunctionMetricRow>> = duplicate_groups
+        let duplicates: Vec<Vec<&FunctionMetricRow>> = duplicate_groups
             .iter()
             .map(|group| {
                 // Only a member the scored rows count as duplicate: the groups
                 // and the rows are separate statements of one read, so an
                 // annotation committed between them could otherwise hand the
                 // counterfactual more copies to clear than Redundancy counted.
-                let mut members: Vec<&FunctionMetricRow> = group
+                group
                     .iter()
                     .filter_map(|id| row_of.get(id).copied())
                     .filter(|f| f.is_duplicate == Some(true))
-                    .collect();
-                members.sort_by_key(|f| f.id);
-                members
+                    .collect::<Vec<_>>()
             })
             .filter(|members| !members.is_empty())
             .collect();
-        duplicates.sort_by_key(|members| members[0].id);
-        Self {
+        let mut inputs = Self {
             by_id: nodes.iter().map(|n| (n.id, n)).collect(),
             containers: ContainerIndex::build(nodes, edges, functions, test_ids).facts(member_access),
             production,
-            duplicates,
-        }
+            duplicates: Vec::new(),
+            clone_groups: Vec::new(),
+        };
+        inputs.duplicates = duplicates
+            .into_iter()
+            .filter_map(|members| {
+                let key = inputs.group_key(FixUnitKind::DuplicateGroup, members.iter().map(|f| f.id))?;
+                Some((members, key))
+            })
+            .collect();
+        inputs.clone_groups = clone_groups_by_mass(&inputs.production)
+            .into_iter()
+            .filter_map(|g| {
+                let key = inputs.group_key(FixUnitKind::CloneGroup, g.members.iter().copied())?;
+                Some((g, key))
+            })
+            .collect();
+        inputs
+    }
+
+    /// The identity of node `id` ([`NodeRow::identity`]), or `None` for an id
+    /// absent from the node set (never expected — dropped, not fabricated).
+    fn identity(&self, id: NodeId) -> Option<&'a str> {
+        self.by_id.get(&id).map(|n| n.identity())
+    }
+
+    /// The key of a group of `kind` over `members`, or `None` when a member is
+    /// absent from the node set: an identity derived from fewer members than
+    /// the group has would name another group.
+    fn group_key(&self, kind: FixUnitKind, members: impl Iterator<Item = NodeId>) -> Option<GroupKey> {
+        let mut named: Vec<(&str, NodeId)> = members
+            .map(|id| Some((self.identity(id)?, id)))
+            .collect::<Option<_>>()?;
+        named.sort_unstable();
+        let identities: Vec<&str> = named.iter().map(|&(identity, _)| identity).collect();
+        Some(GroupKey {
+            identity: group_identity(kind, &identities),
+            named_by: named.first()?.1,
+        })
     }
 
     /// The name/file/line a unit or label reports for `id`, or `None` for an
@@ -208,7 +288,10 @@ impl<'a> Inputs<'a> {
 /// in the snapshot, and how it reads.
 struct Candidate {
     kind: FixUnitKind,
-    id: NodeId,
+    /// The unit's identity — the ranking's tie-break, and what it is serialized by.
+    identity: String,
+    /// The node the unit is named by.
+    named_by: NodeId,
     dimensions: Vec<&'static str>,
     detail: String,
     /// The measures this unit is looked up under for its outlier labels.
@@ -224,7 +307,7 @@ fn rank(
     t: &Thresholds,
     current: &MetricSnapshot,
     signal: i64,
-    labelled: &HashSet<(&str, NodeId)>,
+    labelled: &HashSet<(&str, &str)>,
 ) -> Vec<FixUnit> {
     let mut candidates = Vec::new();
     function_units(inputs, t, current, &mut candidates);
@@ -248,21 +331,21 @@ fn rank(
     ranked.sort_by(|(ap, a), (bp, b)| {
         bp.cmp(ap)
             .then(first_dimension(a).cmp(&first_dimension(b)))
-            .then(a.id.cmp(&b.id))
+            .then_with(|| a.identity.cmp(&b.identity))
             .then(a.kind.as_str().cmp(b.kind.as_str()))
     });
     ranked
         .into_iter()
         .filter_map(|(points, c)| {
-            let (name, file, line) = inputs.named(c.id)?;
+            let (name, file, line) = inputs.named(c.named_by)?;
             let outliers = OutlierMeasure::MEASURES
                 .iter()
                 .copied()
-                .filter(|m| c.measures.contains(m) && labelled.contains(&(*m, c.id)))
+                .filter(|m| c.measures.contains(m) && labelled.contains(&(*m, c.identity.as_str())))
                 .collect();
             Some(FixUnit {
                 kind: c.kind,
-                node_id: c.id.0,
+                node_id: Some(c.identity),
                 name,
                 file,
                 line,
@@ -291,6 +374,9 @@ fn function_units(
         if !is_deep && !is_brain {
             continue;
         }
+        let Some(identity) = inputs.identity(f.id) else {
+            continue;
+        };
         let mut counterfactual = current.clone();
         let mut dimensions = Vec::new();
         if is_deep {
@@ -311,7 +397,8 @@ fn function_units(
         };
         out.push(Candidate {
             kind: FixUnitKind::Function,
-            id: f.id,
+            identity: identity.to_string(),
+            named_by: f.id,
             dimensions,
             detail,
             measures: &["cc", "nesting"],
@@ -339,6 +426,9 @@ fn class_units(
         if !low_cohesion && !is_god {
             continue;
         }
+        let Some(identity) = inputs.identity(c.id) else {
+            continue;
+        };
         let mut counterfactual = current.clone();
         let mut dimensions = Vec::new();
         let mut detail = Vec::new();
@@ -360,7 +450,8 @@ fn class_units(
         }
         out.push(Candidate {
             kind: FixUnitKind::Class,
-            id: c.id,
+            identity: identity.to_string(),
+            named_by: c.id,
             dimensions,
             detail: detail.join(" · "),
             measures: &["lcom4", "methods", "span"],
@@ -377,7 +468,7 @@ fn class_units(
 fn duplicate_group_units(inputs: &Inputs<'_>, current: &MetricSnapshot, out: &mut Vec<Candidate>) {
     let total = inputs.production.len();
     let redundant = inputs.production.iter().filter(|f| is_redundant(f)).count();
-    for members in &inputs.duplicates {
+    for (members, key) in &inputs.duplicates {
         // The live members leave the redundant count — all of them when a dead
         // member is the survivor, all but the survivor when none is dead.
         let live = members.iter().filter(|f| f.is_dead != Some(true)).count();
@@ -386,7 +477,8 @@ fn duplicate_group_units(inputs: &Inputs<'_>, current: &MetricSnapshot, out: &mu
         counterfactual.redundancy = redundancy_of(redundant - cleared, total);
         out.push(Candidate {
             kind: FixUnitKind::DuplicateGroup,
-            id: members[0].id,
+            identity: key.identity.clone(),
+            named_by: key.named_by,
             dimensions: vec!["redundancy"],
             detail: group_detail("duplicate group", members),
             measures: &["duplicate_mass"],
@@ -404,12 +496,13 @@ fn clone_group_units(inputs: &Inputs<'_>, current: &MetricSnapshot, out: &mut Ve
         .iter()
         .filter(|f| f.clone_group.is_some())
         .count();
-    for g in clone_groups_by_mass(&inputs.production) {
+    for (g, key) in &inputs.clone_groups {
         let mut counterfactual = current.clone();
         counterfactual.uniqueness = extended::from_ratio(cloned - g.members.len(), total);
         out.push(Candidate {
             kind: FixUnitKind::CloneGroup,
-            id: g.members[0],
+            identity: key.identity.clone(),
+            named_by: key.named_by,
             dimensions: vec!["uniqueness"],
             detail: g.detail(),
             measures: &["clone_mass"],
@@ -438,29 +531,59 @@ fn mean_lines(members: &[&FunctionMetricRow]) -> Option<i64> {
 
 // ── The outlier labels ───────────────────────────────────────────────────────
 
+/// One unit's place in a measure's distribution: what it is known by, the
+/// node it is named by, and its value on the measure.
+#[derive(Clone, Copy)]
+struct Point<'i> {
+    identity: &'i str,
+    named_by: NodeId,
+    value: i64,
+}
+
+impl<'i> Point<'i> {
+    /// A class's or function's point; `None` for a node absent from the node
+    /// set (never expected — dropped, not fabricated).
+    fn of_node(inputs: &Inputs<'i>, id: NodeId, value: i64) -> Option<Self> {
+        Some(Self {
+            identity: inputs.identity(id)?,
+            named_by: id,
+            value,
+        })
+    }
+
+    /// A group's point.
+    fn of_group(key: &'i GroupKey, value: i64) -> Self {
+        Self {
+            identity: &key.identity,
+            named_by: key.named_by,
+            value,
+        }
+    }
+}
+
 /// One measure's calibration over the member's distribution, before naming.
-struct Calibrated {
+struct Calibrated<'i> {
     measure: &'static str,
     units: usize,
     fence_eighths: Option<i128>,
     threshold: Option<i64>,
-    /// Every labelled unit's `(id, value)`, value descending then id ascending.
-    labelled: Vec<(NodeId, i64)>,
+    /// Every labelled unit, value descending then identity ascending.
+    labelled: Vec<Point<'i>>,
 }
 
-impl Calibrated {
+impl Calibrated<'_> {
     fn into_measure(self, inputs: &Inputs<'_>) -> OutlierMeasure {
         let labels = self
             .labelled
             .iter()
-            .filter_map(|&(id, value)| {
-                let (name, file, line) = inputs.named(id)?;
+            .filter_map(|p| {
+                let (name, file, line) = inputs.named(p.named_by)?;
                 Some(OutlierLabel {
-                    node_id: id.0,
+                    node_id: Some(p.identity.to_string()),
                     name,
                     file,
                     line,
-                    value,
+                    value: p.value,
                 })
             })
             .take(WORST_OFFENDER_CAP)
@@ -478,37 +601,39 @@ impl Calibrated {
 }
 
 /// One measure's distribution before calibration: its name, every unit's
-/// `(id, value)`, and its detection threshold (`None` for a group mass).
-type Distribution = (&'static str, Vec<(NodeId, i64)>, Option<i64>);
+/// point, and its detection threshold (`None` for a group mass).
+type Distribution<'i> = (&'static str, Vec<Point<'i>>, Option<i64>);
 
 /// Calibrate every measure of [`OutlierMeasure::MEASURES`], in that order.
-fn outlier_measures(inputs: &Inputs<'_>, t: &Thresholds) -> Vec<Calibrated> {
+fn outlier_measures<'i>(inputs: &'i Inputs<'_>, t: &Thresholds) -> Vec<Calibrated<'i>> {
     let containers = &inputs.containers;
     let production = &inputs.production;
-    let duplicate_masses: Vec<(NodeId, i64)> = inputs
+    let node = |id: NodeId, value: i64| Point::of_node(inputs, id, value);
+    let duplicate_masses: Vec<Point<'i>> = inputs
         .duplicates
         .iter()
-        .filter_map(|members| Some((members[0].id, members.len() as i64 * mean_lines(members)?)))
-        .collect();
-    let clone_masses: Vec<(NodeId, i64)> = clone_groups_by_mass(production)
-        .into_iter()
-        .filter_map(|g: CloneGroupMass| {
-            Some((g.members[0], g.members.len() as i64 * g.mean_lines()?))
+        .filter_map(|(members, key)| {
+            Some(Point::of_group(key, members.len() as i64 * mean_lines(members)?))
         })
         .collect();
+    let clone_masses: Vec<Point<'i>> = inputs
+        .clone_groups
+        .iter()
+        .filter_map(|(g, key)| Some(Point::of_group(key, g.members.len() as i64 * g.mean_lines()?)))
+        .collect();
 
-    let distributions: [Distribution; 7] = [
+    let distributions: [Distribution<'i>; 7] = [
         (
             "lcom4",
             containers
                 .iter()
-                .filter_map(|c| Some((c.id, c.lcom4? as i64)))
+                .filter_map(|c| node(c.id, c.lcom4? as i64))
                 .collect(),
             Some(LOW_COHESION_LCOM4 as i64),
         ),
         (
             "methods",
-            containers.iter().map(|c| (c.id, c.methods as i64)).collect(),
+            containers.iter().filter_map(|c| node(c.id, c.methods as i64)).collect(),
             Some(t.god_methods),
         ),
         (
@@ -517,7 +642,7 @@ fn outlier_measures(inputs: &Inputs<'_>, t: &Thresholds) -> Vec<Calibrated> {
             containers
                 .iter()
                 .filter(|c| c.span > 0)
-                .map(|c| (c.id, c.span))
+                .filter_map(|c| node(c.id, c.span))
                 .collect(),
             Some(t.god_span),
         ),
@@ -525,7 +650,7 @@ fn outlier_measures(inputs: &Inputs<'_>, t: &Thresholds) -> Vec<Calibrated> {
             "cc",
             production
                 .iter()
-                .filter_map(|f| Some((f.id, f.cyclomatic_complexity?)))
+                .filter_map(|f| node(f.id, f.cyclomatic_complexity?))
                 .collect(),
             Some(t.brain_cc),
         ),
@@ -533,7 +658,7 @@ fn outlier_measures(inputs: &Inputs<'_>, t: &Thresholds) -> Vec<Calibrated> {
             "nesting",
             production
                 .iter()
-                .filter_map(|f| Some((f.id, f.max_nesting_depth?)))
+                .filter_map(|f| node(f.id, f.max_nesting_depth?))
                 .collect(),
             Some(t.nest),
         ),
@@ -555,23 +680,22 @@ fn outlier_measures(inputs: &Inputs<'_>, t: &Thresholds) -> Vec<Calibrated> {
 
 /// Calibrate one measure on its distribution: the Tukey fence, then every
 /// unit above it and at or above `threshold` (no threshold for a group mass).
-fn calibrate(
+fn calibrate<'i>(
     measure: &'static str,
-    values: Vec<(NodeId, i64)>,
+    values: Vec<Point<'i>>,
     threshold: Option<i64>,
-) -> Calibrated {
-    let mut sorted: Vec<i64> = values.iter().map(|&(_, v)| v).collect();
+) -> Calibrated<'i> {
+    let mut sorted: Vec<i64> = values.iter().map(|p| p.value).collect();
     sorted.sort_unstable();
     let fence_eighths = upper_fence_eighths(&sorted);
-    let mut labelled: Vec<(NodeId, i64)> = match fence_eighths {
+    let mut labelled: Vec<Point<'i>> = match fence_eighths {
         Some(fence) => values
-            .iter()
-            .copied()
-            .filter(|&(_, v)| 8 * i128::from(v) > fence && threshold.is_none_or(|t| v >= t))
+            .into_iter()
+            .filter(|p| 8 * i128::from(p.value) > fence && threshold.is_none_or(|t| p.value >= t))
             .collect(),
         None => Vec::new(),
     };
-    labelled.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    labelled.sort_by(|a, b| b.value.cmp(&a.value).then_with(|| a.identity.cmp(b.identity)));
     Calibrated {
         measure,
         units: sorted.len(),

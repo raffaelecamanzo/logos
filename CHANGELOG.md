@@ -13,6 +13,241 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.20.4] — 2026-10-21
+
+### Changed
+
+- **The README opens with what Logos is for:** guidance on governance and
+  compliance, security and test coverage, for agents and humans.
+
+### Fixed
+
+- **A Dependency-Check run refused for want of an NVD API key says so.**
+  Dependency-Check 13 needs an NVD API key to update its data, and its first
+  error line (`Error updating the NVD Data`) did not say that. When the log
+  shows the NVD client rejecting the key, the scan's and `security status`'s
+  `cause` is now one sentence: the key is missing or rejected, where to get a
+  free one, and the user-level `config.toml` setting that supplies it
+  (`[security_scan.dependency-check] extra_args = ["--nvdApiKey", "<key>"]`;
+  a repository config may not set `extra_args`). A rejected key's value is never
+  repeated, and any other NVD failure keeps its first error line.
+- **The Security page's Show brings the Finding detail into view.** The detail
+  sits below every other widget, so Show used to change nothing the reader could
+  see. It now scrolls the detail into view (smoothly, unless the user prefers
+  reduced motion) and moves focus to its heading, including when Show is
+  pressed on the finding already shown; a reload does not scroll. Inside the
+  detail the blast-radius lists, and the sentence shown when one is empty, are
+  spaced apart.
+
+## [1.20.3] — 2026-10-20
+
+### Added
+
+- **A `rules.toml [review]` table gates the branch, per symbol.** Under it,
+  `gate` and `session-end` fail on a `new` or `worsened` offender against the
+  merge-base with the default branch in a gating dimension (by default nesting,
+  conciseness, cohesion, focus and uniqueness), named with its value, threshold
+  and trust label under `gating_entries`. The aggregate becomes a drift budget:
+  `drift_budget = "report"`, the default, reports the fall below the baseline
+  and never fails on it; a number fails a fall past it. Equality, Modularity,
+  Acyclicity and Depth never gate per symbol. `review` marks each gating entry,
+  and the Stop hook then blocks only on one. A distributional or unknown
+  dimension, or an unknown key, exits 2. Without the table nothing changes.
+  The Health page's verdict judges the drift budget as `gate` does; per-symbol
+  entries are judged by `gate` and `session-end` only.
+- **Every change of the signal is attributed, and a re-bless records why.**
+  `review` carries `attribution`: the signal's change from the merge-base split
+  per dimension, with the offenders that drove each share. Under the `[review]`
+  table `gate`, `session-end` and the Health page's verdict carry it too, from the
+  baseline, and the Health page shows it as a Signal change card. `gate --save`
+  stores the attribution of what it blesses and an optional `--reason`, reported
+  as `baseline_reason` while that baseline stands; under the table a save past a
+  numeric `drift_budget` without `--reason` exits 2 and leaves the baseline as it
+  was. The store moves to schema 39.
+- **A distributional dimension in decline raises a trend warning.** Under the
+  `[review]` table, when Equality, Modularity, Acyclicity or Depth fell in each
+  of the last `trend_window` recorded snapshots (default 2), `scan`, `gate`,
+  `session-end` and `review` carry a warning naming the dimension, its values
+  and the window. It never changes a verdict or an exit code. A `trend_window`
+  under 1 exits 2.
+- **`review --branches` projects shared budgets before a merge.** `logos
+  review --base main --branches b1 b2 …` sums each branch's delta against the
+  base (its tip minus its merge-base) and lists each `[constraints]` budget
+  the combined merge would exceed — per module, function, file or
+  project-wide count — and a numeric `[review] drift_budget`, with each
+  branch's share. The drift is judged from this checkout's comparable gate
+  baseline, as the gate after the merge would judge it, else from the base
+  commit's signal; `drift.reference` says which. `max_clone_ratio` and `no_god_containers` are not
+  projected, and the answer names them. A branch it cannot measure is named
+  and left out of the sum. It is report only and exits 0 whenever it answers.
+  The MCP twin is the `review` tool with `branches`.
+- **A checked-in security baseline for CI: `logos security bless`.** It writes
+  every unsuppressed stored finding to `.logos/security-baseline.json` as its
+  fingerprint, rule id and project-relative path only — no message, snippet or
+  secret — sorted, so an unchanged state blesses to the same bytes. When the
+  file exists the `[security]` ratchet reads it instead of the set `gate --save`
+  records in the gitignored `history.db`, so a fresh CI clone reads only new
+  findings as new; `gate --save` and `session-start` then record no set beside
+  it. Under a table whose required scan is missing it writes nothing and exits
+  5. The plugin guard asks before an agent runs it or writes the file. A
+  finding reported by an absolute path outside the index (OSV-Scanner on a
+  lockfile) still carries the checkout's directory in its fingerprint, so the
+  checked-in file also matches it by its rule id and project-relative path and
+  holds in any clone; re-keying it waits for the osv-scanner 2.x identity
+  change. A Gitleaks secret blessed under the
+  key it had before the store's re-key stays known after the next scan re-keys it.
+
+### Fixed
+
+- **One scan or install at a time per project, on every surface.** Under
+  `serve --mcp --ui`, an MCP `security_scan` ran beside the Security page's scan,
+  and two Semgrep runs wrote one report at once. Every scan and scanner install
+  now holds the project's lock, `.logos/security/run.lock`, from the CLI, MCP or
+  the web UI, in any process. A second start is refused before it starts
+  anything, naming what runs: the CLI exits 3 and the MCP tool answers an error.
+  The Security page's Run scan still joins its own running scan, and an install
+  and a scan of one project never run together. `logos security install` run
+  where no scan can run, with no `.logos/` directory, takes no lock and writes
+  nothing there. Its scanners and installers run in process groups of their own,
+  out of reach of Ctrl-C, so a `logos security scan` or `install` stopped by
+  Ctrl-C (SIGINT) or SIGTERM — as the plugin's Stop hook stops an overrunning
+  scan — kills them before the lock goes with it, and exits 130 or 143. A Logos
+  process killed by SIGKILL still leaves its scanner running beside the next
+  scan.
+- **A "where to start" unit keeps its id across a re-index.** `improvements`,
+  the MCP `improvements` tool and the Health card's `scan.where_to_start` used
+  to carry, as `node_id`, the storage row id a unit was named by. A re-index
+  renumbers those rows, so the same unit came back under another number. Each
+  unit's and outlier label's `node_id` is now a string. A class's or function's
+  is its symbol id without the repository coordinate, the identity an
+  `offenders` entry carries. A duplicate or near-clone group's is
+  `duplicate_group:` or `clone_group:` and a digest of its sorted member
+  identities, the same while its member set is. Ties in the ranking break by
+  it. `node`, `impact`, `callers` and `callees` resolve such a coordinate-free
+  id exactly. The store moves to schema 40; a snapshot recorded before it reads
+  `node_id: null`.
+- **The Security page's install starts nothing before you consent.** Install,
+  Update and Install & scan used to run each offered scanner's version command
+  before the consent dialog was answered. They now decide from what is
+  installed alone. The dialog's lines are unchanged except in two cases where
+  only a version could tell. A copy of your own on `PATH`, with no managed copy
+  beside it, is kept whatever its version: `logos security install <scanner>`
+  still installs the pinned version beside an older one. An Update beside such a
+  copy may ask for the pinned version, and if your copy meets the minimum the
+  install then keeps it and downloads nothing.
+- **`session_start` no longer moves an existing baseline.** It used to re-save
+  the gate baseline, and under a `[security]` table the security ratchet's,
+  every time it ran, so an agent's session could bless its own regression or
+  findings without the guardrail asking. It now decides each on its own, before
+  the edits: it saves a missing gate baseline, records a missing ratchet
+  baseline (none checked in and none in `history.db`), and never overwrites one
+  that exists: only `gate --save` moves them, and `session_end` compares against
+  the baseline last blessed. A baseline that no longer compares, after a change of
+  metric semantics or thresholds, is reset before the edits with the usual
+  `baseline reset` notice.
+- **The re-baseline notice shows what it replaced.** `baseline reset: metric
+  semantics changed` now names the replaced baseline's metric version and signal
+  and the run's (`… (v7 8292 → v8 8295)`), says `metric thresholds changed` when
+  only the thresholds moved, and `gate`, `session-end` and `session-start` carry
+  it in `--json` as `baseline_reset`.
+- **A scanner with nothing to scan is `not applicable`, and a failure names
+  its cause.** gosec read `failed` with an empty log on a project with no Go
+  code, and Dependency-Check read `failed` while the cause, a failed NVD data
+  update, stayed in its log. gosec, on a project with no `.go` file outside the
+  ignored paths, and Bandit, with no `.py` or `.pyw` file, are now reported
+  `not_applicable` with a `reason`, and are not started, not even for a version
+  check. `security status` reads them `not_applicable`, and neither `check`'s
+  `[security]` missing-scan exit nor the workspace roll-up counts that as a gap.
+  A stored report that no scan here could refresh — gosec's, once the last `.go`
+  file is gone — reads `not_applicable` too; a fresh one, such as a report
+  ingested from CI at this HEAD, keeps its state. A scan asks no consent for a
+  scanner it will not start, so a `not_applicable` one is asked for once it has
+  something to scan. A `failed` scanner's outcome carries `cause`, one masked
+  line of its log, and `security status` carries it as `last_failure_cause`, on
+  the CLI, MCP and the Security page.
+- **Stopping `serve` stops its scans and installs.** `serve --ui` now handles
+  Ctrl-C (SIGINT) and SIGTERM, and on any normal stop it cancels each running
+  Security page scan or install, waiting up to 10 seconds in all for them to
+  end. Before, `curl` went on downloading after `serve` stopped and its partial
+  download stayed in staging, and a scanner ran on to its own end. A `serve`
+  killed by SIGKILL or any other signal (SIGHUP when its terminal closes) still
+  runs nothing, and the next install of any scanner now discards the staging it
+  left. Before, only the next install of that same
+  scanner did. Staging that a running Logos process holds is never touched.
+  `serve --mcp` alone now stops on Ctrl-C and SIGTERM too, and however `serve`
+  stops, it also kills the scanners of a scan an MCP client started.
+
+- **One secret is one Gitleaks finding, whatever the scan mode or commit.**
+  Gitleaks' history mode reports a secret once per commit that wrote it, each
+  with its own fingerprint, at the place it had in that commit, so one secret
+  read as several findings, and a secret first recorded by a `--path` scan read
+  as new, and lost its suppression, once committed. A Gitleaks finding's
+  fingerprint now folds its rule, its file and a keyed digest of the secret,
+  computed in memory from the file or the commit and never stored; the key
+  comes from the repository's first commit, so every full clone agrees. One
+  secret is one finding listing its `commits`, and it keeps its fingerprint
+  when its line moves, when it is committed and in a `--path` scan. The
+  evidence store migrates (history.db 7): the next full Gitleaks scan re-keys
+  the stored findings and the ratchet baseline; until then a `--path` scan
+  keeps a stored finding at its old fingerprint. `.logos/security-ignore.toml` is
+  never rewritten: an entry written under a per-commit fingerprint is listed
+  `orphaned`, with `should_name` giving the fingerprint to put in its place.
+- **A secret found only in history is anchored to its commit.** A full
+  Gitleaks scan bound each secret to today's file and line, labelled `fresh`,
+  even when the file was deleted or the line held other code since. A
+  history-mode finding is now bound only where its line still holds the
+  secret; otherwise its `binding` is `historical`, with no path, enclosing
+  symbol or blast radius, and its `anchor` names the commit and the path it was
+  found at. The CLI, MCP and the Security page show the label and the same
+  seven-digit `short_commit`. A `historical` finding still counts in the
+  `[security]` ratchet and caps. No author, email or commit message is stored.
+  The evidence store migrates (history.db 8): stored history-mode findings read
+  `historical` until the next full Gitleaks scan checks each line again.
+- **Semgrep and OSV-Scanner stay out of ignored directories in any checkout,
+  and every scan says what each scanner did with them.** Both relied on their
+  own git-based ignore handling, so Semgrep read ignored directories in a copy
+  that is not a git repository, and OSV-Scanner read them there and in a linked
+  worktree, where it cannot read the git ignores. A whole-project scan now gives
+  both every path outside the ignored directories as their targets instead of
+  `.`, the one mechanism the hand-run harness showed keeps them out without
+  dropping a near miss (`src/target/` beside an ignored `target/`). A symbolic
+  link is never named, and Semgrep scans the files it is named whatever its own
+  `.semgrepignore` and size limit say. Each
+  scanner's whole-project outcome carries `ignored_paths`: `excluded` only where
+  the harness proved the mechanism, which means Semgrep, OSV-Scanner and gosec
+  (next entry), or `scanned` with a one-line `coverage_note` saying why. Bandit, Trivy,
+  Checkov and Dependency-Check keep their exclusion flags but read `scanned`
+  (`exclusion flag not proven by the harness`) until the harness runs them;
+  Gitleaks and CodeQL read `scanned` too. It is in `logos security scan` and `status`, the
+  MCP `security_scan` and `security_status`, and a new **Ignored paths** column
+  of the Security page's scanner table. A re-scan of named paths still reads
+  exactly those paths and states no coverage for them.
+- **gosec stays out of ignored directories.** A whole-project scan gives gosec
+  one `-exclude-dir '^target(/|$)'` per ignored directory: anchored at the
+  project root, and covering every directory below it. The hand-run harness,
+  re-run with a package in `target/nested/`, shows this skips both on the
+  pinned gosec 2.21.4 in a git checkout, a linked worktree and a non-git copy,
+  and keeps the near misses `src/target/` and `targets/`; `^target$` would
+  still read `target/nested/`. gosec now reads `excluded`, or `scanned` with
+  the count of directories it was not given (a name a flag could misread, or
+  past the 64 KiB budget). CodeQL, which the harness has never run, gets no
+  exclusion and no config, and still reads `scanned`.
+- **A severity is never made up.** A finding whose report gave no rating (no
+  `security-severity`, and only a default level) reads `unrated`, with
+  `severity_reason: "the scanner gave none"`, where it used to read `medium`.
+  A default level is one the report left out, or one the scanner writes on
+  every result. osv-scanner writes `warning` on every result, so all of the
+  pinned 1.9.2's findings read `unrated`. Gitleaks writes no level or score at
+  all, so its findings read `unrated` too. From 2.0.0 osv-scanner carries the
+  advisory's CVSS score, and a 2.x report reads that rating. The pin stays at
+  1.9.2. `unrated` has its own count on the Security page and on the
+  workspace Security page, where it also gets its own column. `--severity unrated`
+  and the page's *unrated only* option list unrated findings alone. A rated
+  least severity, the `[security]` ratchet and `max_severity` all compare an
+  unrated finding as `medium`, so no gate verdict changes. Neither threshold
+  accepts `"unrated"` (exit 2). The upgrade rewrites a stored osv-scanner 1.x
+  or Gitleaks `medium` to `unrated` without a new scan (`history.db` migration 9).
+
 ## [1.20.2] — 2026-10-18
 
 ### Fixed

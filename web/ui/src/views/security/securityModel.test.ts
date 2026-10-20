@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import reference from "../../../../../docs/howto/commands.md?raw";
 import type { SecurityCategoryCoverage, SecurityFinding, SecurityModel, SecurityScannerStatus } from "../../api/types.ts";
-import { REDACTED } from "../../copy/security.copy.ts";
+import { REDACTED, selectorText, suppressionNote } from "../../copy/security.copy.ts";
 import { commandsIn, documentedCommands, isDocumented } from "../../test/commandCheck.ts";
 import real from "./fixtures/security.real.json";
 import {
@@ -19,7 +19,9 @@ import {
   pathFromSearch,
   scannerDrivers,
   scannerStateText,
+  selectorKey,
   severityTone,
+  suggestedPath,
 } from "./securityModel.ts";
 
 const MODEL = real as unknown as SecurityModel;
@@ -110,8 +112,8 @@ describe("filters mirror `security findings`", () => {
   });
 
   it("keeps active or suppressed findings — an expired suppression is active", () => {
-    const suppressed = { ...SECRET, suppression: { state: "suppressed" as const, reason: "test key", expires: null } };
-    const expired = { ...SQL, suppression: { state: "expired" as const, reason: "old", expires: "2026-01-01" } };
+    const suppressed = { ...SECRET, suppression: { state: "suppressed" as const, reason: "test key", expires: null, by: { fingerprint: SECRET.fingerprint } } };
+    const expired = { ...SQL, suppression: { state: "expired" as const, reason: "old", expires: "2026-01-01", by: { fingerprint: SQL.fingerprint } } };
     const keep = (f: SecurityFinding, suppression: "active" | "suppressed") =>
       keeps(f, { ...NO_FILTERS, suppression }, c2025(f), drivers);
     expect([keep(suppressed, "suppressed"), keep(suppressed, "active")]).toEqual([true, false]);
@@ -134,6 +136,16 @@ describe("filters mirror `security findings`", () => {
   it("keeps the least severity and above", () => {
     expect(kept({ severity: "high" })).toHaveLength(2);
     expect(kept({ severity: "critical" })).toHaveLength(0);
+  });
+
+  it("lists unrated findings alone, and gates them as medium under a rated least severity (S-768)", () => {
+    const unrated = { ...SQL, severity: "unrated" as const, severity_reason: "the scanner gave none" };
+    const medium = { ...SQL, severity: "medium" as const };
+    const keep = (f: SecurityFinding, severity: (typeof NO_FILTERS)["severity"]) =>
+      keeps(f, { ...NO_FILTERS, severity }, c2025(f), drivers);
+    expect([keep(unrated, "unrated"), keep(medium, "unrated"), keep(SQL, "unrated")]).toEqual([true, false, false]);
+    expect([keep(unrated, "low"), keep(unrated, "medium"), keep(unrated, "high")]).toEqual([true, true, false]);
+    expect(kept({ severity: "unrated" })).toHaveLength(0);
   });
 
   it("keeps the registry's driver when a report is stored under a registry name spelled as its driver", () => {
@@ -232,5 +244,33 @@ describe("severityTone", () => {
     expect(["critical", "high"].map((s) => severityTone(s as never))).toEqual(["red", "red"]);
     expect(severityTone("medium")).toBe("orange");
     expect(["low", "info"].map((s) => severityTone(s as never))).toEqual(["muted", "muted"]);
+  });
+});
+
+describe("path suppressions (S-770)", () => {
+  const at = (path: string | null, report_path: string | null = path): SecurityFinding => ({ ...SQL, path, report_path });
+
+  it("offers the finding's directory, the file itself at the root, and a ** glob for an absolute report path", () => {
+    expect(suggestedPath(at("src/db/query.rs"))).toBe("src/db");
+    expect(suggestedPath(at("tests/fixtures/keys.txt"))).toBe("tests/fixtures");
+    expect(suggestedPath(at("Cargo.lock"))).toBe("Cargo.lock");
+    expect(suggestedPath(at(null, "./web/ui/package-lock.json"))).toBe("web/ui");
+    expect(suggestedPath(at(null, "/home/me/logos/Cargo.lock"))).toBe("**/Cargo.lock");
+    expect(suggestedPath(at(null, "C:\\work\\logos\\Cargo.lock"))).toBe("**/Cargo.lock");
+    expect(suggestedPath(at(null, null))).toBe("");
+  });
+
+  it("keys a path entry by its whole selector, so a narrowing is a different entry", () => {
+    const keys = [{ path: "src" }, { path: "src", rule: "r" }, { path: "src", scanner: "r" }, { fingerprint: "src" }].map(selectorKey);
+    expect(new Set(keys).size).toBe(4);
+    expect(selectorKey({ path: "src", rule: "r" })).toBe(selectorKey({ rule: "r", path: "src" }));
+  });
+
+  it("names which entry covers a path-suppressed finding, and leaves a fingerprint's note as it was", () => {
+    expect(selectorText({ path: "tests/fixtures", rule: "k", scanner: "gitleaks" })).toBe("everything under tests/fixtures, rule k, scanner gitleaks");
+    expect(selectorText({ fingerprint: "0123456789abcdef".repeat(4) })).toBe("fingerprint 0123456789ab…");
+    expect(suppressionNote({ state: "suppressed", reason: "r", expires: "2027-01-01", by: { path: "src" } })).toBe("r (until 2027-01-01) — covers everything under src");
+    expect(suppressionNote({ state: "expired", reason: "r", expires: "2026-01-01", by: { path: "src" } })).toBe("r (expired after 2026-01-01) — covers everything under src");
+    expect(suppressionNote({ state: "suppressed", reason: "r", expires: null, by: { fingerprint: "f" } })).toBe("r");
   });
 });

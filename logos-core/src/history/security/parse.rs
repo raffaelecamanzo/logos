@@ -17,7 +17,9 @@
 //! alone the store. Rule text is excluded on purpose: a real Trivy secret rule
 //! carries the matched source line in its `fullDescription`. Fingerprint values
 //! are hashed into the identity and never kept verbatim — Gitleaks' carry commit
-//! authors and messages.
+//! authors and messages. Of those, only a Gitleaks result's commit id and date
+//! are read on their own: the commit is where its secret is read from, to key
+//! its identity ([`super::secret`]), and is stored; the date only orders.
 //!
 //! A secret-class finding's message is replaced here, at parse time, by
 //! [`super::redact`]; the parse output is safe by construction.
@@ -116,6 +118,14 @@ pub struct ParsedFinding {
     /// `partialFingerprints`, empty values dropped — as `key=value` pairs in key
     /// order. Hashed into the stored fingerprint, never stored itself.
     pub identity: Vec<String>,
+    /// The commit a Gitleaks history-mode result was found in
+    /// (`partialFingerprints.commitSha`); `None` for a scoped (`--no-git`) run
+    /// and for every other scanner. The secret is read from it at ingest
+    /// ([`super::secret`]).
+    pub commit: Option<String>,
+    /// That commit's date as Gitleaks gives it (`partialFingerprints.date`),
+    /// which orders a secret's commits. Never stored.
+    pub committed_at: Option<String>,
 }
 
 /// A source region: 1-based lines and columns, each as given (or absent).
@@ -450,7 +460,11 @@ fn parse_result(
                 .and_then(|p| p.security_severity.as_ref())
                 .and_then(cvss)
         });
-    let severity = Severity::from_sarif(score, level);
+    // A level the report left out is SARIF's default, and the level a scanner
+    // writes on every result is its own: neither rates the finding, so with no
+    // score it reads `unrated` (S-768).
+    let rating = level.filter(|&l| fixed_level(scanner_name) != Some(l));
+    let severity = Severity::from_sarif(score, rating);
 
     let tags: Vec<&str> = rule
         .and_then(|r| r.properties.as_ref())
@@ -472,6 +486,19 @@ fn parse_result(
     let region = physical.and_then(|p| p.region).unwrap_or_default();
 
     let identity = identity_pairs(&result);
+    let (commit, committed_at) = if redact::is_gitleaks(scanner_name) {
+        let partial = |key: &str| {
+            result
+                .partial_fingerprints
+                .as_ref()
+                .and_then(|map| map.get(key))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        (partial("commitSha"), partial("date"))
+    } else {
+        (None, None)
+    };
 
     let secret = redact::is_secret_class(scanner_name, &rule_id, &tags, &cwes);
     let (message, redacted) = if secret {
@@ -494,7 +521,19 @@ fn parse_result(
         report_path,
         region,
         identity,
+        commit,
+        committed_at,
     }))
+}
+
+/// The level a scanner writes on every result, whatever the advisory says, so
+/// it rates nothing: OSV-Scanner's `warning`. Its SARIF writer
+/// (`internal/output/sarif.go`) sets `WithLevel("warning")` on each result at
+/// 1.9.2 and still at 2.7.0; from 2.0.0 a rating, when the advisory has one,
+/// is the rule's `security-severity` instead. The driver name is matched with
+/// ASCII case and surrounding space ignored, as [`redact::is_gitleaks`] does.
+fn fixed_level(scanner_name: &str) -> Option<&'static str> {
+    scanner_name.trim().eq_ignore_ascii_case("osv-scanner").then_some("warning")
 }
 
 /// A SARIF `level` must be one of the four the spec defines.
@@ -669,8 +708,12 @@ mod tests {
     }
 
     fn log(result: &str, rules: &str) -> String {
+        log_by("t", result, rules)
+    }
+
+    fn log_by(driver: &str, result: &str, rules: &str) -> String {
         format!(
-            r#"{{"version":"2.1.0","runs":[{{"tool":{{"driver":{{"name":"t","rules":[{rules}]}}}},"results":[{result}]}}]}}"#
+            r#"{{"version":"2.1.0","runs":[{{"tool":{{"driver":{{"name":"{driver}","rules":[{rules}]}}}},"results":[{result}]}}]}}"#
         )
     }
 
@@ -699,7 +742,29 @@ mod tests {
         let f = one(&log(r#"{"ruleId":"r","message":{"text":"m"}}"#, r#"{"id":"r","defaultConfiguration":{"level":"error"}}"#));
         assert_eq!(f.severity, Severity::High, "the rule's default level stands in");
         let f = one(&log(r#"{"ruleId":"r","message":{"text":"m"}}"#, ""));
-        assert_eq!(f.severity, Severity::Medium, "SARIF's default level is warning");
+        assert_eq!(f.severity, Severity::Unrated, "SARIF's default level is no rating");
+        let f = one(&log(r#"{"ruleId":"r","level":"warning","message":{"text":"m"}}"#, ""));
+        assert_eq!(f.severity, Severity::Medium, "a level the report gives is a rating");
+    }
+
+    /// OSV-Scanner writes `warning` on every result, so that level rates
+    /// nothing: without a score it reads `unrated` (S-768). Each case sits
+    /// beside its near miss: another level, another driver one word away, a
+    /// score on the rule (2.0.0 and later), the same level from another
+    /// scanner.
+    #[test]
+    fn osv_scanners_fixed_warning_reads_unrated_and_its_near_misses_do_not() {
+        let at = |driver: &str, level: &str, rules: &str| {
+            let result = format!(r#"{{"ruleId":"r","level":"{level}","message":{{"text":"m"}}}}"#);
+            one(&log_by(driver, &result, rules)).severity
+        };
+        assert_eq!(at("osv-scanner", "warning", ""), Severity::Unrated);
+        assert_eq!(at(" OSV-Scanner ", "warning", ""), Severity::Unrated, "case and space are ignored");
+        assert_eq!(at("osv-scanner", "error", ""), Severity::High, "only its fixed level is no rating");
+        assert_eq!(at("osv-scanner-wrapper", "warning", ""), Severity::Medium, "another driver's warning rates");
+        assert_eq!(at("Trivy", "warning", ""), Severity::Medium);
+        let scored = r#"{"id":"r","properties":{"security-severity":"9.8"}}"#;
+        assert_eq!(at("osv-scanner", "warning", scored), Severity::Critical, "the advisory's own rating");
     }
 
     /// `kind`: a passed or not-applicable check is no finding; an `open` result

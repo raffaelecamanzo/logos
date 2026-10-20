@@ -407,7 +407,7 @@
     "name": "hotspots"
   },
   {
-    "description": "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
+    "description": "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact, and so is a symbol id without its repository coordinate — the node_id an offender, a review entry or a single-symbol improvements unit carries. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -478,7 +478,7 @@
     "name": "impact_intersection"
   },
   {
-    "description": "Where to start (FR-QM-17): the ranked fix units the last snapshot recorded — at most 10 classes, functions, exact-duplicate groups and near-clone groups, each with its dimension(s), its `points` and the `outliers` measures it is labelled on — plus the per-member outlier labels of each measure. `points` is an ESTIMATE under a single-unit counterfactual (the signal recomputed with that one unit's contribution removed, minus the current signal), and `basis` says so. Advisory: it never enters the signal, the gate or `check`. Ordered by points descending, then dimension, then node id; byte-stable. A pure read: run scan first to measure. recorded:false means no snapshot recorded a ranking (never scanned, or one that predates it); recorded:true with no units means no single unit recovers a whole point, never that the code is clean.",
+    "description": "Where to start (FR-QM-17): the ranked fix units the last snapshot recorded — at most 10 classes, functions, exact-duplicate groups and near-clone groups, each with its dimension(s), its `points` and the `outliers` measures it is labelled on — plus the per-member outlier labels of each measure. `points` is an ESTIMATE under a single-unit counterfactual (the signal recomputed with that one unit's contribution removed, minus the current signal), and `basis` says so. Advisory: it never enters the signal, the gate or `check`. Ordered by points descending, then dimension, then node_id; byte-stable. Each unit's and label's node_id is an identity a re-index keeps (CR-238): a class's or function's is its symbol id without the repository coordinate, which node and impact resolve; a group's is `duplicate_group:` or `clone_group:` and a digest of its sorted member identities, the same while its member set is. node_id is null on a snapshot recorded before it was. A pure read: run scan first to measure. recorded:false means no snapshot recorded a ranking (never scanned, or one that predates it); recorded:true with no units means no single unit recovers a whole point, never that the code is clean.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -496,7 +496,7 @@
     "name": "improvements"
   },
   {
-    "description": "Everything about one symbol: kind, location, signature, annotations, immediate edges (FR-NV-04). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact.",
+    "description": "Everything about one symbol: kind, location, signature, annotations, immediate edges (FR-NV-04). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact, and so is a symbol id without its repository coordinate — the node_id an offender, a review entry or a single-symbol improvements unit carries.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -603,7 +603,7 @@
     "name": "rescan"
   },
   {
-    "description": "The branch delta (FR-GV-24): every offender (all nine dimensions, uncapped) and every check violation, classified new, worsened, improved, resolved or unchanged PER SYMBOL against the merge-base of HEAD and `base` (default: the repository's default branch). Changed entries are listed; unchanged ones are only counted (offender_counts, violation_counts). Each entry carries its value before and after, its threshold, and a trust label: resolved, stale (the file changed since the last sync — run sync), or the tag of a language the graph binds within files only. Also lists near-clone groups the branch introduced, and under sections.security the security findings the branch introduced, touched or resolved (FR-SC-18): each with its method (fingerprint against the report recorded at the merge-base, else hunk), freshness, severity, OWASP categories and reachability confidence; a finding removed on a file edited since the last scan reads stale, never resolved; suppressed findings are listed apart; messages stay redacted; never scanned reads measured:false. The before-state is the snapshot recorded at the merge-base, else a shadow index of that tree cached by commit (the first call may take as long as an index); no other commit is ever compared. Advisory: never moves check or gate. measured:false with not_measured_because means nothing was classified. Byte-stable; the CLI twin is `logos review --base <ref>`.",
+    "description": "The branch delta (FR-GV-24): every offender (all nine dimensions, uncapped) and every check violation, classified new, worsened, improved, resolved or unchanged PER SYMBOL against the merge-base of HEAD and `base` (default: the repository's default branch). Changed entries are listed; unchanged ones are only counted (offender_counts, violation_counts). Each entry carries its value before and after, its threshold, and a trust label: resolved, stale (the file changed since the last sync — run sync), or the tag of a language the graph binds within files only. Also lists near-clone groups the branch introduced; `attribution` breaks the signal's change into per-dimension contributions in log space (points summing to exact_change, with the integer rounding and the residual stated), each naming its top driving symbols or clone groups, capped, with driver_count; and under sections.security the security findings the branch introduced, touched or resolved (FR-SC-18): each with its method (fingerprint against the report recorded at the merge-base, else hunk), freshness, severity, OWASP categories and reachability confidence; a finding removed on a file edited since the last scan reads stale, never resolved; suppressed findings are listed apart; messages stay redacted; never scanned reads measured:false. The before-state is the snapshot recorded at the merge-base, else a shadow index of that tree cached by commit (the first call may take as long as an index); no other commit is ever compared. Advisory: never moves check or gate. measured:false with not_measured_because means nothing was classified. Byte-stable; the CLI twin is `logos review --base <ref>`. With `branches` (FR-GV-28) it instead sums each branch's delta against `base` (tip minus merge-base, every side a committed tree) and projects it onto the shared limits — every projectable [constraints] budget, per module, function, file or project-wide count, and a numeric [review] drift_budget, whose drift is judged from this checkout's comparable gate baseline (else the base commit's signal; `drift.reference` and a note say which), so the answer depends on that baseline: `exceeded` (and `drift`) list each limit the combined merge would exceed, with every branch's share and whether it alone would; `subjects` is the denominator; a branch that cannot be measured is named in `branches` with why and left out of the sum; `not_projected` names declared limits it does not judge. Report only; the CLI twin is `logos review --base <ref> --branches <b1> <b2>`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -611,6 +611,16 @@
           "description": "The ref to compare against; omit for the repository's default branch (origin/HEAD, else main, else master).",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "branches": {
+          "description": "Project these branches' summed deltas against `base` onto the shared limits (FR-GV-28) instead of reviewing HEAD; omit or [] for the branch delta.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -727,7 +737,7 @@
           ]
         },
         "severity": {
-          "description": "Least severity listed: critical, high, medium, low or info.",
+          "description": "Least severity listed: critical, high, medium, low or info; or `unrated` alone.",
           "type": [
             "string",
             "null"
@@ -765,7 +775,7 @@
     "name": "security_ingest"
   },
   {
-    "description": "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, not_selected, requires_build, not_applicable, or failed (exit code, a log path and a masked excerpt). One failure never stops the others. `scanners` and `paths` make it a re-scan that takes seconds (FR-SC-17): Semgrep, Gitleaks, Bandit, gosec and Checkov run on the paths only and replace only their findings there (Gitleaks keeps its history findings there); Trivy, OSV-Scanner and Dependency-Check report whole-manifest only, CodeQL whole-project only, and each runs unscoped when named. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "description": "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, not_selected, requires_build, not_applicable (nothing it reads is in the project, so it is not started), or failed (exit code, a log path, a masked excerpt and a one-line masked `cause` from the log). One failure never stops the others. Each scanner that ran over the whole project states `ignored_paths` (FR-SC-26): `excluded`, or `scanned` with a one-line `coverage_note` saying why it read the project's ignored directories. `scanners` and `paths` make it a re-scan that takes seconds (FR-SC-17): Semgrep, Gitleaks, Bandit, gosec and Checkov run on the paths only and replace only their findings there (Gitleaks keeps its history findings there); Trivy, OSV-Scanner and Dependency-Check report whole-manifest only, CodeQL whole-project only, and each runs unscoped when named. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -798,7 +808,7 @@
     "name": "security_scan"
   },
   {
-    "description": "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Also the consent state: the scanners consented to, and the ones the next scan will ask for.",
+    "description": "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, not_applicable (installed, but nothing it reads is in the project: no scan is missing), stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. A scanner whose last scan failed names its `last_failure` log and `last_failure_cause`. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Each installed scanner a scan would start states `ignored_paths` for a whole-project scan of the tree now: `excluded`, or `scanned` with a `coverage_note` (FR-SC-26). Also the consent state: the scanners consented to, and the ones the next scan will ask for; and `suppressions`, every entry of .logos/security-ignore.toml (a fingerprint, or a path glob narrowed by rule and scanner) with `suppressed`, the findings it suppresses now, expired or orphaned flagged.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -816,7 +826,7 @@
     "name": "security_status"
   },
   {
-    "description": "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "description": "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon. Under a rules.toml [review] table it fails on gating branch-delta entries and on a drop past drift_budget instead, and `attribution` breaks the change from the baseline into per-dimension contributions with their driving symbols. `baseline_reason` is the reason the baseline was blessed with. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "DefaultMemberParams",
@@ -825,7 +835,7 @@
     "name": "session_end"
   },
   {
-    "description": "Begin a quality session (FR-GV-04): records the quality baseline before edits — call this BEFORE making changes. Under a workspace it acts on the default member only: it takes no `repo`.",
+    "description": "Begin a quality session (FR-GV-04): call this BEFORE making changes. It records the session's snapshot and saves the quality baseline (and, under a rules.toml [security] table, the security baseline) only when none exists: it never moves an existing one — only `gate --save` does — except a quality baseline that no longer compares (saved under other metric semantics or thresholds), which it resets before the edits and reports as `baseline_reset`. Under a workspace it acts on the default member only: it takes no `repo`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "DefaultMemberParams",

@@ -14,12 +14,17 @@
 //! [`SecurityGateBand`] is the same verdict for the Security page ([S-670]):
 //! `check_security` over the same summary, so the page and `check` agree.
 //!
+//! [`SecurityBless`] is `logos security bless` ([FR-SC-25]): the same summary's
+//! baseline findings, written to the checked-in `.logos/security-baseline.json`
+//! that the summary then reads as the ratchet's baseline.
+//!
 //! Freshness is the one the existing read model decides
 //! ([`status`](super::status)): a scanner's scan is fresh exactly when that
 //! readout says `fresh`. The summary carries every stored finding with its
 //! scanner's state; which ones count is governance's rule ([NFR-RA-05]).
 //!
 //! [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+//! [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 //! [S-668]: ../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5
 //! [S-670]: ../../../docs/planning/journal.md#s-670-the-security-page-shows-scanners-findings-and-the-owasp-view
@@ -32,10 +37,13 @@ use super::{ScanState, SecurityStatus, StaleBecause};
 use crate::config::load_rules_from_root;
 use crate::engine::{today_utc, Engine};
 use crate::governance::security::{
-    check_security, ScanFreshness, ScannerFreshness, SecurityEvidence, SecuritySummary, SummaryFinding,
+    baseline_entries, check_security, missing_scans, read_checked_in, write_checked_in, BaselineSource, ScanFreshness,
+    ScannerFreshness, SecurityEvidence, SecuritySummary, SummaryFinding, CHECKED_IN_FILE_REL,
 };
-use crate::history::security::{classify, label, read_baseline, read_latest, IgnoreFile, OwaspEdition};
-use crate::models::quality::{MissingScan, Violation};
+use crate::history::security::{
+    classify, label, project_location, read_baseline, read_latest, IgnoreFile, OwaspEdition,
+};
+use crate::models::quality::{MissingScan, Violation, EXIT_MISSING_SCAN};
 
 /// The evidence the `[security]` gate reads, over one engine.
 pub(crate) struct SecurityGateEvidence<'a>(pub(crate) &'a Engine);
@@ -65,8 +73,9 @@ pub struct SecurityGateBand {
 
 impl SecurityGateEvidence<'_> {
     /// The summary over a status readout already taken, so a caller that also
-    /// shows that readout probes the scanners once.
-    fn summary_over(&self, status: &SecurityStatus) -> Result<SecuritySummary> {
+    /// shows that readout probes the scanners once — scanners and findings
+    /// only, with no baseline read.
+    fn findings_over(&self, status: &SecurityStatus) -> Result<SecuritySummary> {
         let root = self.0.root();
         let today = today_utc();
         let view = read_latest(root)?;
@@ -84,7 +93,7 @@ impl SecurityGateEvidence<'_> {
             })
             .collect();
 
-        let labelled = label(&view.findings, &IgnoreFile::load(root)?, today);
+        let labelled = label(&view.findings, &IgnoreFile::load(root)?, root, today);
         let none: &[&str] = &[];
         let editions = [
             classify(&view.findings, OwaspEdition::V2025, none),
@@ -97,15 +106,20 @@ impl SecurityGateEvidence<'_> {
             .map(|(idx, item)| {
                 let suppressed = item.is_suppressed();
                 let f = item.finding;
+                let unbound_location = unbound_location(root, &f);
                 SummaryFinding {
                     owasp: editions
                         .iter()
                         .flat_map(|e| e.findings[idx].categories.iter().map(|c| (*c).to_string()))
                         .collect(),
+                    historical: f.binding == crate::history::FindingBinding::Historical,
+                    short_commit: f.anchor.map(|a| a.short_commit),
                     path: f.path.or(f.report_path),
                     line: f.start_line,
                     scanner: f.scanner_name,
                     fingerprint: f.fingerprint,
+                    legacy_fingerprints: f.legacy_fingerprints,
+                    unbound_location,
                     rule_id: f.rule_id,
                     severity: f.severity,
                     suppressed,
@@ -113,11 +127,31 @@ impl SecurityGateEvidence<'_> {
             })
             .collect();
 
-        Ok(SecuritySummary {
-            scanners,
-            findings,
-            baseline: read_baseline(root)?.map(|b| b.fingerprints),
-        })
+        Ok(SecuritySummary { scanners, findings, ..SecuritySummary::default() })
+    }
+
+    /// [`findings_over`](Self::findings_over) with the ratchet's baseline from
+    /// its one source ([FR-SC-25]): the checked-in
+    /// `.logos/security-baseline.json` when it exists, else the set `gate
+    /// --save` recorded in `history.db`, which is then not read.
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    fn summary_over(&self, status: &SecurityStatus) -> Result<SecuritySummary> {
+        let root = self.0.root();
+        let mut summary = self.findings_over(status)?;
+        match read_checked_in(root)? {
+            Some(entries) => {
+                summary.baseline_locations =
+                    entries.iter().filter_map(|e| Some((e.rule_id.clone(), e.path.clone()?))).collect();
+                summary.baseline = Some(entries.into_iter().map(|e| e.fingerprint).collect());
+                summary.baseline_source = BaselineSource::CheckedIn;
+            }
+            None => {
+                summary.baseline = read_baseline(root)?.map(|b| b.fingerprints);
+                summary.baseline_source = BaselineSource::Store;
+            }
+        }
+        Ok(summary)
     }
 
     /// The `[security]` gate as the Security page shows it ([FR-SC-09]): the
@@ -144,6 +178,18 @@ impl SecurityGateEvidence<'_> {
     }
 }
 
+/// The project-relative path of a finding that binds to no indexed file and is
+/// reported by an absolute path under `root`: what a checked-in baseline also
+/// matches it by ([`SummaryFinding::unbound_location`]). `None` for any other.
+fn unbound_location(root: &std::path::Path, f: &crate::history::SecurityFinding) -> Option<String> {
+    use crate::history::FindingBinding;
+    if !matches!(f.binding, FindingBinding::Unmatched | FindingBinding::Ambiguous) {
+        return None;
+    }
+    let report = f.report_path.as_deref()?;
+    std::path::Path::new(report).is_absolute().then(|| project_location(root, report)).flatten()
+}
+
 /// The gate's freshness for one scanner state: `fresh` exactly when `status`
 /// says so, every stale state with the reason `check` names.
 pub(super) fn freshness_of(state: &ScanState) -> ScanFreshness {
@@ -159,23 +205,119 @@ pub(super) fn freshness_of(state: &ScanState) -> ScanFreshness {
             ScanFreshness::Stale("only a scoped scan is stored".to_string())
         }
         ScanState::NeverRun => ScanFreshness::NeverRun,
+        ScanState::NotApplicable { .. } => ScanFreshness::NotApplicable,
         ScanState::NotInstalled => ScanFreshness::NotInstalled,
         ScanState::Disabled => ScanFreshness::Disabled,
     }
 }
 
-impl SecurityEvidence for SecurityGateEvidence<'_> {
-    fn summary(&self) -> Result<SecuritySummary> {
-        let status = super::status(
+impl SecurityGateEvidence<'_> {
+    /// Each scanner's state as the gate reads it: never its version, since
+    /// `check` runs on the Dashboard's reads as well as the CLI's.
+    fn gate_status(&self) -> Result<SecurityStatus> {
+        super::status(
             self.0.root(),
             &self.0.scan_environment(),
             self.0.tools_manifest(),
             today_utc(),
-            // The summary reads each scanner's state, never its version, and
-            // `check` runs on the Dashboard's reads as well as the CLI's.
             super::VersionProbes::Never,
-        )?;
-        self.summary_over(&status)
+            false,
+        )
+    }
+
+    /// `logos security bless` ([FR-SC-25]): write the findings the ratchet's
+    /// baseline records — every unsuppressed finding of every stored scan, as
+    /// `gate --save` records them — to the checked-in
+    /// `.logos/security-baseline.json`, as fingerprint, rule id and
+    /// project-relative path only. Sorted, so blessing an unchanged state
+    /// writes the same bytes, and leaves the file untouched. Under a
+    /// `[security]` table with a required scan missing it writes nothing, as
+    /// `gate --save` records nothing then. The file being rewritten is never
+    /// read, so a malformed one is replaced rather than refused.
+    ///
+    /// # Errors
+    /// An invalid `.logos/rules.toml` or ignore file (exit 2), a failed write
+    /// (exit 2), or a store failure.
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    pub(crate) fn bless(&self) -> Result<SecurityBless> {
+        let root = self.0.root();
+        let table = load_rules_from_root(root)?.security;
+        let summary = self.findings_over(&self.gate_status()?)?;
+        let missing_scans = table.as_ref().map(|table| missing_scans(table, &summary)).unwrap_or_default();
+        if !missing_scans.is_empty() {
+            let named: Vec<&str> = missing_scans.iter().map(|m| m.scanner.as_str()).collect();
+            return Ok(SecurityBless {
+                file: CHECKED_IN_FILE_REL.to_string(),
+                recorded: false,
+                changed: false,
+                findings: 0,
+                message: format!(
+                    "security baseline not blessed: required scan missing or stale at HEAD: {} — \
+                     {CHECKED_IN_FILE_REL} is left as it was",
+                    named.join(", ")
+                ),
+                missing_scans,
+            });
+        }
+        let entries = baseline_entries(&summary, |path| project_location(root, path));
+        let changed = write_checked_in(root, &entries)?;
+        let outcome = if changed { "written" } else { "unchanged" };
+        let reader = if table.is_some() {
+            "the ratchet reads it in every checkout"
+        } else {
+            "the ratchet reads it once .logos/rules.toml has a [security] table"
+        };
+        Ok(SecurityBless {
+            file: CHECKED_IN_FILE_REL.to_string(),
+            recorded: true,
+            changed,
+            findings: entries.len(),
+            message: format!(
+                "security baseline blessed: {} findings in {CHECKED_IN_FILE_REL} ({outcome}) — commit it: \
+                 {reader}",
+                entries.len()
+            ),
+            missing_scans,
+        })
+    }
+}
+
+/// What `logos security bless` did ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecurityBless {
+    /// The file it writes: `.logos/security-baseline.json`.
+    pub file: String,
+    /// Whether the file now records the current findings — `false` only when
+    /// a required scan is missing, and the file was left as it was.
+    pub recorded: bool,
+    /// Whether the file's bytes changed: blessing an unchanged state does not
+    /// touch it.
+    pub changed: bool,
+    /// How many findings the file records (0 when nothing was recorded).
+    pub findings: usize,
+    /// Required scanners with no fresh scan at HEAD — exit 5, nothing written.
+    pub missing_scans: Vec<MissingScan>,
+    pub message: String,
+}
+
+impl SecurityBless {
+    /// `5` when a required scan was missing and nothing was written, else `0`.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        if self.missing_scans.is_empty() {
+            0
+        } else {
+            EXIT_MISSING_SCAN
+        }
+    }
+}
+
+impl SecurityEvidence for SecurityGateEvidence<'_> {
+    fn summary(&self) -> Result<SecuritySummary> {
+        self.summary_over(&self.gate_status()?)
     }
 
     fn save_baseline(&self, rules: &crate::config::SecurityRules, fingerprints: &[(String, String)]) -> Result<usize> {

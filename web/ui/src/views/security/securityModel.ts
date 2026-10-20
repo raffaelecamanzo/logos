@@ -13,6 +13,8 @@
  * - Absent states: each scanner state and each not-covered category resolves to
  *   the command that fixes it (`copy/security.copy.ts`).
  * - Redaction: a secret-class message is never rendered, whatever text it holds.
+ * - Triage: "everything under this path" starts from the finding's directory
+ *   (S-770), and an entry's selector keys the rows an unsuppress is in flight for.
  */
 
 import type {
@@ -23,6 +25,7 @@ import type {
   SecurityFindingContext,
   SecurityPage,
   SecurityScannerStatus,
+  SecuritySelector,
   SecuritySeverity,
   SecurityStatus,
   SecurityUnclassified,
@@ -30,8 +33,9 @@ import type {
 import type { BadgeTone } from "../../components/index.ts";
 import { REDACTED, SCANNER_STATE_TEXT, SECURITY_COMMANDS, notCoveredText } from "../../copy/security.copy.ts";
 
-/** Severities from most to least severe. */
-export const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "low", "info"];
+/** Severities from most to least severe, `unrated` (no rating, S-768) where a
+ *  threshold gates it: with `medium`, listed just after it. */
+export const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "unrated", "low", "info"];
 
 /** The editions the page offers, the default first. */
 export const EDITIONS: readonly OwaspEditionYear[] = ["2025", "2021"];
@@ -76,6 +80,25 @@ export function findingLocation(f: SecurityFinding): string {
   return f.start_line !== null ? `${path}:${f.start_line}` : path;
 }
 
+/** The path "everything under this path" offers for `f` (S-770): the directory
+ *  holding its file, or the file itself at the project root. An absolute report
+ *  path — a lockfile a scanner names where it found it — has no project-relative
+ *  spelling on the page, so its file name is offered under a leading `**`
+ *  segment, for the user to narrow.
+ *  `""` when the finding has no location. */
+export function suggestedPath(f: SecurityFinding): string {
+  const path = (f.path ?? f.report_path ?? "").replaceAll("\\", "/").replace(/^(\.\/)+/, "");
+  const cut = path.lastIndexOf("/");
+  if (path.startsWith("/") || /^[A-Za-z]:\//.test(path)) return `**/${path.slice(cut + 1)}`;
+  return cut === -1 ? path : path.slice(0, cut);
+}
+
+/** One entry's identity: what an unsuppress is keyed by, so every row one path
+ *  entry covers waits on the same removal. */
+export function selectorKey(s: SecuritySelector): string {
+  return "fingerprint" in s ? `fingerprint\u0000${s.fingerprint}` : `path\u0000${s.path}\u0000${s.rule ?? ""}\u0000${s.scanner ?? ""}`;
+}
+
 /** The page's filters; an empty string is "any". */
 export interface FindingFilters {
   severity: SecuritySeverity | "";
@@ -108,10 +131,15 @@ export function pathFromSearch(search: string): string {
   return normalisePath(new URLSearchParams(search).get("path") ?? "");
 }
 
-/** A severity's rank, higher for more severe: the one order the filter and the
- *  table's sort share. */
+/** A severity's rank, higher for more severe: the order the table sorts by. */
 export function severityRank(s: SecuritySeverity): number {
   return SEVERITIES.length - SEVERITIES.indexOf(s);
+}
+
+/** The severity a threshold compares, as the server's `Severity::gated_as`
+ *  does: `unrated` is gated as `medium`. */
+export function gatedAs(s: SecuritySeverity): SecuritySeverity {
+  return s === "unrated" ? "medium" : s;
 }
 
 /** Severity badge tone: critical/high red, medium orange, the rest muted. Text
@@ -130,7 +158,13 @@ export function keeps(
   classification: Classification,
   scanners: ReadonlyMap<string, string>,
 ): boolean {
-  const severity = filters.severity === "" || severityRank(f.severity) >= severityRank(filters.severity);
+  // `unrated` lists the unrated findings alone; a rated least severity compares
+  // an unrated finding as a gate does, as `medium` (the CLI's `--severity`).
+  const severity =
+    filters.severity === "" ||
+    (filters.severity === "unrated"
+      ? f.severity === "unrated"
+      : severityRank(gatedAs(f.severity)) >= severityRank(filters.severity));
   const want = filters.scanner.toLowerCase();
   const scanner =
     want === "" || f.scanner_name.toLowerCase() === want || scanners.get(want) === f.scanner_name;
@@ -167,6 +201,8 @@ export function scannerStateText(row: SecurityScannerStatus, pending: readonly s
       return SCANNER_STATE_TEXT.neverRun(scanFor([row], pending));
     case "disabled":
       return SCANNER_STATE_TEXT.disabled;
+    case "not_applicable":
+      return SCANNER_STATE_TEXT.notApplicable(row.reason);
     case "stale":
       // A report ingested from CI, or from a tool that is not a registered
       // scanner, has no copy here to run: only a newer report refreshes it.

@@ -297,6 +297,33 @@ pub struct EdgeRow {
     pub kind: EdgeKind,
 }
 
+/// An edge read back **by symbol identity** rather than by storage rowid — the
+/// currency the deep `verify` diff ([FR-GV-19], [NFR-RA-06]) compares across two
+/// stores.
+///
+/// A [`NodeId`] is storage-local and differs between the live store and a fresh
+/// shadow reindex, so two stores' [`EdgeRow`]s cannot be diffed; the canonical
+/// symbol strings of the two endpoints (plus the kind) can. The endpoint files
+/// ride along so a drifted edge points at the file whose re-extraction lost or
+/// kept it ([CR-236]); a node unbound to a file reads `None`.
+///
+/// [FR-GV-19]: ../../../docs/specs/requirements/FR-GV-19.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolEdgeRow {
+    /// The relationship kind.
+    pub kind: EdgeKind,
+    /// The canonical SCIP symbol of the source node.
+    pub source: String,
+    /// The canonical SCIP symbol of the target node.
+    pub target: String,
+    /// The defining file's path of the source node, if bound to one.
+    pub source_file: Option<String>,
+    /// The defining file's path of the target node, if bound to one.
+    pub target_file: Option<String>,
+}
+
 /// The fields needed to insert a new node.
 ///
 /// `symbol` must already be a resolved [`LogosSymbol`] id (see
@@ -815,6 +842,20 @@ pub struct FunctionMetricRow {
     pub has_body: Option<bool>,
 }
 
+/// What a re-bless records beside the gate baseline ([FR-GV-16], migration
+/// 39). Both `None` on an anchor that records no re-bless.
+///
+/// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BaselineRecord {
+    /// The `gate --save --reason` text.
+    pub reason: Option<String>,
+    /// The serialized attribution of the blessed change ([FR-GV-26]).
+    ///
+    /// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+    pub attribution: Option<String>,
+}
+
 /// One persisted `metric_snapshots` row (S-018, [FR-QM-07]).
 ///
 /// Raw + normalized per metric, the counts the run scored, the `empty` flag,
@@ -959,6 +1000,12 @@ pub struct MetricSnapshotRow {
 /// [`MetricSnapshot`]: crate::models::quality::MetricSnapshot
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LatestMetricSnapshot {
+    /// The row's id — what a reader pairs anything else of this snapshot by,
+    /// never "latest" again ([CR-135] §3.2). Not serialized.
+    ///
+    /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+    #[serde(skip)]
+    pub id: i64,
     /// Vertices in the metric graph the run scored.
     pub node_count: i64,
     /// Edges in the metric graph the run scored.
@@ -2199,6 +2246,18 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn all_edges(&self) -> Result<Vec<EdgeRow>>;
 
+    /// Every edge keyed by the canonical symbols of its endpoints, with each
+    /// endpoint's defining file — the identity the deep `verify` diff compares
+    /// across the live store and a shadow reindex ([FR-GV-19], [NFR-RA-06]),
+    /// where storage rowids do not line up.
+    ///
+    /// Ordered by `(kind, source symbol, target symbol)`, so the result is
+    /// deterministic ([NFR-RA-06]). Read-only; one joined query.
+    ///
+    /// [FR-GV-19]: ../../../docs/specs/requirements/FR-GV-19.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn symbol_edges(&self) -> Result<Vec<SymbolEdgeRow>>;
+
     /// The source node of every **dispatch live-root marker** — a `RoutesTo`
     /// self-edge (`source == target`) planted by the dispatch pass ([CR-043],
     /// [`crate::resolve::dispatch`]).
@@ -2460,6 +2519,12 @@ pub trait GraphStore {
     /// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
     fn baseline_snapshot(&self, scope: &str) -> Result<Option<MetricSnapshotRow>>;
 
+    /// What the re-bless that set the `scope` baseline recorded ([FR-GV-16],
+    /// migration 39), or `None` when no baseline is saved.
+    ///
+    /// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+    fn baseline_record(&self, scope: &str) -> Result<Option<BaselineRecord>>;
+
     /// The most-recent persisted snapshot's **full** dimension breakdown, or
     /// `None` when no snapshot has ever been recorded (a never-`scan`-ned store).
     ///
@@ -2476,6 +2541,15 @@ pub trait GraphStore {
     /// [CR-018]: ../../../docs/requests/CR-018-web-dashboard-write-on-read.md
     /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     fn latest_metric_snapshot(&self) -> Result<Option<LatestMetricSnapshot>>;
+
+    /// The `metric_snapshots` row persisted under `snapshot_id`, read as
+    /// [`latest_metric_snapshot`](Self::latest_metric_snapshot) reads the last
+    /// one, or `None` when no such row exists. The attribution of a change
+    /// against the gate baseline reads the baseline's row through it — every
+    /// dimension, not the original five the series carries ([FR-GV-26]).
+    ///
+    /// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+    fn metric_snapshot(&self, snapshot_id: i64) -> Result<Option<LatestMetricSnapshot>>;
 
     /// The **uncapped** offender lists of the most-recent snapshot
     /// ([FR-QM-19]), or `None` when no snapshot has ever been recorded. A pure
@@ -3672,6 +3746,48 @@ impl GraphStore for SqliteGraphStore {
             .collect()
     }
 
+    fn symbol_edges(&self) -> Result<Vec<SymbolEdgeRow>> {
+        // ORDER BY (kind, symbols) is the deterministic order (NFR-RA-06); the
+        // LEFT JOINs keep an edge whose endpoint is unbound to a file.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT e.kind, ss.symbol, ts.symbol, sf.path, tf.path \
+             FROM edges e \
+             JOIN nodes sn ON sn.id = e.source \
+             JOIN symbols ss ON ss.id = sn.symbol_id \
+             LEFT JOIN files sf ON sf.id = sn.file_id \
+             JOIN nodes tn ON tn.id = e.target \
+             JOIN symbols ts ON ts.id = tn.symbol_id \
+             LEFT JOIN files tf ON tf.id = tn.file_id \
+             ORDER BY e.kind, ss.symbol, ts.symbol",
+        )?;
+        let raws = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting symbol-keyed edges for verify")?;
+        raws.into_iter()
+            .map(|(kind, source, target, source_file, target_file)| {
+                let kind = EdgeKind::try_from(kind).map_err(|e| {
+                    anyhow!("corrupt edge kind {kind} for edge {source}->{target}: {e}; rebuild advised (NFR-RA-08)")
+                })?;
+                Ok(SymbolEdgeRow {
+                    kind,
+                    source,
+                    target,
+                    source_file,
+                    target_file,
+                })
+            })
+            .collect()
+    }
+
     fn dispatch_markers(&self) -> Result<Vec<NodeId>> {
         // Only the dispatch live-root markers (RoutesTo self-edges) — a tiny set,
         // so the dispatch pass never pays the whole-graph `all_edges` scan on the
@@ -4301,6 +4417,19 @@ impl GraphStore for SqliteGraphStore {
         Ok(rows)
     }
 
+    fn baseline_record(&self, scope: &str) -> Result<Option<BaselineRecord>> {
+        self.conn
+            .prepare_cached("SELECT reason, attribution FROM baseline WHERE scope = ?1")?
+            .query_row([scope], |row| {
+                Ok(BaselineRecord {
+                    reason: row.get(0)?,
+                    attribution: row.get(1)?,
+                })
+            })
+            .optional()
+            .context("querying the gate baseline's record")
+    }
+
     fn baseline_snapshot(&self, scope: &str) -> Result<Option<MetricSnapshotRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT m.id, m.created_at, m.commit_sha, m.node_count, m.edge_count, \
@@ -4350,93 +4479,11 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn latest_metric_snapshot(&self) -> Result<Option<LatestMetricSnapshot>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT node_count, edge_count, function_count, test_function_count, empty, \
-                    thresholds_hash, aggregate_signal, \
-                    modularity_raw, modularity_normalized, \
-                    acyclicity_raw, acyclicity_normalized, \
-                    depth_raw, depth_normalized, \
-                    equality_raw, equality_normalized, \
-                    redundancy_raw, redundancy_normalized, \
-                    nesting_raw, nesting_normalized, \
-                    conciseness_raw, conciseness_normalized, \
-                    cohesion_raw, cohesion_normalized, cohesion_applicable, \
-                    focus_raw, focus_normalized, focus_applicable, \
-                    uniqueness_raw, uniqueness_normalized, modularity_applicable, \
-                    id, offenders_recorded, insight_recorded, offender_values_recorded, \
-                    acyclicity_applicable, depth_applicable, cross_module_edges \
-             FROM metric_snapshots ORDER BY id DESC LIMIT 1",
-        )?;
-        let latest = stmt.query_row([], |row| {
-            // `*_applicable` is stored as INTEGER 0/1/NULL → Option<bool>.
-            let opt_bool = |idx: usize| -> rusqlite::Result<Option<bool>> {
-                Ok(row.get::<_, Option<i64>>(idx)?.map(|n| n != 0))
-            };
-            let id: i64 = row.get(30)?;
-            let recorded = row.get::<_, Option<i64>>(31)?.is_some();
-            let insight_recorded = row.get::<_, Option<i64>>(32)?.is_some();
-            // Only a recorded snapshot can vouch for its entries' values.
-            let values_recorded = recorded && row.get::<_, Option<i64>>(33)?.is_some();
-            let snapshot = LatestMetricSnapshot {
-                node_count: row.get(0)?,
-                edge_count: row.get(1)?,
-                function_count: row.get(2)?,
-                test_function_count: row.get(3)?,
-                empty: row.get::<_, i64>(4)? != 0,
-                thresholds_hash: row.get(5)?,
-                aggregate_signal: row.get(6)?,
-                modularity_raw: row.get(7)?,
-                modularity_normalized: row.get(8)?,
-                acyclicity_raw: row.get(9)?,
-                acyclicity_normalized: row.get(10)?,
-                acyclicity_applicable: opt_bool(34)?,
-                depth_raw: row.get(11)?,
-                depth_normalized: row.get(12)?,
-                depth_applicable: opt_bool(35)?,
-                cross_module_edges: row.get(36)?,
-                equality_raw: row.get(13)?,
-                equality_normalized: row.get(14)?,
-                redundancy_raw: row.get(15)?,
-                redundancy_normalized: row.get(16)?,
-                nesting_raw: row.get(17)?,
-                nesting_normalized: row.get(18)?,
-                conciseness_raw: row.get(19)?,
-                conciseness_normalized: row.get(20)?,
-                cohesion_raw: row.get(21)?,
-                cohesion_normalized: row.get(22)?,
-                cohesion_applicable: opt_bool(23)?,
-                focus_raw: row.get(24)?,
-                focus_normalized: row.get(25)?,
-                focus_applicable: opt_bool(26)?,
-                uniqueness_raw: row.get(27)?,
-                uniqueness_normalized: row.get(28)?,
-                modularity_applicable: opt_bool(29)?,
-                worst_offenders: WorstOffenders {
-                    recorded,
-                    values_recorded,
-                    ..WorstOffenders::default()
-                },
-                where_to_start: WhereToStart::default(),
-            };
-            Ok((id, insight_recorded, snapshot))
-        });
-        let Some((id, insight_recorded, mut snapshot)) = latest
-            .optional()
-            .context("querying the latest metric snapshot")?
-        else {
-            return Ok(None);
-        };
-        // The lists are read by the id the row above was read under, never by
-        // "latest" again. A snapshot and its offender rows are written in one
-        // transaction and never mutated, so this pairs the row with exactly its
-        // own lists even when a `scan` commits a newer snapshot in between —
-        // the single-read property the Health bundle relies on (CR-135 §3.2).
-        if snapshot.worst_offenders.recorded {
-            read_snapshot_offenders(&self.conn, CAPPED_OFFENDERS, id, &mut snapshot.worst_offenders)?;
-        }
-        // The ranking likewise, by the same id (FR-QM-17).
-        snapshot.where_to_start = read_where_to_start(&self.conn, id, insight_recorded)?;
-        Ok(Some(snapshot))
+        read_metric_snapshot(&self.conn, "ORDER BY id DESC LIMIT 1", [])
+    }
+
+    fn metric_snapshot(&self, snapshot_id: i64) -> Result<Option<LatestMetricSnapshot>> {
+        read_metric_snapshot(&self.conn, "WHERE id = ?1", [snapshot_id])
     }
 
     fn latest_uncapped_offenders(&self) -> Result<Option<WorstOffenders>> {
@@ -4675,6 +4722,105 @@ const CAPPED_OFFENDERS: &str = "metric_snapshot_offenders";
 /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 const UNCAPPED_OFFENDERS: &str = "metric_snapshot_offenders_uncapped";
 
+/// One `metric_snapshots` row with the capped lists and ranking persisted with
+/// it, picked by `selector` — the shared body of
+/// [`GraphStore::latest_metric_snapshot`] and its by-id twin
+/// [`GraphStore::metric_snapshot`], as [`read_uncapped_offenders`] is of theirs.
+fn read_metric_snapshot(
+    conn: &Connection,
+    selector: &'static str,
+    params: impl rusqlite::Params,
+) -> Result<Option<LatestMetricSnapshot>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT node_count, edge_count, function_count, test_function_count, empty, \
+                thresholds_hash, aggregate_signal, \
+                modularity_raw, modularity_normalized, \
+                acyclicity_raw, acyclicity_normalized, \
+                depth_raw, depth_normalized, \
+                equality_raw, equality_normalized, \
+                redundancy_raw, redundancy_normalized, \
+                nesting_raw, nesting_normalized, \
+                conciseness_raw, conciseness_normalized, \
+                cohesion_raw, cohesion_normalized, cohesion_applicable, \
+                focus_raw, focus_normalized, focus_applicable, \
+                uniqueness_raw, uniqueness_normalized, modularity_applicable, \
+                id, offenders_recorded, insight_recorded, offender_values_recorded, \
+                acyclicity_applicable, depth_applicable, cross_module_edges \
+         FROM metric_snapshots {selector}"
+    ))?;
+    let latest = stmt.query_row(params, |row| {
+        // `*_applicable` is stored as INTEGER 0/1/NULL → Option<bool>.
+        let opt_bool = |idx: usize| -> rusqlite::Result<Option<bool>> {
+            Ok(row.get::<_, Option<i64>>(idx)?.map(|n| n != 0))
+        };
+        let id: i64 = row.get(30)?;
+        let recorded = row.get::<_, Option<i64>>(31)?.is_some();
+        let insight_recorded = row.get::<_, Option<i64>>(32)?.is_some();
+        // Only a recorded snapshot can vouch for its entries' values.
+        let values_recorded = recorded && row.get::<_, Option<i64>>(33)?.is_some();
+        let snapshot = LatestMetricSnapshot {
+            id,
+            node_count: row.get(0)?,
+            edge_count: row.get(1)?,
+            function_count: row.get(2)?,
+            test_function_count: row.get(3)?,
+            empty: row.get::<_, i64>(4)? != 0,
+            thresholds_hash: row.get(5)?,
+            aggregate_signal: row.get(6)?,
+            modularity_raw: row.get(7)?,
+            modularity_normalized: row.get(8)?,
+            acyclicity_raw: row.get(9)?,
+            acyclicity_normalized: row.get(10)?,
+            acyclicity_applicable: opt_bool(34)?,
+            depth_raw: row.get(11)?,
+            depth_normalized: row.get(12)?,
+            depth_applicable: opt_bool(35)?,
+            cross_module_edges: row.get(36)?,
+            equality_raw: row.get(13)?,
+            equality_normalized: row.get(14)?,
+            redundancy_raw: row.get(15)?,
+            redundancy_normalized: row.get(16)?,
+            nesting_raw: row.get(17)?,
+            nesting_normalized: row.get(18)?,
+            conciseness_raw: row.get(19)?,
+            conciseness_normalized: row.get(20)?,
+            cohesion_raw: row.get(21)?,
+            cohesion_normalized: row.get(22)?,
+            cohesion_applicable: opt_bool(23)?,
+            focus_raw: row.get(24)?,
+            focus_normalized: row.get(25)?,
+            focus_applicable: opt_bool(26)?,
+            uniqueness_raw: row.get(27)?,
+            uniqueness_normalized: row.get(28)?,
+            modularity_applicable: opt_bool(29)?,
+            worst_offenders: WorstOffenders {
+                recorded,
+                values_recorded,
+                ..WorstOffenders::default()
+            },
+            where_to_start: WhereToStart::default(),
+        };
+        Ok((id, insight_recorded, snapshot))
+    });
+    let Some((id, insight_recorded, mut snapshot)) = latest
+        .optional()
+        .context("querying a metric snapshot")?
+    else {
+        return Ok(None);
+    };
+    // The lists are read by the id the row above was read under, never by
+    // "latest" again. A snapshot and its offender rows are written in one
+    // transaction and never mutated, so this pairs the row with exactly its
+    // own lists even when a `scan` commits a newer snapshot in between —
+    // the single-read property the Health bundle relies on (CR-135 §3.2).
+    if snapshot.worst_offenders.recorded {
+        read_snapshot_offenders(conn, CAPPED_OFFENDERS, id, &mut snapshot.worst_offenders)?;
+    }
+    // The ranking likewise, by the same id (FR-QM-17).
+    snapshot.where_to_start = read_where_to_start(conn, id, insight_recorded)?;
+    Ok(Some(snapshot))
+}
+
 /// The **uncapped** offender lists ([FR-QM-19]) of the one `metric_snapshots`
 /// row `selector` picks (`ORDER BY id DESC LIMIT 1`, or `WHERE id = ?1`), or
 /// `None` when it picks none. The one body behind
@@ -4797,7 +4943,9 @@ fn read_where_to_start(
 /// as computed. A row naming a kind, dimension or measure outside the pinned
 /// vocabulary is skipped rather than invented, as [`read_snapshot_offenders`]
 /// does: the columns carry no `CHECK` list (migration 36), and a later list
-/// that reuses them does not belong to this read-model.
+/// that reuses them does not belong to this read-model. A unit or label
+/// written before migration 40 reads `node_id: None` — its storage id was
+/// cleared, never reread as an identity.
 ///
 /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
 fn read_snapshot_insight(conn: &Connection, snapshot_id: i64, into: &mut WhereToStart) -> Result<()> {
@@ -4816,7 +4964,7 @@ fn read_snapshot_insight(conn: &Connection, snapshot_id: i64, into: &mut WhereTo
     let rows = stmt.query_map([snapshot_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
+            row.get::<_, Option<String>>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<i64>>(4)?,
@@ -6274,19 +6422,43 @@ impl BatchWriter<'_> {
 
     // ── Governance primitives (S-020, [FR-GV-01..05]) ────────────────────────
 
-    /// Upsert the gate baseline for `scope` ([FR-GV-04]): re-running
-    /// `session_start` / `gate --save` overwrites the previous anchor.
+    /// Upsert the gate baseline for `scope` ([FR-GV-04]) — a first-run
+    /// `session_start` and the gate's announced auto-re-baseline write it. It
+    /// overwrites the previous anchor and records no re-bless: a `reason` or
+    /// `attribution` the previous one carried is cleared with it
+    /// ([`record_baseline`](Self::record_baseline)).
     ///
     /// # Errors
     /// Returns an error if `snapshot_id` does not exist or I/O fails.
     ///
     /// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
     pub fn upsert_baseline(&self, scope: &str, snapshot_id: i64, created_at: i64) -> Result<()> {
+        self.record_baseline(scope, snapshot_id, created_at, &BaselineRecord::default())
+    }
+
+    /// Upsert the gate baseline for `scope` with what its re-bless records
+    /// ([FR-GV-16], migration 39): the `--reason` and the attribution of the
+    /// change it blesses, each `NULL` when absent. Both are replaced with the
+    /// anchor, never kept from the one before.
+    ///
+    /// # Errors
+    /// Returns an error if `snapshot_id` does not exist or I/O fails.
+    ///
+    /// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+    pub fn record_baseline(
+        &self,
+        scope: &str,
+        snapshot_id: i64,
+        created_at: i64,
+        record: &BaselineRecord,
+    ) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO baseline (scope, snapshot_id, created_at) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(scope) DO UPDATE SET snapshot_id = ?2, created_at = ?3",
-                rusqlite::params![scope, snapshot_id, created_at],
+                "INSERT INTO baseline (scope, snapshot_id, created_at, reason, attribution) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(scope) DO UPDATE SET snapshot_id = ?2, created_at = ?3, \
+                 reason = ?4, attribution = ?5",
+                rusqlite::params![scope, snapshot_id, created_at, record.reason, record.attribution],
             )
             .context("upserting the gate baseline")?;
         Ok(())

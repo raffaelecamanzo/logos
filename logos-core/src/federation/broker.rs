@@ -811,7 +811,10 @@ mod tests {
     /// associated-item facts (S-606, migration 34) and uninherited
     /// interface-member marker (S-609, migration 35), CR-164's
     /// where-to-start ranking (S-504, migration 36) and CR-218's offender
-    /// values and uncapped list (S-676, migration 37) — not the
+    /// values and uncapped list (S-676, migration 37), CR-171's graph-dimension
+    /// applicability (S-523, migration 38), CR-237's re-bless record on the
+    /// baseline (S-755, migration 39) and CR-238's where-to-start identity
+    /// (S-761, migration 40) — not the
     /// ledger-only binding
     /// under test here.
     ///
@@ -822,7 +825,7 @@ mod tests {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            38,
+            40,
             "no migration is added by the ledger-only arm itself — user_version reflects \
              only the later, separate broker-kind widening (migration 17), the \
              relation-aware ledger key (migration 18), the configuration-corpus \
@@ -838,8 +841,9 @@ mod tests {
              (migration 33), the associated-item facts (migration 34), the \
              uninherited interface-member marker (migration 35), the \
              where-to-start ranking (migration 36), the offender values and \
-             uncapped list (migration 37) and the graph-dimension applicability \
-             (migration 38)"
+             uncapped list (migration 37), the graph-dimension applicability \
+             (migration 38), the baseline's re-bless record (migration 39) and \
+             the where-to-start identity (migration 40)"
         );
     }
 }

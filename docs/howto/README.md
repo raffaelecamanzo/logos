@@ -104,6 +104,7 @@ advisory** — they never move the quality signal and the quality gate never rea
 8. [Contributing](contributing.md) — the per-sprint pull request (`scripts/publish-sprint.sh`), the issue status labels, and the owner's GitHub settings checklist; contributors start at [CONTRIBUTING.md](../../CONTRIBUTING.md)
 9. [Claude Code plugin](plugin.md) — installing the plugin, migrating from `init -i`, `init --uninstall`, the Stop check with its security leg and its off switch, the `/logos:review` and `/logos:sec-review` skills and their verdicts, the guardrail, and the trust labels
 10. [Security](security.md) — the security section end to end: installing the nine scanners and their tested versions, consent and the network, scans and re-scans, reachability confidence, the `[security]` gate with its ratchet and exit 5, the ignore file, reviewing what a branch introduced (the five verdicts, and that a clean review is not a claim of security), and the Security page
+11. [Development](development.md) — for maintainers: the hand-run harnesses kept outside every gate: `scripts/verify-scanner-exclusions.sh` and how to read the scanner-exclusion evidence it commits, and `scripts/verify-sync-history.sh`, the on-demand review check that replays real commits through `logos sync` and compares the result with a fresh index
 
 ## Quick start
 

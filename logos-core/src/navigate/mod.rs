@@ -3058,9 +3058,42 @@ pub(crate) fn resolve_exact(store: &dyn GraphStore, text: &str) -> Result<Option
         .map(|row| (row, Some(upgrade_note(text, &canonical)))))
 }
 
+/// The node whose identity ([`NodeRow::identity`]) is `text`: the symbol id
+/// without its repository coordinate that an offender, a ratchet entry and a
+/// "where to start" unit carry ([FR-GV-23], [FR-QM-19], [FR-QM-17]).
+///
+/// The identity is the descriptor tail, so it is read as a coordinate-less
+/// symbol and handed to [`resolve_exact`]: as given on a store that records no
+/// coordinate, else under the store's coordinate. One exact lookup, so it is
+/// unambiguous, and the note is dropped — the identity is a form these
+/// answers hand out, not one that predates the store. `None` for
+/// text that is no descriptor tail (a bare name, a path, a full symbol, a
+/// group's id) or names no node.
+///
+/// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
+/// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+fn resolve_identity(store: &dyn GraphStore, text: &str) -> Result<Option<NodeRow>> {
+    let Ok(symbol) = LogosSymbol::from_descriptor_tail(text) else {
+        return Ok(None);
+    };
+    Ok(resolve_exact(store, symbol.as_str())?.map(|(row, _)| row))
+}
+
+/// The exact rungs of every code-navigation resolver: the canonical symbol
+/// ([`resolve_exact`]), then the identity ([`resolve_identity`]) — both name
+/// one node, so neither passes anything over.
+fn resolve_exact_or_identity(store: &dyn GraphStore, text: &str) -> Result<Option<(NodeRow, UpgradeNote)>> {
+    if let Some(exact) = resolve_exact(store, text)? {
+        return Ok(Some(exact));
+    }
+    Ok(resolve_identity(store, text)?.map(|row| (row, None)))
+}
+
 /// Resolve a navigation `symbol` argument to a node: exact canonical-symbol
 /// match first ([`resolve_exact`], which upgrades a coordinate-less symbol and
-/// returns its note), then exact name match (lowest id wins — deterministic).
+/// returns its note), then the identity ([`resolve_identity`]), then exact
+/// name match (lowest id wins — deterministic).
 /// `None` means unknown → the caller assembles the graceful empty result.
 ///
 /// The documentation lookups (`implements`, `referencing_docs`) keep this rule;
@@ -3069,7 +3102,7 @@ pub(crate) fn resolve_exact(store: &dyn GraphStore, text: &str) -> Result<Option
 ///
 /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
 fn resolve_symbol(store: &dyn GraphStore, text: &str) -> Result<Option<(NodeRow, UpgradeNote)>> {
-    if let Some(exact) = resolve_exact(store, text)? {
+    if let Some(exact) = resolve_exact_or_identity(store, text)? {
         return Ok(Some(exact));
     }
     Ok(store
@@ -3136,8 +3169,8 @@ fn prefer_code(mut matches: Vec<NodeRow>) -> Option<(NodeRow, Vec<NodeRow>)> {
 }
 
 /// [`resolve_symbol`] for a lookup whose answer names what it passed over
-/// ([FR-NV-15]): an exact canonical-symbol hit is unchanged and passes over
-/// nothing; a bare name prefers code to a module to a doc node
+/// ([FR-NV-15]): an exact canonical-symbol or identity hit is unchanged and
+/// passes over nothing; a bare name prefers code to a module to a doc node
 /// ([`prefer_code`]) and returns the rest as alternatives.
 ///
 /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
@@ -3145,7 +3178,7 @@ fn resolve_preferring_code(
     store: &dyn GraphStore,
     text: &str,
 ) -> Result<Option<(NodeRow, Vec<NodeRow>, UpgradeNote)>> {
-    if let Some((row, note)) = resolve_exact(store, text)? {
+    if let Some((row, note)) = resolve_exact_or_identity(store, text)? {
         return Ok(Some((row, Vec::new(), note)));
     }
     Ok(prefer_code(store.nodes_by_name(text)?).map(|(row, passed_over)| (row, passed_over, None)))
@@ -3154,7 +3187,7 @@ fn resolve_preferring_code(
 /// [`resolve_symbol`] that also reports HOW MANY nodes the name matched.
 ///
 /// Same resolution rule, same winner — only the discarded count is kept. An
-/// exact canonical-symbol hit is unambiguous by construction (count 1); the
+/// exact canonical-symbol or identity hit is unambiguous by construction (count 1); the
 /// name fallback returns the number of candidates it chose from, so a caller
 /// whose answer depends on picking the right one can say that it guessed
 /// ([NFR-CC-04]). `impact_intersection` is that caller.
@@ -3162,7 +3195,7 @@ fn resolve_counting_candidates(
     store: &dyn GraphStore,
     text: &str,
 ) -> Result<Option<(NodeRow, usize, UpgradeNote)>> {
-    if let Some((row, note)) = resolve_exact(store, text)? {
+    if let Some((row, note)) = resolve_exact_or_identity(store, text)? {
         return Ok(Some((row, 1, note)));
     }
     let candidates = store.nodes_by_name(text)?;

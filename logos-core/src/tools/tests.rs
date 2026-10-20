@@ -499,3 +499,29 @@ fn a_java_tool_runs_with_both_launcher_variables_at_the_managed_runtime() {
         "JAVACMD is what the launcher reads first, so the user's own cannot win"
     );
 }
+
+/// A lock file its last holder removed is no lock. An install that opened the
+/// file before a sweep removed it, and locks it after, holds nothing the next
+/// sweep would see: the lock is taken again on the file now at the path, so
+/// that sweep leaves the install's staging alone (S-759).
+#[cfg(unix)]
+#[test]
+fn a_lock_on_a_removed_lock_file_is_not_held_and_is_taken_on_the_current_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join(STAGING_DIR);
+    let entry = root.join("trivy-0.74.0");
+    fs::create_dir_all(&root).unwrap();
+    // The install has opened the lock file; a sweep takes it, finds no entry,
+    // removes the file and releases it.
+    let opened = open_lock_file(&lock_path(&entry)).unwrap();
+    sweep_stale_staging(&root);
+    assert!(!lock_path(&entry).exists(), "the sweep removed the lock file");
+    assert!(matches!(hold(opened, &lock_path(&entry)).unwrap(), Hold::Unlinked), "the removed file is no lock");
+
+    let held = StagingLock::take(&entry).unwrap().expect("the entry is free");
+    fs::create_dir_all(&entry).unwrap();
+    fs::write(entry.join("trivy.tar.gz"), "partial").unwrap();
+    sweep_stale_staging(&root);
+    assert!(entry.join("trivy.tar.gz").is_file(), "a sweep leaves a held entry alone");
+    drop(held);
+}

@@ -56,7 +56,7 @@ pub use hotspot::{
 pub(crate) use miner::head_sha;
 pub use miner::{DegradedReason, MineOutcome};
 pub use security::{
-    path_findings, FindingBinding, PathFindings, ScannerIngest, ScannerSnapshot, SecurityBaseline, SecurityFinding,
+    path_findings, CommitAnchor, FindingBinding, PathFindings, ScannerIngest, ScannerSnapshot, SecurityBaseline, SecurityFinding,
     SecurityFormat, SecurityIngestSummary, SecurityView, Severity, UnmatchedPath,
 };
 pub use temporal::{FileTemporal, TemporalReport};

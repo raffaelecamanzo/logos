@@ -71,6 +71,8 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (36, MIGRATION_36),
     (37, MIGRATION_37),
     (38, MIGRATION_38),
+    (39, MIGRATION_39),
+    (40, MIGRATION_40),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -3130,6 +3132,121 @@ ALTER TABLE metric_snapshots ADD COLUMN acyclicity_applicable INTEGER CHECK (acy
 ALTER TABLE metric_snapshots ADD COLUMN depth_applicable INTEGER CHECK (depth_applicable IN (0,1));
 -- The cross-module edge count the three flags were decided on; NULL before v8.
 ALTER TABLE metric_snapshots ADD COLUMN cross_module_edges INTEGER CHECK (cross_module_edges >= 0);
+";
+
+/// Migration 39 — what a re-bless records beside the gate baseline
+/// ([FR-GV-16], [FR-GV-26], [CR-237], S-755).
+///
+/// `gate --save` stores the attribution of the change it blesses — the
+/// signal's movement from the baseline it replaces, per dimension with the
+/// driving symbols — and, past a `[review]` `drift_budget`, the `--reason` it
+/// was required to give:
+///
+/// 1. **`reason`** — the `--reason` text, `NULL` when none was given.
+/// 2. **`attribution`** — the serialized attribution, `NULL` when there was no
+///    comparable baseline to attribute against.
+///
+/// Both are `NULL` on a baseline that `session_start` or an announced
+/// auto-re-baseline ([FR-GV-10]) set, and every upsert that records neither
+/// clears them, so a reason never outlives the anchor it was given for.
+///
+/// **Purely additive**: two nullable `ALTER TABLE … ADD COLUMN`s on the
+/// one-row-per-scope table. The existing row keeps its anchor, nothing is
+/// back-filled ([NFR-MA-06]) — asserted by
+/// `migration_39_adds_the_baseline_record_and_keeps_the_anchor` in
+/// [`super::migrate`].
+///
+/// [FR-GV-16]: ../../../../docs/specs/requirements/FR-GV-16.md
+/// [FR-GV-26]: ../../../../docs/specs/requirements/FR-GV-26.md
+/// [FR-GV-10]: ../../../../docs/specs/requirements/FR-GV-10.md
+/// [CR-237]: ../../../../docs/requests/CR-237-branch-delta-gating-attribution-and-budgets.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_39: &str = "\
+-- FR-GV-16 (CR-237): a re-bless records why and what it blessed. NULL on a
+-- baseline saved before, or set by session_start or an auto-re-baseline.
+ALTER TABLE baseline ADD COLUMN reason TEXT;
+-- The attribution of the blessed change, serialized (FR-GV-26).
+ALTER TABLE baseline ADD COLUMN attribution TEXT;
+";
+
+/// Migration 40 — a "where to start" unit and an outlier label carry an
+/// **identity** that a re-index keeps, not a storage id ([FR-QM-17],
+/// [CR-238] D7, S-761).
+///
+/// Migration 36 stored each unit's and label's `node_id` as the `nodes` row id
+/// it was named by. A full re-index renumbers those rows, so the same unit read
+/// back under another id (49, then 71) and no reader could find it again. The
+/// column now holds the identity [`metrics::insight`](crate::metrics::insight)
+/// computes: a class's or function's symbol id without the repository
+/// coordinate — the [FR-GV-23] identity an offender carries — and a group's
+/// derived from its members' identities, sorted.
+///
+/// SQLite cannot change a column's type in place, so each of
+/// **`metric_snapshot_fix_units`** and **`metric_snapshot_outlier_labels`** is
+/// rebuilt with `node_id TEXT`, nullable: renamed aside, created under its
+/// name, copied, and the old copy dropped. Neither table is referenced by a
+/// foreign key or a trigger, so the rename re-points nothing. Every other
+/// column crosses byte for byte, in rank order, and every key is kept.
+///
+/// **The old storage ids are cleared to `NULL`, not carried over.** A storage
+/// id names whichever node holds that row now — after any re-index, another
+/// one — so reading it as an identity would name the wrong symbol. `NULL` reads
+/// back as "not recorded" ([NFR-CC-04]); every row written from now on carries
+/// its identity. No back-fill, as for migrations 36 and 37 ([CR-162] §3.3).
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_40_gives_the_insight_rows_an_identity_and_clears_the_storage_ids`
+/// in [`super::migrate`].
+///
+/// [FR-QM-17]: ../../../../docs/specs/requirements/FR-QM-17.md
+/// [FR-GV-23]: ../../../../docs/specs/requirements/FR-GV-23.md
+/// [CR-162]: ../../../../docs/requests/CR-162-health-shows-the-worst-offenders-its-snapshot-computed.md
+/// [CR-238]: ../../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_40: &str = "\
+-- FR-QM-17 (CR-238 D7): node_id becomes the unit's identity (TEXT). A storage
+-- id is not one, so every earlier row's is cleared to NULL (not recorded).
+ALTER TABLE metric_snapshot_fix_units RENAME TO metric_snapshot_fix_units_v39;
+CREATE TABLE metric_snapshot_fix_units (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    rank        INTEGER NOT NULL CHECK (rank >= 1),
+    kind        TEXT NOT NULL,
+    node_id     TEXT,
+    name        TEXT NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    dimensions  TEXT NOT NULL,
+    points      INTEGER NOT NULL CHECK (points >= 1),
+    detail      TEXT NOT NULL,
+    outliers    TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, rank)
+) STRICT;
+INSERT INTO metric_snapshot_fix_units
+    (snapshot_id, rank, kind, node_id, name, file, line, dimensions, points, detail, outliers)
+    SELECT snapshot_id, rank, kind, NULL, name, file, line, dimensions, points, detail, outliers
+    FROM metric_snapshot_fix_units_v39 ORDER BY snapshot_id, rank;
+DROP TABLE metric_snapshot_fix_units_v39;
+
+-- The outlier labels, alike.
+ALTER TABLE metric_snapshot_outlier_labels RENAME TO metric_snapshot_outlier_labels_v39;
+CREATE TABLE metric_snapshot_outlier_labels (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    measure     TEXT NOT NULL,
+    rank        INTEGER NOT NULL CHECK (rank >= 1),
+    node_id     TEXT,
+    name        TEXT NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    value       INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_id, measure, rank)
+) STRICT;
+INSERT INTO metric_snapshot_outlier_labels
+    (snapshot_id, measure, rank, node_id, name, file, line, value)
+    SELECT snapshot_id, measure, rank, NULL, name, file, line, value
+    FROM metric_snapshot_outlier_labels_v39 ORDER BY snapshot_id, measure, rank;
+DROP TABLE metric_snapshot_outlier_labels_v39;
 ";
 
 #[cfg(test)]

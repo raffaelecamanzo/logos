@@ -227,38 +227,136 @@ top. `gate --save` moves the *signal* baseline and lives in the store; the
 ratchet's blessed set lists *named offenders*, is checked in, and changes only
 through a reviewed commit.
 
-## Gating on security findings in CI: the baseline is not in the repository
+## Gating on security findings in CI: a checked-in baseline
 
 If the rules contract (the tracked file you pass to `--rules`) has a
 [`[security]`](configuration.md#security--the-security-gate)
 table, `logos check` fails on every unsuppressed finding at or above
 `ratchet_min_severity` (default `high`) that is **new** — whose fingerprint is not
-in the set `logos gate --save` recorded. That recorded set lives in
-`.logos/history.db`, which is derived, gitignored and never committed (unlike
-`rules-baseline.json` in the section above). A fresh CI clone therefore starts
-with no recorded set, and **every finding at or above `ratchet_min_severity` reads
-as new**: the first `check` fails on the whole backlog, and keeps failing on each
-run, because a CI checkout never carries the previous run's save.
+in the ratchet's baseline. `logos gate --save` records that baseline in
+`.logos/history.db`, which is derived, gitignored and never committed, so a fresh
+CI clone has none and reads **every** finding as new. Check the baseline in
+instead, as the constraint ratchet's `rules-baseline.json` is
+([FR-SC-25](../specs/requirements/FR-SC-25.md)).
 
-What works today:
+**1. Bless the current findings, locally, and commit the result.**
 
-- **Persist `.logos/history.db` between runs** with your CI's cache, restored
-  before `logos check`. Write the cache from a run that stored a scan and then
-  executed `logos gate --save` on the release branch (a `gate --save` that exits 5
-  saves no security baseline) — a restored store with no save in it changes
-  nothing. The stored scans in it are evidence for the commit they were
-  made at, so scan again in the job (`logos security scan --consent`, or
-  `logos security ingest <report>`); only the recorded set is what the cache is for.
-- **Or gate without the ratchet**: run CI's `check` with a rules file that has no
-  `[security]` table (`logos check --rules <file>`). The whole table is skipped,
-  so `max_severity`, `fail_on_owasp` and `required_scanners` stop gating too;
-  review findings with
-  `logos security findings --suppression active` or gate them in another tool.
-  Raising `ratchet_min_severity` only narrows what the ratchet reads; it does
-  not switch it off.
+```bash
+logos security scan --consent        # or: logos security ingest <report>
+logos security bless                 # writes .logos/security-baseline.json
+git add .logos/security-baseline.json
+git commit -m "Bless the current security findings"
+```
 
-Accepting a finding on purpose is still done in the repository: add its
-fingerprint and a reason to `.logos/security-ignore.toml`, which is committed.
+[`security bless`](commands.md#security-bless) writes one entry per
+unsuppressed stored finding: its fingerprint, rule id and project-relative path,
+and nothing else — no message, snippet or secret value, so the file is safe to
+commit and review. It is sorted, so blessing an unchanged state is
+byte-identical and the diff in code review shows exactly the findings a change
+accepts. Under a `[security]` table with a required scanner's scan missing it
+writes nothing and exits 5. Like `rules-baseline.json` it must be **tracked**:
+the generated `.logos/.gitignore` leaves it tracked, and a root `.gitignore`
+that ignores `.logos/*` needs `!.logos/security-baseline.json`.
+
+**2. CI scans, then checks — and never blesses.** When the file exists the
+ratchet reads it instead of `history.db`, in every checkout, so the PR job
+needs no cache:
+
+```bash
+logos index
+logos security scan --consent        # or ingest the reports your CI produces
+logos check --no-reconcile           # exit 1 names only findings not in the file
+```
+
+A new finding's message names `.logos/security-baseline.json` as the baseline it
+is missing from. `gate --save` and `session-start` record no ratchet baseline
+beside the file; only `logos security bless` changes it. Never add it to a
+pipeline: accepting a finding is a human decision, and the plugin's guard asks
+before an agent runs `security bless` or writes the file
+([plugin.md](plugin.md#the-guardrail)).
+
+**What makes a fingerprint the same in CI.** A fingerprint is computed from the
+finding's rule, its path and its position (or the scanner's own identity for
+it), so a clone that scans the same code computes the one you blessed. A Gitleaks secret's fingerprint is keyed by the repository's first
+commit, which every full clone shares; a shallow clone (`fetch-depth: 1`) keys
+it differently, so check out full history in a job that gates on Gitleaks. A
+finding a scanner reports at an **absolute** path it could not match to an
+indexed file — OSV-Scanner on a lockfile is the usual case — carries the
+checkout's directory in its fingerprint, which therefore differs in a clone at
+another path. The checked-in file also records each finding's rule id and
+project-relative path, and the ratchet matches such a finding by those two, so
+it holds in any clone; the same advisory at another path is still new. Only
+these findings are matched that way: every other one is known by its
+fingerprint alone. Re-keying them to a checkout-independent fingerprint waits
+for the osv-scanner 2.x identity change. To keep one out of every report
+instead, use a [path entry in the ignore file](security.md#one-entry-for-a-whole-path).
+
+**Without the file**, the ratchet reads the set `gate --save` recorded in
+`history.db`, as before: persist `.logos/history.db` between runs with your CI's
+cache, written from a run that stored a scan and then executed `gate --save` on
+the release branch (one that exits 5 saves no security baseline). Or gate
+without the ratchet: run CI's `check` with a rules file that has no `[security]`
+table (`logos check --rules <file>`), which skips `max_severity`,
+`fail_on_owasp` and `required_scanners` too.
+
+Accepting a finding on purpose without blessing is still done in the
+repository: add its fingerprint, or a path, and a reason to
+`.logos/security-ignore.toml`, which is committed. A suppressed finding is never
+written to the baseline, so it returns to the ratchet when its entry expires.
+
+## Gating a pull request per symbol: the `[review]` table
+
+The plain gate compares one number with the blessed baseline, so a pull request
+that adds an ordinary above-average function can fail on the small Equality
+drift it causes, while one that adds a 6-deep function can pass when something
+else improved. A [`[review]`](configuration.md#review--the-branch-delta-gate)
+table makes `logos gate` judge the pull request's own change instead. It fails
+on each `new` or `worsened` offender in a gating dimension against the merge-base
+with the default branch, and treats the aggregate as a drift budget,
+report-only by default.
+
+`gate` reads the contract from `.logos/rules.toml` only (it has no `--rules`), so
+copy the tracked contract there after `logos index` creates `.logos/`. The job
+also needs the default branch and the history back to the merge-base. A
+pull-request checkout has neither by default: `actions/checkout` fetches a
+detached `HEAD` and creates no local `main` and no `origin/HEAD`.
+
+```yaml
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # the merge-base must be in the clone
+
+      # `origin/HEAD` is what the branch delta compares against (else `main`,
+      # else `master`); set it locally, no network needed.
+      - name: Name the default branch
+        run: git remote set-head origin main
+
+      - name: Freshen
+        run: logos index
+
+      - name: Gate the branch delta
+        run: |
+          cp ci/rules.toml .logos/rules.toml   # the tracked contract, with its [review] table
+          logos gate --no-reconcile --json > logos-gate.json
+```
+
+What to expect from it:
+
+- **No baseline is needed for the per-symbol verdict.** The before-state is the
+  merge-base tree, indexed once in the job; a recorded snapshot is never used
+  for it. That costs about one more `logos index`. A fresh clone has no
+  blessed baseline either, so there is no `drift` and the aggregate does not
+  gate, unless you restore `.logos/` from a cache written by the bless job.
+- **A failing gate names what to fix.** `gating_entries` lists each entry with
+  its value, threshold and trust label. The exit code is 1.
+- **A delta that cannot be measured does not fail the job.** If the default
+  branch does not resolve or the history is shallow, `warnings` holds a line that
+  starts `[review]: the branch delta was not measured` and no entry is judged.
+  Grep for it if you want such a job to fail:
+  `! grep -q '\[review\]: the branch delta was not measured' logos-gate.json`.
+- **An invalid table fails loudly.** An unknown key, or a distributional
+  dimension (`equality`, `modularity`, `acyclicity`, `depth`) in
+  `gate_dimensions`, exits 2 before anything is measured.
 
 ## Verify the recipe locally
 

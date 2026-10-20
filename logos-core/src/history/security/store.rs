@@ -3,7 +3,8 @@
 //!
 //! The whole ingest write is **one transaction** ([NFR-RA-07]): a crash mid-ingest
 //! leaves the store at its prior coherent state. The tables are created by
-//! migration 4 in [`super::super::db`]; this module owns only their DML.
+//! migration 4 in [`super::super::db`] (`security_findings` rebuilt by
+//! migration 8); this module owns only their DML.
 //!
 //! The rules ([FR-SC-02]):
 //! - **New HEAD** → a new snapshot per scanner; prior snapshots are kept.
@@ -23,17 +24,31 @@
 //!   Gitleaks, whose scoped run reads the files and whose full scan reads their
 //!   git history) → the full scan's findings within the scope are kept too,
 //!   since a secret removed from a file is still in its history. A scoped finding
-//!   that is one of them — same file, same rule, same match position
-//!   ([`matches_kept`]) — keeps that finding's row and fingerprint, so the
-//!   `[security]` baseline and suppressions still know it. Only an unmatched one
-//!   is stored with its own fingerprint, marked `scoped`, and reads as new; the
-//!   next scoped run replaces it.
+//!   that is one of them keeps that finding's row, so the `[security]` baseline
+//!   and suppressions still know it: it has the same fingerprint, both being
+//!   keyed by the secret (migration 7). Only an unmatched one is stored, marked
+//!   `scoped`, and reads as new; the next scoped run replaces it. A kept row
+//!   stored before migration 7 is still keyed by its report, and is matched by
+//!   position instead ([`matches_kept`]): it keeps its row and its key, as it
+//!   did before, since a position match is no proof that it is the same secret.
+//! - **Re-keying** ([`rekey`], migration 7) → a Gitleaks ingest maps the key
+//!   each of its results had before migration 7 — its report key, computed
+//!   exactly as it was then, never a position match — onto the secret-keyed one, and
+//!   re-keys every stored row of the scanner and every baseline fingerprint
+//!   under an old key, so a store written before the migration reads, and
+//!   ratchets, under the new identity. The committed ignore file is never
+//!   rewritten: [`super::label`] names the fingerprint an entry should name.
+//! - **A history-mode row** records the commit whose place it is
+//!   (`anchor_commit`, migration 8), and is bound to its file only where the
+//!   secret is still on its line; otherwise it is stored `historical`, with no
+//!   path and no file anchor ([S-767]).
 //!
 //! [FR-SC-01]: ../../../../docs/specs/requirements/FR-SC-01.md
 //! [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
 //! [FR-SC-17]: ../../../../docs/specs/requirements/FR-SC-17.md
 //! [NFR-RA-07]: ../../../../docs/specs/requirements/NFR-RA-07.md
 //! [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
+//! [S-767]: ../../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
@@ -70,6 +85,23 @@ pub(crate) struct FindingRow {
     pub(crate) region: Region,
     /// Written by a scoped run rather than a full scan (migration 6).
     pub(crate) scoped: bool,
+    /// The commit whose place the row's region and report path are, for a
+    /// history-mode result; `None` otherwise (migration 8).
+    pub(crate) anchor_commit: Option<String>,
+    /// The commits the secret was found in, newest first (migration 7).
+    pub(crate) commits: Vec<String>,
+    /// The report keys its results had before migration 7, sorted; empty for a
+    /// row keyed by its report, as every row stored before migration 7 is.
+    pub(crate) legacy_fingerprints: Vec<String>,
+}
+
+impl FindingRow {
+    /// Keyed by its report rather than by its secret: every row of a scanner
+    /// other than Gitleaks, and a Gitleaks row stored before migration 7 or
+    /// whose secret could not be read.
+    pub(crate) fn report_keyed(&self) -> bool {
+        self.legacy_fingerprints.is_empty()
+    }
 }
 
 /// What [`persist_ingest`] did.
@@ -188,14 +220,21 @@ pub(crate) fn persist_ingest(
             None => (&[][..], &[][..]),
         };
         // A scoped finding that is a kept full-scan finding is that finding:
-        // its row stays, and the scoped copy is not stored a second time.
-        let matched = carried.as_ref().map_or_else(Vec::new, |c| matches_kept(&batch.findings, &c.kept));
+        // its row stays, and the scoped copy is not stored a second time. A
+        // kept row keyed before migration 7 is matched by position and keeps
+        // its key: only a full scan's report key re-keys it.
+        let matched: Vec<usize> = carried.as_ref().map_or_else(Vec::new, |c| matches_kept(&batch.findings, &c.kept));
         let fresh: Vec<&FindingRow> = batch
             .findings
             .iter()
             .enumerate()
             .filter(|(i, f)| !matched.contains(i) && carried_findings.iter().all(|c| c.fingerprint != f.fingerprint))
             .map(|(_, f)| f)
+            .collect();
+        let renamed: std::collections::BTreeMap<String, String> = batch
+            .findings
+            .iter()
+            .flat_map(|f| f.legacy_fingerprints.iter().map(|old| (old.clone(), f.fingerprint.clone())))
             .collect();
         let anchored: Vec<&str> = batch.files.iter().map(|(path, _)| path.as_str()).collect();
 
@@ -219,8 +258,9 @@ pub(crate) fn persist_ingest(
                     "INSERT INTO security_findings (
                          snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted,
                          binding, report_path, path,
-                         start_line, start_column, end_line, end_column, scoped
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                         start_line, start_column, end_line, end_column, scoped,
+                         commits, legacy_fingerprints, anchor_commit
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 )
                 .context("preparing the security finding insert")?;
             for f in fresh.into_iter().chain(carried_findings) {
@@ -241,10 +281,14 @@ pub(crate) fn persist_ingest(
                         f.region.end_line,
                         f.region.end_column,
                         f.scoped,
+                        f.commits.join(","),
+                        f.legacy_fingerprints.join(","),
+                        f.anchor_commit,
                     ])
                     .with_context(|| format!("inserting finding {} ({})", f.fingerprint, f.rule_id))?;
             }
         }
+        rekey(&tx, &batch.name, &renamed)?;
         snapshots.push((snapshot_id, replaced));
     }
 
@@ -266,18 +310,21 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
     let mut stmt = conn
         .prepare_cached(&format!(
             "SELECT fingerprint, rule_id, severity, cwes, message, redacted, binding,
-                    report_path, path, start_line, start_column, end_line, end_column, scoped
+                    report_path, path, start_line, start_column, end_line, end_column, scoped,
+                    commits, legacy_fingerprints, anchor_commit
                FROM security_findings WHERE snapshot_id = ?1 ORDER BY {order}"
         ))
         .context("preparing the security finding read")?;
     // The tokens are decoded after the query: a token Logos never writes is
     // this read's error, not a column-type one.
-    let raw: Vec<(String, String, String, FindingRow)> = stmt
+    let raw: Vec<(String, String, String, String, String, FindingRow)> = stmt
         .query_map([snapshot_id], |row| {
             Ok((
                 row.get(2)?,
                 row.get(3)?,
                 row.get(6)?,
+                row.get(14)?,
+                row.get(15)?,
                 FindingRow {
                     fingerprint: row.get(0)?,
                     rule_id: row.get(1)?,
@@ -295,6 +342,9 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
                         end_column: row.get(12)?,
                     },
                     scoped: row.get(13)?,
+                    anchor_commit: row.get(16)?,
+                    commits: Vec::new(),
+                    legacy_fingerprints: Vec::new(),
                 },
             ))
         })
@@ -302,15 +352,101 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
         .collect::<rusqlite::Result<_>>()
         .context("collecting security findings")?;
     raw.into_iter()
-        .map(|(severity, cwes, binding, mut row)| {
+        .map(|(severity, cwes, binding, commits, legacy, mut row)| {
             row.severity = Severity::from_str_stored(&severity)
                 .ok_or_else(|| anyhow::anyhow!("stored severity {severity:?} is not one Logos writes"))?;
-            row.cwes = if cwes.is_empty() { Vec::new() } else { cwes.split(',').map(str::to_string).collect() };
+            row.cwes = split_list(&cwes);
+            row.commits = split_list(&commits);
+            row.legacy_fingerprints = split_list(&legacy);
             row.binding = FindingBinding::from_str_stored(&binding)
                 .ok_or_else(|| anyhow::anyhow!("stored binding {binding:?} is not one Logos writes"))?;
             Ok(row)
         })
         .collect()
+}
+
+/// A stored comma-separated list: `''` is none.
+fn split_list(stored: &str) -> Vec<String> {
+    if stored.is_empty() {
+        Vec::new()
+    } else {
+        stored.split(',').map(str::to_string).collect()
+    }
+}
+
+/// Re-key every stored row of `scanner`, in every snapshot, and every baseline
+/// fingerprint, whose key is an old one `renamed` maps (migration 7). A row
+/// re-keyed onto a key its snapshot already holds is merged into that row: the
+/// per-commit repeats of one secret stored before the migration become one.
+/// Each re-keyed row records the key it had as a legacy fingerprint.
+///
+/// # Errors
+/// A statement failure.
+fn rekey(tx: &rusqlite::Transaction<'_>, scanner: &str, renamed: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    if renamed.is_empty() {
+        return Ok(());
+    }
+    let stored: Vec<(i64, String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT f.snapshot_id, f.fingerprint, f.legacy_fingerprints
+                   FROM security_findings f JOIN security_snapshots s ON s.id = f.snapshot_id
+                  WHERE s.scanner_name = ?1 ORDER BY f.snapshot_id, f.fingerprint",
+            )
+            .context("preparing the re-key read")?;
+        let rows = stmt
+            .query_map([scanner], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .context("reading the rows to re-key")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the rows to re-key")?;
+        rows.into_iter().filter(|(_, fingerprint, _)| renamed.contains_key(fingerprint)).collect()
+    };
+    for (snapshot_id, old, legacy) in stored {
+        let new = &renamed[&old];
+        let target: Option<String> = tx
+            .query_row(
+                "SELECT legacy_fingerprints FROM security_findings WHERE snapshot_id = ?1 AND fingerprint = ?2",
+                rusqlite::params![snapshot_id, new],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("looking up the re-keyed row")?;
+        let mut merged: std::collections::BTreeSet<String> = split_list(&legacy).into_iter().collect();
+        merged.extend(split_list(target.as_deref().unwrap_or_default()));
+        merged.insert(old.clone());
+        let merged = merged.into_iter().collect::<Vec<_>>().join(",");
+        if target.is_some() {
+            tx.execute(
+                "DELETE FROM security_findings WHERE snapshot_id = ?1 AND fingerprint = ?2",
+                rusqlite::params![snapshot_id, old],
+            )
+            .context("merging a re-keyed row")?;
+            tx.execute(
+                "UPDATE security_findings SET legacy_fingerprints = ?3 WHERE snapshot_id = ?1 AND fingerprint = ?2",
+                rusqlite::params![snapshot_id, new, merged],
+            )
+            .context("recording a merged row's old key")?;
+        } else {
+            tx.execute(
+                "UPDATE security_findings SET fingerprint = ?3, legacy_fingerprints = ?4
+                  WHERE snapshot_id = ?1 AND fingerprint = ?2",
+                rusqlite::params![snapshot_id, old, new, merged],
+            )
+            .context("re-keying a stored row")?;
+        }
+    }
+    for (old, new) in renamed {
+        tx.execute(
+            "INSERT INTO security_baseline_findings (fingerprint, scanner_name)
+             SELECT ?2, scanner_name FROM security_baseline_findings WHERE fingerprint = ?1
+             ON CONFLICT (fingerprint) DO NOTHING",
+            rusqlite::params![old, new],
+        )
+        .context("re-keying a baseline fingerprint")?;
+        tx.execute("DELETE FROM security_baseline_findings WHERE fingerprint = ?1", [old])
+            .context("dropping a re-keyed baseline fingerprint")?;
+    }
+    Ok(())
 }
 
 /// What a scoped ingest copies from a scanner's latest snapshot: the rows
@@ -399,18 +535,17 @@ fn location(path: Option<&str>, report_path: Option<&str>) -> Option<String> {
 }
 
 /// Which of a scoped run's `fresh` findings are one of the `kept` full-scan
-/// findings, by index into `fresh`: the same file and rule, matched first on
-/// the whole match position (start and end line and column), then — for a
-/// secret whose lines moved — on its column span alone, when exactly one
-/// unmatched finding on each side shares it. Each kept finding matches at most
-/// one fresh one; ties go to the lowest fingerprint, so the answer is the same
-/// on every run. The secret itself is never compared: Gitleaks redacts it and
-/// no snippet is stored ([FR-SC-03]).
-///
-/// [FR-SC-03]: ../../../../docs/specs/requirements/FR-SC-03.md
+/// findings keyed by their report — rows stored before migration 7 — by index
+/// into `fresh`: the same file and rule, matched first on the whole match
+/// position (start and end line and column), then — for a secret whose lines
+/// moved — on its column span alone, when exactly one unmatched finding on
+/// each side shares it. Each kept finding matches at most one fresh one; ties
+/// go to the lowest fingerprint, so the answer is the same on every run. A row
+/// keyed by its secret needs none of this: a scoped finding of the same secret
+/// has its very fingerprint.
 pub(crate) fn matches_kept(fresh: &[FindingRow], kept: &[FindingRow]) -> Vec<usize> {
     let file = |f: &FindingRow| location(f.path.as_deref(), f.report_path.as_deref());
-    let mut order: Vec<&FindingRow> = kept.iter().collect();
+    let mut order: Vec<&FindingRow> = kept.iter().filter(|k| k.report_keyed()).collect();
     order.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
     let mut taken = vec![false; order.len()];
     let mut matched = Vec::new();

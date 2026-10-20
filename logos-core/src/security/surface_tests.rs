@@ -161,7 +161,7 @@ impl World {
     }
 
     fn status(&self) -> Value {
-        serde_json::to_value(status(&self.root, &self.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every).unwrap()).unwrap()
+        serde_json::to_value(status(&self.root, &self.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every, true).unwrap()).unwrap()
     }
 
     /// The listing with no graph behind it: every finding unbound. The graph
@@ -230,6 +230,261 @@ fn an_absent_and_a_failing_scanner_are_reported_and_the_rest_ingest() {
     w.stub("gitleaks", Some(&w.clean_bandit()), 0, "");
     w.scan(false).expect("consent is recorded");
     assert_eq!(scanner_row(&w.status(), "gitleaks")["last_failure"], Value::Null);
+}
+
+/// S-769: a failed scanner's outcome names its cause in one line taken from
+/// its log — the first line that reports an error, not a line that merely
+/// counts errors — masked, on the scan payload and on the status row, which
+/// reads it back from the log a later read finds.
+#[test]
+fn a_failed_scanner_names_its_cause_from_its_log() {
+    let w = World::new();
+    let output = [
+        "[INFO] Checking for updates",
+        "[INFO] Analysis started; 0 errors so far",
+        &format!("[ERROR] Error updating the NVD Data: apiKey={PLANTED}"),
+        "org.owasp.dependencycheck.data.update.exception.UpdateException: Error updating the NVD Data",
+        "Caused by: NVD Returned Status Code: 403",
+        "[ERROR] Unable to continue dependency-check analysis.",
+    ]
+    .join("\n");
+    w.stub("dependency-check", None, 1, &output);
+    let payload = serde_json::to_value(w.scan(true).expect("the scan runs")).unwrap();
+    let failed = scanner_row(&payload, "dependency-check");
+    assert_eq!(failed["outcome"], "failed", "{failed}");
+    let cause = failed["cause"].as_str().unwrap_or_else(|| panic!("no cause: {failed}"));
+    assert!(cause.starts_with("[ERROR] Error updating the NVD Data: apiKey="), "{cause}");
+    assert!(cause.contains(super::mask::MASK) && !cause.contains(PLANTED), "{cause}");
+    assert!(!cause.contains('\n'), "one line: {cause:?}");
+
+    let row = w.status();
+    let row = scanner_row(&row, "dependency-check");
+    assert_eq!(row["last_failure"], format!("{OUTPUT_DIR}/dependency-check.failed.log"), "{row}");
+    assert_eq!(row["last_failure_cause"].as_str(), Some(cause), "{row}");
+    assert_eq!(scanner_row(&w.status(), "semgrep").get("last_failure_cause"), None, "absent without a failure");
+}
+
+/// Dependency-Check 13 updates its NVD data through an API that rejects a
+/// missing key. The first `[ERROR]` line then says only that the update
+/// failed, so the cause names the key and the user-level route that supplies
+/// it — whole, on one line, with no key value in it — on the scan payload and
+/// on the status row.
+#[test]
+fn a_dependency_check_failing_for_want_of_an_nvd_api_key_names_the_remedy() {
+    let w = World::new();
+    let output = [
+        "[INFO] Checking for updates",
+        "[ERROR] Error updating the NVD Data",
+        "org.owasp.dependencycheck.data.update.exception.UpdateException: Error updating the NVD Data",
+        "\tat org.owasp.dependencycheck.data.update.NvdApiDataSource.processApi(NvdApiDataSource.java:387)",
+        "Caused by: io.github.jeremylong.openvulnerability.client.nvd.NvdApiException: Invalid API Key, length of 0 too short to provided a masked partial key",
+        "[ERROR] Unable to continue dependency-check analysis.",
+    ]
+    .join("\n");
+    w.stub("dependency-check", None, 13, &output);
+    let payload = serde_json::to_value(w.scan(true).expect("the scan runs")).unwrap();
+    let failed = scanner_row(&payload, "dependency-check");
+    assert_eq!((failed["outcome"].as_str(), failed["exit_code"].as_i64()), (Some("failed"), Some(13)), "{failed}");
+    let cause = failed["cause"].as_str().unwrap_or_else(|| panic!("no cause: {failed}"));
+    assert!(cause.contains("NVD API key") && cause.contains("missing or rejected"), "{cause}");
+    assert!(cause.contains("https://nvd.nist.gov/developers/request-an-api-key"), "{cause}");
+    assert!(cause.contains("[security_scan.dependency-check]") && cause.contains(r#"extra_args = ["--nvdApiKey", "<key>"]"#), "{cause}");
+    assert!(cause.contains("user config"), "the repository config may not set extra_args: {cause}");
+    assert!(!cause.contains('\n') && cause.chars().count() <= super::surface::CAUSE_CHARS, "one bounded line: {cause:?}");
+    assert_eq!(scanner_row(&w.status(), "dependency-check")["last_failure_cause"].as_str(), Some(cause));
+}
+
+/// The NVD-key cause fires on the exception that names the API key and on
+/// nothing nearer: another NVD failure (a 403, a rate limit) and a line that
+/// merely says "API key" keep the first error line, and a rejected key's
+/// value never reaches the cause.
+#[test]
+fn only_an_nvd_exception_naming_the_api_key_changes_the_cause() {
+    use super::surface::failure_cause;
+    let rate_limited = "[ERROR] Error updating the NVD Data\nCaused by: io.github.jeremylong.openvulnerability.client.nvd.NvdApiException: NVD Returned Status Code: 429";
+    assert_eq!(failure_cause(rate_limited), "[ERROR] Error updating the NVD Data");
+    let other_scanner = "[ERROR] Invalid API Key supplied to the registry\nCaused by: io.example.RegistryException: Invalid API Key";
+    assert_eq!(failure_cause(other_scanner), "[ERROR] Invalid API Key supplied to the registry");
+    let rejected = format!("[ERROR] Error updating the NVD Data\nCaused by: io.github.jeremylong.openvulnerability.client.nvd.NvdApiException: Invalid API Key apiKey={PLANTED}");
+    let cause = failure_cause(&rejected);
+    assert!(cause.contains("NVD API key") && !cause.contains(PLANTED), "{cause}");
+}
+
+/// The status cause is read back from as much of the log as a scan writes:
+/// a scanner that prints only to stdout, more than the stderr cap of it,
+/// before its error line, reads the same cause on the scan and on `status`.
+#[test]
+fn the_status_cause_reads_the_whole_log_a_scan_wrote() {
+    let w = World::new();
+    let script = "#!/bin/sh\n\
+         case \"$1\" in --version) printf '%s\\n' 'dependency-check 13.0.0'; exit 0;; esac\n\
+         i=0; while [ $i -lt 400 ]; do printf '[INFO] %060d\\n' $i; i=$((i+1)); done\n\
+         printf '%s\\n' '[ERROR] Error updating the NVD Data'\n\
+         exit 1\n";
+    let path = w.bin.join("dependency-check");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let payload = serde_json::to_value(w.scan(true).unwrap()).unwrap();
+    let failed = scanner_row(&payload, "dependency-check");
+    assert_eq!(failed["cause"], "[ERROR] Error updating the NVD Data", "{failed}");
+    let log = fs::metadata(w.root.join(OUTPUT_DIR).join("dependency-check.failed.log")).unwrap().len();
+    assert!(log > crate::jobs::spawn::STDERR_CAP as u64, "the log ({log} bytes) outgrows the stderr cap");
+    assert_eq!(scanner_row(&w.status(), "dependency-check")["last_failure_cause"], failed["cause"]);
+}
+
+/// The managed gosec 2.21.4 under a newer Go toolchain cannot type a
+/// standard-library import and exits 1 with no report (S-771's observation).
+/// That is a `failed` outcome naming gosec's own line, never a clean scan.
+#[test]
+fn a_gosec_that_cannot_type_a_stdlib_import_fails_naming_that_line() {
+    let w = World::new();
+    fs::write(w.root.join("app/hash.go"), "package app\n\nimport _ \"crypto/md5\"\n").unwrap();
+    let line = r#"internal error: package "crypto/md5" without types was imported from "command-line-arguments""#;
+    w.stub("gosec", None, 1, line);
+    let payload = serde_json::to_value(w.scan(true).expect("the scan runs")).unwrap();
+    let row = scanner_row(&payload, "gosec");
+    assert_eq!(row["outcome"], "failed", "{row}");
+    assert_eq!(row["exit_code"], 1, "{row}");
+    assert_eq!(row["cause"], line, "{row}");
+}
+
+/// The cause is one line whatever the output: the first error line, else the
+/// last line, else a sentence saying nothing was printed; never longer than
+/// the cap.
+#[test]
+fn a_failure_cause_is_one_bounded_line() {
+    use super::surface::failure_cause;
+    assert_eq!(failure_cause("downloading rules\nfatal: no git repository\nbye\n"), "fatal: no git repository");
+    assert_eq!(failure_cause("panic: runtime error: index out of range"), "panic: runtime error: index out of range");
+    assert_eq!(failure_cause("2 errors were ignored\nERRORS: none\nlast words  \n\n"), "last words", "a count of errors is no error");
+    assert_eq!(failure_cause("could not start /bin/x: No such file or directory"), "could not start /bin/x: No such file or directory");
+    assert_eq!(failure_cause(" \n\t\n"), super::surface::NO_OUTPUT);
+    let cap = super::surface::CAUSE_CHARS;
+    // Exactly at the cap a line is whole; one past it, it is cut to the cap,
+    // its last character the `…`.
+    let at_cap = format!("Error: {}", "x".repeat(cap - "Error: ".len()));
+    assert_eq!(failure_cause(&at_cap), at_cap);
+    let past_cap = format!("{at_cap}y");
+    assert_eq!(failure_cause(&past_cap), format!("{}…", &at_cap[..cap - 1]));
+    let cut = failure_cause(&format!("Error: {}", "é".repeat(1000)));
+    assert!(cut.chars().count() == cap && cut.ends_with('…') && cut.starts_with("Error: é"), "{cut}");
+}
+
+/// S-769: a scanner with nothing to scan — gosec on a project without Go — is
+/// `not applicable` on the scan, reported without a start and never spawned,
+/// not even for its version; `status` reads it `not_applicable` with the
+/// reason, and the roll-up leaves it out of the scanners a member should have
+/// fresh.
+#[test]
+fn a_scanner_with_nothing_to_scan_is_not_applicable_on_every_surface() {
+    let w = World::new();
+    w.stub("semgrep", Some(&fixture("semgrep")), 0, "");
+    w.stub("gosec", None, 2, "");
+    let mut heard = Vec::new();
+    let payload = serde_json::to_value(w.scan_reporting(true, &mut |p| heard.push(p.clone())).unwrap()).unwrap();
+    let gosec = scanner_row(&payload, "gosec");
+    assert_eq!(gosec["outcome"], "not_applicable", "{gosec}");
+    let reason = "no Go source file (.go) among the files the project does not ignore";
+    assert_eq!(gosec["reason"], reason);
+    assert!(!heard.contains(&ScanProgress::Started { scanner: "gosec" }), "gosec was reported started: {heard:?}");
+    assert!(!w.rec.join("gosec.argv").exists(), "gosec was invoked: {:?}", w.started());
+
+    let status = w.status();
+    let row = scanner_row(&status, "gosec");
+    assert_eq!((row["state"].as_str(), row["reason"].as_str()), (Some("not_applicable"), Some(reason)), "{row}");
+    assert_eq!((row.get("ignored_paths"), row["last_failure"].clone()), (None, Value::Null), "nothing would run: {row}");
+    // UAT-SC-10 step 2: not even the CLI's status, which probes every other
+    // installed copy, starts it; its copy is named, unprobed.
+    assert!(!w.rec.join("gosec.argv").exists(), "status probed gosec: {:?}", w.started());
+    assert_eq!((row["installed"]["copy"].as_str(), row["installed"]["unprobed"].as_str()), (Some("path"), Some("nothing_to_scan")), "{row}");
+
+    // `security findings` lists `status`'s `never_run` scanners: not gosec.
+    assert_eq!(w.findings(&FindingsFilter::default())["never_run"], json!([]), "one state per scanner on every surface");
+
+    let rollup = w.rollup();
+    assert_eq!(rollup.scanners_enabled, REGISTRY.len() - 1, "every registered scanner but the not-applicable gosec");
+    assert_eq!(super::gate::freshness_of(&rollup.scanners[5].state), crate::governance::security::ScanFreshness::NotApplicable);
+}
+
+/// S-769: a stored report outranks `not_applicable`, as it outranks every
+/// detected state — a gosec report ingested from CI on a project with no Go
+/// file here reads `fresh`, and the roll-up still counts gosec.
+#[test]
+fn a_stored_report_outranks_not_applicable() {
+    let w = World::new();
+    w.stub("gosec", None, 0, "");
+    crate::history::security::ingest(&w.root, &fixture("gosec"), &["app/db.py".to_string()]).unwrap();
+    let status = w.status();
+    let row = scanner_row(&status, "gosec");
+    assert_eq!(row["state"], "fresh", "{row}");
+    assert_eq!(w.rollup().scanners_enabled, REGISTRY.len(), "a stored report keeps gosec in the denominator");
+}
+
+/// S-769 × S-760: a stale report does not outrank `not_applicable`. Once the
+/// project's last Go file is gone, no scan here can refresh gosec's report, so
+/// it reads `not_applicable` on `status`, the roll-up and the gate's freshness
+/// alike — never a stale scan whose remedy is a scan that starts nothing.
+#[test]
+fn a_stale_report_with_nothing_left_to_scan_is_not_applicable() {
+    let w = World::new();
+    fs::write(w.root.join("x.go"), "package x\n").unwrap();
+    git(&w.root, &["add", "."]);
+    git(&w.root, &["commit", "-q", "-m", "go"]);
+    w.stub("gosec", None, 0, "");
+    crate::history::security::ingest(&w.root, &fixture("gosec"), &["app/db.py".to_string()]).unwrap();
+    assert_eq!(scanner_row(&w.status(), "gosec")["state"], "fresh");
+
+    git(&w.root, &["rm", "-q", "x.go"]);
+    git(&w.root, &["commit", "-q", "-m", "no go"]);
+    let _ = fs::remove_file(w.rec.join("gosec.argv"));
+    let status = w.status();
+    let row = scanner_row(&status, "gosec");
+    assert_eq!(row["state"], "not_applicable", "{row}");
+    assert_eq!(row.get("ignored_paths"), None, "no coverage is forecast for a scan that starts nothing: {row}");
+    assert!(!w.rec.join("gosec.argv").exists(), "status probed gosec: {:?}", w.started());
+    let rollup = w.rollup();
+    assert_eq!(rollup.scanners_enabled, REGISTRY.len() - 1, "gosec leaves the denominator");
+    let gosec = rollup.scanners.iter().find(|s| s.scanner == "gosec").unwrap();
+    assert_eq!(super::gate::freshness_of(&gosec.state), crate::governance::security::ScanFreshness::NotApplicable);
+}
+
+/// S-769: consent covers what a scan will start, so a scanner with nothing to
+/// scan is neither asked for nor recorded, and is never pending — until the
+/// project gives it something to scan.
+#[test]
+fn a_scanner_with_nothing_to_scan_needs_no_consent() {
+    let w = World::new();
+    w.stub("semgrep", Some(&fixture("semgrep")), 0, "");
+    w.stub("gosec", None, 0, "");
+    let first = w.scan(true).unwrap();
+    assert_eq!(first.consent_recorded, vec!["semgrep".to_string()]);
+    assert_eq!(w.status()["consent"]["pending"], json!([]));
+    w.scan(false).expect("gosec, which starts nothing, asks for no consent");
+
+    fs::write(w.root.join("x.go"), "package x\n").unwrap();
+    assert_eq!(w.status()["consent"]["pending"], json!(["gosec"]));
+    assert!(consent_refusal(&w.scan(false).unwrap_err()).contains("gosec"));
+}
+
+/// S-769: a scanner that failed while it had something to scan, and has
+/// nothing now, leaves no stale failure behind — its log goes with the
+/// `not_applicable` outcome, as with a clean run.
+#[test]
+fn a_scanner_with_nothing_to_scan_clears_its_earlier_failure() {
+    let w = World::new();
+    fs::write(w.root.join("x.go"), "package x\n").unwrap();
+    w.stub("gosec", None, 2, "panic: boom");
+    let first = serde_json::to_value(w.scan(true).unwrap()).unwrap();
+    assert_eq!(scanner_row(&first, "gosec")["cause"], "panic: boom", "{first}");
+    assert_eq!(scanner_row(&w.status(), "gosec")["last_failure_cause"], "panic: boom");
+
+    fs::remove_file(w.root.join("x.go")).unwrap();
+    let second = serde_json::to_value(w.scan(false).unwrap()).unwrap();
+    assert_eq!(scanner_row(&second, "gosec")["outcome"], "not_applicable", "{second}");
+    let status = w.status();
+    let row = scanner_row(&status, "gosec");
+    assert_eq!((row["state"].as_str(), row["last_failure"].clone(), row.get("last_failure_cause")), (Some("not_applicable"), Value::Null, None), "{row}");
+    assert!(!w.root.join(OUTPUT_DIR).join("gosec.failed.log").exists(), "the stale log is gone");
 }
 
 /// FR-SC-06 "one failure never stops the others", for Logos's own I/O too: a
@@ -593,6 +848,48 @@ fn findings_are_classified_labelled_and_the_filters_intersect() {
     assert!(bad.to_string().contains("severe"), "{bad}");
 }
 
+/// S-768: an `unrated` finding is listed with its reason and is filterable.
+/// `--severity unrated` lists the unrated findings alone; a rated least
+/// severity compares it as a gate does, as `medium`, so `medium` lists it and
+/// `high` does not. A rated finding carries no reason.
+#[test]
+fn unrated_findings_carry_their_reason_and_are_filterable() {
+    let w = World::new();
+    let indexed = vec!["app/db.py".to_string()];
+    for name in ["osv-scanner-2.7.0", "semgrep"] {
+        crate::history::security::ingest(&w.root, &fixture(name), &indexed).unwrap();
+    }
+    let least = |severity: &str| -> Vec<(String, String)> {
+        let filter = FindingsFilter::parse(Some(severity), None, None, None, None, None).unwrap();
+        let mut got: Vec<(String, String)> = w.findings(&filter)["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["rule_id"].as_str().unwrap().to_string(), f["severity"].as_str().unwrap().to_string()))
+            .collect();
+        got.sort();
+        got
+    };
+    let pair = |rule: &str, severity: &str| (rule.to_string(), severity.to_string());
+    assert_eq!(least("unrated"), [pair("CVE-2021-3121", "unrated")]);
+    assert_eq!(least("UNRATED"), least("unrated"), "tokens ignore case");
+    let medium = least("medium");
+    assert!(medium.contains(&pair("CVE-2021-3121", "unrated")), "{medium:?}");
+    assert!(medium.contains(&pair("CVE-2022-24713", "high")), "{medium:?}");
+    assert!(medium.iter().any(|(_, s)| s == "medium"), "a rated medium is listed too: {medium:?}");
+    assert!(!least("high").iter().any(|(_, s)| s == "unrated"), "{:?}", least("high"));
+
+    let all = w.findings(&FindingsFilter::default());
+    for f in all["findings"].as_array().unwrap() {
+        match f["severity"].as_str().unwrap() {
+            "unrated" => assert_eq!(f["severity_reason"], "the scanner gave none", "{f}"),
+            _ => assert!(f.get("severity_reason").is_none(), "a rating carries no reason: {f}"),
+        }
+    }
+    let bad = FindingsFilter::parse(Some("unrate"), None, None, None, None, None).unwrap_err();
+    assert!(bad.to_string().contains("unrated"), "the error lists the token: {bad}");
+}
+
 /// S-673: each installed scanner's start, then every registered scanner's
 /// settled outcome, in registry order and as the summary lists it.
 #[test]
@@ -765,17 +1062,20 @@ impl World {
     /// its findings listed under each edition, as the workspace roll-up reads them.
     fn rollup(&self) -> super::MemberSecurity {
         let manifest = crate::tools::Manifest::builtin();
-        let status = status(&self.root, &self.env(), manifest, TODAY.unwrap(), super::VersionProbes::Every).unwrap();
+        let status = status(&self.root, &self.env(), manifest, TODAY.unwrap(), super::VersionProbes::Every, true).unwrap();
         let listings = super::listings(&self.root, &self.env(), manifest, TODAY.unwrap()).unwrap();
         super::MemberSecurity::from_reads(status, &listings)
     }
 }
 
-/// Reports stored but none fresh: the member is `stale`, it counts nothing and
-/// no category is covered — an old scan's findings are neither a count nor a
-/// zero, and every one of them is excluded as not fresh.
+/// Reports stored but none fresh: the member is `stale` and covers no category
+/// — an old scan says nothing about the files it never read — yet its findings
+/// are counted by their own freshness ([S-760]): HEAD moved, but the file each
+/// sits in did not, so both count and none is excluded.
+///
+/// [S-760]: ../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
 #[test]
-fn a_member_whose_reports_are_all_stale_counts_nothing_and_covers_nothing() {
+fn a_member_whose_reports_are_all_stale_counts_its_fresh_findings_and_covers_nothing() {
     let w = World::new();
     crate::history::security::ingest(&w.root, &fixture("semgrep"), &["app/db.py".to_string()]).unwrap();
     fs::write(w.root.join("app/more.py"), "x = 1\n").unwrap();
@@ -784,20 +1084,22 @@ fn a_member_whose_reports_are_all_stale_counts_nothing_and_covers_nothing() {
 
     let rollup = w.rollup();
     assert_eq!(rollup.scan, super::MemberScan::Stale);
-    assert_eq!(rollup.findings, None, "a stale member has no count, not 0");
-    assert_eq!((rollup.scanners_fresh, rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 2, 0));
+    assert_eq!(rollup.findings.map(|c| c.total), Some(2), "db.py is unchanged, so both findings are fresh");
+    assert_eq!((rollup.scanners_fresh, rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 0, 0));
+    assert_eq!((rollup.reports_fresh, rollup.reports_stored), (0, 1), "the one report is not fresh at the new HEAD");
     assert_eq!(rollup.owasp.len(), 2, "both editions");
     for edition in &rollup.owasp {
         assert!(edition.categories.iter().all(|c| c.findings.is_none()), "{edition:?}");
     }
 }
 
-/// A fresh report counts; a stored report from a scanner the config now
-/// disables is excluded as not fresh, and the disabled scanner leaves the
-/// denominator. A category Semgrep covers reads its count; one only Bandit
-/// could see is not covered.
+/// A stored report from a scanner the config now disables is still counted
+/// finding by finding — its findings are on the Security page and in Files &
+/// Risk, so the roll-up cannot read fewer — and it stays in the reports
+/// denominator, though the disabled scanner leaves the scanners' one. A category
+/// Semgrep covers reads its count; one only Bandit could see is not covered.
 #[test]
-fn a_disabled_scanner_s_stored_report_is_not_counted() {
+fn a_disabled_scanner_s_stored_findings_are_counted_by_their_own_freshness() {
     let w = World::new();
     let indexed = ["app/db.py".to_string()];
     crate::history::security::ingest(&w.root, &fixture("semgrep"), &indexed).unwrap();
@@ -807,14 +1109,14 @@ fn a_disabled_scanner_s_stored_report_is_not_counted() {
     let rollup = w.rollup();
     assert_eq!(rollup.scan, super::MemberScan::Fresh);
     let counts = rollup.findings.expect("a fresh member has a count");
-    assert_eq!(counts.total, 2, "Semgrep's two findings: {counts:?}");
+    assert_eq!(counts.total, 4, "Semgrep's two and Bandit's two: {counts:?}");
     assert_eq!(counts.total, counts.critical + counts.high + counts.medium + counts.low + counts.info);
-    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (2, 0), "Bandit's two");
-    assert_eq!(rollup.scanners_fresh, 1);
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 0));
+    assert_eq!((rollup.scanners_fresh, rollup.reports_fresh, rollup.reports_stored), (1, 1, 2));
     assert_eq!(rollup.scanners_enabled, REGISTRY.len() - 1, "every registered scanner but Bandit");
     let injection = rollup.owasp[0].categories.iter().find(|c| c.id == "A05:2025").unwrap();
-    assert_eq!(injection.findings, Some(2), "{injection:?}");
-    assert_eq!(rollup.owasp[0].unclassified, 0, "both sit under a category");
+    assert_eq!(injection.findings, Some(3), "Semgrep's two and one of Bandit's: {injection:?}");
+    assert_eq!(rollup.owasp[0].unclassified, 0, "every counted finding sits under a category");
 }
 
 /// A counted finding with no CWE sits under no category: each edition states it
@@ -834,7 +1136,8 @@ fn a_counted_finding_under_no_category_is_stated_apart() {
 }
 
 /// A stored report with no findings is still a scan: once stale it reads
-/// `stale`, never `never_run` — a clean report is not an absent one ([BR-66]).
+/// `stale`, never `never_run`, and counts `0` — a clean report is not an absent
+/// one ([BR-66]).
 ///
 /// [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
 #[test]
@@ -847,12 +1150,13 @@ fn a_stale_clean_report_is_stale_not_never_run() {
 
     let rollup = w.rollup();
     assert_eq!(rollup.scan, super::MemberScan::Stale);
-    assert_eq!((rollup.findings, rollup.excluded.not_fresh), (None, 0));
+    assert_eq!((rollup.findings.map(|c| c.total), rollup.excluded.not_fresh), (Some(0), 0));
+    assert_eq!(w.files_and_risk(), Some((0, 0)), "a stored clean report is a column of zeros, not an absent column");
 }
 
 /// A member whose only stored report is from a scanner its config now
-/// disables has been scanned: it reads `stale`, its findings are excluded as
-/// not fresh, and it counts nothing.
+/// disables has been scanned: it reads `stale`, and its findings still count
+/// by their own freshness.
 #[test]
 fn a_member_whose_only_report_is_from_a_disabled_scanner_is_stale() {
     let w = World::new();
@@ -861,9 +1165,259 @@ fn a_member_whose_only_report_is_from_a_disabled_scanner_is_stale() {
 
     let rollup = w.rollup();
     assert_eq!(rollup.scan, super::MemberScan::Stale);
-    assert_eq!(rollup.findings, None);
+    assert_eq!(rollup.findings.map(|c| c.total), Some(2));
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 0));
+    assert_eq!((rollup.scanners_fresh, rollup.reports_fresh, rollup.reports_stored), (0, 0, 1));
+}
+
+// ── S-760: one freshness definition across the security surfaces ─────────────
+
+impl World {
+    /// Ingest the Semgrep fixture (two findings, both in `app/db.py`) as a
+    /// `--path app/db.py` run alone: no full scan stands behind it, so the
+    /// scanner reads `stale` with `scoped_only` ([FR-SC-17]).
+    ///
+    /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+    fn ingest_scoped_only(&self) {
+        let paths = ["app/db.py".to_string()];
+        crate::history::security::ingest_scoped(
+            &self.root,
+            &fixture("semgrep"),
+            &paths,
+            Some(crate::history::security::IngestScope::replacing(&paths)),
+        )
+        .unwrap();
+    }
+
+    /// What the Security page states as its count: the tally of every stored
+    /// finding, as [`Engine::security_page`](crate::Engine::security_page)
+    /// takes it off the unfiltered listing.
+    fn page_counts(&self) -> super::FindingTally {
+        let no_graph = |listed: &[&SecurityFinding]| {
+            Ok(listed.iter().map(|f| FindingContext::unbound(f.start_line, UnboundBecause::NoSymbol)).collect())
+        };
+        let listed = findings(&self.root, &self.env(), crate::tools::Manifest::builtin(), &FindingsFilter::default(), TODAY.unwrap(), no_graph).unwrap();
+        super::FindingTally::of(&listed.findings)
+    }
+
+    /// What Files & Risk reads for this project: every file's counted findings
+    /// summed, and the stale ones apart.
+    fn files_and_risk(&self) -> Option<(usize, usize)> {
+        let cells = crate::history::security::path_findings(&self.root, TODAY.unwrap()).unwrap()?;
+        Some((cells.values().map(|c| c.count).sum(), cells.values().map(|c| c.stale).sum()))
+    }
+}
+
+/// The owner's report (review D6): a project whose only report is a `--path`
+/// scan read "2 MEDIUM" on its page and "no fresh scan" in the roll-up. Its two
+/// findings sit in a file nothing has touched, so each is fresh, and every
+/// surface reads that one count.
+#[test]
+fn a_scoped_only_project_reads_one_count_on_every_surface() {
+    let w = World::new();
+    w.ingest_scoped_only();
+
+    let rollup = w.rollup();
+    assert_eq!(rollup.scan, super::MemberScan::Stale, "the report itself is not fresh: scoped_only");
+    let counts = rollup.findings.expect("a stored report is counted from, finding by finding");
+    assert_eq!(counts.total, 2, "{counts:?}");
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 0));
+    assert_eq!((rollup.reports_fresh, rollup.reports_stored), (0, 1), "the roll-up states the report's own freshness apart");
+
+    let page = w.page_counts();
+    assert_eq!(Some(page.counted), rollup.findings, "the page's count is the roll-up row's, severity by severity");
+    assert_eq!(page.excluded, rollup.excluded);
+    assert_eq!(w.files_and_risk(), Some((2, 0)), "Files & Risk reads the same two");
+}
+
+/// A finding whose file moved since the scan is stale on every surface, and
+/// the roll-up tallies it apart rather than counting it.
+#[test]
+fn a_finding_in_an_edited_file_is_left_out_of_every_count() {
+    let w = World::new();
+    w.ingest_scoped_only();
+    fs::write(w.root.join("app/db.py"), "import sqlite3  # edited\n").unwrap();
+
+    let rollup = w.rollup();
+    assert_eq!(rollup.findings.map(|c| c.total), Some(0), "stored, scanned, and nothing current in it");
     assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (2, 0));
-    assert_eq!(rollup.scanners_fresh, 0);
+    let page = w.page_counts();
+    assert_eq!((page.counted.total, page.excluded), (0, rollup.excluded));
+    assert_eq!(w.files_and_risk(), Some((0, 2)));
+}
+
+/// A suppressed finding is left out of every count, and stated apart, whatever
+/// the state of its file.
+#[test]
+fn a_suppressed_finding_is_left_out_of_the_page_and_the_roll_up_alike() {
+    let w = World::new();
+    w.ingest_scoped_only();
+    let fingerprint = w.findings(&FindingsFilter::default())["findings"][0]["fingerprint"].as_str().unwrap().to_string();
+    crate::history::security::suppress(&w.root, &fingerprint, "accepted", None, TODAY.unwrap()).unwrap();
+
+    let rollup = w.rollup();
+    assert_eq!(rollup.findings.map(|c| c.total), Some(1));
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 1));
+    let page = w.page_counts();
+    assert_eq!(Some(page.counted), rollup.findings);
+    assert_eq!(page.excluded, rollup.excluded);
+    assert_eq!(w.files_and_risk(), Some((1, 0)));
+}
+
+/// A path entry suppresses every finding under it on every surface: `status`
+/// lists each entry with its count and the scanner row counts them apart,
+/// `findings` labels each with the entry's reason and selector, and a glob
+/// matching nothing is listed orphaned ([S-770]).
+///
+/// [S-770]: ../../../docs/planning/journal.md#s-770-a-suppression-can-cover-a-path
+#[test]
+fn a_path_entry_is_counted_in_status_and_labels_every_finding_it_covers() {
+    let w = World::new();
+    w.ingest_scoped_only();
+    let stored = w.findings(&FindingsFilter::default())["total"].as_u64().unwrap();
+    assert!(stored >= 2, "the fixture stores several findings under app/");
+    fs::create_dir_all(w.root.join(".logos")).unwrap();
+    fs::write(
+        w.root.join(crate::history::security::IGNORE_FILE),
+        "[[ignore]]\npath = \"app\"\nreason = \"fixture app\"\n\n[[ignore]]\npath = \"tests/fixtures\"\nreason = \"none yet\"\n",
+    )
+    .unwrap();
+
+    let status = w.status();
+    let entries: Vec<(&str, u64, bool)> = status["suppressions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["entry"]["path"].as_str().unwrap(), e["suppressed"].as_u64().unwrap(), e["orphaned"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(entries, [("app", stored, false), ("tests/fixtures", 0, true)]);
+    let row = scanner_row(&status, "semgrep");
+    assert_eq!((row["findings"].as_u64(), row["suppressed"].as_u64()), (Some(0), Some(stored)));
+
+    let listed = w.findings(&FindingsFilter::default());
+    for finding in listed["findings"].as_array().unwrap() {
+        assert_eq!(
+            finding["suppression"],
+            serde_json::json!({"state": "suppressed", "reason": "fixture app", "expires": null, "by": {"path": "app"}})
+        );
+    }
+    assert_eq!(listed["suppressions"], status["suppressions"], "the page and status audit the entries alike");
+    let rollup = w.rollup();
+    assert_eq!((rollup.findings.map(|c| c.total), rollup.excluded.suppressed), (Some(0), stored as usize));
+}
+
+impl World {
+    /// The fingerprint of the stored finding classified under `category`.
+    fn fingerprint_under(&self, category: &str) -> String {
+        let listed = self.findings(&FindingsFilter::default());
+        listed["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["owasp"].as_array().unwrap().iter().any(|c| c == category))
+            .unwrap_or_else(|| panic!("a stored finding under {category}: {listed}"))["fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+}
+
+/// Nothing stored is `never_run`, which has no count at all — never a count of
+/// zero ([BR-66]) — and no Files & Risk column.
+///
+/// [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
+#[test]
+fn a_never_scanned_member_has_no_count_and_no_column() {
+    let w = World::new();
+    let rollup = w.rollup();
+    assert_eq!(rollup.scan, super::MemberScan::NeverRun);
+    assert_eq!((rollup.findings, rollup.reports_stored, rollup.reports_fresh), (None, 0, 0));
+    assert_eq!(w.files_and_risk(), None);
+}
+
+/// A finding both suppressed and in an edited file is left out once, as
+/// suppressed — "whatever their file's state" — and Files & Risk, which skips
+/// suppressed findings, does not tally it as stale.
+#[test]
+fn a_suppressed_finding_in_an_edited_file_is_counted_apart_as_suppressed() {
+    let w = World::new();
+    w.ingest_scoped_only();
+    let fingerprint = w.fingerprint_under("A05:2025");
+    crate::history::security::suppress(&w.root, &fingerprint, "accepted", None, TODAY.unwrap()).unwrap();
+    fs::write(w.root.join("app/db.py"), "import sqlite3  # edited\n").unwrap();
+
+    let rollup = w.rollup();
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (1, 1));
+    assert_eq!(w.page_counts().excluded, rollup.excluded);
+    assert_eq!(w.files_and_risk(), Some((0, 1)), "only the unsuppressed one is stale there");
+}
+
+/// An expired entry no longer suppresses: its finding counts while its file is
+/// unchanged, and is stale — not suppressed — once the file moves.
+#[test]
+fn an_expired_suppression_does_not_hold_the_finding_out() {
+    let w = World::new();
+    w.ingest_scoped_only();
+    let fingerprint = w.fingerprint_under("A05:2025");
+    let entered = NaiveDate::from_ymd_opt(2026, 10, 1);
+    let expires = NaiveDate::from_ymd_opt(2026, 10, 10);
+    crate::history::security::suppress(&w.root, &fingerprint, "accepted until the 10th", expires, entered.unwrap()).unwrap();
+
+    let rollup = w.rollup();
+    assert_eq!(rollup.findings.map(|c| c.total), Some(2), "TODAY is past the expiry, so both count");
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (0, 0));
+
+    fs::write(w.root.join("app/db.py"), "import sqlite3  # edited\n").unwrap();
+    let rollup = w.rollup();
+    assert_eq!((rollup.excluded.not_fresh, rollup.excluded.suppressed), (2, 0), "stale, not suppressed");
+    assert_eq!(w.page_counts().excluded, rollup.excluded);
+}
+
+/// A category a fresh report covers counts only counted findings: a suppressed
+/// one is out of it, and so is a stale finding of another scanner's report.
+#[test]
+fn a_category_count_holds_only_counted_findings() {
+    let w = World::new();
+    w.with_views();
+    // Semgrep's report is fresh (views.py), with one finding under no category.
+    let plain = w.rec.join("plain.sarif");
+    fs::write(&plain, semgrep_report(&[("app/views.py", "r.plain", 1)])).unwrap();
+    let indexed = ["app/db.py".to_string(), "app/views.py".to_string()];
+    crate::history::security::ingest(&w.root, &plain, &indexed).unwrap();
+    // Bandit's findings: B608 in db.py (under A05) and B105 in app/settings.py,
+    // which is not indexed, so it is bound to no file.
+    crate::history::security::ingest(&w.root, &fixture("bandit"), &indexed).unwrap();
+    let a05 = |r: &super::MemberSecurity| r.owasp[0].categories.iter().find(|c| c.id == "A05:2025").unwrap().findings;
+    assert_eq!(a05(&w.rollup()), Some(1), "Bandit's injection finding, while both reports are fresh");
+
+    // Suppressed: out of the category.
+    let fingerprint = w.fingerprint_under("A05:2025");
+    crate::history::security::suppress(&w.root, &fingerprint, "accepted", None, TODAY.unwrap()).unwrap();
+    assert_eq!(a05(&w.rollup()), Some(0), "a suppressed finding is not in its category's count");
+    crate::history::security::unsuppress(&w.root, &fingerprint).unwrap();
+
+    // Stale: db.py moves, so Bandit's report is stale; Semgrep's stays fresh and
+    // still covers the category.
+    fs::write(w.root.join("app/db.py"), "import sqlite3  # edited\n").unwrap();
+    let rollup = w.rollup();
+    assert_eq!(rollup.scan, super::MemberScan::Fresh);
+    assert_eq!(a05(&rollup), Some(0), "a stale finding is not in its category's count");
+    assert_eq!(rollup.excluded.not_fresh, 1, "Bandit's db.py finding; its unbound one has no file to have moved");
+    assert_eq!(rollup.owasp[0].unclassified, 1, "only Semgrep's plain finding is counted, under no category");
+}
+
+/// A finding bound to no file counts on the page and in the roll-up, and has no
+/// row on Files & Risk, which is per file — the one place the three differ, and
+/// the manual says so.
+#[test]
+fn a_finding_bound_to_no_file_counts_on_the_page_and_in_the_roll_up_only() {
+    let w = World::new();
+    crate::history::security::ingest(&w.root, &fixture("semgrep"), &[]).unwrap();
+
+    let rollup = w.rollup();
+    assert_eq!(rollup.findings.map(|c| c.total), Some(2), "no file to compare, so each counts");
+    assert_eq!(Some(w.page_counts().counted), rollup.findings);
+    assert_eq!(w.files_and_risk(), Some((0, 0)), "and joins no file's cell");
 }
 
 // ── FR-SC-17: a scan selected by scanner and scoped by path ─────────────────
@@ -1231,4 +1785,83 @@ fn a_scoped_run_at_a_new_head_reads_stale_since_the_full_scans_head() {
     let semgrep = scanner_row(&status, "semgrep");
     assert_eq!((semgrep["state"].as_str(), semgrep["because"].as_str()), (Some("stale"), Some("head_moved")), "{semgrep}");
     assert_eq!(semgrep["snapshot_head"], head_a.as_str(), "the full scan's HEAD, not the scoped run's");
+}
+
+/// FR-SC-26: the coverage fact rides on every surface — each scanner's row in
+/// the scan summary (the CLI's and MCP's `security scan` payload, and the
+/// scan job's progress), and each installed scanner's row in `security
+/// status` (which the Security page reads) — as `ignored_paths` with a
+/// `coverage_note` exactly when it is `scanned`. A scoped re-scan of an
+/// ignored path states none for the scanner that read only that path.
+#[test]
+fn every_scan_surface_states_what_each_scanner_did_with_the_ignored_directories() {
+    let w = World::new();
+    fs::write(w.root.join(".gitignore"), "/target/\n").unwrap();
+    fs::create_dir_all(w.root.join("target")).unwrap();
+    fs::write(w.root.join("target/gen.py"), "x\n").unwrap();
+    w.stub("semgrep", Some(&fixture("semgrep")), 0, "");
+    w.stub("osv-scanner", Some(&fixture("osv-scanner")), 0, "");
+    w.stub("gitleaks", Some(&fixture("gitleaks")), 0, "");
+    let mut finished = Vec::new();
+    let summary = w.scan_reporting(true, &mut |p| {
+        if let ScanProgress::Finished(run) = p {
+            finished.push(serde_json::to_value(run).unwrap());
+        }
+    });
+    let payload = serde_json::to_value(summary.expect("the scan runs")).unwrap();
+    for name in ["semgrep", "osv-scanner"] {
+        let row = scanner_row(&payload, name);
+        assert_eq!(row["ignored_paths"], "excluded", "{row}");
+        assert!(row.get("coverage_note").is_none(), "no note when excluded: {row}");
+    }
+    let gitleaks = scanner_row(&payload, "gitleaks");
+    assert_eq!(gitleaks["ignored_paths"], "scanned", "{gitleaks}");
+    assert_eq!(gitleaks["coverage_note"], super::registry::scanner("gitleaks").unwrap().reads_ignored.unwrap());
+    for name in ["trivy", "bandit", "codeql"] {
+        assert!(scanner_row(&payload, name).get("ignored_paths").is_none(), "{name} did not run");
+    }
+    for row in &finished {
+        let summary_row = scanner_row(&payload, row["scanner"].as_str().unwrap());
+        assert_eq!(row.get("ignored_paths"), summary_row.get("ignored_paths"), "the job's progress carries it: {row}");
+    }
+
+    let status = w.status();
+    assert_eq!(scanner_row(&status, "semgrep")["ignored_paths"], "excluded");
+    assert_eq!(scanner_row(&status, "gitleaks")["ignored_paths"], "scanned");
+    assert!(scanner_row(&status, "gitleaks")["coverage_note"].is_string());
+    assert!(scanner_row(&status, "trivy").get("ignored_paths").is_none(), "not installed here");
+    // A readout that does not ask for it walks no tree, whatever it probes.
+    let without = status_without_coverage(&w);
+    assert!(without.scanners.iter().all(|row| row.coverage.is_none()), "{without:?}");
+    // Installed but disabled, or refused by the repository's config: a scan
+    // would not run it, so its row states nothing.
+    w.stub("bandit", Some(&w.clean_bandit()), 0, "");
+    w.stub("checkov", None, 0, "");
+    fs::write(w.root.join(".checkov.yaml"), "external-checks-dir:\n  - checks\n").unwrap();
+    w.repo_config("[security_scan.bandit]\nenabled = false\n");
+    let status = w.status();
+    for name in ["bandit", "checkov"] {
+        assert!(scanner_row(&status, name).get("ignored_paths").is_none(), "{name}: {}", scanner_row(&status, name));
+    }
+    assert_eq!(scanner_row(&status, "semgrep")["ignored_paths"], "excluded");
+    fs::remove_file(w.root.join(".checkov.yaml")).unwrap();
+    fs::remove_file(w.root.join(".logos/config.toml")).unwrap();
+
+    let scoped = w
+        .scan_request(false, &ScanRequest::new(strings(&["semgrep", "osv-scanner"]), strings(&["target"])), &mut |_| {})
+        .expect("a scoped scan runs");
+    let scoped = serde_json::to_value(scoped).unwrap();
+    let semgrep = scanner_row(&scoped, "semgrep");
+    assert_eq!(semgrep["scope"]["paths"], json!(["target"]), "{semgrep}");
+    assert!(semgrep.get("ignored_paths").is_none(), "a run on named paths states no coverage: {semgrep}");
+    assert!(w.started().iter().any(|line| line.ends_with("--exclude .logos target")), "{:?}", w.started());
+    assert_eq!(scanner_row(&scoped, "osv-scanner")["ignored_paths"], "excluded", "it ran whole");
+}
+
+fn status_without_coverage(w: &World) -> super::SecurityStatus {
+    status(&w.root, &w.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every, false).unwrap()
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| (*s).to_string()).collect()
 }

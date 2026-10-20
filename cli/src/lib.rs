@@ -366,6 +366,10 @@ pub(crate) enum Commands {
         /// Label for the saved snapshot.
         #[arg(long, requires = "save")]
         label: Option<String>,
+        /// Why this re-bless is right, stored with the baseline (FR-GV-16);
+        /// required past a [review] drift_budget.
+        #[arg(long, requires = "save")]
+        reason: Option<String>,
         /// Skip the pre-evaluation reconcile (FR-RC-04).
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
@@ -380,8 +384,9 @@ pub(crate) enum Commands {
         no_reconcile: bool,
         #[command(flatten)] member: MemberArg,
     },
-    /// Begin a quality session (FR-GV-04): record the baseline BEFORE edits —
-    /// the CLI half of the session gate the MCP instructions call mandatory.
+    /// Begin a quality session (FR-GV-04) BEFORE edits: save the baseline if none exists,
+    /// never move one but reset one that no longer compares — the CLI half of the session gate
+    /// the MCP instructions call mandatory.
     #[command(name = "session-start", alias = "session_start")]
     SessionStart,
     /// End the quality session (FR-GV-05): re-score and compare to the
@@ -442,11 +447,23 @@ pub(crate) enum Commands {
     /// against the merge-base of HEAD and the base ref, with near-clone groups
     /// the branch introduced. Advisory: exits 0 when it classified, 1 when it
     /// could not measure; never moves `check` or `gate`.
+    ///
+    /// With `--branches` (FR-GV-28) it instead sums each named branch's delta
+    /// against the base and projects it onto the shared limits — every
+    /// projectable `[constraints]` budget (`not_projected` names the rest) and
+    /// a numeric `[review] drift_budget` — listing each limit the combined
+    /// merge would exceed with every branch's share. The drift is judged from
+    /// this checkout's comparable gate baseline (else the base commit's
+    /// signal), so the answer depends on that baseline. Report only: it exits
+    /// 0 whenever it answers.
     Review {
         /// The ref to compare against (default: the repository's default
         /// branch — origin/HEAD, else main, else master).
         #[arg(long, value_name = "REF")]
         base: Option<String>,
+        /// Project these branches' summed deltas onto the shared limits.
+        #[arg(long, value_name = "BRANCH", num_args = 1..)]
+        branches: Vec<String>,
         #[command(flatten)] member: MemberArg,
     },
     /// Where to start (FR-QM-17): the ranked fix units the last snapshot
@@ -651,7 +668,7 @@ pub(crate) enum SecurityCommands {
     /// The stored findings with OWASP categories and suppressions; the filters
     /// intersect (FR-SC-08).
     Findings {
-        /// Least severity listed: critical, high, medium, low or info.
+        /// Least severity listed: critical, high, medium, low or info; or `unrated` alone.
         #[arg(long)]
         severity: Option<String>,
         /// A scanner, by registry name or SARIF driver name.
@@ -671,6 +688,12 @@ pub(crate) enum SecurityCommands {
         edition: Option<String>,
         #[command(flatten)] member: MemberArg,
     },
+    /// Write the stored findings, as fingerprint, rule id and path only, to
+    /// the checked-in .logos/security-baseline.json, which the [security]
+    /// ratchet then reads in place of `gate --save`'s set, so a CI clone reads
+    /// only new findings as new (FR-SC-25). Exit 5 and no write when a
+    /// required scan is missing.
+    Bless,
 }
 
 /// The arguments of the session-start quality-report hook install (`logos hook`,
@@ -1510,6 +1533,13 @@ mod surface_parity {
              changes which scanner binaries exist on the machine, a user's \
              decision, not an agent's. MCP reports the copies through \
              `security_status`.",
+        ),
+        (
+            "security bless",
+            "rewrites the checked-in security baseline the ratchet accepts \
+             findings from (FR-SC-25): blessing a finding is a human decision \
+             made in code review, so an agent gets no tool for it, and the \
+             plugin guard asks before an agent runs the command.",
         ),
     ];
 

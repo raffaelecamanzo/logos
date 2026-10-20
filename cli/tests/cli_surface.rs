@@ -961,6 +961,11 @@ fn verify_exits_1_on_an_orphan_file_leak() {
     let report: serde_json::Value = serde_json::from_slice(&clean.stdout).unwrap();
     assert_eq!(report["ok"], serde_json::json!(true));
     assert_eq!(report["node_delta"], serde_json::json!(0));
+    // CR-236: both edge lists are present and empty on a clean store.
+    for (total, list) in [("lost_edges_total", "lost_edges"), ("extra_edges_total", "extra_edges")] {
+        assert_eq!(report[total], serde_json::json!(0), "{report}");
+        assert_eq!(report[list], serde_json::json!([]), "{report}");
+    }
 
     // Delete a leaf file on disk; no sync, so the live store keeps its nodes.
     fs::remove_file(tmp.path().join("src/top.rs")).unwrap();
@@ -985,6 +990,20 @@ fn verify_exits_1_on_an_orphan_file_leak() {
                 .is_some_and(|s| !s.is_empty()),
         "the leaked (live-only) symbols of the deleted file are reported: {report}"
     );
+    // CR-236: the stale edges the leak keeps are named — kind, both symbols, both files.
+    assert!(
+        report["extra_edges_total"].as_u64().unwrap() > 0
+            && report["extra_edges"].as_array().is_some_and(|e| {
+                !e.is_empty()
+                    && e.iter().all(|edge| {
+                        ["kind", "source_symbol", "target_symbol", "source_file", "target_file"]
+                            .iter()
+                            .all(|k| edge.get(*k).is_some())
+                    })
+            }),
+        "the extra (live-only) edges of the deleted file are named: {report}"
+    );
+    assert_eq!(report["lost_edges_total"], serde_json::json!(0), "{report}");
 }
 
 // ── FR-GH-08 / UAT-GH-04: `hotspots` degrades when `git` is absent ─────────

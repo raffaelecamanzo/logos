@@ -28,12 +28,19 @@ const SECRET_CWES: &[&str] = &["CWE-259", "CWE-321", "CWE-798"];
 /// `true` when a finding is secret-class and its message must be redacted.
 /// `cwes` is the normalised `CWE-<n>` list.
 pub(crate) fn is_secret_class(scanner_name: &str, rule_id: &str, tags: &[&str], cwes: &[String]) -> bool {
-    scanner_name.trim().eq_ignore_ascii_case("gitleaks")
+    is_gitleaks(scanner_name)
         || tags
             .iter()
             .any(|t| t.eq_ignore_ascii_case("secret") || t.eq_ignore_ascii_case("secrets"))
         || rule_id.to_ascii_lowercase().contains("secret")
         || cwes.iter().any(|c| SECRET_CWES.contains(&c.as_str()))
+}
+
+/// `true` when a report's driver is Gitleaks, ASCII case and surrounding space
+/// ignored: every one of its findings is a secret, and its identity folds in
+/// the secret's keyed digest ([`super::secret`]).
+pub(crate) fn is_gitleaks(scanner_name: &str) -> bool {
+    scanner_name.trim().eq_ignore_ascii_case("gitleaks")
 }
 
 /// The fixed message a secret-class finding is stored with: the rule and the

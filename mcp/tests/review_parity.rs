@@ -4,7 +4,9 @@
 //! Both surfaces delegate to the one `Engine::review` entrypoint
 //! ([NFR-CC-01]). This test proves the two serialize the **same value** for one
 //! repository, that the MCP payload is byte-stable when asked twice, and that
-//! an unresolvable base answers `measured: false` on the MCP side too.
+//! an unresolvable base answers `measured: false` on the MCP side too. With
+//! `branches` (S-757, [FR-GV-28]) the tool answers what `review --branches`
+//! does, through `Engine::review_branches`.
 //!
 //! **What it does NOT cover.** `cli_payload` calls the `Engine` accessor the
 //! CLI arm calls; it does not spawn the binary — `cli/tests/review_cli.rs`
@@ -12,6 +14,7 @@
 //!
 //! [FR-GV-24]: ../../docs/specs/requirements/FR-GV-24.md
 //! [NFR-CC-01]: ../../docs/specs/requirements/NFR-CC-01.md
+//! [FR-GV-28]: ../../docs/specs/requirements/FR-GV-28.md
 
 use std::fs;
 use std::path::Path;
@@ -126,6 +129,62 @@ async fn cli_and_mcp_return_the_same_review_byte_stably() {
 
     let missing: Value = serde_json::from_str(&mcp_call(&client, json!({"base": "no-such-ref"})).await).unwrap();
     assert_eq!(missing["measured"], false, "{missing}");
+
+    client.cancel().await.expect("client cancel");
+    server.await.expect("server task");
+}
+
+/// `main`'s `engine` module at `max_fan_out − 1`; `b1` and `b2` each add one
+/// outgoing module edge to it.
+fn branches_fixture() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let engine_calling = |modules: &[&str]| -> String {
+        let calls: String = modules.iter().map(|m| format!("    crate::{m}::work_{m}();\n")).collect();
+        format!("pub fn run() {{\n{calls}}}\n")
+    };
+    git(root, &["init", "-q"]);
+    write(root, ".gitignore", ".logos/\n");
+    write(root, "src/lib.rs", "pub mod engine;\npub mod a;\npub mod b;\npub mod c;\npub mod d;\n");
+    for m in ["a", "b", "c", "d"] {
+        write(root, &format!("src/{m}.rs"), &format!("pub fn work_{m}() {{}}\n"));
+    }
+    write(root, "src/engine.rs", &engine_calling(&["a", "b"]));
+    write(root, ".logos/rules.toml", "[constraints]\nmax_fan_out = 3\n");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["branch", "-M", "main"]);
+    for (branch, extra) in [("b1", "c"), ("b2", "d")] {
+        git(root, &["checkout", "-q", "-b", branch, "main"]);
+        write(root, "src/engine.rs", &engine_calling(&["a", "b", extra]));
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "one more edge"]);
+    }
+    git(root, &["checkout", "-q", "main"]);
+    tmp
+}
+
+#[tokio::test]
+async fn cli_and_mcp_return_the_same_branch_projection() {
+    let tmp = branches_fixture();
+    let root = tmp.path();
+    let branches = ["b1".to_string(), "b2".to_string()];
+    let cli = {
+        let engine = Engine::start(root).expect("engine");
+        serde_json::to_string(&engine.review_branches(Some("main"), &branches).expect("projection runs")).unwrap()
+    };
+
+    let (client, server) = boot(root).await;
+    let arguments = json!({"base": "main", "branches": ["b1", "b2"]});
+    let first = mcp_call(&client, arguments.clone()).await;
+    assert_eq!(mcp_call(&client, arguments).await, first, "the MCP payload is byte-stable");
+    assert_eq!(first, cli, "the same projection on both surfaces");
+    let mcp: Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(mcp["exceeded"][0]["rule"], "max_fan_out", "{mcp}");
+    assert_eq!(mcp["exceeded"][0]["projected"], 4, "{mcp}");
+
+    let empty: Value = serde_json::from_str(&mcp_call(&client, json!({"base": "main", "branches": []})).await).unwrap();
+    assert!(empty.get("exceeded").is_none() && empty.get("offenders").is_some(), "no branches is the branch delta: {empty}");
 
     client.cancel().await.expect("client cancel");
     server.await.expect("server task");

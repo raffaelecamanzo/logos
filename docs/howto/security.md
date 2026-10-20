@@ -27,7 +27,7 @@ configuration references it links to hold every flag and payload.
 ```bash
 logos security scan --install --consent   # install what is missing, record consent, scan
 logos security findings --severity high   # what was found, with OWASP categories
-logos security status                     # each scanner: fresh, stale, never run, not installed
+logos security status                     # each scanner: fresh, stale, never run, not applicable, not installed
 ```
 
 Findings are evidence in `.logos/history.db`, anchored to the commit (HEAD), the
@@ -167,6 +167,13 @@ scanners without a terminal:
   Checkov). For Install & scan it also names the scanners whose network consent
   this project has not given. Accepting records both consents exactly as
   `--consent` does; declining downloads and records nothing.
+- **Nothing runs before you answer.** The page decides what to ask from what is
+  installed, without starting any scanner, not even to read its version. A copy
+  of your own on `PATH`, with no managed copy beside it, is therefore left as it
+  is, whatever its version; to put the pinned version beside an older one, run
+  `logos security install <scanner>`. Where both copies are there, **Update**
+  asks for the pinned version, and if your own copy meets the minimum the install
+  keeps it and downloads nothing.
 - **Dependency-Check and CodeQL are opt-in lines, unticked.** Dependency-Check's
   line states the Java runtime it brings and its size. CodeQL's line shows its
   licence terms, and accepting them is a checkbox of its own: CodeQL does not
@@ -194,7 +201,7 @@ dialog.
 
 | Consent | Covers | Kept in | Asked again when |
 |---|---|---|---|
-| Scan | The scanners named in it may reach the network to refresh rules or databases | `security-consent.toml`, user-level, keyed by the project's root path | A scanner is installed or enabled later: it is asked for alone |
+| Scan | The scanners named in it may reach the network to refresh rules or databases | `security-consent.toml`, user-level, keyed by the project's root path | A scanner is installed or enabled later, or a `not_applicable` one gets something to scan: it is asked for alone |
 | Install | Downloading and installing each tool at its pinned version, in every project | `security-install-consent.toml`, user-level | A release pins a new version of a tool |
 
 Without consent the command exits 2, names what is awaiting it and the flag that
@@ -224,45 +231,168 @@ writes anything, binds each path to an indexed file by longest unique suffix, an
 lists a path it cannot bind as `unmatched` rather than guessing; ingesting the same
 bytes at the same HEAD again writes nothing.
 
-**What a scan covers.** A scan reads the project, not what it ignores, for the
-scanners that walk its directories. Logos finds the top-most directories the
-project's own ignore files exclude: the `.gitignore` and `.ignore` files at the
-root and below it, and `.git/info/exclude`, but not your global git excludes or
-an ignore file above the root. It then gives them to Bandit, Trivy, Checkov and
-Dependency-Check through each one's exclusion flag, besides `.logos/`. So those
-four do not scan a build directory (`target/`, `node_modules/`, `dist/`), a notes
-folder or a vendored copy you ignore, and Trivy no longer spends its whole
-timeout walking `target/`. The others work by their own rules:
+**One scan or install at a time per project.** Every scan and every scanner
+install of a project holds the project's lock, `.logos/security/run.lock`,
+whether it was started from the CLI, an MCP client or the Security page, and in
+whichever process. While one runs, another is refused before it starts anything:
+the CLI exits 3 and the MCP tool answers an error, each naming what runs, for
+example `a security scan is already running on this project: job 4, started
+from the web UI by Logos process 81234 12 s ago`. The Security page answers
+**Run scan** by joining a scan it is already running, and refuses a start while a
+scan or install started elsewhere runs, with the same message naming it. An
+install and a scan of the same project never run together. The lock is the operating system's, so it is released however its
+holder ends, a killed process included. Each scanner and installer runs in a
+process group of its own, out of reach of the terminal's Ctrl-C, so a holder that
+stops kills them first: a `logos security scan` or `install` stopped by Ctrl-C
+(SIGINT) or SIGTERM — the plugin's Stop hook stops an overrunning scan with
+SIGTERM — kills the scanners it started and exits 130 or 143, and a stopping
+`serve` kills those of a scan an MCP client started. SIGKILL cannot be caught: a
+Logos process killed by it leaves its scanner running, and the freed lock then
+admits a scan beside it. A `logos security install` run where no
+scan can run — a directory with no `.logos/`, or one whose `.logos` is a symbolic
+link, which every scan refuses — takes no lock and writes nothing there.
 
-- Semgrep and OSV-Scanner skip what *git* ignores, by themselves, in a git
-  repository. A directory only `.ignore` names is still scanned by both, and
-  so is everything in a project that is not a git repository. Semgrep also
-  honours your global git excludes.
-- Gitleaks reads committed history, which an ignored file never enters.
-- gosec and CodeQL still read ignored directories: neither has an exclusion
-  flag that would skip exactly those directories. CodeQL only analyses
-  languages found in files the project does not ignore.
+**A scanner with nothing to scan is not run.** gosec reads only Go files (`.go`)
+and Bandit only Python files (`.py`, `.pyw`). In a project where no file the
+project keeps has one of those extensions, the scan reports that scanner
+`not_applicable`, with a `reason` naming the files it looked for, and starts
+nothing for it, not even its version check. Files in directories the project
+ignores do not count, so a vendored `third_party/` you ignore does not make
+gosec run. CodeQL is `not_applicable` when no file is in a language it analyses.
+Every other scanner reads many languages, manifests or any file, so it always
+runs.
 
-The edges for the four scanners Logos gives the list to:
+**A failure names its cause.** A `failed` scanner's entry carries `cause`: one
+line taken from its output (the same text as its log), with anything that looks
+like a secret replaced by `[masked]`. Logos picks the first line that reports an
+error, meaning one with the word `error`, `fatal` or `panic` (`0 errors` does
+not count). Without such a line it takes the last line, and if the scanner
+printed nothing, it says so. The line is cut to 240 characters. A Dependency-Check
+run that could not update its NVD data reads, for example,
+`[ERROR] Error updating the NVD Data`. The whole output stays in the log.
 
-- A file you ignore *by name* in a directory that is not ignored (`*.log`,
-  `.env`) is still read by the directory-walking scanners. Only whole
-  directories are passed.
+**A missing NVD API key is named, with its remedy.** Dependency-Check 13 needs
+an NVD API key to update its data, and when it has none the NVD API refuses it
+(`failed`, exit 13). Its first error line says only that the update failed, so
+when the log shows the NVD client rejecting the API key (an `NvdApiException`
+naming it) the `cause` is this sentence instead: *the NVD API key is missing or
+rejected: get a free key at https://nvd.nist.gov/developers/request-an-api-key
+and set [security_scan.dependency-check] extra_args = ["--nvdApiKey", "<key>"]
+in the user config*. Request the key at that address, then put it in your
+user-level `config.toml` ([configuration.md](configuration.md#user-level-config--settings-no-repository-can-choose)),
+not in `.logos/config.toml`, which may only set `enabled`:
+
+```toml
+[security_scan.dependency-check]
+extra_args = ["--nvdApiKey", "<key>"]
+```
+
+The cause never repeats a key value. The flag is passed on Dependency-Check's
+command line, so the key is visible to other users of the machine in the process
+list while a scan runs, and the user config is yours alone: do not commit it.
+Any other NVD failure keeps its own first error line as the cause.
+
+**What a scan covers.** A scan reads the project, not what it ignores. Logos finds
+the top-most directories the project's own ignore files exclude: the `.gitignore`
+and `.ignore` files at the root and below it, and `.git/info/exclude`, but not
+your global git excludes or an ignore file above the root. Then it keeps each
+scanner out of them in the way that scanner allows:
+
+- **Bandit, Trivy, Checkov and Dependency-Check** get the directories through
+  their own exclusion flag, besides `.logos/`. So they do not scan a build
+  directory (`target/`, `node_modules/`, `dist/`), a notes folder or a vendored
+  copy you ignore, and Trivy no longer spends its whole timeout walking `target/`.
+  Their flags were read from each scanner's source, but the hand-run harness
+  has not run them, so nothing yet proves them anchored on the pinned
+  versions: these four still say `scanned`, with the note `exclusion flag not
+  proven by the harness`, until it does.
+- **Semgrep and OSV-Scanner** get every path outside them as their targets,
+  instead of `.`: beside an ignored `target/`, that is `.gitignore app go.mod src
+  targets`. A directory that holds an ignored one is named by its entries, so an
+  ignored `web/dist/` makes the list `… web/.gitignore web/src …`. A symbolic
+  link is never named: neither scanner follows one when it walks `.` itself, and
+  Semgrep refuses one given as a target. This works the
+  same in a git checkout, a linked worktree (`git worktree add`) and a copy that
+  is not a git repository. Left to themselves, Semgrep reads ignored directories
+  in a copy that is not a git repository, and OSV-Scanner reads them in a linked
+  worktree too: it cannot read the worktree's git ignores. Semgrep's own
+  exclude option would also skip `src/target/` when you ignore `/target/`.
+- **gosec** gets `-exclude-dir '^target(/|$)'` for each directory: an
+  expression anchored at the project root that covers the directory and every
+  directory below it. The hand-run harness proved it on the pinned gosec
+  2.21.4, in a git checkout, a linked worktree and a copy that is not a git
+  repository: it skips `target/` and `target/nested/`, and keeps the near
+  misses `src/target/` and `targets/`. A test of gosec's matching rule also
+  keeps `pkg/mytarget/`. gosec's simpler spellings would not do: `target` also
+  drops those near misses, and `^target$` misses `target/nested/`.
+- **Gitleaks** reads committed history, so it reads a file committed inside an
+  ignored directory. **CodeQL** still reads ignored directories. A config with
+  `paths-ignore` might keep it out, but the harness has never run CodeQL, so
+  nothing proves that on the pinned version: Logos gives CodeQL no exclusion
+  and writes no config for one.
+
+Every whole-project scan says what each scanner did. Each scanner that ran reads
+`ignored_paths: excluded` (a mechanism the hand-run harness proved kept it out
+of all of them, which today means Semgrep, OSV-Scanner and gosec, or the project
+ignores none) or `ignored_paths: scanned` with a one-line `coverage_note`
+saying why. The
+fact is in each scanner's entry of `security scan` (CLI and MCP), in each
+installed scanner's row of `security status`, and in the **Ignored paths**
+column of the Security page. In `security status` and on the page it is a
+forecast: what a whole-project scan of the tree as it is now would do, beside a
+stored report that may come from an older tree or from CI. A scanner the scan
+would not start (disabled, or refused because of a `.checkov.yaml`) states
+none there; CodeQL states its forecast even when the scan would find no
+language for it to analyse.
+
+Per scanner, when the project ignores something:
+
+| Scanner | How Logos keeps it out | Proven by the harness | `ignored_paths` |
+|---|---|---|---|
+| Semgrep, OSV-Scanner | every path outside the ignored directories as a target | yes | `excluded`, or `scanned` when the list cannot be passed |
+| gosec | one anchored `-exclude-dir` expression per directory | yes | `excluded`, or `scanned` when a directory is left out of the list |
+| Bandit, Trivy, Checkov, Dependency-Check | their own exclusion flag | no | `scanned`, note `exclusion flag not proven by the harness` |
+| Gitleaks | none: it reads committed history | — | `scanned` |
+| CodeQL | none: no exclusion is proven for it | — | `scanned` |
+
+The edges:
+
+- A file you ignore *by name* (`*.log`, `.env`) in a directory that is not
+  ignored is still read by Bandit, Trivy, Checkov, Dependency-Check and gosec,
+  which are given whole directories only. Semgrep and OSV-Scanner leave it out where
+  Logos names a directory's entries, and otherwise apply their own rules.
+- Your global git excludes are not the project's, so a file only they ignore
+  (`.DS_Store`) is named to Semgrep and OSV-Scanner when it sits beside an
+  ignored directory. In a git checkout Semgrep would otherwise have skipped it.
+- Semgrep scans a file it is given by name whatever its own filters say: your
+  `.semgrepignore`, an exclude flag in your `extra_args` and its 1 MB size limit
+  do not apply to the files Logos names (those beside an ignored directory, at
+  the root for an ignored `target/`). Directories it is given are filtered as
+  usual. A large generated file at that level can slow Semgrep down; ignore it
+  in `.gitignore` or `.ignore` to keep it out.
 - A file committed inside an ignored directory (added with `git add -f`) is
-  skipped by Bandit, Trivy, Checkov and Dependency-Check with the rest of that
-  directory. Semgrep still scans it, because it is tracked, and Gitleaks reads
-  it in history.
+  skipped with the rest of that directory by every scanner but Gitleaks, which
+  reads it in history, and CodeQL.
 - An ignored directory whose name holds a comma, a double quote, a glob
-  character, a backslash or a control character, or starts with `-`, is scanned
-  as before, because an exclusion flag could misread it.
+  character, a backslash or a control character, or starts with `-`, is not
+  given to an exclusion flag, which could misread it. Bandit, Trivy, Checkov,
+  Dependency-Check and gosec read it, and gosec then says `scanned`, with how
+  many it was not given. Semgrep and OSV-Scanner still keep out of it.
 - The list a scanner is given is capped at 64 KiB of arguments, so that every
   scanner still starts when a project has thousands of ignored directories,
-  such as a `__pycache__` in every package. Past the cap, the deepest
-  directories are scanned as before, and the log says how many.
+  such as a `__pycache__` in every package. Past the cap, an exclusion flag
+  leaves out the deepest directories, which are read (the log says how many,
+  and gosec says `scanned` with the count); and Semgrep and OSV-Scanner are
+  given `.` as before, and say `scanned`, with the note saying why. Semgrep and OSV-Scanner are also given `.`, and say
+  `scanned`, when a path outside the ignored directories starts with `-` (they
+  would read it as a flag) or is not UTF-8, or when no path lies outside the
+  ignored directories at all.
 
 A re-scan of named paths (`--path`, next section) reads exactly those paths, even
-inside an ignored directory. The scanners that cannot be narrowed to paths run
-over the whole project there too, and they leave out the same directories.
+inside an ignored directory, and states no coverage for the scanners that read
+only them. The scanners that cannot be narrowed to paths run over the whole
+project there too: they leave out the same directories and state their
+coverage.
 
 `security status` gives each scanner one state:
 
@@ -271,11 +401,24 @@ over the whole project there too, and they leave out the same directories.
 | `not_installed` | No binary was found and no report is stored |
 | `disabled` | Switched off in `[security_scan]` |
 | `never_run` | Installed, and no report is stored |
+| `not_applicable` | Installed, no fresh report is stored, and nothing it reads is in the project (gosec without Go files, Bandit without Python files; CodeQL without a language it analyses still reads `never_run` here); `reason` says which files it looked for. No readout starts it, not even for its version: its `installed` copy says `"unprobed": "nothing_to_scan"`. No scan is missing, so neither `check`, the `[security]` table nor the workspace roll-up counts it as one |
 | `stale` | A report is stored but HEAD has moved (`head_moved`), a file it anchors changed (`files_changed`), or only re-scans of some paths stand behind it (`scoped_only`) |
 | `fresh` | A report is stored at this HEAD over unchanged files; a clean scan is `fresh` with `findings: 0` |
 
 A scanner that has not run has looked at nothing, so its silence is never a clean
 result: `never_run` carries no count, and every list says what it was drawn from.
+A fresh stored report outranks `not_applicable`: a gosec report ingested from CI
+at this HEAD reads `fresh` whatever the files here are. A stale one does not,
+since no scan here could refresh it: once the last `.go` file is gone, gosec reads
+`not_applicable`, never a `stale` scan whose remedy is a scan that starts
+nothing.
+
+Whatever the state, a scanner whose last scan failed also carries
+`last_failure`, the log, and `last_failure_cause`, the
+[cause line](#running-scans-and-reading-the-results) read back from that log.
+Both stay until the scanner next runs cleanly. On the Security page the row's
+**What it means** cell shows a red *last scan failed* badge followed by the
+cause.
 `security findings` returns the stored findings with their OWASP Top 10 categories
 (2025, or 2021 with `--edition`, reclassified without a re-ingest), the filters
 `--severity`, `--scanner`, `--category`, `--path` and `--suppression`, and a
@@ -285,6 +428,39 @@ whose report is stored can detect it. In a workspace, `--repo <MEMBER>` on
 
 Each finding also carries its place in the graph, described next. The payloads and
 every flag are in [commands.md](commands.md#security-findings).
+
+### Severities, and `unrated`
+
+A finding's severity comes from its report. A CVSS score in `security-severity`
+decides first: 9.0 and above is `critical`, 7.0 `high`, 4.0 `medium`, above 0
+`low`, and 0 `info`. Without a score, the SARIF `level` decides: `error` is `high`,
+`warning` `medium`, `note` `low`, `none` `info`.
+
+A report that gives neither a score nor a level of its own gives no rating, and
+Logos does not make one up. The finding reads **`unrated`**, and the reason
+`the scanner gave none` goes with it (`severity_reason` in the JSON, a line in
+the Security page's finding detail). There are two cases:
+
+- the result has no `level` and its rule sets none, so the level is only SARIF's
+  default `warning`. Gitleaks writes no level and no score at all, so every
+  Gitleaks finding reads `unrated`;
+- the scanner writes the same level on every result. osv-scanner does this: each
+  result reads `warning` whatever the advisory says. The pinned 1.9.2 never gives
+  a score, so all its findings read `unrated`. osv-scanner 2.0.0 and later put
+  the advisory's CVSS score on the rule, where the advisory has one. If you run
+  one of those yourself, from your `PATH` or as a report you ingest, its findings
+  read the advisory's own rating, and only the advisories with no score read
+  `unrated`.
+
+`unrated` is listed with the other findings and counted on its own, never inside
+`medium`. `--severity unrated` lists the unrated findings alone. A rated
+`--severity` compares an unrated finding as `medium`: `--severity medium` lists it
+and `--severity high` does not. The Security page's **Least severity** filter
+works the same way (its *unrated only* option), and the workspace roll-up gives
+`unrated` its own column. Findings stored before this release that read `medium`
+from an osv-scanner 1.x or a Gitleaks report read `unrated` after the upgrade,
+without a new scan. Re-ingest any other report to have its severities decided
+again.
 
 ## Re-scanning a few files
 
@@ -312,11 +488,30 @@ logos security scan --scanner semgrep --scanner bandit --path src/api --path src
   git history of the repository; a scoped run reads the named files as they are
   now (`--no-git`). Those are different evidence, so a scoped Gitleaks run does not
   replace the full scan's findings in those paths: a secret removed from a file is
-  still in history and stays listed. A secret the scoped run finds that matches a
-  recorded one (same file, same rule, same position, or the same column span when
-  only its lines moved and no other finding shares it) keeps that finding's
-  fingerprint, so `check`, `gate` and the ignore file still recognise it; only a
-  secret with no match reads as new.
+  still in history and stays listed. A secret the scoped run finds that is a
+  recorded one has that finding's fingerprint (below), so `check`, `gate` and the
+  ignore file still recognise it; only a new secret reads as new.
+- **One secret is one Gitleaks finding.** Its fingerprint folds its rule, its
+  file and a keyed digest of the secret, never its position or its commit. The
+  digest is computed in memory from the file, or from the commit that holds the
+  secret; neither the secret nor its digest is stored. So a secret found in
+  several commits is one finding that lists them in `commits`, newest first, and
+  it keeps its fingerprint when its line moves, when it is committed and when a
+  scoped run reads it. The key is derived from the repository's first commit, so
+  every full clone keys a secret alike; a shallow clone keys it differently.
+- **A secret found only in history is `historical`.** A full scan's finding is
+  bound to today's file and line only where that line still holds the secret
+  (an edit elsewhere on the line keeps it). If its file is gone, or the line
+  holds other code now, the finding's `binding` is `historical`: it has no
+  `path`, no enclosing symbol and no blast radius, and its `anchor` names the
+  commit and the path it was found at, with `short_commit` — the seven digits
+  the CLI, MCP and the Security page all show. When the secret is still on the
+  line some older commit put it, the finding sits there instead. A
+  `historical` finding still counts, in the ratchet and in every cap: the secret
+  is still in the repository's history, and a `check` or `gate` violation names
+  its place `(historical, commit <short_commit>)`. A secret still on its line in
+  a file the index does not hold keeps its `unmatched` binding. No author,
+  email or commit message is stored.
 - **A re-scan never makes a scanner read `fresh` for the rest.** A scanner whose
   only report is from `--path` scans reads `stale` with `scoped_only`, and one
   whose full scan is from an earlier commit reads `stale` with `head_moved`, so a
@@ -343,7 +538,8 @@ what it could not see:
 An `unbound` finding says why: it has no location, its file is not indexed (a
 lockfile, which is excluded by default, keeps its manifest line), its file changed
 since the scan (a stale finding is never bound, because its line may now point at
-another symbol), or its line is in no code symbol.
+another symbol), its line is in no code symbol, or it is a secret found only in
+history (`historical`, anchored to its commit instead).
 
 The reachability **verdict** is `reachable`, `unreachable` or `unknown`:
 
@@ -390,10 +586,19 @@ fail_on_owasp = ["A04", "A01:2021"]
 
 | Key | Default | Fails when |
 |---|---|---|
-| `required_scanners` | none | A scanner named here has no fresh scan at HEAD: it never ran, is stale, is not installed or is disabled, or its name matches no scanner (`unknown`). Exit 5 |
-| `ratchet_min_severity` | `high` | An unsuppressed finding at or above it is **new**: its fingerprint is not in the set `logos gate --save` recorded. Rule `security:ratchet` |
+| `required_scanners` | none | A scanner named here has no fresh scan at HEAD: it never ran, is stale, is not installed or is disabled, or its name matches no scanner (`unknown`). Exit 5. A `not_applicable` one, with nothing to scan here, is not missing |
+| `ratchet_min_severity` | `high` | An unsuppressed finding at or above it is **new**: its fingerprint is not in the ratchet's baseline — the checked-in `.logos/security-baseline.json` when present, else the set `logos gate --save` recorded. Rule `security:ratchet` |
 | `max_severity` | unset | Any unsuppressed finding at or above it exists, recorded or not. Rule `security:max_severity` |
 | `fail_on_owasp` | none | Any unsuppressed finding is in one of these OWASP Top 10 categories. `A04` is the 2025 edition; `A01:2021` names the older one. Rule `security:fail_on_owasp:<id>` |
+
+**How the ratchet and the cap treat an `unrated` finding.** Both gate it as
+`medium`, the rank its default `warning` level gave it before it read `unrated`
+([Severities, and `unrated`](#severities-and-unrated)). So
+`ratchet_min_severity = "medium"` or `max_severity = "medium"` (or a lower
+threshold) fails on it, and `"high"` or `"critical"` does not. No verdict changed
+when the spelling did. The message names it as `unrated (gated as medium)`.
+Neither key accepts `"unrated"` as a value: it is not a rank, and naming it is
+a usage error (exit 2).
 
 **The ratchet adopts the gate on a codebase that already has findings.** Scan, then
 record what is there; after that only a finding that is new since the save fails:
@@ -406,10 +611,21 @@ logos check                     # now fails only on what is new, or over a cap
 
 Until a save is recorded, every finding at or above `ratchet_min_severity` is new,
 and the report says to run the save. The recorded set lives in `.logos/history.db`
-with the findings; `session_start` records it too. A suppressed finding is not
+with the findings; `session_start` records it before the edits when none is
+saved and none is checked in, and never moves it after. A suppressed finding is not
 recorded, so when its suppression expires or is removed it is new again. The
 **caps** ignore the recorded set: `max_severity = "critical"` fails on any
 unsuppressed critical finding, however old.
+
+To gate in CI, check the baseline in: `logos security bless` writes the findings
+— fingerprint, rule id and path, no message or secret — to
+`.logos/security-baseline.json`, which the ratchet then reads instead of the set in
+`history.db`, in every checkout
+([ci-integration.md](ci-integration.md#gating-on-security-findings-in-ci-a-checked-in-baseline)).
+A finding reported by an absolute path that binds to no indexed file (OSV-Scanner
+on a lockfile) is also matched by its rule id and project-relative path, since its
+fingerprint carries the checkout's directory; a re-key waits for the osv-scanner
+2.x identity change.
 
 **Exit 5 means the evidence is missing, not that a rule failed.** `check`, `gate`
 and `session-end` exit **5** when a scanner in `required_scanners` has no fresh scan
@@ -447,6 +663,10 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   workspace roll-up.
 - From the day after `expires` the entry stops suppressing and is listed as
   `expired`; an entry that matches no stored finding is listed as `orphaned`.
+- An entry written for a Gitleaks finding under its earlier, per-commit
+  fingerprint is `orphaned` after the next full Gitleaks scan. Logos never rewrites
+  the file: the orphaned entry carries `should_name`, the fingerprint its
+  finding has now, for you to put in its place.
 
 You do not have to edit the file by hand. On the Security page, **Suppress…** on a
 finding opens a dialog that asks for the reason (required) and an expiry date
@@ -458,6 +678,58 @@ byte. A file you spelled by hand differently, with a comment like the `expires`
 one above for instance, is refused rather than rewritten, because rewriting it
 would drop your comments: edit that file by hand, or remove the comments first.
 The reference is [configuration.md](configuration.md#logossecurity-ignoretoml--suppressions).
+
+### One entry for a whole path
+
+A fixtures directory full of planted secrets would need one fingerprint entry per
+finding. One entry can name a **`path`** glob instead, optionally narrowed to one
+`rule` and one `scanner`:
+
+```toml
+[[ignore]]
+path = "tests/fixtures"
+scanner = "gitleaks"
+reason = "planted test secrets, never deployed"
+```
+
+- **What it matches.** The glob is matched against each finding's location
+  relative to the project root. `*` stays within one path segment and `**`
+  crosses segments. A glob that matches a directory covers everything under it,
+  as a `.gitignore` line does. So `tests/fixtures` and `tests/fixtures/**` cover
+  the same findings, `*.lock` matches only a lockfile at the root, and
+  `**/fixtures` matches a `fixtures` directory at any depth. A finding a scanner
+  reported by an absolute path, such as osv-scanner's `Cargo.lock`, is matched
+  after the root is taken off. The same entry therefore holds in every checkout,
+  where a fingerprint taken from such a finding holds only in the checkout it
+  came from.
+- **Narrowing.** `rule` is the finding's rule id, exactly. `scanner` is the
+  scanner name findings show (`gitleaks`, `osv-scanner`, `Semgrep OSS`), in
+  either case. Leave a key out to cover every rule or every scanner.
+- **Each entry is counted.** `logos security status` and `security findings` list
+  every entry under `suppressions` with `suppressed`, the number of findings it
+  suppresses now. Each finding a path entry covers is listed as `suppressed`,
+  with the entry's reason and, under `by`, the entry that covers it. An entry
+  that names no finding, such as a glob matching nothing, is `orphaned`. When
+  several entries name a finding, the first unexpired one labels it and counts
+  it, fingerprint entries before path entries; an expired fingerprint entry
+  gives way to a live path entry.
+- **Refused, with exit 2 and the line.** A glob that covers the whole project
+  (`*`, `**`, `.`, any glob made only of those, or one that matches every name
+  at the root, such as `?*` or `{*}`), a glob that escapes the root
+  (`..`, an absolute path) or does not compile, an entry with both `fingerprint`
+  and `path`, and `rule` or `scanner` beside a fingerprint each reject the file.
+- **Canonical spelling.** A path is written without a leading `./` or a
+  trailing `/`, with `/` separators. Path entries follow the fingerprint entries,
+  sorted by path, then rule, then scanner. A file spelled differently still
+  loads, but triage refuses to rewrite it, as with any hand-spelled file.
+
+On the Security page, the Suppress dialog offers **Everything under this path**.
+It starts from the finding's directory, which you can edit, and can be narrowed
+to the finding's rule or scanner. **Unsuppress** on any finding the entry covers
+removes that entry, and so restores everything under it. As with a fingerprint
+entry, adding and then removing it restores the file byte for byte. The
+**Suppressions** panel lists every entry with its count, flags an orphaned or
+expired one, and removes an entry directly.
 
 ## Reviewing what a branch introduced
 
@@ -587,9 +859,10 @@ beside Files & Risk, Rule findings and Coverage. It answers for the selected mem
 a `GET`, and the actions are the intent-guarded `POST`s the dashboard already
 allows for scans and suppression.
 
-- **The verdict first**: the finding count, and, when `rules.toml` has a
-  `[security]` table, the gate band with the required scanners and the findings its
-  rules fail on.
+- **The verdict first**: the finding count by severity, with what it leaves out
+  ([one definition](#one-definition-of-a-counted-finding)), and, when `rules.toml`
+  has a `[security]` table, the gate band with the required scanners and the
+  findings its rules fail on.
 - **Scanners**: the state of each of the nine, with the command that fixes a missing
   one (`logos security install …`, `logos security scan --consent`, or
   `logos security ingest <report>`). Its **Install** and **Update** buttons, and
@@ -606,25 +879,55 @@ allows for scans and suppression.
   site, starts no scanner process you have not consented to.
 - **Run scan** starts a scan in the background, shows each scanner as it starts and
   finishes, and **Cancel scan** stops every scanner process at once and keeps the
-  previous results. A click while a scan runs joins it. The first scan asks consent
+  previous results. A click while a scan runs joins it; while a scan or install
+  started elsewhere runs (`logos security scan`, an MCP client), Run scan is
+  refused with a message naming it. The first scan asks consent
   in a dialog that names the scanners, and records it exactly as
   `security scan --consent` does.
 - **Findings**, filtered by severity, scanner, category and path; selecting one
   opens its graph detail (enclosing symbol, route, blast radius, each with its
-  confidence) and the triage actions above.
+  confidence) and the triage actions above. **Show** brings the detail, below the
+  table, into view and moves focus to its heading; with reduced motion set in the
+  system, the page jumps instead of scrolling. An `unrated` finding's badge carries
+  its reason, and its detail states it; *unrated only* in **Least severity**
+  lists those findings alone ([Severities, and `unrated`](#severities-and-unrated)).
 - **OWASP Top 10**, 2025 or 2021, with each category `covered` or `not covered`.
 
 In a workspace, a **Security** page at `/workspace-security` rolls up every member:
 each member's fresh scanners and its fresh, unsuppressed findings by severity,
 linked to that member's own page, and the OWASP view summed over the members read.
-Every total says how many members it counts: a member never scanned reads
-`never run`, not `0`, and a stale scan or a suppressed finding is left out and
-counted as left out. The page starts no scan; open a member's page, or run
-`logos security scan` in that member.
+Every total says how many members it counts, and `N of M reports fresh` says how
+many of the stored reports are themselves fresh at HEAD. A member never scanned
+reads `never run`, not `0`; a finding in a changed file or a suppressed one is left
+out and counted as left out, by
+[the one definition](#one-definition-of-a-counted-finding). The page starts no scan;
+open a member's page, or run `logos security scan` in that member.
 
 Elsewhere, `logos hotspots --with-findings` ranks files with a fresh finding first
 and the Files & Risk Findings column links each file to its findings on the
-Security page ([commands.md](commands.md#hotspots)).
+Security page ([commands.md](commands.md#hotspots)); both count findings by
+[the one definition](#one-definition-of-a-counted-finding).
+
+### One definition of a counted finding
+
+**One definition of a counted finding.** The Security page, Files & Risk and the
+workspace roll-up count a finding the same way: it counts unless a current entry in
+`.logos/security-ignore.toml` suppresses it or its own file changed since the scan.
+Freshness is the finding's, never its report's, so a project whose only report is a
+`--path` scan (its scanner reads `stale` with `scoped_only`) reads the same count on
+all three. A finding in an edited file is left out and shown apart as `stale`; a
+suppressed one is left out and counted apart; a finding bound to no file has none to
+compare, so it counts on the page and in the roll-up, while Files & Risk, which is
+per file, has no row for it.
+
+Whether the *report* is fresh is a separate figure that changes no count: the
+roll-up states it as its own field, `N of M reports fresh` (a disabled scanner's
+stored report is in `M` and never in `N`). A scanner you disable keeps its stored
+findings in every count until you re-scan without it. A file a `--path` scan never
+read reads `0` in Files & Risk, which is the absence of a finding and not proof of a
+scan: the scanner's `scoped_only` state says which. The OWASP table below the
+findings is the one exception: it still counts every stored finding it classifies,
+suppressed and changed-file ones included.
 
 ## From an agent: the MCP tools
 
@@ -641,11 +944,15 @@ section ([Reviewing what a branch introduced](#reviewing-what-a-branch-introduce
 | You see | Why |
 |---|---|
 | `security scan` exits 2 naming `--consent` | No consent is recorded for a scanner it would start. Nothing ran |
+| `security scan` or `security install` exits 3: `… is already running on this project` | Another scan or install of this project runs, named in the message. Nothing was started. Wait for it, or cancel it on the Security page if it is a web job, then run it again |
 | `security install` exits 2 listing tools, versions and sources | The install consent is missing; run it again with `--consent` |
 | `security install` exits 1 | Every tool you asked for failed or has no release for this platform: none ended `installed`, `already_present` or kept. Read each `outcome` and `reason` in the output; one tool in place is exit 0 |
 | `check` or `gate` exits 5 | A required scanner has no fresh scan at HEAD; run the command it names |
 | A scanner reads `stale` after you re-scanned a file | Only a full scan at HEAD makes it `fresh` (`scoped_only`, `head_moved`) |
-| A scanner is `failed` | Read its `log` (`.logos/security/<scanner>.failed.log`); one failure never stops the others |
+| A scanner is `failed` | Its `cause` names why in one line; the whole output is in its `log` (`.logos/security/<scanner>.failed.log`). One failure never stops the others |
+| Dependency-Check is `failed`, cause `the NVD API key is missing or rejected …` | Dependency-Check 13 needs an NVD API key and none was supplied (or the one given was refused). Get a free key at https://nvd.nist.gov/developers/request-an-api-key and set `extra_args = ["--nvdApiKey", "<key>"]` under `[security_scan.dependency-check]` in your **user-level** `config.toml`; the repository config may not set `extra_args` |
+| gosec or Bandit is `not_applicable` | No Go (or Python) file outside the ignored paths: there is nothing for it to scan, and nothing is missing |
+| gosec is `failed`, cause `internal error: package "crypto/md5" without types was imported …` | The managed gosec 2.21.4 fails this way on a file that imports the standard library under some Go toolchains (seen with Go 1.27.2), and writes no report. Run gosec in CI with a toolchain it supports and ingest its SARIF |
 | Exit 2 on a `path` or `extra_args` key in `.logos/config.toml` | A repository may only set `enabled`; set the rest in your user-level config |
 
 The troubleshooting table in [error-handling.md](error-handling.md#troubleshooting-common-errors)

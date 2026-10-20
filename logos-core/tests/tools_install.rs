@@ -521,9 +521,10 @@ fn a_download_or_an_unpack_that_dies_leaves_no_partial_tool_and_a_second_run_com
         .contains("Version: 0.74.0"));
 }
 
-/// The install the crash tests kill: run only as their child process.
+/// The install the crash and staging tests run in a process of its own: run
+/// only as their child process.
 #[test]
-#[ignore = "the child process of the two crash tests below"]
+#[ignore = "the child process of the crash and staging tests below"]
 fn crash_child() {
     let Some(base) = std::env::var_os(CRASH_CHILD_ENV) else {
         return;
@@ -540,6 +541,20 @@ fn crash_child() {
 /// Kill a whole install process — not just its `curl` or `tar` — at the
 /// point the stubs hang, and check what it leaves behind.
 fn kill_an_install(rig: &Rig) {
+    let mut child = start_an_install(rig);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // The hanging stub runs in a process group of its own; it goes too.
+    for name in ["curl", "tar"] {
+        if let Ok(pid) = fs::read_to_string(rig.rec().join(format!("{name}.pid"))) {
+            let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
+        }
+    }
+}
+
+/// An install of trivy in a process of its own, returned once it reached the
+/// point the stubs hang.
+fn start_an_install(rig: &Rig) -> std::process::Child {
     let exe = std::env::current_exe().unwrap();
     let mut child = Command::new(exe)
         .args([
@@ -566,14 +581,7 @@ fn kill_an_install(rig: &Rig) {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
-    // The hanging stub runs in a process group of its own; it goes too.
-    for name in ["curl", "tar"] {
-        if let Ok(pid) = fs::read_to_string(rig.rec().join(format!("{name}.pid"))) {
-            let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
-        }
-    }
+    child
 }
 
 fn assert_killed_install_left_no_tool_then_completes(rig: &Rig, residue: &str) {
@@ -800,6 +808,36 @@ fn an_install_never_deletes_or_writes_through_a_symlinked_tool_or_staging_direct
     );
 }
 
+/// A symlink in place of a staging lock file — the install's own, or one the
+/// sweep reaches — is removed, never followed: no file is created outside the
+/// tools directory, and the install goes ahead.
+#[test]
+fn an_install_never_creates_a_file_through_a_symlinked_lock_file() {
+    let rig = Rig::new();
+    let outside = rig.base.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let staging = rig.tools().join(STAGING_DIR);
+    fs::create_dir_all(&staging).unwrap();
+    std::os::unix::fs::symlink(outside.join("own"), staging.join("trivy-0.74.0.lock")).unwrap();
+    std::os::unix::fs::symlink(outside.join("swept"), staging.join("gosec-2.21.4.lock")).unwrap();
+
+    let report = rig
+        .installer(manifest(None))
+        .install(&["trivy"], &Source::Network)
+        .unwrap();
+    assert_eq!(
+        report.tools[0].outcome,
+        InstallOutcome::Installed {
+            binary: pinned(&rig, "trivy")
+        }
+    );
+    assert!(rig.tree(&outside).is_empty(), "nothing was created outside: {:?}", rig.tree(&outside));
+    assert_eq!(
+        rig.tree(&rig.tools()),
+        ["trivy", "trivy/0.74.0", "trivy/0.74.0/trivy"]
+    );
+}
+
 /// An offline artifact that is not a regular file fails at once: a FIFO is
 /// never opened, so the install cannot block on it.
 #[test]
@@ -827,30 +865,95 @@ fn an_offline_artifact_that_is_not_a_regular_file_fails_without_blocking() {
     );
 }
 
-/// An interrupted install of an earlier version leaves staging the next
-/// install of that tool discards; another tool's staging is left alone.
+/// What interrupted installs left in staging — the tool's own at an earlier
+/// version, another tool's, a lock file with no entry — is discarded by the
+/// next install of any tool, as no running install holds it (S-759).
 #[test]
-fn the_next_install_of_a_tool_discards_its_staging_from_any_version() {
+fn the_next_install_discards_the_staging_no_running_install_holds() {
     let rig = Rig::new();
     let staging = rig.tools().join(STAGING_DIR);
     for leftover in ["trivy-0.73.0", "gosec-2.21.4"] {
         fs::create_dir_all(staging.join(leftover)).unwrap();
         fs::write(staging.join(leftover).join("partial"), "x").unwrap();
     }
+    fs::write(staging.join("gosec-2.21.4.lock"), "").unwrap();
+    fs::write(staging.join("osv-scanner-1.9.2.lock"), "").unwrap();
     rig.installer(manifest(None))
         .install(&["trivy"], &Source::Network)
         .unwrap();
     assert_eq!(
         rig.tree(&rig.tools()),
-        [
-            ".staging",
-            ".staging/gosec-2.21.4",
-            ".staging/gosec-2.21.4/partial",
-            "trivy",
-            "trivy/0.74.0",
-            "trivy/0.74.0/trivy"
-        ]
+        ["trivy", "trivy/0.74.0", "trivy/0.74.0/trivy"]
     );
+}
+
+/// After a process is killed mid-download — as a `serve` stopped by SIGKILL
+/// is — the next install, of another tool, clears the staging it left: the
+/// killed process's lock went with it (S-759).
+#[test]
+fn an_install_of_another_tool_clears_the_staging_a_killed_install_left() {
+    let rig = Rig::new();
+    rig.curl(Curl::HangsMidway);
+    kill_an_install(&rig);
+    let left = rig.tools().join(STAGING_DIR).join("trivy-0.74.0");
+    assert!(
+        left.join("trivy.tar.gz").is_file(),
+        "the killed install left its download: {:?}",
+        rig.tree(&rig.tools())
+    );
+
+    rig.curl(Curl::Serves);
+    let report = rig
+        .installer(manifest(None))
+        .install(&["gosec"], &Source::Network)
+        .unwrap();
+    assert_eq!(
+        report.tools[0].outcome,
+        InstallOutcome::Installed {
+            binary: pinned(&rig, "gosec")
+        }
+    );
+    assert_eq!(
+        rig.tree(&rig.tools()),
+        ["gosec", "gosec/2.21.4", "gosec/2.21.4/gosec"],
+        "the killed install's staging is gone"
+    );
+}
+
+/// The staging of an install still running in another process is left
+/// alone, and an install of the same tool there fails that tool rather than
+/// write over it.
+#[test]
+fn the_staging_of_an_install_running_in_another_process_is_left_alone() {
+    let rig = Rig::new();
+    rig.curl(Curl::HangsMidway);
+    let mut running = start_an_install(&rig);
+    rig.curl(Curl::Serves);
+    let installer = rig.installer(manifest(None));
+
+    let report = installer.install(&["gosec", "trivy"], &Source::Network).unwrap();
+    let live = rig.tools().join(STAGING_DIR).join("trivy-0.74.0");
+    let still_there = live.join("trivy.tar.gz").is_file();
+    running.kill().unwrap();
+    running.wait().unwrap();
+    if let Ok(pid) = fs::read_to_string(rig.rec().join("curl.pid")) {
+        let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
+    }
+
+    assert_eq!(
+        report.tools[0].outcome,
+        InstallOutcome::Installed {
+            binary: pinned(&rig, "gosec")
+        }
+    );
+    assert_eq!(
+        report.tools[1].outcome,
+        InstallOutcome::Failed {
+            stage: FailStage::Install,
+            reason: "another Logos process is using the staging of trivy 0.74.0: try again once it ends".to_string()
+        }
+    );
+    assert!(still_there, "the running install's download was left alone");
 }
 
 /// A managed copy that cannot be removed fails that tool alone, with the

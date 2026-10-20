@@ -15,7 +15,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "echarts": "^5.6.0",
+    "echarts": "^6.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uplot": "^1.6.32"
@@ -31,11 +31,11 @@
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^25.0.1",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.9"
+    "vite": "^7.3.7",
+    "vitest": "^4.1.12"
   },
   "allowScripts": {
-    "esbuild@0.21.5": true,
+    "esbuild@0.28.2": true,
     "fsevents@2.3.3": true
   }
 }

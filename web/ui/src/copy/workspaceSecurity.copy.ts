@@ -9,11 +9,12 @@
  * members (NFR-CC-04).
  */
 
+import { FINDING_COUNT_TEXT } from "./security.copy.ts";
 import { plural, type CopyEntry } from "./types.ts";
 
 export const memberSecurity: CopyEntry = {
   what: "Each member's scanners with a fresh scan at its current commit, and its fresh, unsuppressed findings by severity, linked to that member's Security page.",
-  why: "A member nothing has scanned has looked at nothing, so it reads never run rather than a clean zero; a stale or suppressed finding is not in these counts.",
+  why: "A member nothing has scanned has looked at nothing, so it reads never run rather than a clean zero; a finding whose file changed since the scan, or a suppressed one, is not in these counts.",
 };
 
 export const workspaceOwasp: CopyEntry = {
@@ -29,19 +30,21 @@ export const WORKSPACE_SECURITY_TEXT = {
   /** The roll-up's denominator: "findings from m of N members; k never scanned". */
   denominator: (counted: number, total: number, neverScanned: number) =>
     `Findings from ${counted} of ${total} ${plural(total, "member", "members")}; ${neverScanned} ${plural(neverScanned, "member", "members")} never scanned.`,
-  /** The totals in words, with what they count. */
-  totals: (critical: number, high: number, medium: number, low: number, info: number) =>
-    `${critical} critical · ${high} high · ${medium} medium · ${low} low · ${info} info — fresh, unsuppressed findings only`,
-  /** What the totals leave out, and why. */
-  excluded: (notFresh: number, suppressed: number) =>
-    `Left out: ${notFresh} ${plural(notFresh, "finding", "findings")} from reports that are not fresh (stale, or from a scanner now disabled), and ${suppressed} suppressed.`,
+  /** The totals in words, with what they count: the Security page's sentence. */
+  totals: FINDING_COUNT_TEXT.totals,
+  /** How many stored reports are themselves fresh at HEAD, apart from the counts. */
+  reportsFresh: (fresh: number, stored: number) =>
+    `${fresh} of ${stored} ${plural(stored, "report", "reports")} fresh at HEAD.`,
+  /** What the OWASP counts rest on: a category counts only from a fresh report. */
+  owaspBasis: (fresh: number, stored: number) =>
+    `Category counts come from fresh reports only: ${fresh} of ${stored} ${plural(stored, "report", "reports")} fresh at HEAD.`,
+  /** What the totals leave out, and why: the Security page's sentence. */
+  excluded: FINDING_COUNT_TEXT.excluded,
   /** Members that could not be opened or read. */
   unread: (n: number) =>
     `${n} ${plural(n, "member", "members")} could not be read, so every total here is over fewer than all members:`,
   /** A figure cell of a member never scanned. */
   neverRun: "never run",
-  /** A figure cell of a member whose stored reports are all stale. */
-  stale: "no fresh scan",
   /** A cell of a member that could not be read. */
   notRead: "not read",
   /** The scanners column: fresh of enabled. */
@@ -60,7 +63,7 @@ export const WORKSPACE_SECURITY_TEXT = {
 export const WORKSPACE_SECURITY_ABSENCE = {
   /** No member could be read at all. */
   noneRead: "No member could be read, so nothing is summed; open a member's Security page to see why it does not answer.",
-  /** Members read, and none has a fresh scan: nothing current to count. */
-  noneFresh:
-    "No member has a fresh scan, so there is nothing current to count — never run is not zero; run logos security scan in a member to fill this in.",
+  /** Members read, and none has a stored report: nothing to count from. */
+  noneScanned:
+    "No member has a stored scan, so there is nothing to count — never run is not zero; run logos security scan in a member to fill this in.",
 } as const;

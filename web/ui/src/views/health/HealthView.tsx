@@ -43,6 +43,7 @@ import type {
   HealthModel,
   Offender,
   ScanResult,
+  SignalAttribution,
   WhereToStart,
 } from "../../api/types.ts";
 import {
@@ -69,12 +70,20 @@ import {
   READING_ABSENCE,
   THRESHOLDS_DISCLOSURE,
   gate as gateCopy,
+  gateBaselineReason,
   gateFigureText,
   gateLowest,
   GATE_NOT_COMPARED,
+  moreDrivers,
+  nearCloneGroupDriver,
   offenderBadge,
   qualitySignal as qualitySignalCopy,
   scopeLine,
+  signalChange as signalChangeCopy,
+  signalChangeDriversNotNamed,
+  signalChangeFigure,
+  signalChangeNotAttributed,
+  SIGNAL_CHANGE_CAPTION,
   signalFigure,
   signalTrend as signalTrendCopy,
   staleNote,
@@ -88,6 +97,7 @@ import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
   aggregateSignal,
   applicableCount,
+  changeRows,
   dimensionDetails,
   gateFigure,
   isInformationalPass,
@@ -98,9 +108,11 @@ import {
   passFloor,
   shortSha,
   signalAbsence,
+  signedPoints,
   snapshotStaleness,
   unitLocation,
   whereToStart,
+  type ChangeRow,
   type DimensionDetail,
   type MetricRow,
   type SignalAbsence,
@@ -140,6 +152,9 @@ function Health({ data }: { data: HealthModel }) {
   return (
     <WidgetStack>
       <GateWidget gate={data.gate} absence={absence} currency={currency} lowest={lowest} />
+      {data.gate.attribution !== undefined && (
+        <SignalChangeWidget attribution={data.gate.attribution} currency={currency} />
+      )}
       <QualitySignalWidget scan={data.scan} absence={absence} currency={currency} />
       {!data.scan.metrics.empty && (
         <WhereToStartWidget ranking={data.scan.where_to_start} currency={currency} />
@@ -167,6 +182,7 @@ function ReadingFigure({
   currency,
   note,
   fact,
+  reason,
 }: {
   figure: ReactNode;
   currency: SnapshotCurrency | null;
@@ -175,12 +191,19 @@ function ReadingFigure({
   note?: string;
   /** A fact about the reading (a current FAIL's lowest-scoring dimension). */
   fact?: string;
+  /** The reason the Gate's baseline was saved with (FR-GV-16). */
+  reason?: string;
 }) {
   return (
     <div className={styles.figureLines}>
       <span>{figure}</span>
       {note !== undefined && <FigureNote block>{note}</FigureNote>}
       {fact !== undefined && <FigureNote block>{fact}</FigureNote>}
+      {reason !== undefined && (
+        <FigureNote block>
+          <CopyTextView text={gateBaselineReason(reason)} />
+        </FigureNote>
+      )}
       {currency !== null && <FigureNote block>{staleNote(currency)}</FigureNote>}
     </div>
   );
@@ -258,8 +281,98 @@ function GateWidget({
           currency={currency}
           note={informational && gate.baseline_signal !== null ? GATE_NOT_COMPARED : undefined}
           fact={!gate.passed && currency === null && lowest !== null ? gateLowest(lowest.name) : undefined}
+          reason={gate.baseline_reason}
         />
       }
+    />
+  );
+}
+
+/** The Signal change widget (FR-GV-26, S-755): under a `rules.toml [review]`
+ *  table, the gate's change from its baseline split per dimension in log space,
+ *  each share with the symbols or near-clone groups behind it — the same
+ *  attribution `logos gate --json` and the MCP `session_end` carry. The figure
+ *  states what the shares sum to, and what rounding and the residual leave. */
+function SignalChangeWidget({
+  attribution,
+  currency,
+}: {
+  attribution: SignalAttribution;
+  currency: SnapshotCurrency | null;
+}) {
+  const stale = currency !== null && <FigureNote block>{DIMENSION_NOT_CURRENT}</FigureNote>;
+  const figure = (
+    <div className={styles.figureLines}>
+      {attribution.exact_change !== null && (
+        <span className="mono">
+          <CopyTextView
+            text={signalChangeFigure({
+              change: signedPoints(attribution.change),
+              exact: signedPoints(attribution.exact_change),
+              rounding: signedPoints(attribution.rounding),
+              residual: signedPoints(attribution.residual),
+            })}
+          />
+        </span>
+      )}
+      {attribution.not_attributable_because !== undefined && (
+        <FigureNote block>{signalChangeNotAttributed(attribution.not_attributable_because)}</FigureNote>
+      )}
+      {attribution.drivers_not_named_because !== undefined && (
+        <FigureNote block>{signalChangeDriversNotNamed(attribution.drivers_not_named_because)}</FigureNote>
+      )}
+      {stale}
+    </div>
+  );
+  const rows = changeRows(attribution);
+  return (
+    <Widget title="Signal change" copy={signalChangeCopy} figure={figure}>
+      {rows.length > 0 && <SignalChangeTable rows={rows} />}
+    </Widget>
+  );
+}
+
+/** The dimensions that moved, in the attribution's own order. */
+function SignalChangeTable({ rows }: { rows: ChangeRow[] }) {
+  const columns: Column<ChangeRow>[] = [
+    { key: "dimension", header: "Dimension", cell: (r) => r.dimension, sortValue: (r) => r.dimension },
+    {
+      key: "points",
+      header: "Points",
+      numeric: true,
+      mono: true,
+      cell: (r) => signedPoints(r.points),
+      sortValue: (r) => r.points,
+    },
+    {
+      key: "drivers",
+      header: "Driven by",
+      cell: (r) => (
+        <span>
+          {r.drivers.map((d) => (
+            <span key={`${d.name}:${d.location}`} data-driver-status={d.status}>
+              {d.members === null ? (
+                <span className="mono">{d.name}</span>
+              ) : (
+                <CopyTextView text={nearCloneGroupDriver(d.members)} />
+              )}
+              <FigureNote block>{[d.status, d.location].filter((part) => part !== "").join(" · ")}</FigureNote>
+            </span>
+          ))}
+          {r.more > 0 && <FigureNote block>{moreDrivers(r.more)}</FigureNote>}
+        </span>
+      ),
+      sortValue: (r) => r.drivers.length + r.more,
+    },
+  ];
+  return (
+    <DataTable
+      columns={columns}
+      rows={rows}
+      rowKey={(r) => r.dimension}
+      caption={SIGNAL_CHANGE_CAPTION}
+      captionVisible
+      pageSize={DEFAULT_TABLE_PAGE_SIZE}
     />
   );
 }

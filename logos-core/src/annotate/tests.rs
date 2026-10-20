@@ -338,6 +338,7 @@ fn layered_rules() -> Rules {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     }
 }
 
@@ -359,6 +360,7 @@ fn forbidden_import_rules() -> Rules {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     }
 }
 

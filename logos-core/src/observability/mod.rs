@@ -408,6 +408,17 @@ fn ambient_surface() -> Option<Surface> {
     SURFACE_OVERRIDE.with(|s| s.get())
 }
 
+/// The process surface [`init`] was called with; unset in a process that
+/// never called it (an embedder, a test).
+static PROCESS_SURFACE: std::sync::OnceLock<Surface> = std::sync::OnceLock::new();
+
+/// The surface the calling thread answers for: its [`in_surface`] override,
+/// else the process surface [`init`] recorded, else `None`. What a held
+/// project lock names its holder by (S-758, [`crate::jobs::lock`]).
+pub fn surface_here() -> Option<Surface> {
+    ambient_surface().or_else(|| PROCESS_SURFACE.get().copied())
+}
+
 /// The surface override in force on the calling thread, if any — the
 /// introspection half of [`in_surface`].
 ///
@@ -596,6 +607,7 @@ fn generate_session_id() -> String {
 /// [ADR-50]: ../../../docs/specs/architecture/decisions/ADR-50.md
 /// [FR-OB-07]: ../../../docs/specs/requirements/FR-OB-07.md
 pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
+    let _ = PROCESS_SURFACE.set(surface.into());
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     // Human logs: stderr, never stdout (NFR-RA-01) — a stray stdout byte
     // corrupts the MCP JSON-RPC stream (RK-02).

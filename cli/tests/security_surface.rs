@@ -16,6 +16,7 @@
 
 #![cfg(unix)]
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -126,9 +127,15 @@ impl World {
     }
 
     fn logos(&self, args: &[&str]) -> Output {
+        self.logos_in(&self.root, args)
+    }
+
+    /// [`World::logos`] on the project at `root` — a clone of the fixture —
+    /// with the same user-level directories and scanners.
+    fn logos_in(&self, root: &Path, args: &[&str]) -> Output {
         let out = Command::new(env!("CARGO_BIN_EXE_logos"))
             .arg("--project")
-            .arg(&self.root)
+            .arg(root)
             .args(args)
             .env("PATH", &self.path)
             .env("LOGOS_CONFIG_HOME", &self.user)
@@ -201,7 +208,13 @@ fn the_security_commands_scan_with_consent_and_report_every_state() {
     let failed = row(&scan, "gitleaks");
     assert_eq!((failed["outcome"].as_str(), failed["exit_code"].as_i64()), (Some("failed"), Some(3)));
     assert!(failed["stderr"].as_str().unwrap().contains("fatal: token="), "{failed}");
+    // S-769: the cause, in one masked line of its log.
+    assert_eq!(failed["cause"], "fatal: token=[masked]", "{failed}");
     assert_eq!((row(&scan, "semgrep")["outcome"].as_str(), scan["findings"].as_u64()), (Some("ran"), Some(2)));
+    // FR-SC-26: each run states its coverage of the ignored directories — the
+    // project ignores none — and a scanner that did not run states none.
+    assert_eq!((row(&scan, "semgrep")["ignored_paths"].as_str(), row(&scan, "gitleaks")["ignored_paths"].as_str()), (Some("excluded"), Some("excluded")));
+    assert!(row(&scan, "trivy").get("ignored_paths").is_none());
 
     // Consent is not asked again; a newly installed scanner is asked for alone.
     assert_eq!(w.json(&["security", "scan"])["consent_recorded"], serde_json::json!([]));
@@ -216,6 +229,8 @@ fn the_security_commands_scan_with_consent_and_report_every_state() {
     assert_eq!((row(&after, "bandit")["state"].as_str(), row(&after, "bandit")["findings"].as_u64()), (Some("fresh"), Some(0)));
     assert_eq!(row(&after, "semgrep")["findings"], 2);
     assert_eq!(row(&after, "gitleaks")["last_failure"], ".logos/security/gitleaks.failed.log");
+    assert_eq!(row(&after, "gitleaks")["last_failure_cause"], "fatal: token=[masked]");
+    assert_eq!(row(&after, "semgrep")["ignored_paths"], "excluded");
 
     let findings = w.json(&["security", "findings", "--scanner", "semgrep", "--path", "app"]);
     assert_eq!(findings["findings"].as_array().unwrap().len(), 2);
@@ -371,8 +386,16 @@ fn a_security_table_gates_new_findings_and_exits_5_on_a_missing_scan() {
     assert_eq!(code, Some(1), "no baseline yet: the existing high finding is new: {unsaved}");
     assert!(unsaved["notes"].to_string().contains("no security baseline is recorded"), "the refused save recorded none: {unsaved}");
     assert_eq!(unsaved["checked_rules"], 2, "max_cc and the ratchet: {unsaved}");
-    // `session-start` is the MCP spelling of `gate --save`: it records it too.
-    let (code, saved) = w.verdict(&["session-start"]);
+    // The refused save recorded the metric baseline but no ratchet. Each
+    // baseline is decided on its own (S-763, sprint 107 review D2):
+    // `session-start` keeps the one and records the missing other, before the
+    // edits, so the findings already there are the session's starting point.
+    let (code, started) = w.verdict(&["session-start"]);
+    assert_eq!(code, Some(0), "{started}");
+    let message = started["message"].as_str().unwrap();
+    assert!(message.contains("baseline kept (snapshot #") && message.contains("security baseline saved (2 finding fingerprints)"), "{started}");
+    assert_eq!(w.verdict(&["check"]).0, Some(0), "the findings before the edits are the baseline");
+    let (code, saved) = w.verdict(&["gate", "--save"]);
     assert_eq!(code, Some(0), "{saved}");
     assert!(saved["message"].as_str().unwrap().contains("security baseline saved (2 finding fingerprints)"), "{saved}");
     for command in ["check", "gate", "session-end"] {
@@ -478,6 +501,131 @@ fn a_security_table_gates_new_findings_and_exits_5_on_a_missing_scan() {
     // No contract at all outranks everything: exit 4.
     w.rules(None);
     assert_eq!(w.logos(&["check"]).status.code(), Some(4));
+}
+
+/// [CR-238] / S-763: `session-start` on a first run records both baselines as
+/// before; with a security ratchet baseline present it leaves it unchanged —
+/// header and fingerprints — so a finding introduced since is still new, and
+/// it decides the gate baseline on its own (sprint 107 review D2).
+///
+/// [CR-238]: ../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+#[test]
+fn session_start_leaves_an_existing_security_baseline_unchanged() {
+    let w = World::new();
+    w.rules(Some("[constraints]\nmax_cc = 50\n\n[security]\nrequired_scanners = [\"semgrep\"]\n"));
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+    w.ingest(&semgrep);
+    /// The ratchet's baseline header rows and its fingerprints.
+    type Ratchet = (Vec<(Option<String>, String, i64)>, Vec<(String, String)>);
+    let ratchet = || -> Ratchet {
+        let db = rusqlite::Connection::open(w.root.join(".logos/history.db")).unwrap();
+        let header = db
+            .prepare("SELECT head_sha, config_hash, created_at FROM security_baseline")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let fingerprints = db
+            .prepare("SELECT fingerprint, scanner_name FROM security_baseline_findings ORDER BY fingerprint")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        (header, fingerprints)
+    };
+
+    // First run: no baseline of either kind, so the session records both.
+    let (code, first) = w.verdict(&["session-start"]);
+    assert_eq!(code, Some(0), "{first}");
+    let message = first["message"].as_str().unwrap();
+    assert!(message.contains("baseline saved") && message.contains("security baseline saved (2 finding fingerprints)"), "{first}");
+    // Backdated, so a rewrite within the same second still shows.
+    rusqlite::Connection::open(w.root.join(".logos/history.db"))
+        .unwrap()
+        .execute("UPDATE security_baseline SET created_at = 1", [])
+        .unwrap();
+    let blessed = ratchet();
+    assert_eq!((blessed.0.len(), blessed.1.len()), (1, 2), "{blessed:?}");
+
+    // A new high finding, then a session: the ratchet's baseline is unchanged
+    // and the finding is still new.
+    w.ingest(&w.semgrep_with_a_new_high_finding());
+    let (code, started) = w.verdict(&["session-start"]);
+    assert_eq!(code, Some(0), "{started}");
+    assert!(started["message"].as_str().unwrap().contains("security baseline kept"), "{started}");
+    assert_eq!(ratchet(), blessed, "the session moved the ratchet's baseline");
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "{check}");
+    assert!(check["violations"].to_string().contains(NEW_RULE), "{check}");
+
+    // Each baseline is decided on its own (sprint 107 review D2): with no gate
+    // baseline the session saves one, whatever the ratchet's source, and still
+    // leaves the ratchet's untouched — so the new finding stays new.
+    let logos_db = || rusqlite::Connection::open(w.root.join(".logos/logos.db")).unwrap();
+    logos_db().execute("DELETE FROM baseline", []).unwrap();
+    let (code, started) = w.verdict(&["session-start"]);
+    assert_eq!(code, Some(0), "{started}");
+    let message = started["message"].as_str().unwrap();
+    assert!(message.contains("— baseline saved (snapshot #") && message.contains("security baseline kept"), "{started}");
+    let gate_baselines: i64 = logos_db().query_row("SELECT COUNT(*) FROM baseline", [], |r| r.get(0)).unwrap();
+    assert_eq!(gate_baselines, 1, "{started}");
+    assert_eq!(ratchet(), blessed, "{started}");
+    let (_, ended) = w.verdict(&["session-end"]);
+    assert!(ended["message"].as_str().unwrap().contains("holds the baseline"), "session_end compares: {ended}");
+}
+
+/// A path entry holds out an advisory osv-scanner reported against the
+/// lockfile by its absolute path: every surface labels from the project's own
+/// root, which is what makes that path `Cargo.lock`, so the entry holds in any
+/// checkout where a fingerprint taken from it would not (S-770).
+#[test]
+fn a_path_entry_holds_an_absolute_lockfile_finding_out_of_every_surface() {
+    let w = World::new();
+    fs::write(w.root.join("Cargo.lock"), "# lockfile\n").unwrap();
+    let report = w.root.parent().unwrap().join("osv.sarif");
+    let result = |rule: &str| {
+        serde_json::json!({
+            "ruleId": rule,
+            "level": "error",
+            "message": {"text": format!("Package 'rmcp@1.7.0' is vulnerable to '{rule}'.")},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/Cargo.lock", w.root.display())}}}]
+        })
+    };
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
+        "results": [result("CVE-2026-63127"), result("CVE-2026-99999")]
+    }]});
+    fs::write(&report, sarif.to_string()).unwrap();
+    w.ingest(&report);
+    w.rules(Some("[security]\nmax_severity = \"info\"\n"));
+    // The advisories each violation names: the cap and the ratchet both fail.
+    let named = |verdict: &Value| -> BTreeSet<String> {
+        let messages = verdict["violations"].as_array().unwrap().iter().filter_map(|v| v["message"].as_str());
+        messages.flat_map(|m| ["CVE-2026-63127", "CVE-2026-99999"].into_iter().filter(|a| m.contains(a)).map(str::to_string)).collect()
+    };
+    let (code, before) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "{before}");
+    assert_eq!(named(&before), BTreeSet::from(["CVE-2026-63127".to_string(), "CVE-2026-99999".to_string()]), "{before}");
+
+    fs::write(
+        w.root.join(".logos/security-ignore.toml"),
+        "[[ignore]]\npath = \"Cargo.lock\"\nrule = \"CVE-2026-63127\"\nreason = \"code never compiled\"\n",
+    )
+    .unwrap();
+    let (code, after) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "the other advisory still fails: {after}");
+    assert_eq!(named(&after), BTreeSet::from(["CVE-2026-99999".to_string()]), "{after}");
+
+    let findings = w.json(&["security", "findings"]);
+    let held = findings["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "CVE-2026-63127").unwrap();
+    assert!(held["report_path"].as_str().unwrap().starts_with('/'), "the report named it absolutely: {held}");
+    assert_eq!(held["suppression"]["state"], "suppressed", "{held}");
+    assert_eq!(held["suppression"]["by"], serde_json::json!({"path": "Cargo.lock", "rule": "CVE-2026-63127"}));
+    let status = w.json(&["security", "status"]);
+    assert_eq!(status["suppressions"][0]["suppressed"], 1, "{status}");
+    assert_eq!(status["suppressions"][0]["orphaned"], false, "{status}");
 }
 
 /// `security install|uninstall|scan --install` through the binary (S-744,
@@ -646,21 +794,34 @@ fn a_scan_narrowed_by_scanner_and_path_runs_only_there_and_refuses_an_outside_pa
     assert_eq!(conflict.status.code(), Some(2), "--install takes no --path");
 }
 
-/// A Gitleaks report from a scoped (`--no-git`) run: one result per
-/// `(line, start column, end column)` in `app/settings.py`, with no commit
-/// fingerprint — content mode carries none.
-fn gitleaks_content_report(dir: &Path, name: &str, secrets: &[(i64, i64, i64)]) -> PathBuf {
-    let results: Vec<Value> = secrets
+/// A Gitleaks 8.18.4 report on `app/settings.py`, one result per
+/// `(commit, line, start column, end column)` in `app/settings.py`: a
+/// history-mode result names its commit, a scoped (`--no-git`) one names none,
+/// and history-mode results are dated a day apart in the order given, oldest
+/// first. Written as Gitleaks writes it with `--redact`: the snippet holds no
+/// secret.
+fn gitleaks_report(dir: &Path, name: &str, results: &[(Option<&str>, i64, i64, i64)]) -> PathBuf {
+    let results: Vec<_> = results.iter().map(|&(commit, line, start, end)| (commit, "app/settings.py", line, start, end)).collect();
+    gitleaks_report_in(dir, name, &results)
+}
+
+/// [`gitleaks_report`] over results in any file: `(commit, path, line, start
+/// column, end column)`.
+fn gitleaks_report_in(dir: &Path, name: &str, results: &[(Option<&str>, &str, i64, i64, i64)]) -> PathBuf {
+    let results: Vec<Value> = results
         .iter()
-        .map(|&(line, start, end)| {
+        .enumerate()
+        .map(|(day, &(commit, uri, line, start, end))| {
+            let (sha, date) = commit.map_or((String::new(), String::new()), |sha| (sha.to_string(), format!("2026-10-{:02}T09:00:00Z", day + 1)));
             serde_json::json!({
                 "ruleId": "generic-api-key",
-                "message": { "text": "generic-api-key has detected secret for file app/settings.py." },
+                "message": { "text": format!("generic-api-key has detected secret for file {uri}.") },
                 "locations": [{ "physicalLocation": {
-                    "artifactLocation": { "uri": "app/settings.py" },
-                    "region": { "startLine": line, "startColumn": start, "endLine": line, "endColumn": end }
+                    "artifactLocation": { "uri": uri },
+                    "region": { "startLine": line, "startColumn": start, "endLine": line, "endColumn": end,
+                                "snippet": { "text": "REDACTED" } }
                 } }],
-                "partialFingerprints": { "commitSha": "", "email": "", "author": "", "date": "", "commitMessage": "" }
+                "partialFingerprints": { "commitSha": sha, "email": "", "author": "", "date": date, "commitMessage": "" }
             })
         })
         .collect();
@@ -673,44 +834,62 @@ fn gitleaks_content_report(dir: &Path, name: &str, secrets: &[(i64, i64, i64)]) 
     path
 }
 
-/// The coordinator's S-685 decision, through the binary and the `[security]`
-/// gate: a scoped Gitleaks run reads the file (`--no-git`) while the full scan
-/// read its git history, so
-/// - an already-recorded secret re-scanned scoped keeps its fingerprint — it is
-///   not new, and `check` still passes;
+/// The commit `rev` names in `root`.
+fn rev(root: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .current_dir(root)
+        .env("GIT_CEILING_DIRECTORIES", root.parent().unwrap())
+        .args(["rev-parse", rev])
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git rev-parse {rev}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// One Gitleaks identity across scan modes and commits ([S-765]), through the
+/// binary and the `[security]` gate. The full scan read the secret in the two
+/// commits that wrote its line — at columns `2..42` and `1..41`, as Gitleaks
+/// 8.18.4 reports a line that is or is not the first it matched — and lists it
+/// once with both commits; a scoped run reads the file (`--no-git`), so
+/// - the recorded secret re-scanned scoped keeps its fingerprint — it is not
+///   new, and `check` still passes;
 /// - a newly added secret is new, and `check` fails on it alone;
 /// - a secret removed from the file stays listed: it is still in history.
+///
+/// [S-765]: ../../docs/planning/journal.md#s-765-a-gitleaks-finding-keeps-one-identity-across-scan-modes-and-commits
 #[test]
 fn a_scoped_gitleaks_run_keeps_recorded_secrets_known_and_history_findings_listed() {
     let w = World::new();
-    fs::write(w.root.join("app/settings.py"), "DEBUG = False\nAPI_TIMEOUT = 30\n\nAPI_KEY = 'redacted-for-the-fixture'\n").unwrap();
-    git(&w.root, &["add", "."]);
+    let key = "API_KEY = \"lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw\"";
+    fs::write(w.root.join("app/settings.py"), format!("DEBUG = False\nAPI_TIMEOUT = 30\n\n{key}\n")).unwrap();
+    git(&w.root, &["add", "app/settings.py"]);
     git(&w.root, &["commit", "-q", "-m", "settings"]);
+    fs::write(w.root.join("app/settings.py"), format!("DEBUG = False\nAPI_TIMEOUT = 30\n\n{key}  # rotate me\n")).unwrap();
+    git(&w.root, &["commit", "-q", "-am", "note the rotation"]);
+    let (first, second) = (rev(&w.root, "HEAD~1"), rev(&w.root, "HEAD"));
     w.rules(Some("[security]\nratchet_min_severity = \"medium\"\n"));
-    // The full scan: the fixture's two history findings of one secret at
-    // app/settings.py 4:14-45, one per commit that touched it.
-    let full = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/gitleaks.sarif");
-    w.ingest(&full);
+    let dir = w.root.parent().unwrap();
+    w.ingest(&gitleaks_report(dir, "history.sarif", &[(Some(&first), 4, 2, 42), (Some(&second), 4, 1, 41)]));
+    let listed = |w: &World| -> Vec<Value> {
+        w.json(&["security", "findings", "--scanner", "gitleaks"])["findings"].as_array().unwrap().clone()
+    };
     let fingerprints = |w: &World| -> Vec<String> {
-        let mut prints: Vec<String> = w.json(&["security", "findings", "--scanner", "gitleaks"])["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| f["fingerprint"].as_str().unwrap().to_string())
-            .collect();
+        let mut prints: Vec<String> = listed(w).iter().map(|f| f["fingerprint"].as_str().unwrap().to_string()).collect();
         prints.sort();
         prints
     };
+    let recorded = listed(&w);
+    assert_eq!(recorded.len(), 1, "one secret, one finding: {recorded:?}");
+    assert_eq!(recorded[0]["commits"], serde_json::json!([second, first]), "its commits, newest first");
     let recorded = fingerprints(&w);
-    assert_eq!(recorded.len(), 2, "{recorded:?}");
     let (code, saved) = w.verdict(&["gate", "--save"]);
     assert_eq!(code, Some(0), "{saved}");
     let (code, before) = w.verdict(&["check"]);
     assert_eq!(code, Some(0), "{before}");
 
     let scoped = ["security", "scan", "--consent", "--scanner", "gitleaks", "--path", "app/settings.py"];
-    // The recorded secret, re-scanned in content mode at the same position.
-    w.stub("gitleaks", Some(&gitleaks_content_report(w.root.parent().unwrap(), "same.sarif", &[(4, 14, 45)])), 0, "");
+    // The recorded secret, re-scanned in content mode.
+    w.stub("gitleaks", Some(&gitleaks_report(dir, "same.sarif", &[(None, 4, 2, 42)])), 0, "");
     assert_eq!(row(&w.json(&scoped), "gitleaks")["outcome"], "ran");
     assert_eq!(fingerprints(&w), recorded, "the recorded secret keeps its fingerprint; no copy is added");
     let (code, after) = w.verdict(&["check"]);
@@ -718,22 +897,402 @@ fn a_scoped_gitleaks_run_keeps_recorded_secrets_known_and_history_findings_liste
     assert_eq!(after["violations"], before["violations"], "the gate verdict is unchanged");
 
     // A newly added secret on line 6: new, and the only violation.
-    w.stub("gitleaks", Some(&gitleaks_content_report(w.root.parent().unwrap(), "added.sarif", &[(4, 14, 45), (6, 10, 40)])), 0, "");
+    let added = format!("DEBUG = False\nAPI_TIMEOUT = 30\n\n{key}  # rotate me\n\nTOKEN = \"lgs_s3cond_W4xT9mQ2pR7vK5\"\n");
+    fs::write(w.root.join("app/settings.py"), added).unwrap();
+    w.stub("gitleaks", Some(&gitleaks_report(dir, "added.sarif", &[(None, 4, 2, 42), (None, 6, 2, 36)])), 0, "");
     w.json(&scoped);
     let (code, check) = w.verdict(&["check"]);
     assert_eq!(code, Some(1), "{check}");
     let ratchet: Vec<&Value> = check["violations"].as_array().unwrap().iter().filter(|v| v["rule"] == "security:ratchet").collect();
     assert_eq!(ratchet.len(), 1, "only the added secret is new: {check}");
-    assert_eq!(fingerprints(&w).len(), 3);
+    assert_eq!(fingerprints(&w).len(), 2);
 
     // Both secrets removed from the file: the added one is gone, the recorded
     // one is still in history and still listed.
     fs::write(w.root.join("app/settings.py"), "DEBUG = False\n").unwrap();
-    w.stub("gitleaks", Some(&gitleaks_content_report(w.root.parent().unwrap(), "removed.sarif", &[])), 0, "");
+    w.stub("gitleaks", Some(&gitleaks_report(dir, "removed.sarif", &[])), 0, "");
     w.json(&scoped);
     assert_eq!(fingerprints(&w), recorded, "a secret removed from the file stays: it is still in history");
     let (code, cleared) = w.verdict(&["check"]);
     assert_eq!(code, Some(0), "{cleared}");
+}
+
+/// A secret found only in history is anchored to its commit ([S-767]),
+/// through the binary and the `[security]` gate. Three secrets are committed in
+/// one commit, each on its function's second line; the next commit deletes one
+/// file and puts other code on another's line. History mode reports all three
+/// at the first commit, one column late as Gitleaks 8.18.4 reads a line that
+/// is not its hunk's first.
+/// - the secret still on its line is bound to it, with today's enclosing
+///   symbol;
+/// - the one in the deleted file and the one whose line holds other code are
+///   `historical`, with the short commit, no symbol and no blast radius;
+/// - both still count: each is a new finding to the ratchet, and a cap fails
+///   on each, until `gate --save` records them.
+///
+/// [S-767]: ../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
+#[test]
+fn a_secret_found_only_in_history_is_anchored_to_its_commit_and_still_counts() {
+    let w = World::new();
+    let files = [
+        ("app/settings.py", "def load():\n    API_KEY = \"lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw\"\n    return API_KEY\n"),
+        ("app/legacy.py", "def old():\n    API_KEY = \"lgs_l3gacy_R8wY2pQ5nM4kT7\"\n    return API_KEY\n"),
+        ("app/keys.py", "def keys():\n    API_KEY = \"lgs_r0tated_X3mK8pQ1wZ6vB4\"\n    return API_KEY\n"),
+    ];
+    for (path, body) in files {
+        fs::write(w.root.join(path), body).unwrap();
+    }
+    git(&w.root, &["add", "app"]);
+    git(&w.root, &["commit", "-q", "-m", "keys"]);
+    let added = rev(&w.root, "HEAD");
+    fs::remove_file(w.root.join("app/legacy.py")).unwrap();
+    fs::write(w.root.join("app/keys.py"), "def keys():\n    API_KEY = load_from_vault()\n    return API_KEY\n").unwrap();
+    git(&w.root, &["commit", "-q", "-am", "move the keys out"]);
+    assert!(w.logos(&["index"]).status.success());
+    w.rules(Some("[security]\nratchet_min_severity = \"medium\"\n"));
+    let (code, saved) = w.verdict(&["gate", "--save"]);
+    assert_eq!(code, Some(0), "the baseline holds the semgrep findings alone: {saved}");
+
+    // Each match is `API_KEY = "…"` from byte 5 of line 2, read one column late
+    // (`6..5+len`): the exact text of each, so every one is read from its commit.
+    let dir = w.root.parent().unwrap();
+    let results: Vec<_> = files
+        .iter()
+        .map(|&(path, body)| {
+            let line = body.lines().nth(1).unwrap().trim_start();
+            (Some(added.as_str()), path, 2, 6, 5 + line.len() as i64)
+        })
+        .collect();
+    w.ingest(&gitleaks_report_in(dir, "history.sarif", &results));
+    let listed = w.json(&["security", "findings", "--scanner", "gitleaks"]);
+    let short = &added[..7];
+    let at = |path: &str| -> Value {
+        let found: Vec<&Value> =
+            listed["findings"].as_array().unwrap().iter().filter(|f| f["report_path"] == path).collect();
+        assert_eq!(found.len(), 1, "{path}: {listed}");
+        found[0].clone()
+    };
+    let bound = at("app/settings.py");
+    assert_eq!((bound["binding"].as_str(), bound["path"].as_str()), (Some("bound"), Some("app/settings.py")));
+    assert_eq!(bound["context"]["enclosing"]["symbol"]["name"], "load", "today's enclosing symbol");
+    assert_eq!(bound["anchor"]["short_commit"], short);
+    for path in ["app/legacy.py", "app/keys.py"] {
+        let historical = at(path);
+        assert_eq!(historical["binding"], "historical", "{path}: {historical}");
+        assert_eq!(historical["path"], Value::Null, "{path}: no file of today's tree");
+        assert_eq!(historical["anchor"], serde_json::json!({ "commit": added, "short_commit": short, "path": path }));
+        let context = &historical["context"];
+        assert_eq!(context["enclosing"]["symbol"], Value::Null, "{path}: no enclosing symbol");
+        assert_eq!(context["enclosing"]["unbound_because"], "historical");
+        assert_eq!(context["blast_radius"], serde_json::json!({ "confidence": "unbound" }), "{path}: no blast radius");
+    }
+
+    // Both historical findings count: new to the ratchet, and over a cap.
+    let ratchet = |check: &Value| -> usize {
+        check["violations"].as_array().unwrap().iter().filter(|v| v["rule"] == "security:ratchet").count()
+    };
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!((code, ratchet(&check)), (Some(1), 3), "all three secrets are new: {check}");
+    let (code, saved) = w.verdict(&["gate", "--save"]);
+    assert_eq!(code, Some(0), "{saved}");
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!((code, ratchet(&check)), (Some(0), 0), "recorded, so no longer new: {check}");
+    w.rules(Some("[security]\nratchet_min_severity = \"medium\"\nmax_severity = \"medium\"\n"));
+    let (code, check) = w.verdict(&["check"]);
+    let capped: Vec<&str> = check["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["rule"] == "security:max_severity")
+        .filter_map(|v| v["file"].as_str())
+        .collect();
+    assert_eq!((code, ratchet(&check)), (Some(1), 0), "a cap fails on recorded findings too: {check}");
+    for path in ["app/settings.py", "app/legacy.py", "app/keys.py"] {
+        assert!(capped.contains(&path), "the cap counts {path}: {check}");
+    }
+    // Each violation names its place as history, with its short commit, never
+    // as today's code.
+    let message = |path: &str| -> String {
+        let found = check["violations"].as_array().unwrap().iter().find(|v| v["rule"] == "security:max_severity" && v["file"] == path);
+        found.unwrap()["message"].as_str().unwrap().to_string()
+    };
+    for path in ["app/legacy.py", "app/keys.py"] {
+        assert!(message(path).contains(&format!("at {path}:2 (historical, commit {short})")), "{}", message(path));
+    }
+    assert!(!message("app/settings.py").contains("historical"), "{}", message("app/settings.py"));
+}
+
+/// `logos --json <args>` on the project at `root`: the exit code and stdout.
+fn verdict_in(w: &World, root: &Path, args: &[&str]) -> (Option<i32>, Value) {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let out = w.logos_in(root, &all);
+    let json = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("logos {args:?}: {e}: {}", String::from_utf8_lossy(&out.stderr)));
+    (out.status.code(), json)
+}
+
+/// The ratchet's violations in a `check` verdict.
+fn ratchet_violations(check: &Value) -> Vec<&Value> {
+    check["violations"].as_array().unwrap().iter().filter(|v| v["rule"] == "security:ratchet").collect()
+}
+
+/// A CI clone with a checked-in security baseline reads only new findings as
+/// new ([FR-SC-25], [UAT-SC-09]). The fixture records a Semgrep scan (two
+/// findings) and a Gitleaks one (a secret), and `security bless` writes them
+/// to `.logos/security-baseline.json`:
+/// - the file holds fingerprint, rule id and project-relative path per
+///   finding and nothing else — no message, snippet, secret or checkout path;
+/// - blessing the same state again writes the same bytes;
+/// - `gate --save` records no `history.db` set beside it;
+/// - a fresh `git clone` (no `history.db`) scanned with the same stubs reads no
+///   blessed finding as new, its first `session_start` keeps the file as the
+///   baseline and records none in `history.db`, and a third finding is the
+///   only new one, named against the file.
+///
+/// The secret's fingerprint is keyed by the repository's first commit
+/// (S-765, coordinator decision 7), which the clone shares.
+///
+/// [FR-SC-25]: ../../docs/specs/requirements/FR-SC-25.md
+/// [UAT-SC-09]: ../../docs/specs/requirements/UAT-SC-09.md
+#[test]
+fn a_fresh_clone_with_a_checked_in_security_baseline_reads_only_new_findings_as_new() {
+    let w = World::new();
+    let secret = "lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw";
+    fs::write(w.root.join("app/settings.py"), format!("DEBUG = False\nAPI_TIMEOUT = 30\n\nAPI_KEY = \"{secret}\"\n")).unwrap();
+    w.rules(Some("[security]\nratchet_min_severity = \"medium\"\n"));
+    git(&w.root, &["add", "app/settings.py", ".logos/rules.toml"]);
+    git(&w.root, &["commit", "-q", "-m", "settings"]);
+    let dir = w.root.parent().unwrap().to_path_buf();
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+    let gitleaks = gitleaks_report(&dir, "scoped.sarif", &[(None, 4, 2, 42)]);
+    let scan = |root: &Path| {
+        for report in [&semgrep, &gitleaks] {
+            let out = w.logos_in(root, &["security", "ingest", report.to_str().unwrap()]);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+    };
+    scan(&w.root);
+    let (code, unblessed) = w.verdict(&["check"]);
+    assert_eq!((code, ratchet_violations(&unblessed).len()), (Some(1), 3), "nothing is blessed yet: {unblessed}");
+
+    // UAT-SC-09 step 1: bless.
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!(code, Some(0), "{blessed}");
+    assert_eq!((&blessed["recorded"], &blessed["changed"], &blessed["findings"]), (&Value::Bool(true), &Value::Bool(true), &serde_json::json!(3)), "{blessed}");
+    let file = w.root.join(".logos/security-baseline.json");
+    let bytes = fs::read_to_string(&file).unwrap();
+    let doc: Value = serde_json::from_str(&bytes).unwrap();
+    let entries = doc["findings"].as_array().unwrap();
+    assert_eq!(entries.len(), 3, "{bytes}");
+    for entry in entries {
+        let keys: Vec<&str> = entry.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["fingerprint", "rule_id", "path"], "{bytes}");
+    }
+    let paths: BTreeSet<&str> = entries.iter().filter_map(|e| e["path"].as_str()).collect();
+    assert_eq!(paths, BTreeSet::from(["app/db.py", "app/settings.py"]), "{bytes}");
+    let root = w.root.display().to_string();
+    for absent in [secret, "REDACTED", "Detected possible formatted SQL", "has detected secret", "cursor.execute", root.as_str()] {
+        assert!(!bytes.contains(absent), "the file holds {absent:?}: {bytes}");
+    }
+    let (code, again) = w.verdict(&["security", "bless"]);
+    assert_eq!((code, &again["changed"]), (Some(0), &Value::Bool(false)), "{again}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), bytes, "a second bless of one state is byte-identical");
+
+    // With the file checked in, `gate --save` records no second baseline.
+    let (code, saved) = w.verdict(&["gate", "--save"]);
+    assert_eq!(code, Some(0), "{saved}");
+    assert!(saved["message"].as_str().unwrap().contains("security baseline not saved: the checked-in .logos/security-baseline.json"), "{saved}");
+    let recorded: i64 = rusqlite::Connection::open(w.root.join(".logos/history.db"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM security_baseline", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(recorded, 0, "{saved}");
+
+    // UAT-SC-09 step 2: a fresh clone carrying the file, scanned again.
+    git(&w.root, &["add", ".logos/security-baseline.json"]);
+    git(&w.root, &["commit", "-q", "-m", "bless the security baseline"]);
+    let clone = dir.join("clone");
+    git(&dir, &["clone", "-q", w.root.to_str().unwrap(), clone.to_str().unwrap()]);
+    assert!(!clone.join(".logos/history.db").exists(), "the clone starts with no history.db");
+    assert_eq!(fs::read_to_string(clone.join(".logos/security-baseline.json")).unwrap(), bytes);
+    assert!(w.logos_in(&clone, &["index"]).status.success());
+    scan(&clone);
+    let (code, check) = verdict_in(&w, &clone, &["check"]);
+    assert_eq!(code, Some(0), "no blessed finding reads as new in the clone: {check}");
+    assert!(ratchet_violations(&check).is_empty(), "{check}");
+    // The clone's first session saves its missing metric baseline, keeps the
+    // checked-in file — which it never writes — and records no history.db
+    // ratchet beside it.
+    let (code, started) = verdict_in(&w, &clone, &["session-start"]);
+    assert_eq!(code, Some(0), "{started}");
+    let message = started["message"].as_str().unwrap();
+    assert!(message.contains("— baseline saved (snapshot #"), "{started}");
+    assert!(message.contains("security baseline kept (3 finding fingerprints, checked in at .logos/security-baseline.json)"), "{started}");
+    let recorded: i64 = rusqlite::Connection::open(clone.join(".logos/history.db"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM security_baseline", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(recorded, 0, "the clone's first session records no history.db baseline: {started}");
+    let gate_baselines: i64 = rusqlite::Connection::open(clone.join(".logos/logos.db"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM baseline", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(gate_baselines, 1, "session_end has a metric baseline to compare against: {started}");
+    let (code, again) = verdict_in(&w, &clone, &["session-start"]);
+    assert_eq!(code, Some(0), "{again}");
+    let message = again["message"].as_str().unwrap();
+    assert!(message.contains("baseline kept (snapshot #"), "{again}");
+    assert!(message.contains("security baseline kept (3 finding fingerprints, checked in at .logos/security-baseline.json)"), "{again}");
+
+    // UAT-SC-09 step 3: a third finding is the only new one.
+    let out = w.logos_in(&clone, &["security", "ingest", w.semgrep_with_a_new_high_finding().to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (code, check) = verdict_in(&w, &clone, &["check"]);
+    assert_eq!(code, Some(1), "{check}");
+    let new = ratchet_violations(&check);
+    assert_eq!(new.len(), 1, "only the third finding is new: {check}");
+    let message = new[0]["message"].as_str().unwrap();
+    assert!(message.contains(NEW_RULE) && message.contains("not in the findings .logos/security-baseline.json records"), "{message}");
+}
+
+/// `security bless` under a `[security]` table whose required scan is missing
+/// writes nothing and exits 5, as `gate --save` records nothing then; a
+/// malformed checked-in file is refused by `check` (exit 2, naming it) and
+/// replaced by the next bless ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../docs/specs/requirements/FR-SC-25.md
+#[test]
+fn security_bless_refuses_over_a_missing_scan_and_replaces_a_malformed_file() {
+    let w = World::new();
+    w.rules(Some("[security]\nrequired_scanners = [\"semgrep\"]\n"));
+    let file = w.root.join(".logos/security-baseline.json");
+    let (code, refused) = w.verdict(&["security", "bless"]);
+    assert_eq!(code, Some(5), "{refused}");
+    assert_eq!(refused["recorded"], false, "{refused}");
+    assert_eq!(refused["missing_scans"][0]["scanner"], "semgrep", "{refused}");
+    assert!(!file.exists(), "nothing is written over a missing scan");
+
+    w.ingest(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif"));
+    fs::write(&file, "{\"version\":1,\"findings\":[],\"message\":\"x\"}\n").unwrap();
+    let out = w.logos(&["check"]);
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".logos/security-baseline.json"), "{}", String::from_utf8_lossy(&out.stderr));
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!((code, &blessed["findings"]), (Some(0), &serde_json::json!(2)), "{blessed}");
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!(code, Some(0), "{check}");
+
+    // HEAD moves, so the required scan is stale: `gate --save` beside the file
+    // exits 5 and still names the scanner it is missing.
+    git(&w.root, &["commit", "-q", "--allow-empty", "-m", "move HEAD"]);
+    let (code, saved) = w.verdict(&["gate", "--save"]);
+    assert_eq!(code, Some(5), "{saved}");
+    let message = saved["message"].as_str().unwrap();
+    assert!(
+        message.contains("the checked-in .logos/security-baseline.json") && message.contains("required scan missing or stale at HEAD: semgrep"),
+        "{saved}"
+    );
+}
+
+/// One source per checkout ([FR-SC-25]): beside a set `gate --save` recorded
+/// in `history.db`, the checked-in file alone is the ratchet's baseline. A
+/// finding the stored set holds but the file does not is new, named against
+/// the file; a malformed file is exit 2 even though a stored set could stand
+/// in for it.
+///
+/// [FR-SC-25]: ../../docs/specs/requirements/FR-SC-25.md
+#[test]
+fn the_checked_in_baseline_is_the_one_source_beside_a_stored_one() {
+    let w = World::new();
+    w.rules(Some("[security]\nratchet_min_severity = \"medium\"\n"));
+    w.ingest(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif"));
+    let (code, saved) = w.verdict(&["gate", "--save"]);
+    assert!(code == Some(0) && saved["message"].as_str().unwrap().contains("security baseline saved (2 finding fingerprints)"), "{saved}");
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!((code, &blessed["findings"]), (Some(0), &serde_json::json!(2)), "{blessed}");
+
+    // Drop one blessed finding from the file: the stored set still holds it.
+    let file = w.root.join(".logos/security-baseline.json");
+    let mut doc: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    let dropped = doc["findings"].as_array_mut().unwrap().remove(0);
+    fs::write(&file, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "the file, not the stored set, is the baseline: {check}");
+    let new = ratchet_violations(&check);
+    assert_eq!(new.len(), 1, "{check}");
+    let message = new[0]["message"].as_str().unwrap();
+    assert!(message.contains(dropped["fingerprint"].as_str().unwrap()), "{message}");
+    assert!(message.contains("not in the findings .logos/security-baseline.json records"), "{message}");
+
+    fs::write(&file, "{\"version\":1}\n").unwrap();
+    let out = w.logos(&["check"]);
+    assert_eq!(out.status.code(), Some(2), "a malformed file never falls back to the stored set");
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".logos/security-baseline.json"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// `security bless` records a finding reported by an absolute path — as
+/// osv-scanner reports a lockfile — by its path relative to the project, and
+/// one reported outside the project with no path, so the checked-in file
+/// never carries the checkout's directory ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../docs/specs/requirements/FR-SC-25.md
+#[test]
+fn security_bless_records_an_absolutely_reported_finding_by_its_project_path() {
+    let w = World::new();
+    fs::write(w.root.join("Cargo.lock"), "# lockfile\n").unwrap();
+    let result = |rule: &str, uri: String| {
+        serde_json::json!({
+            "ruleId": rule,
+            "level": "error",
+            "message": {"text": format!("Package 'rmcp@1.7.0' is vulnerable to '{rule}'.")},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}}}]
+        })
+    };
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
+        "results": [
+            result("CVE-2026-63127", format!("file://{}/Cargo.lock", w.root.display())),
+            result("CVE-2026-99999", "file:///elsewhere-s764/Cargo.lock".to_string())
+        ]
+    }]});
+    let report = w.root.parent().unwrap().join("osv.sarif");
+    fs::write(&report, sarif.to_string()).unwrap();
+    w.ingest(&report);
+
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!((code, &blessed["findings"]), (Some(0), &serde_json::json!(2)), "{blessed}");
+    let bytes = fs::read_to_string(w.root.join(".logos/security-baseline.json")).unwrap();
+    let doc: Value = serde_json::from_str(&bytes).unwrap();
+    let paths: Vec<(&str, &Value)> = doc["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["rule_id"].as_str().unwrap(), &e["path"]))
+        .collect();
+    assert_eq!(
+        paths,
+        [("CVE-2026-99999", &Value::Null), ("CVE-2026-63127", &serde_json::json!("Cargo.lock"))],
+        "{bytes}"
+    );
+    let root = w.root.display().to_string();
+    assert!(!bytes.contains(&root) && !bytes.contains("elsewhere-s764"), "{bytes}");
+}
+
+/// Without a `[security]` table `security bless` still writes the file
+/// (exit 0) and says the ratchet reads it once a table exists ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../docs/specs/requirements/FR-SC-25.md
+#[test]
+fn security_bless_without_a_security_table_writes_the_file_and_says_who_reads_it() {
+    let w = World::new();
+    assert!(!w.root.join(".logos/rules.toml").exists(), "the fixture has no rules contract");
+    w.ingest(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif"));
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!(code, Some(0), "{blessed}");
+    assert_eq!((&blessed["recorded"], &blessed["findings"]), (&Value::Bool(true), &serde_json::json!(2)), "{blessed}");
+    assert!(blessed["message"].as_str().unwrap().contains("once .logos/rules.toml has a [security] table"), "{blessed}");
+    assert!(w.root.join(".logos/security-baseline.json").is_file());
 }
 
 // ── The manual's Security page (S-675, NFR-SE-01, NFR-SE-08) ────────────────
@@ -1084,6 +1643,28 @@ fn the_page_states_the_network_posture_consent_and_the_reachability_limits() {
     }
 }
 
+/// S-760: the manual names the one definition of a counted finding, says freshness
+/// is the finding's and not its report's, and says the roll-up states how many
+/// reports are fresh as its own field. Each needle is one sentence a rewrite would
+/// have to keep.
+#[test]
+fn the_page_names_the_one_definition_of_a_counted_finding() {
+    let page = security_page().split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "**One definition of a counted finding.**",
+        "it counts unless a current entry in `.logos/security-ignore.toml` suppresses it or its own file changed since the scan",
+        "Freshness is the finding's, never its report's",
+        "reads the same count on all three",
+        "states it as its own field, `N of M reports fresh`",
+        "`N of M reports fresh` says how many of the stored reports are themselves fresh at HEAD",
+        "A scanner you disable keeps its stored findings in every count until you re-scan without it.",
+        "A file a `--path` scan never read reads `0` in Files & Risk, which is the absence of a finding and not proof of a scan",
+        "The OWASP table below the findings is the one exception",
+    ] {
+        assert!(page.contains(needle), "docs/howto/security.md no longer says: {needle}");
+    }
+}
+
 // ── The manual's security review loop (S-689, FR-SC-19, NFR-UX-05) ──────────
 //
 // `security.md` and `plugin.md` document the loop: the security section of
@@ -1250,7 +1831,9 @@ fn commands_md_names_the_fields_of_the_security_section_review_emits() {
         scanner: "semgrep".into(),
         fingerprint: "f".into(),
         rule_id: "r".into(),
-        severity: logos_core::model::Severity::High,
+        // Unrated, so its optional `severity_reason` is emitted and named too.
+        severity: logos_core::model::Severity::Unrated,
+        severity_reason: logos_core::model::Severity::Unrated.reason(),
         owasp: vec![],
         message: "m".into(),
         redacted: false,
@@ -1304,4 +1887,168 @@ fn the_plugin_page_quotes_the_stop_hooks_security_messages_and_its_consent_check
     assert!(!unquoted.contains("security status"), "stop.sh asks `security status`, which the page says it never does");
     assert!(!unquoted.contains("--consent") && !unquoted.contains("--install"), "stop.sh records consent or installs, which the page says it never does");
     assert!(code_lines.iter().any(|l| l.contains("invalid value for consent:")), "stop.sh's code no longer reads the scan's consent refusal");
+}
+
+/// Kills the process on drop, so a failing assertion leaves no `logos` behind.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// S-758 across processes: while one `logos security scan` runs, a second
+/// scan and an install of the same project, each a process of its own, exit 3
+/// naming the running scan and its process, and start no scanner; one scanner
+/// process runs throughout. Once the first ends, a scan runs.
+#[test]
+fn a_second_cli_scan_or_install_is_refused_naming_the_running_scan() {
+    let w = World::new();
+    let rec = w.data.parent().unwrap().join("rec");
+    fs::create_dir_all(&rec).unwrap();
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+    // Records each run, then waits — at most 60 s — for `rec/release`.
+    let script = format!(
+        "#!/bin/sh\n\
+         case \"$1\" in --version|version|-version) printf '%s\\n' 'semgrep 1.2.3'; exit 0;; esac\n\
+         printf '%s\\n' \"$$\" >> '{rec}/semgrep.runs'\n\
+         out=''; prev=''\n\
+         for a in \"$@\"; do [ \"$prev\" = --output ] && out=\"$a\"; prev=\"$a\"; done\n\
+         n=0; while [ ! -e '{rec}/release' ] && [ $n -lt 1200 ]; do /bin/sleep 0.05; n=$((n+1)); done\n\
+         /bin/cp '{report}' \"$out\"\n",
+        rec = rec.display(),
+        report = semgrep.display(),
+    );
+    let stub = w.bin.join("semgrep");
+    fs::write(&stub, script).unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let runs = || fs::read_to_string(rec.join("semgrep.runs")).map(|s| s.lines().count()).unwrap_or(0);
+
+    let first = Reaped(
+        Command::new(env!("CARGO_BIN_EXE_logos"))
+            .arg("--project")
+            .arg(&w.root)
+            .args(["security", "scan", "--consent", "--scanner", "semgrep"])
+            .env("PATH", &w.path)
+            .env("LOGOS_CONFIG_HOME", &w.user)
+            .env("LOGOS_DATA_HOME", &w.data)
+            .env("GIT_CEILING_DIRECTORIES", w.root.parent().unwrap())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the logos binary runs"),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while runs() == 0 {
+        assert!(std::time::Instant::now() < deadline, "the first scan never started semgrep");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let named = format!(
+        "a security scan is already running on this project: started from the command line by Logos process {} ",
+        first.0.id()
+    );
+    for args in [&["security", "scan", "--scanner", "semgrep"][..], &["security", "install", "gitleaks", "--consent"][..]] {
+        let out = w.logos(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "logos {args:?}: {stderr}");
+        assert!(stderr.contains(&named), "logos {args:?} names the running scan: {stderr}");
+    }
+    let ps = Command::new("ps").args(["-A", "-o", "pid=,command="]).output().expect("ps runs");
+    let stub_path = stub.display().to_string();
+    let scanners: Vec<String> =
+        String::from_utf8_lossy(&ps.stdout).lines().filter(|l| l.contains(&stub_path)).map(str::to_string).collect();
+    assert_eq!(scanners.len(), 1, "one scanner process runs on the project: {scanners:?}");
+    assert_eq!(runs(), 1, "the refused commands started no scanner");
+
+    fs::write(rec.join("release"), "").unwrap();
+    let mut first = first;
+    let status = first.0.wait().unwrap();
+    assert!(status.success(), "the first scan completes: {status:?}");
+    let out = w.logos(&["security", "scan", "--scanner", "semgrep"]);
+    assert!(out.status.success(), "a scan runs once the first ended: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(runs(), 2);
+}
+
+/// Sprint 107 review D1 (S-758 × S-759): a `logos security scan` stopped by
+/// SIGINT, or by SIGTERM as the plugin's Stop hook stops one past its budget,
+/// kills the scanner it started before the project lock goes with it — the
+/// scanner runs in a process group of its own, out of the signal's reach — and
+/// exits 128 + the signal. No scanner of it is left, so the next scan is
+/// admitted with exactly one scanner running. SIGKILL is not covered.
+#[test]
+fn a_scan_stopped_by_a_signal_leaves_no_scanner_beside_the_next_one() {
+    for (signal, code) in [("INT", 130), ("TERM", 143)] {
+        let w = World::new();
+        let rec = w.data.parent().unwrap().join("rec");
+        fs::create_dir_all(&rec).unwrap();
+        let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+        // Records each run, then waits — at most 60 s — for `rec/release`.
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1\" in --version|version|-version) printf '%s\\n' 'semgrep 1.2.3'; exit 0;; esac\n\
+             printf '%s\\n' \"$$\" >> '{rec}/semgrep.runs'\n\
+             out=''; prev=''\n\
+             for a in \"$@\"; do [ \"$prev\" = --output ] && out=\"$a\"; prev=\"$a\"; done\n\
+             n=0; while [ ! -e '{rec}/release' ] && [ $n -lt 1200 ]; do /bin/sleep 0.05; n=$((n+1)); done\n\
+             /bin/cp '{report}' \"$out\"\n",
+            rec = rec.display(),
+            report = semgrep.display(),
+        );
+        let stub = w.bin.join("semgrep");
+        fs::write(&stub, script).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        let runs = || fs::read_to_string(rec.join("semgrep.runs")).map(|s| s.lines().count()).unwrap_or(0);
+        let stub_path = stub.display().to_string();
+        let scanners = || -> Vec<String> {
+            let ps = Command::new("ps").args(["-A", "-o", "pid=,command="]).output().expect("ps runs");
+            String::from_utf8_lossy(&ps.stdout).lines().filter(|l| l.contains(&stub_path)).map(str::to_string).collect()
+        };
+        let scan = |args: &[&str]| {
+            Reaped(
+                Command::new(env!("CARGO_BIN_EXE_logos"))
+                    .arg("--project")
+                    .arg(&w.root)
+                    .args(args)
+                    .env("PATH", &w.path)
+                    .env("LOGOS_CONFIG_HOME", &w.user)
+                    .env("LOGOS_DATA_HOME", &w.data)
+                    .env("GIT_CEILING_DIRECTORIES", w.root.parent().unwrap())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("the logos binary runs"),
+            )
+        };
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "SIG{signal}: {what}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+
+        let mut first = scan(&["security", "scan", "--consent", "--scanner", "semgrep"]);
+        wait_for("the first scan never started semgrep", &|| runs() == 1);
+        let sent = Command::new("kill").arg(format!("-{signal}")).arg(first.0.id().to_string()).status().unwrap();
+        assert!(sent.success());
+        let status = first.0.wait().unwrap();
+        assert_eq!(status.code(), Some(code), "SIG{signal}: exits 128 + the signal: {status:?}");
+        // SIGKILL lands at once, but a killed process can linger in the table
+        // for a moment: what counts is that none outlives it.
+        let gone = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !scanners().is_empty() && std::time::Instant::now() < gone {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(scanners(), Vec::<String>::new(), "SIG{signal}: no scanner outlives the stopped scan");
+
+        let mut second = scan(&["security", "scan", "--scanner", "semgrep"]);
+        wait_for("the next scan was not admitted", &|| runs() == 2);
+        assert_eq!(scanners().len(), 1, "SIG{signal}: exactly one scanner runs: {:?}", scanners());
+        fs::write(rec.join("release"), "").unwrap();
+        let status = second.0.wait().unwrap();
+        assert!(status.success(), "SIG{signal}: the next scan completes: {status:?}");
+    }
 }

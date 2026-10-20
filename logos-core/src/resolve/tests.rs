@@ -327,6 +327,65 @@ fn glob_ref_itself_binds_to_the_globbed_module() {
 
 // ── Level 4: crate paths — crate:: / self:: / super:: ───────────────────────
 
+/// `src/lib.rs` and `src/main.rs` both key the crate root; the first in path
+/// order holds it, whatever the ids. A sync that re-extracts `src/lib.rs` alone
+/// leaves its ids above `src/main.rs`'s, and a `crate::` path from a third file
+/// still binds through `src/lib.rs`, as on a cold index (S-751).
+#[test]
+fn a_key_two_files_share_goes_to_the_first_path_whatever_the_ids() {
+    let nodes = vec![
+        node(1, "main", NodeKind::Module, "src/main.rs"),
+        node(2, "dispatch", NodeKind::Module, "src/dispatch.rs"),
+        node(3, "dispatch", NodeKind::Function, "src/dispatch.rs"),
+        // `src/lib.rs`, re-extracted after the other two.
+        node(30, "lib", NodeKind::Module, "src/lib.rs"),
+        node(31, "engine", NodeKind::Function, "src/lib.rs"),
+    ];
+    let edges = vec![contains(2, 3), contains(30, 31)];
+    let r = call(100, 13, 3, "crate::engine");
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r));
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 3, 31, EdgeKind::Calls);
+}
+
+/// "First in path order" is by component, as discovery writes files: a crate
+/// `web` nested under a hyphenated sibling sorts before `web/src/lib.rs` as a
+/// string (`-` before `/`) but after it by component (`web` before
+/// `web-old`), so `web/src/lib.rs` holds the root a cold index gives it — with
+/// the higher ids too (S-751).
+#[test]
+fn a_shared_key_goes_to_the_first_path_by_component_not_by_string() {
+    let nodes = vec![
+        node(1, "web", NodeKind::Module, "web-old/web/src/main.rs"),
+        node(2, "cli", NodeKind::Module, "cli/src/lib.rs"),
+        node(3, "serve", NodeKind::Function, "cli/src/lib.rs"),
+        node(30, "web", NodeKind::Module, "web/src/lib.rs"),
+        node(31, "router", NodeKind::Function, "web/src/lib.rs"),
+    ];
+    let edges = vec![contains(2, 3), contains(30, 31)];
+    let r = call(100, 13, 3, "web::router");
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r));
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 3, 31, EdgeKind::Calls);
+}
+
+/// An inline `mod inner { … }` holds its key against an `inner.rs` no file
+/// declares, although that file comes first in path order — the order a cold
+/// index writes it in, and so the lower ids (S-751, FR-RS-41).
+#[test]
+fn an_inline_module_holds_its_key_against_a_file_that_sorts_first() {
+    let nodes = vec![
+        node(1, "inner", NodeKind::Module, "src/inner.rs"),
+        node(2, "deep", NodeKind::Function, "src/inner.rs"),
+        node(10, "crate", NodeKind::Module, "src/lib.rs"),
+        node(11, "alpha", NodeKind::Function, "src/lib.rs"),
+        node(12, "inner", NodeKind::Module, "src/lib.rs"),
+        node(13, "deep", NodeKind::Function, "src/lib.rs"),
+    ];
+    let edges = vec![contains(1, 2), contains(10, 11), contains(10, 12), contains(12, 13)];
+    let r = call(100, LIB_RS, 11, "crate::inner::deep");
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r));
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 11, 13, EdgeKind::Calls);
+}
+
 #[test]
 fn crate_self_and_super_heads_resolve() {
     let crate_path = call(100, LIB_RS, 2, "crate::util::run");
@@ -3994,9 +4053,10 @@ fn a_capture_row_from_a_re_extracted_source_sweeps_its_source() {
 }
 
 /// Out of a swept source, the reference-bound edges no re-bound row produces
-/// are retracted — every one of FR-SY-12's seven kinds; one a row still
-/// produces, a containment edge, and an edge out of a source that was not
-/// swept are kept.
+/// are retracted — every one of FR-SY-12's seven kinds, and a doc mention's
+/// `DocReference` (S-751); one a row still produces, a containment edge, a
+/// `TracesTo` edge (rows of other sources can produce it) and an edge out of
+/// a source that was not swept are kept.
 #[test]
 fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
     let (nodes, mut edges) = fixture();
@@ -4009,6 +4069,9 @@ fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
         edge(2, 21, EdgeKind::Imports),
         // Containment is another pass's.
         edge(2, 7, EdgeKind::Contains),
+        // A trace out of a typed owner can come from its sections' rows, so
+        // alpha's re-bound rows alone never decide it.
+        edge(2, 20, EdgeKind::TracesTo),
         // helper -> run: helper was not swept.
         edge(3, 5, EdgeKind::Calls),
     ]);
@@ -4019,6 +4082,7 @@ fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
         EdgeKind::Implements,
         EdgeKind::Instantiates,
         EdgeKind::TypeUses,
+        EdgeKind::DocReference,
     ];
     edges.extend(other_kinds.iter().map(|&kind| edge(2, 20, kind)));
     let swept = ["local sym2"].into_iter().collect();

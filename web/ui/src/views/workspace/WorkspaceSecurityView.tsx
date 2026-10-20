@@ -5,7 +5,9 @@
  *
  * One unscoped read, `workspace/security`. Three honesty rules shape it:
  *   - A member never scanned reads "never run" in every figure cell, never 0
- *     (BR-66); one whose reports are all stale reads "no fresh scan".
+ *     (BR-66); one whose reports are all stale still counts its findings, each
+ *     by its own freshness (S-760), and the figure row states how many reports
+ *     are fresh as a field of its own.
  *   - A member that could not be opened or read is a row, named, with its
  *     reason, and the totals say they are over fewer than all members
  *     (FR-WS-16, NFR-CC-04).
@@ -110,14 +112,14 @@ export function WorkspaceSecurityView() {
 // ── The member roll-up ───────────────────────────────────────────────────────
 
 /** The severities a member row shows, in the order the columns read — every one
- *  the server counts, `info` included, so a member whose only findings are `info`
- *  never reads as a row of zeros. */
-const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "low", "info"];
+ *  the server counts, `info` and `unrated` included, so a member whose only
+ *  findings are `info` or `unrated` never reads as a row of zeros. */
+const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "low", "info", "unrated"];
 
-/** What a figure cell says when the member has nothing current to count. */
+/** What a figure cell says when the member has nothing to count from: it was
+ *  never scanned, or it could not be read. */
 function absentFigure(row: MemberResult<MemberSecurity>): string {
-  if (!row.result) return WORKSPACE_SECURITY_TEXT.notRead;
-  return row.result.scan === "never_run" ? WORKSPACE_SECURITY_TEXT.neverRun : WORKSPACE_SECURITY_TEXT.stale;
+  return row.result ? WORKSPACE_SECURITY_TEXT.neverRun : WORKSPACE_SECURITY_TEXT.notRead;
 }
 
 function severityColumn(severity: SecuritySeverity): Column<MemberResult<MemberSecurity>> {
@@ -195,7 +197,7 @@ function MembersWidget({ answer }: { answer: WorkspaceSecurityAnswer }) {
   }
   if (s.members_counted === 0) {
     return (
-      <Widget {...common} absence={WORKSPACE_SECURITY_ABSENCE.noneFresh}>
+      <Widget {...common} absence={WORKSPACE_SECURITY_ABSENCE.noneScanned}>
         {evidence}
       </Widget>
     );
@@ -206,10 +208,11 @@ function MembersWidget({ answer }: { answer: WorkspaceSecurityAnswer }) {
       {...common}
       figure={
         <div className={styles.figure}>
-          <p>{WORKSPACE_SECURITY_TEXT.totals(t.critical, t.high, t.medium, t.low, t.info)}</p>
+          <p>{WORKSPACE_SECURITY_TEXT.totals(t.critical, t.high, t.medium, t.low, t.info, t.unrated)}</p>
           <FigureNote block>
             {WORKSPACE_SECURITY_TEXT.denominator(s.members_counted, s.members_total, s.members_never_scanned)}
           </FigureNote>
+          <FigureNote block>{WORKSPACE_SECURITY_TEXT.reportsFresh(s.reports_fresh, s.reports_stored)}</FigureNote>
           <FigureNote block>{WORKSPACE_SECURITY_TEXT.excluded(s.excluded.not_fresh, s.excluded.suppressed)}</FigureNote>
         </div>
       }
@@ -253,9 +256,7 @@ function OwaspWidget({ answer }: { answer: WorkspaceSecurityAnswer }) {
       figure={
         <div className={styles.figure}>
           <p>{OWASP_TEXT.edition(edition)}</p>
-          <FigureNote block>
-            {WORKSPACE_SECURITY_TEXT.denominator(s.members_counted, s.members_total, s.members_never_scanned)}
-          </FigureNote>
+          <FigureNote block>{WORKSPACE_SECURITY_TEXT.owaspBasis(s.reports_fresh, s.reports_stored)}</FigureNote>
           {unclassified > 0 && <FigureNote block>{OWASP_TEXT.unclassified(unclassified)}</FigureNote>}
         </div>
       }

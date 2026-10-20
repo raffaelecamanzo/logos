@@ -36,6 +36,7 @@ import type {
   SecurityIgnoreWrite,
   SecurityInstallAsk,
   SecurityInstallPlan,
+  SecuritySelector,
 } from "./types.ts";
 
 const SCAN_PATH = "/api/v1/security/scan";
@@ -145,17 +146,20 @@ async function cancelJob<J>(path: string): Promise<J | null> {
   return ((await res.json()) as { job: J | null }).job ?? null;
 }
 
-/** `POST /api/v1/security/suppress` — add a suppression for one finding to the
- *  committed ignore file: `reason` is required, `expires` (`YYYY-MM-DD`) is the
- *  last day it suppresses, `null` until removed. A refusal (a blank reason, a
- *  past expiry, a hand-spelled file) throws with the server's reason. */
-export async function suppressFinding(fingerprint: string, reason: string, expires: string | null): Promise<SecurityIgnoreWrite> {
-  return triage("/api/v1/security/suppress", { fingerprint, reason, expires });
+/** `POST /api/v1/security/suppress` — add a suppression to the committed ignore
+ *  file: one finding's fingerprint, or everything under a path (S-770). `reason`
+ *  is required, `expires` (`YYYY-MM-DD`) is the last day it suppresses, `null`
+ *  until removed. The server writes a path in its canonical spelling. A refusal
+ *  (a blank reason, a past expiry, a whole-project glob, a hand-spelled file)
+ *  throws with the server's reason. */
+export async function suppressFinding(selector: SecuritySelector, reason: string, expires: string | null): Promise<SecurityIgnoreWrite> {
+  return triage("/api/v1/security/suppress", { ...selector, reason, expires });
 }
 
-/** `POST /api/v1/security/unsuppress` — remove the suppression for one finding. */
-export async function unsuppressFinding(fingerprint: string): Promise<SecurityIgnoreWrite> {
-  return triage("/api/v1/security/unsuppress", { fingerprint });
+/** `POST /api/v1/security/unsuppress` — remove the entry `selector` names: a
+ *  finding's `suppression.by`, or an entry's own selector. */
+export async function unsuppressFinding(selector: SecuritySelector): Promise<SecurityIgnoreWrite> {
+  return triage("/api/v1/security/unsuppress", selector);
 }
 
 async function triage(path: string, body: object): Promise<SecurityIgnoreWrite> {

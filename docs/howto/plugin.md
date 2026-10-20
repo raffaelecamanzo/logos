@@ -199,7 +199,11 @@ contract, within a budget. It stays silent unless there is something to say.
    failing error-severity rule, and a pointer to `/logos:review`. It names at most
    12 of them and counts the rest ("... and N more"). A failing rule blocks. Of
    the `review` entries, only one labelled `resolved` blocks; an entry the graph
-   could not fully resolve is listed and never blocks by itself. A new secret, or a
+   could not fully resolve is listed and never blocks by itself. Under a
+   [`rules.toml [review]`](configuration.md#review--the-branch-delta-gate) table
+   only a gating entry blocks — `new` or `worsened` in a gating dimension, labelled
+   `resolved` — so a new above-average function's Equality entry, or a `review`
+   violation, is listed and does not block. A new secret, or a
    new finding at `high` or above in a file the turn changed, blocks too, and the
    reason points to `/logos:sec-review`.
 5. **It blocks once.** The host does not stop a blocked agent from being blocked
@@ -213,7 +217,8 @@ contract, within a budget. It stays silent unless there is something to say.
 merge-base, and a cold merge-base costs one full index of that tree. The hook runs
 `review` only when it can tell a before-state is ready: one it built here under
 the same `logos` version, contract and configuration, or, when `check` evaluated
-no rule, a snapshot recorded at the merge-base. Otherwise it starts the build
+no rule and `rules.toml` has no `[review]` table, a snapshot recorded at the
+merge-base. Otherwise it starts the build
 detached, at most one at a time, says "not measured", and measures the next turn.
 A build that failed is not retried until the contract, the configuration or
 `logos` changes.
@@ -247,9 +252,9 @@ anything.
   run `logos security scan --consent` yourself ([Consent](security.md#consent)).
 - **New is the scan's verdict, not the hook's.** A finding in a scanned file whose
   fingerprint the store did not hold before the scan. A secret the scan finds
-  again keeps its recorded fingerprint and is not new, also when only its lines
-  moved and its column span is unchanged and unique; one with no such match reads
-  as new. Suppressed findings are never listed.
+  again has its recorded fingerprint and is not new, also when its line moved:
+  a Gitleaks finding is keyed by its secret, not its position. A new secret
+  reads as new. Suppressed findings are never listed.
 - **It blocks** on a new secret-class finding, whatever its severity (Gitleaks
   reports secrets as medium), and on a new finding at `high` or `critical`. The
   reason lists each one's rule, file, line, scanner and severity with the stored
@@ -396,9 +401,9 @@ script, which also refuses any line that claims safety.
 The `PreToolUse` hook returns the permission decision `ask`, with a reason naming
 the file or command, when an agent tool call would:
 
-- write, edit or delete `.logos/rules.toml`, `.logos/rules-baseline.json` or
-  `.logos/security-ignore.toml` (under any `.logos/`, so a workspace member's
-  contract is guarded too); or
+- write, edit or delete `.logos/rules.toml`, `.logos/rules-baseline.json`,
+  `.logos/security-ignore.toml` or `.logos/security-baseline.json` (under any
+  `.logos/`, so a workspace member's contract is guarded too); or
 - run `logos gate --save` or `logos check --bless`, as a shell command, or through
   `check --bless`'s MCP twin `bless_rules` (under the plugin's or a project
   `.mcp.json`'s prefix); or
@@ -407,6 +412,10 @@ the file or command, when an agent tool call would:
   an empty SARIF report ingested for a scanner clears a failing `[security]` gate,
   required scanners included, so an agent does not do it unseen. Its read-only
   neighbours (`security findings`, `security status`, `security scan`) pass.
+- run `logos security bless`, as a shell command (it has no MCP twin): it
+  rewrites the checked-in `.logos/security-baseline.json`, which accepts every
+  finding it records in every checkout, so an agent does not bless its own
+  findings unseen.
 
 The human then decides: the quality contract is what the review loop measures
 against, so an agent does not relax it unseen. Every other call passes untouched,
