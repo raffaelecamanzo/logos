@@ -149,13 +149,18 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// `nodes.uninherited` column, of migration 36 (S-504), the snapshot
 /// where-to-start tables and their flag column, of migration 37 (S-676), the
 /// offender value columns, the uncapped offender table and their flag column,
-/// and of migration 38 (S-523), the graph-dimension flags and cross-module
-/// count; the next [`Engine::start`] re-applies all seventeen, as it does on a
-/// real upgrade.
+/// of migration 38 (S-523), the graph-dimension flags and cross-module
+/// count, of migration 39 (S-755), the baseline's re-bless record, and of
+/// migration 40 (S-761), the where-to-start rows' identity (its rebuilt tables
+/// go with migration 36's); the next [`Engine::start`] re-applies all
+/// nineteen, as it does on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
+        "DELETE FROM schema_versions WHERE version = 40; \
+         ALTER TABLE baseline DROP COLUMN attribution; ALTER TABLE baseline DROP COLUMN reason; \
+         DELETE FROM schema_versions WHERE version = 39; \
+         ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
          ALTER TABLE metric_snapshots DROP COLUMN acyclicity_applicable; DELETE FROM schema_versions WHERE version = 38; \
          DROP TABLE metric_snapshot_offenders_uncapped; ALTER TABLE metric_snapshot_offenders DROP COLUMN threshold; \
          ALTER TABLE metric_snapshot_offenders DROP COLUMN value; ALTER TABLE metric_snapshot_offenders DROP COLUMN measure; \

@@ -28,8 +28,11 @@
 //! `temporal_snapshots` series ([FR-GH-09]) on this same independent track.
 //! Migration 3 ([S-049]) adds the coverage tables; migration 4 ([S-663]) adds the
 //! security-finding tables ([ADR-79]), migration 5 ([S-668]) the security
-//! ratchet's baseline and migration 6 ([S-685]) the provenance of a scoped
-//! scan's snapshot — the evidence store stays one file.
+//! ratchet's baseline, migration 6 ([S-685]) the provenance of a scoped
+//! scan's snapshot, migration 7 ([S-765]) one identity for a Gitleaks
+//! finding, migration 8 ([S-767]) the commit a history-only secret is
+//! anchored to and migration 9 ([S-768]) the `unrated` severity — the
+//! evidence store stays one file.
 //!
 //! Migrations follow the same forward-only `user_version` discipline as
 //! [`crate::graph_store::migrate`] and [`crate::observability::db`] — one
@@ -47,6 +50,9 @@
 //! [S-663]: ../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
 //! [S-668]: ../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5
 //! [S-685]: ../../../docs/planning/journal.md#s-685-a-security-re-scan-can-target-one-scanner-and-a-set-of-paths
+//! [S-765]: ../../../docs/planning/journal.md#s-765-a-gitleaks-finding-keeps-one-identity-across-scan-modes-and-commits
+//! [S-767]: ../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
+//! [S-768]: ../../../docs/planning/journal.md#s-768-osv-scanner-severities-are-never-made-up
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 
 use std::path::Path;
@@ -61,9 +67,11 @@ use super::miner::{CommitFact, FileChange};
 /// `observability::db::MIGRATIONS`). [S-047] appends migration 2 (the commit
 /// subject + the temporal snapshot series); [S-049] appends migration 3 for the
 /// coverage tables, [S-663] migration 4 for the security findings, [S-668]
-/// migration 5 for the security ratchet's baseline and [S-685] migration 6 for
-/// scoped-snapshot provenance, on this same track. A shipped migration is
-/// **never** edited.
+/// migration 5 for the security ratchet's baseline, [S-685] migration 6 for
+/// scoped-snapshot provenance, [S-765] migration 7 for the Gitleaks
+/// identity, [S-767] migration 8 for a history-only secret's commit
+/// anchor and [S-768] migration 9 for the `unrated` severity, on this same
+/// track. A shipped migration is **never** edited.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -318,6 +326,164 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE security_snapshots ADD COLUMN scope TEXT;
          UPDATE security_snapshots SET full_head_sha = head_sha;
          ALTER TABLE security_findings ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0 CHECK (scoped IN (0, 1));",
+    ),
+    // ── Migration 7 (S-765, CR-238 Amendment 1, ADR-79): one identity for a
+    // Gitleaks finding. Its fingerprint folds rule, path and a keyed digest of
+    // the secret (computed in memory at ingest, never stored), so the per-commit
+    // repeats of one secret are one row listing its commits, and a scoped run's
+    // row and a full scan's row of one secret share one key.
+    //
+    // `commits` is the comma-separated list of commits the secret was found in,
+    // newest first ('' when the report named none: a scoped run, another
+    // scanner). `legacy_fingerprints` is the comma-separated, sorted list of the
+    // keys the finding's results had before this identity ('' for a row keyed
+    // as before): what maps an ignore entry or a baseline fingerprint written
+    // under the old identity to the new one.
+    //
+    // A stored row cannot be re-keyed here: its secret was never stored. The
+    // first Gitleaks ingest after this migration re-keys every stored row its
+    // results map (store::rekey). The stored Gitleaks snapshots' report hashes
+    // are marked so that re-ingesting one of their very reports is that ingest,
+    // not a no-op that would leave them under the old keys.
+    (
+        7,
+        "ALTER TABLE security_findings ADD COLUMN commits TEXT NOT NULL DEFAULT '';
+         ALTER TABLE security_findings ADD COLUMN legacy_fingerprints TEXT NOT NULL DEFAULT '';
+         UPDATE security_snapshots SET report_hash = 'pre-7:' || report_hash
+          WHERE lower(trim(scanner_name)) = 'gitleaks';",
+    ),
+    // ── Migration 8 (S-767, CR-238 Amendment 1, ADR-79): a secret found only in
+    // history is anchored to its commit. `anchor_commit` is the commit whose
+    // place a history-mode row's region and report path are (NULL for a row no
+    // commit names: a scoped run, another scanner). A history-mode row is bound
+    // to its file only where the secret is still on its line; otherwise its
+    // binding is 'historical', with no path, so no file, symbol or blast radius
+    // is claimed for it. It still counts. No author, email or commit message is
+    // stored: the parser never reads them.
+    //
+    // SQLite cannot widen a CHECK, so the table is rebuilt with 'historical'
+    // among the bindings, every column and row copied as they are.
+    //
+    // A stored row's line cannot be checked here: its secret was never stored.
+    // So every stored history-mode row is marked 'historical' until the next
+    // Gitleaks ingest decides it anew — an unverified binding is never kept —
+    // and the stored Gitleaks snapshots' report hashes are marked so that
+    // re-ingesting one of their very reports is that ingest, not a no-op. A
+    // history-mode row is one listing commits (migration 7), anchored to its
+    // newest; or a located full-scan row of a Gitleaks snapshot whose commits
+    // were never recorded — a store written before migration 7, which a
+    // released store upgrades through in the same open, so its `commits` are
+    // all '' here — anchored to no commit, since none is known.
+    (
+        8,
+        "CREATE TABLE security_findings_v8 (
+             snapshot_id  INTEGER NOT NULL REFERENCES security_snapshots(id) ON DELETE CASCADE,
+             fingerprint  TEXT    NOT NULL,
+             rule_id      TEXT    NOT NULL,
+             severity     TEXT    NOT NULL CHECK (severity IN ('critical','high','medium','low','info')),
+             cwes         TEXT    NOT NULL,
+             message      TEXT    NOT NULL,
+             redacted     INTEGER NOT NULL CHECK (redacted IN (0, 1)),
+             binding      TEXT    NOT NULL CHECK (binding IN ('bound','unmatched','ambiguous','unbound','historical')),
+             report_path  TEXT,
+             path         TEXT,
+             start_line   INTEGER,
+             start_column INTEGER,
+             end_line     INTEGER,
+             end_column   INTEGER,
+             scoped       INTEGER NOT NULL DEFAULT 0 CHECK (scoped IN (0, 1)),
+             commits      TEXT    NOT NULL DEFAULT '',
+             legacy_fingerprints TEXT NOT NULL DEFAULT '',
+             anchor_commit TEXT,             -- the commit a history-mode row's place is; NULL otherwise
+             PRIMARY KEY (snapshot_id, fingerprint),
+             CHECK ((binding = 'bound') = (path IS NOT NULL))
+         ) STRICT, WITHOUT ROWID;
+         INSERT INTO security_findings_v8 (
+             snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+             report_path, path, start_line, start_column, end_line, end_column, scoped,
+             commits, legacy_fingerprints, anchor_commit)
+         SELECT snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted,
+                CASE WHEN history THEN 'historical' ELSE binding END,
+                report_path,
+                CASE WHEN history THEN NULL ELSE path END,
+                start_line, start_column, end_line, end_column, scoped,
+                commits, legacy_fingerprints,
+                CASE WHEN commits = '' THEN NULL
+                     WHEN instr(commits, ',') = 0 THEN commits
+                     ELSE substr(commits, 1, instr(commits, ',') - 1) END
+           FROM (SELECT *,
+                        commits <> ''
+                        OR (scoped = 0 AND report_path IS NOT NULL
+                            AND snapshot_id IN (SELECT id FROM security_snapshots
+                                                 WHERE lower(trim(scanner_name)) = 'gitleaks')) AS history
+                   FROM security_findings);
+         DROP TABLE security_findings;
+         ALTER TABLE security_findings_v8 RENAME TO security_findings;
+         CREATE INDEX security_findings_path ON security_findings (path);
+         UPDATE security_snapshots SET report_hash = 'pre-8:' || report_hash
+          WHERE lower(trim(scanner_name)) = 'gitleaks';",
+    ),
+    // ── Migration 9 (S-768, CR-238 Amendment 1, ADR-79): a severity is never
+    // made up. A finding whose report gave no rating — no `security-severity`
+    // and only a default level, one the report left out or OSV-Scanner's fixed
+    // `warning` — reads 'unrated', never 'medium'.
+    //
+    // SQLite cannot widen a CHECK, so the table is rebuilt with 'unrated'
+    // among the severities, every column and row copied as they are, except:
+    // a 'medium' row of an OSV-Scanner 1.x snapshot or of a Gitleaks one is
+    // 'unrated'. No OSV-Scanner 1.x release writes a `security-severity` (it
+    // arrives in 2.0.0), and Gitleaks' SARIF writer (`report/sarif.go`, read
+    // at 8.0.0, 8.18.4 and 8.30.1) writes no level, no rule default and no
+    // score at all, so either 'medium' can only have come from a default
+    // level — exactly what the next ingest of that report decides. A scoped
+    // Gitleaks run carries the full scan's rows forward rather than
+    // re-deciding them, so they must not wait for one. Any other stored row
+    // cannot be told apart here (the level was never stored), so every
+    // snapshot's report hash is marked: re-ingesting one of their very
+    // reports decides its severities anew instead of being a no-op.
+    (
+        9,
+        "CREATE TABLE security_findings_v9 (
+             snapshot_id  INTEGER NOT NULL REFERENCES security_snapshots(id) ON DELETE CASCADE,
+             fingerprint  TEXT    NOT NULL,
+             rule_id      TEXT    NOT NULL,
+             severity     TEXT    NOT NULL CHECK (severity IN ('critical','high','medium','low','info','unrated')),
+             cwes         TEXT    NOT NULL,
+             message      TEXT    NOT NULL,
+             redacted     INTEGER NOT NULL CHECK (redacted IN (0, 1)),
+             binding      TEXT    NOT NULL CHECK (binding IN ('bound','unmatched','ambiguous','unbound','historical')),
+             report_path  TEXT,
+             path         TEXT,
+             start_line   INTEGER,
+             start_column INTEGER,
+             end_line     INTEGER,
+             end_column   INTEGER,
+             scoped       INTEGER NOT NULL DEFAULT 0 CHECK (scoped IN (0, 1)),
+             commits      TEXT    NOT NULL DEFAULT '',
+             legacy_fingerprints TEXT NOT NULL DEFAULT '',
+             anchor_commit TEXT,
+             PRIMARY KEY (snapshot_id, fingerprint),
+             CHECK ((binding = 'bound') = (path IS NOT NULL))
+         ) STRICT, WITHOUT ROWID;
+         INSERT INTO security_findings_v9 (
+             snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+             report_path, path, start_line, start_column, end_line, end_column, scoped,
+             commits, legacy_fingerprints, anchor_commit)
+         SELECT snapshot_id, fingerprint, rule_id,
+                CASE WHEN severity = 'medium'
+                      AND snapshot_id IN (SELECT id FROM security_snapshots
+                                           WHERE (lower(trim(scanner_name)) = 'osv-scanner'
+                                                  AND ltrim(trim(scanner_version), 'v') LIKE '1.%')
+                                              OR lower(trim(scanner_name)) = 'gitleaks')
+                     THEN 'unrated' ELSE severity END,
+                cwes, message, redacted, binding,
+                report_path, path, start_line, start_column, end_line, end_column, scoped,
+                commits, legacy_fingerprints, anchor_commit
+           FROM security_findings;
+         DROP TABLE security_findings;
+         ALTER TABLE security_findings_v9 RENAME TO security_findings;
+         CREATE INDEX security_findings_path ON security_findings (path);
+         UPDATE security_snapshots SET report_hash = 'pre-9:' || report_hash;",
     ),
 ];
 

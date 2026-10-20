@@ -20,7 +20,10 @@
  * (S-747, FR-SC-24), a `tool-install` job the same panel follows after one
  * consent dialog; and triage (S-672, FR-SC-12), where Suppress… opens
  * `SuppressDialog` and Unsuppress removes the entry from the committed ignore
- * file. A suppressed finding stays listed, labelled with its reason.
+ * file. A suppressed finding stays listed, labelled with its reason. The
+ * Suppressions widget lists every entry of that file with the findings it
+ * suppresses counted and an orphaned one flagged (S-770); a path entry covers
+ * every finding under it, and Unsuppress on any of them removes that entry.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,11 +34,13 @@ import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type {
   OwaspEditionYear,
   SecurityCategoryCoverage,
+  SecurityEntryStatus,
   SecurityFinding,
   SecurityGateBand,
   SecurityModel,
   SecurityPage,
   SecurityScannerStatus,
+  SecuritySelector,
 } from "../../api/types.ts";
 import {
   Badge,
@@ -53,16 +58,23 @@ import {
   type Column,
 } from "../../components/index.ts";
 import {
+  ANCHOR_TEXT,
   COPY_TEXT,
+  IGNORED_PATHS_TEXT,
   INSTALL_JOB_TEXT,
+  FINDING_COUNT_TEXT,
   OWASP_TEXT,
+  SCANNER_STATE_TEXT,
   SECURITY_ABSENCE,
   SECURITY_GATE_TEXT,
   SUPPRESS_TEXT,
+  SUPPRESSIONS_TEXT,
   owaspView,
   scannerMatrix,
   securityFindings,
   securityGate,
+  selectorText,
+  suppressionEntries,
   suppressionNote,
 } from "../../copy/security.copy.ts";
 import { plural } from "../../copy/types.ts";
@@ -82,6 +94,7 @@ import {
   pathFromSearch,
   scannerDrivers,
   scannerStateText,
+  selectorKey,
   severityRank,
   severityTone,
   type Classification,
@@ -112,16 +125,22 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => v
     path: pathFromSearch(window.location.search),
   }));
   const [selected, setSelected] = useState<string | null>(null);
+  // Counts every Show, so pressing it on the finding already shown brings the detail back into view.
+  const [shown, setShown] = useState(0);
+  const select = (key: string) => {
+    setSelected(key);
+    setShown((n) => n + 1);
+  };
   // The finding the suppression dialog is open for, and a refused unsuppress.
   const [suppressing, setSuppressing] = useState<SecurityFinding | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
   // A matrix row's Install or Update, until the scan panel takes it (S-747).
   const [request, setRequest] = useState<InstallRequest | null>(null);
   const requested = useCallback(() => setRequest(null), []);
-  // The fingerprints with an unsuppress in flight, or done and awaiting the
-  // reloaded page: the row's button stays disabled until the page shows the
-  // removal, so a double click cannot answer "no entry" for a removal that
-  // succeeded. The ref guards within one tick; the state disables.
+  // The entries (by `selectorKey`) with an unsuppress in flight, or done and
+  // awaiting the reloaded page: every button removing one stays disabled until
+  // the page shows the removal, so a double click cannot answer "no entry" for
+  // a removal that succeeded. The ref guards within one tick; the state disables.
   const unsuppressing = useRef(new Set<string>());
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => {
@@ -143,23 +162,26 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => v
   const detail = page.findings.findings.find((f) => findingKey(f) === selected) ?? null;
   const total = page.findings.total;
 
-  const suppress = async (finding: SecurityFinding, reason: string, expires: string | null) => {
-    await suppressFinding(finding.fingerprint, reason, expires);
+  const suppress = async (selector: SecuritySelector, reason: string, expires: string | null) => {
+    await suppressFinding(selector, reason, expires);
     setSuppressing(null);
     setTriageError(null);
     reload();
   };
-  const unsuppress = async (finding: SecurityFinding) => {
+  // Removes the entry `selector` names: a finding's `suppression.by`, or a
+  // Suppressions row's own entry.
+  const unsuppress = async (selector: SecuritySelector) => {
+    const key = selectorKey(selector);
     const inFlight = unsuppressing.current;
-    if (inFlight.has(finding.fingerprint)) return;
-    inFlight.add(finding.fingerprint);
+    if (inFlight.has(key)) return;
+    inFlight.add(key);
     setBusy(new Set(inFlight));
     setTriageError(null);
     try {
-      await unsuppressFinding(finding.fingerprint);
+      await unsuppressFinding(selector);
       reload();
     } catch (e) {
-      inFlight.delete(finding.fingerprint);
+      inFlight.delete(key);
       setBusy(new Set(inFlight));
       setTriageError(SUPPRESS_TEXT.removeFailed(requestDetail(e)));
     }
@@ -191,19 +213,24 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => v
         setFilters={setFilters}
         categories={categories}
         classify={classify}
-        onSelect={setSelected}
+        onSelect={select}
         onSuppress={setSuppressing}
-        onUnsuppress={(f) => void unsuppress(f)}
+        onUnsuppress={(selector) => void unsuppress(selector)}
         unsuppressing={busy}
         triageError={triageError}
       />
+      <SuppressionsWidget
+        entries={page.findings.suppressions}
+        onUnsuppress={(selector) => void unsuppress(selector)}
+        unsuppressing={busy}
+      />
       <OwaspWidget page={page} edition={edition} setEdition={switchEdition} categories={categories} classify={classify} />
-      {scanned && total > 0 && <FindingDetail finding={detail} classification={detail ? classify(detail) : null} />}
+      {scanned && total > 0 && <FindingDetail finding={detail} classification={detail ? classify(detail) : null} shown={shown} />}
       {suppressing && (
         <SuppressDialog
           key={findingKey(suppressing)}
           finding={suppressing}
-          onSubmit={(reason, expires) => suppress(suppressing, reason, expires)}
+          onSubmit={(selector, reason, expires) => suppress(selector, reason, expires)}
           onCancel={() => setSuppressing(null)}
         />
       )}
@@ -270,6 +297,35 @@ function CopyCell({ row }: { row: SecurityScannerStatus }) {
   );
 }
 
+/** What a whole-project scan does with the ignored directories (FR-SC-26):
+ *  `excluded`, or `scanned` with the server's one-line note. */
+function IgnoredPathsCell({ row }: { row: SecurityScannerStatus }) {
+  if (row.ignored_paths === undefined) return <>{IGNORED_PATHS_TEXT.absent}</>;
+  if (row.ignored_paths === "excluded") return <>{IGNORED_PATHS_TEXT.excluded}</>;
+  return (
+    <>
+      <Badge tone="orange">{IGNORED_PATHS_TEXT.scanned}</Badge>
+      {row.coverage_note !== undefined && <> {row.coverage_note}</>}
+    </>
+  );
+}
+
+/** What a row's state means, and — when its last scan failed — why, in the one
+ *  masked line the server read from the failure log (S-769). */
+function StateDetail({ row, pending }: { row: SecurityScannerStatus; pending: readonly string[] }) {
+  return (
+    <>
+      {scannerStateText(row, pending)}
+      {row.last_failure !== null && (
+        <>
+          {" "}
+          <Badge tone="red">{SCANNER_STATE_TEXT.lastFailed}</Badge> {SCANNER_STATE_TEXT.failureCause(row.last_failure_cause, row.last_failure)}
+        </>
+      )}
+    </>
+  );
+}
+
 /** A row's action: Install a scanner Logos can install here and is missing,
  *  Update a managed copy older than the pin. */
 function ActionCell({ row, onInstall }: { row: SecurityScannerStatus; onInstall: (tool: string, update: boolean) => void }) {
@@ -310,7 +366,8 @@ function scannerColumns(
       cell: (r) => (r.state === "fresh" || r.state === "stale" ? r.version : (r.installed?.version ?? "—")),
     },
     { key: "copy", header: "Copy", cell: (r) => <CopyCell row={r} /> },
-    { key: "detail", header: "What it means", cell: (r) => scannerStateText(r, pending) },
+    { key: "detail", header: "What it means", cell: (r) => <StateDetail row={r} pending={pending} /> },
+    { key: "ignored", header: "Ignored paths", cell: (r) => <IgnoredPathsCell row={r} /> },
     { key: "action", header: "Action", cell: (r) => <ActionCell row={r} onInstall={onInstall} /> },
   ];
 }
@@ -352,13 +409,39 @@ interface FindingsWidgetProps {
   onSelect: (key: string) => void;
   /** Opens the suppression dialog for an unsuppressed finding. */
   onSuppress: (f: SecurityFinding) => void;
-  /** Removes the entry naming a suppressed or expired finding. */
-  onUnsuppress: (f: SecurityFinding) => void;
-  /** The fingerprints whose unsuppress is in flight or awaiting the reload:
-   *  their button is disabled. */
+  /** Removes the entry a suppressed or expired finding's label names. */
+  onUnsuppress: (selector: SecuritySelector) => void;
+  /** The entries (by `selectorKey`) whose unsuppress is in flight or awaiting
+   *  the reload: every button removing one is disabled. */
   unsuppressing: ReadonlySet<string>;
   /** Why the last unsuppress was refused, if it was. */
   triageError: string | null;
+}
+
+/** A finding's location and, for one found in history (S-767), its
+ *  `historical` label and short commit — the payload's own spelling, as the
+ *  CLI and MCP print it. */
+function LocationCell({ finding }: { finding: SecurityFinding }) {
+  const { anchor } = finding;
+  return (
+    <>
+      {findingLocation(finding)}
+      {finding.binding === "historical" && (
+        <>
+          {" "}
+          <Badge tone="muted">{ANCHOR_TEXT.historical}</Badge>
+        </>
+      )}
+      {anchor && (
+        <>
+          {" "}
+          <span className="muted" title={ANCHOR_TEXT.commit(anchor)} data-commit>
+            {anchor.short_commit}
+          </span>
+        </>
+      )}
+    </>
+  );
 }
 
 function FindingsWidget({
@@ -386,10 +469,14 @@ function FindingsWidget({
       key: "sev",
       header: "Severity",
       sortValue: (f) => severityRank(f.severity),
-      cell: (f) => <Badge tone={severityTone(f.severity)}>{f.severity}</Badge>,
+      cell: (f) => (
+        <span title={f.severity_reason}>
+          <Badge tone={severityTone(f.severity)}>{f.severity}</Badge>
+        </span>
+      ),
     },
     { key: "rule", header: "Rule", mono: true, sortValue: (f) => f.rule_id, cell: (f) => f.rule_id },
-    { key: "loc", header: "Location", mono: true, sortValue: (f) => findingLocation(f), cell: (f) => findingLocation(f) },
+    { key: "loc", header: "Location", mono: true, sortValue: (f) => findingLocation(f), cell: (f) => <LocationCell finding={f} /> },
     {
       key: "msg",
       header: "Message",
@@ -432,8 +519,8 @@ function FindingsWidget({
         f.suppression ? (
           <Button
             size="sm"
-            onClick={() => onUnsuppress(f)}
-            disabled={unsuppressing.has(f.fingerprint)}
+            onClick={() => f.suppression && onUnsuppress(f.suppression.by)}
+            disabled={unsuppressing.has(selectorKey(f.suppression.by))}
             aria-label={`Unsuppress ${f.rule_id} at ${findingLocation(f)}`}
           >
             {SUPPRESS_TEXT.unsuppress}
@@ -447,14 +534,21 @@ function FindingsWidget({
   ];
   const set = (patch: Partial<FindingFilters>) => setFilters({ ...filters, ...patch });
   const scanners = page.findings.scanned.map((s) => s.driver);
+  const { counted, excluded } = page.counts;
   return (
     <Widget
       title="Findings"
       copy={securityFindings}
       figure={
-        <span>
-          {kept.length} <FigureNote>of {page.findings.total} {plural(page.findings.total, "finding", "findings")} shown</FigureNote>
-        </span>
+        <div>
+          <span>
+            {kept.length} <FigureNote>of {page.findings.total} {plural(page.findings.total, "finding", "findings")} shown</FigureNote>
+          </span>
+          <FigureNote block>
+            {FINDING_COUNT_TEXT.totals(counted.critical, counted.high, counted.medium, counted.low, counted.info, counted.unrated)}
+          </FigureNote>
+          <FigureNote block>{FINDING_COUNT_TEXT.excluded(excluded.not_fresh, excluded.suppressed)}</FigureNote>
+        </div>
       }
     >
       <div className={styles.filters} role="group" aria-label="Filter the findings">
@@ -466,7 +560,7 @@ function FindingsWidget({
           <option value="">Any</option>
           {SEVERITIES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {s === "unrated" ? "unrated only" : s}
             </option>
           ))}
         </SelectField>
@@ -520,6 +614,67 @@ function FindingsWidget({
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
         empty={filters.path !== "" && kept.length === 0 ? SECURITY_ABSENCE.noFindingAt(filters.path) : SECURITY_ABSENCE.noMatch}
       />
+    </Widget>
+  );
+}
+
+/** Every entry of the ignore file with what it suppresses now (S-770, FR-SC-11):
+ *  the count of findings it suppresses, and an orphaned or expired entry
+ *  flagged. Shown once there is an entry; removing one is the same Unsuppress
+ *  the findings table sends. */
+function SuppressionsWidget({
+  entries,
+  onUnsuppress,
+  unsuppressing,
+}: {
+  entries: SecurityEntryStatus[];
+  onUnsuppress: (selector: SecuritySelector) => void;
+  unsuppressing: ReadonlySet<string>;
+}) {
+  if (entries.length === 0) return null;
+  const selectorOf = (e: SecurityEntryStatus): SecuritySelector =>
+    "fingerprint" in e.entry
+      ? { fingerprint: e.entry.fingerprint }
+      : { path: e.entry.path, ...(e.entry.rule ? { rule: e.entry.rule } : {}), ...(e.entry.scanner ? { scanner: e.entry.scanner } : {}) };
+  const suppressed = entries.reduce((n, e) => n + e.suppressed, 0);
+  const columns: Column<SecurityEntryStatus>[] = [
+    { key: "what", header: "Suppresses", mono: true, cell: (e) => selectorText(selectorOf(e)) },
+    { key: "reason", header: "Reason", cell: (e) => e.entry.reason },
+    { key: "expires", header: "Expires", mono: true, cell: (e) => e.entry.expires ?? "—" },
+    { key: "count", header: "Findings", sortValue: (e) => e.suppressed, cell: (e) => SUPPRESSIONS_TEXT.count(e.suppressed) },
+    {
+      key: "state",
+      header: "State",
+      cell: (e) => (
+        <>
+          <Badge tone={e.orphaned || e.expired ? "orange" : "muted"}>{SUPPRESSIONS_TEXT.state(e)}</Badge>
+          {e.should_name && (
+            <>
+              {" "}
+              <span className="muted">{SUPPRESSIONS_TEXT.shouldName(e.should_name)}</span>
+            </>
+          )}
+        </>
+      ),
+    },
+    {
+      key: "remove",
+      header: "Triage",
+      cell: (e) => (
+        <Button
+          size="sm"
+          onClick={() => onUnsuppress(selectorOf(e))}
+          disabled={unsuppressing.has(selectorKey(selectorOf(e)))}
+          aria-label={SUPPRESSIONS_TEXT.remove(selectorOf(e))}
+        >
+          {SUPPRESS_TEXT.unsuppress}
+        </Button>
+      ),
+    },
+  ];
+  return (
+    <Widget title={SUPPRESSIONS_TEXT.title} copy={suppressionEntries} figure={<span>{SUPPRESSIONS_TEXT.figure(entries.length, suppressed)}</span>}>
+      <DataTable caption={SUPPRESSIONS_TEXT.caption} columns={columns} rows={entries} rowKey={(e) => selectorKey(selectorOf(e))} />
     </Widget>
   );
 }

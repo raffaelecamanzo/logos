@@ -101,6 +101,61 @@ export function gateFigureText(f: {
 export const GATE_NOT_COMPARED =
   "The baseline was recorded under different metric thresholds or semantics, so it cannot be compared with this score; the next logos gate run saves the current score as the new baseline.";
 
+/** The line under the Gate figure naming why the baseline was blessed
+ *  (FR-GV-16): the `gate --save --reason` stored with it. */
+export function gateBaselineReason(reason: string): CopyText {
+  return ["The ", gloss("baseline"), ` was saved with the reason: “${reason}”`];
+}
+
+// ── Signal change (FR-GV-26, S-755) ──────────────────────────────────────────
+
+export const signalChange: CopyEntry = {
+  what: [
+    "How far each dimension moved the signal since the gate last saved its reference score, and the symbols or ",
+    gloss("nearClone", "near-clone"),
+    " groups behind each share.",
+  ],
+  why: "A change with a named cause can be fixed at that cause, or accepted with a reason that says why.",
+};
+
+/** The Signal change figure: the observed change, and what the shares sum to —
+ *  the exact change, the integer rounding and the residual (FR-GV-26). */
+export function signalChangeFigure(f: {
+  readonly change: string;
+  readonly exact: string;
+  readonly rounding: string;
+  readonly residual: string;
+}): CopyText {
+  return [
+    `${f.change} points against the `,
+    gloss("baseline"),
+    ` · the shares below sum to ${f.exact}; rounding to whole points adds ${f.rounding}, residual ${f.residual}`,
+  ];
+}
+
+/** Why a change carries no shares — the engine's own reason (FR-GV-26). */
+export function signalChangeNotAttributed(reason: string): string {
+  return `Not split by dimension: ${reason}.`;
+}
+
+/** Why a change split by dimension names no driving symbols — the engine's
+ *  own reason (a snapshot that predates recorded offender values). */
+export function signalChangeDriversNotNamed(reason: string): string {
+  return `No driving symbols named: ${reason}.`;
+}
+
+/** A near-clone group as a driver: its members, by name. */
+export function nearCloneGroupDriver(members: readonly string[]): CopyText {
+  return [gloss("nearClone", "Near-clone"), ` group of ${members.length}: ${members.join(", ")}`];
+}
+
+/** The tail of a capped driver list. */
+export function moreDrivers(more: number): string {
+  return `and ${more} more`;
+}
+
+export const SIGNAL_CHANGE_CAPTION = "Each dimension that moved, its share in signal points, and what drove it, largest share first.";
+
 // ── Quality signal (items 13 and 20) ─────────────────────────────────────────
 
 export const qualitySignal: CopyEntry = {

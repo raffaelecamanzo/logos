@@ -306,11 +306,43 @@ describe("ScanJobPanel", () => {
     expect(await screen.findByText(SCAN_JOB_TEXT.failed("the job panicked"))).toBeInTheDocument();
   });
 
-  it("states a failed scanner with its exit code and log", () => {
-    expect(SCAN_OUTCOME_TEXT.failed(3, ".logos/security/bandit.failed.log")).toBe(
-      "failed (exit 3); its output is in .logos/security/bandit.failed.log",
+  it("shows a failed scanner's one-line cause in its progress row (S-769)", async () => {
+    const at = COMPLETED.events.length;
+    const failed: ScanJob = {
+      ...COMPLETED,
+      events: [
+        ...COMPLETED.events,
+        { seq: at, at_ms: 500, event: { phase: "started", scanner: "dependency-check" } },
+        {
+          seq: at + 1,
+          at_ms: 900,
+          event: {
+            phase: "finished",
+            scanner: "dependency-check",
+            driver: "dependency-check",
+            version: "13.0.0",
+            outcome: "failed",
+            exit_code: 1,
+            log: ".logos/security/dependency-check.failed.log",
+            stderr: "[ERROR] Unable to continue dependency-check analysis.",
+            cause: "[ERROR] Error updating the NVD Data",
+          },
+        },
+      ],
+    } as ScanJob;
+    stub(() => ({ body: { job: failed } }));
+    mount([]);
+    const progress = await screen.findByRole("list", { name: "Scanner progress" });
+    expect(within(progress).getByText("dependency-check", { selector: "span" }).parentElement!.textContent).toContain(
+      "failed (exit 1): [ERROR] Error updating the NVD Data; its output is in .logos/security/dependency-check.failed.log",
     );
-    expect(SCAN_OUTCOME_TEXT.failed(null, null)).toBe("failed");
+  });
+
+  it("states a failed scanner with its exit code, its cause and its log", () => {
+    expect(SCAN_OUTCOME_TEXT.failed(3, ".logos/security/bandit.failed.log", "ERROR: no rules")).toBe(
+      "failed (exit 3): ERROR: no rules; its output is in .logos/security/bandit.failed.log",
+    );
+    expect(SCAN_OUTCOME_TEXT.failed(null, null, "could not start bandit")).toBe("failed: could not start bandit");
   });
 
   describe("Install & scan (S-747)", () => {

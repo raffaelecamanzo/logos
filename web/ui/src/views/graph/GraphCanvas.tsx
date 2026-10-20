@@ -48,11 +48,20 @@ export interface GraphCanvasProps {
   busy?: boolean;
 }
 
+/** A name as rich-text tooltip content. The `richText` tooltip reads
+ *  `{style|text}` as styling markup (zrender's `/\{([a-zA-Z0-9_]+)\|/`), so a
+ *  repository-derived name like `Render {{title|upper}}` would lose characters
+ *  (NFR-SE-11). A zero-width space after each `{` keeps the run from matching
+ *  and draws nothing. */
+function richTextLiteral(name: string): string {
+  return name.replaceAll("{", "{​");
+}
+
 /** The on-canvas tooltip text for a hovered node/edge. */
 function tooltipText(p: GraphEventParams): string {
   if (!p?.data) return "";
   if (p.dataType === "edge") return p.data.edge_type ? prettify(p.data.edge_type) : "";
-  const label = p.data.displayLabel || p.name || "";
+  const label = richTextLiteral(p.data.displayLabel || p.name || "");
   const kind = p.data.kind ? prettify(p.data.kind) : "";
   return kind ? `${label}\n${kind}` : label;
 }

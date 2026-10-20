@@ -483,6 +483,9 @@ mod tests {
             start_column: None,
             end_line: None,
             end_column: None,
+            commits: Vec::new(),
+            legacy_fingerprints: Vec::new(),
+            anchor: None,
             freshness: crate::history::FRESHNESS_NA,
         }
     }

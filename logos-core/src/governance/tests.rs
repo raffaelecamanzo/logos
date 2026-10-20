@@ -79,6 +79,7 @@ fn layered_rules() -> CompiledRules {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -111,6 +112,7 @@ fn forbidden_import_rules() -> CompiledRules {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -344,6 +346,7 @@ fn constraints_enforce_their_budgets() {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     let compiled = CompiledRules::compile(rules, "test".to_string()).unwrap();
 
@@ -433,6 +436,7 @@ fn constraints_only(constraints: Constraints) -> CompiledRules {
             history: Default::default(),
             coverage: Default::default(),
             security: None,
+            review: None,
         },
         "test".to_string(),
     )
@@ -925,6 +929,7 @@ fn layer_assignment_is_first_glob_wins() {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     let compiled = CompiledRules::compile(rules, "test".to_string()).unwrap();
     let (name, order) = compiled.layer_of("src/sub/deep.rs").expect("assigned");
@@ -1225,6 +1230,123 @@ fn no_evolution_delta_crosses_a_point_where_a_graph_dimension_dropped_out() {
     assert!(back.metric_deltas[..3].iter().all(|d| d.delta.is_none() && d.not_applicable.is_some()));
 }
 
+// ── FR-GV-27 (S-756): the trend warning ─────────────────────────────────────
+
+/// The series of [`applicable_row`]s whose Equality takes `values` in turn.
+fn equality_series(values: &[f64]) -> Vec<MetricSnapshotRow> {
+    (1..)
+        .zip(values)
+        .map(|(id, value)| MetricSnapshotRow { equality_normalized: *value, ..applicable_row(id) })
+        .collect()
+}
+
+/// [FR-GV-27] acceptance 1 and 3: two consecutive Equality declines warn,
+/// naming the dimension, both declined values and the window; one does not.
+/// Under `trend_window = 3` two do not and three do.
+///
+/// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+#[test]
+fn consecutive_declines_warn_only_once_they_fill_the_window() {
+    let one = equality_series(&[0.9, 0.8]);
+    let two = equality_series(&[0.9, 0.8, 0.7]);
+    let three = equality_series(&[0.95, 0.9, 0.8, 0.7]);
+
+    assert!(review::declining_dimensions(&one, 2).is_empty(), "one decline is not a trend");
+    assert_eq!(
+        review::declining_dimensions(&two, 2),
+        ["equality declined at each of the last 2 recorded snapshots that moved it: 0.9 → 0.8 → 0.7 \
+          (review.trend_window = 2); a trend warning, never a failure"]
+    );
+    assert!(review::declining_dimensions(&two, 3).is_empty(), "trend_window = 3 needs three");
+    let warned = review::declining_dimensions(&three, 3);
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].contains("0.95 → 0.9 → 0.8 → 0.7"), "{warned:?}");
+    assert_eq!(
+        review::declining_dimensions(&three, 2),
+        review::declining_dimensions(&two, 2),
+        "a longer run warns with the window's last declines"
+    );
+    assert_eq!(review::declining_dimensions(&one, 1).len(), 1, "trend_window = 1 warns on one");
+    assert!(review::declining_dimensions(&[], 2).is_empty());
+
+    // A decline just past the noise floor prints as one: each value reads
+    // back as the value recorded, never rounded into its neighbour.
+    let tiny = [0.9, 0.9 - 1e-8, 0.9 - 2e-8];
+    let warned = review::declining_dimensions(&equality_series(&tiny), 2);
+    let chain = warned[0].split(": ").nth(1).and_then(|c| c.split(" (").next()).unwrap_or_default();
+    let printed: Vec<f64> = chain.split(" → ").map(|v| v.parse().expect("a number")).collect();
+    assert_eq!(printed, tiny, "{warned:?}");
+    assert!(review::declining_dimensions(&equality_series(&[0.9]), 1).is_empty());
+}
+
+/// Only the latest run counts: a rise between two declines breaks it, and so
+/// does a step the dimension did not apply on, or one across a change of
+/// metric semantics or thresholds. A re-measurement that does not move the
+/// dimension — a `gate` after a `scan` of the same tree — neither breaks nor
+/// extends it.
+#[test]
+fn a_rise_or_an_incomparable_step_breaks_the_run_and_a_flat_one_does_not() {
+    assert!(review::declining_dimensions(&equality_series(&[0.9, 0.8, 0.85, 0.7]), 2).is_empty(), "a rise");
+    assert!(
+        review::declining_dimensions(&equality_series(&[0.9, 0.8, 0.7, 0.75]), 2).is_empty(),
+        "a rise at the end ends the run"
+    );
+    let flat = review::declining_dimensions(&equality_series(&[0.9, 0.8, 0.8, 0.7, 0.7]), 2);
+    assert_eq!(flat.len(), 1, "flat steps are re-measurements: {flat:?}");
+    assert!(flat[0].contains("0.9 → 0.8 → 0.7"), "{flat:?}");
+    // Float residue within METRIC_NOISE is flat too, either way.
+    let jitter = equality_series(&[0.9, 0.8, 0.8 - 1e-12, 0.8 + 1e-12, 0.7]);
+    assert_eq!(review::declining_dimensions(&jitter, 2).len(), 1, "residue neither breaks the run");
+    assert!(review::declining_dimensions(&jitter, 3).is_empty(), "nor extends it");
+
+    let mut series = equality_series(&[0.9, 0.8, 0.7]);
+    series[1].metric_version -= 1;
+    assert!(review::declining_dimensions(&series, 2).is_empty(), "across a semantics change");
+    let mut series = equality_series(&[0.9, 0.8, 0.7]);
+    series[2].thresholds_hash = Some("tuned".to_string());
+    assert!(review::declining_dimensions(&series, 2).is_empty(), "across a threshold change");
+    let mut series = equality_series(&[0.9, 0.8, 0.7]);
+    series[0].empty = true;
+    assert!(review::declining_dimensions(&series, 2).is_empty(), "from a snapshot that scored nothing");
+    let mut series = equality_series(&[0.9, 0.8, 0.7]);
+    series[2].empty = true;
+    assert!(review::declining_dimensions(&series, 2).is_empty(), "to a snapshot that scored nothing");
+
+    let mut series: Vec<MetricSnapshotRow> = [0.9, 0.8, 0.7]
+        .iter()
+        .zip(1..)
+        .map(|(depth, id)| MetricSnapshotRow { depth_normalized: *depth, ..applicable_row(id) })
+        .collect();
+    assert_eq!(review::declining_dimensions(&series, 2).len(), 1, "Depth applies throughout");
+    series[0] = MetricSnapshotRow { depth_normalized: 0.9, ..thin_row(1) };
+    assert!(review::declining_dimensions(&series, 2).is_empty(), "Depth dropped out of the first");
+}
+
+/// Every distributional dimension is watched, in canonical order, and no
+/// other: Redundancy is per-symbol ([BR-95]) and its decline never warns.
+///
+/// [BR-95]: ../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+#[test]
+fn every_distributional_dimension_is_watched_and_nothing_else() {
+    let series: Vec<MetricSnapshotRow> = [0.9, 0.8, 0.7]
+        .iter()
+        .zip(1..)
+        .map(|(v, id)| MetricSnapshotRow {
+            modularity_normalized: *v,
+            acyclicity_normalized: *v,
+            depth_normalized: *v,
+            equality_normalized: *v,
+            redundancy_normalized: *v,
+            ..applicable_row(id)
+        })
+        .collect();
+    let named: Vec<String> = review::declining_dimensions(&series, 2)
+        .iter()
+        .map(|w| w.split_whitespace().next().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(named, ["modularity", "acyclicity", "depth", "equality"]);
+}
+
 // ── FR-GV-07: dsm granularity parsing ───────────────────────────────────────
 
 #[test]
@@ -1419,6 +1541,7 @@ fn require_tested_rules() -> CompiledRules {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -1665,6 +1788,7 @@ fn require_tested_rules_from(entries: Vec<RequireTested>) -> CompiledRules {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -1787,6 +1911,7 @@ fn require_documented_rules_from(entries: Vec<RequireDocumented>) -> CompiledRul
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     CompiledRules::compile(rules, "test".to_string()).expect("test globs compile")
 }
@@ -2603,6 +2728,7 @@ fn evaluate_concatenates_sections_in_canonical_order() {
         history: Default::default(),
         coverage: Default::default(),
         security: None,
+        review: None,
     };
     let compiled = CompiledRules::compile(rules, "test".to_string()).unwrap();
 
@@ -3379,7 +3505,8 @@ mod security_gate {
     use std::collections::BTreeSet;
 
     use super::security::{
-        baseline_fingerprints, check_security, missing_scans, ScanFreshness, ScannerFreshness, SecuritySummary, SummaryFinding,
+        baseline_entries, baseline_fingerprints, check_security, missing_scans, read_checked_in, render_checked_in,
+        write_checked_in, BaselineSource, ScanFreshness, ScannerFreshness, SecuritySummary, SummaryFinding,
         RULE_MAX_SEVERITY, RULE_RATCHET,
     };
     use crate::config::SecurityRules;
@@ -3389,10 +3516,14 @@ mod security_gate {
         SummaryFinding {
             scanner: "Semgrep OSS".to_string(),
             fingerprint: fingerprint.to_string(),
+            legacy_fingerprints: Vec::new(),
+            unbound_location: None,
             rule_id: rule_id.to_string(),
             severity,
             path: Some("app/db.py".to_string()),
             line: Some(18),
+            historical: false,
+            short_commit: None,
             owasp: owasp.iter().map(|c| (*c).to_string()).collect(),
             suppressed: false,
         }
@@ -3408,6 +3539,7 @@ mod security_gate {
             scanners: vec![row("semgrep", "Semgrep OSS", ScanFreshness::Fresh, true)],
             findings,
             baseline: baseline.map(|b| b.iter().map(|f| (*f).to_string()).collect::<BTreeSet<_>>()),
+            ..SecuritySummary::default()
         }
     }
 
@@ -3460,6 +3592,28 @@ mod security_gate {
 
         let recorded_empty = check_security(&table, &summary(Vec::new(), Some(&[])));
         assert!(recorded_empty.violations.is_empty() && recorded_empty.notes.is_empty());
+    }
+
+    /// An `unrated` finding is gated as `medium` (S-768): a ratchet or cap at
+    /// `medium` fails on it, one at `high` does not — the verdicts it had when
+    /// it read `medium` — and the message says it is unrated and what it is
+    /// gated as.
+    #[test]
+    fn an_unrated_finding_is_gated_as_medium_and_says_so() {
+        let unrated = || vec![finding("u", "CVE-2021-3121", Severity::Unrated, &[])];
+        let ratchet = |least| SecurityRules { ratchet_min_severity: least, ..SecurityRules::default() };
+        let cap = |most| SecurityRules { ratchet_min_severity: Severity::Critical, max_severity: Some(most), ..SecurityRules::default() };
+
+        let verdict = check_security(&ratchet(Severity::Medium), &summary(unrated(), Some(&[])));
+        assert_eq!(rules_of(&verdict), [RULE_RATCHET]);
+        let message = &verdict.violations[0].message;
+        assert!(message.starts_with("new unrated (gated as medium) finding `CVE-2021-3121`"), "{message}");
+        assert!(check_security(&ratchet(Severity::High), &summary(unrated(), Some(&[]))).violations.is_empty());
+
+        let verdict = check_security(&cap(Severity::Medium), &summary(unrated(), Some(&["u"])));
+        assert_eq!(rules_of(&verdict), [RULE_MAX_SEVERITY]);
+        assert!(verdict.violations[0].message.contains("unrated (gated as medium)"), "{}", verdict.violations[0].message);
+        assert!(check_security(&cap(Severity::High), &summary(unrated(), Some(&["u"]))).violations.is_empty());
     }
 
     /// The caps ignore the baseline: `max_severity = "critical"` fails on a
@@ -3538,6 +3692,23 @@ mod security_gate {
         assert!(missing_scans(&required(&[]), &summary).is_empty(), "a table that requires nothing never exits 5");
     }
 
+    /// S-769: a required scanner with nothing to scan in this project is no
+    /// missing scan — `check` does not exit 5 over gosec on a project without
+    /// Go — while a never-run one beside it still is.
+    #[test]
+    fn a_required_scanner_that_is_not_applicable_is_not_missing() {
+        let summary = SecuritySummary {
+            scanners: vec![
+                row("gosec", "gosec", ScanFreshness::NotApplicable, false),
+                row("bandit", "Bandit", ScanFreshness::NeverRun, false),
+            ],
+            ..SecuritySummary::default()
+        };
+        let missing = missing_scans(&required(&["gosec", "bandit"]), &summary);
+        let rows: Vec<(&str, &str)> = missing.iter().map(|m| (m.scanner.as_str(), m.state)).collect();
+        assert_eq!(rows, [("bandit", "never_run")]);
+    }
+
     /// Only fresh scans are evaluated ([NFR-RA-05]): a stale scan's new high
     /// finding fails nothing, and the note names exactly the stored scans that
     /// are not fresh and not required — never a fresh one, never a required one
@@ -3558,6 +3729,7 @@ mod security_gate {
             ],
             findings: vec![stale, required_stale, finding("f", "rule.fresh", Severity::Low, &[])],
             baseline: Some(BTreeSet::new()),
+            ..SecuritySummary::default()
         };
         let table = SecurityRules {
             max_severity: Some(Severity::High),
@@ -3591,11 +3763,151 @@ mod security_gate {
             ],
             findings: vec![finding("f", "rule.fresh", Severity::Info, &[]), suppressed, stale],
             baseline: None,
+            ..SecuritySummary::default()
         };
         assert_eq!(
             baseline_fingerprints(&summary),
             [("Semgrep OSS".to_string(), "f".to_string()), ("Bandit".to_string(), "t".to_string())]
         );
+    }
+
+    /// `/checkout` taken off an absolute path, as `project_location` does for
+    /// the root a test names; a relative one kept.
+    fn under_checkout(path: &str) -> Option<String> {
+        match path.strip_prefix("/checkout/") {
+            Some(rest) => Some(rest.to_string()),
+            None => (!path.starts_with('/')).then(|| path.to_string()),
+        }
+    }
+
+    /// [FR-SC-25]: the checked-in baseline records the findings `gate --save`
+    /// would — never a suppressed one — as fingerprint, rule id and
+    /// project-relative path only, sorted by path, rule, fingerprint, each
+    /// once; a path outside the project is recorded as none.
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    #[test]
+    fn the_checked_in_baseline_records_fingerprint_rule_and_relative_path_sorted() {
+        let mut suppressed = finding("s", "rule.suppressed", Severity::Critical, &[]);
+        suppressed.suppressed = true;
+        let mut absolute = finding("c", "CVE-1", Severity::High, &[]);
+        absolute.path = Some("/checkout/Cargo.lock".to_string());
+        let mut outside = finding("o", "CVE-2", Severity::High, &[]);
+        outside.path = Some("/elsewhere/Cargo.lock".to_string());
+        let mut nowhere = finding("n", "rule.nowhere", Severity::Low, &[]);
+        nowhere.path = None;
+        let findings = vec![
+            finding("z", "rule.b", Severity::High, &[]),
+            finding("a", "rule.b", Severity::High, &[]),
+            suppressed,
+            finding("y", "rule.a", Severity::Medium, &[]),
+            absolute,
+            outside,
+            nowhere,
+            finding("a", "rule.b", Severity::High, &[]),
+        ];
+        let entries = baseline_entries(&summary(findings, None), under_checkout);
+        let got: Vec<(Option<&str>, &str, &str)> =
+            entries.iter().map(|e| (e.path.as_deref(), e.rule_id.as_str(), e.fingerprint.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (None, "CVE-2", "o"),
+                (None, "rule.nowhere", "n"),
+                (Some("Cargo.lock"), "CVE-1", "c"),
+                (Some("app/db.py"), "rule.a", "y"),
+                (Some("app/db.py"), "rule.b", "a"),
+                (Some("app/db.py"), "rule.b", "z"),
+            ]
+        );
+
+        let rendered: serde_json::Value = serde_json::from_str(&render_checked_in(&entries)).unwrap();
+        let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&rendered), ["version", "findings"]);
+        assert_eq!(rendered["version"], 1);
+        for entry in rendered["findings"].as_array().unwrap() {
+            assert_eq!(keys(entry), ["fingerprint", "rule_id", "path"], "{entry}");
+        }
+    }
+
+    /// [FR-SC-25] / [NFR-RA-06]: one state blesses to one byte string, in
+    /// whatever order the findings arrive, and re-blessing it leaves the file
+    /// untouched; what was written reads back as the fingerprints.
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    #[test]
+    fn blessing_one_state_twice_writes_identical_bytes_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let findings = || vec![finding("b", "rule.b", Severity::High, &[]), finding("a", "rule.a", Severity::Low, &[])];
+        let mut reversed = findings();
+        reversed.reverse();
+        let first = baseline_entries(&summary(findings(), None), under_checkout);
+        assert_eq!(baseline_entries(&summary(reversed, None), under_checkout), first);
+
+        assert!(write_checked_in(tmp.path(), &first).unwrap(), "the first bless writes the file");
+        let path = tmp.path().join(".logos/security-baseline.json");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.ends_with(b"}\n"), "{}", String::from_utf8_lossy(&bytes));
+        assert!(!write_checked_in(tmp.path(), &first).unwrap(), "an unchanged bless writes nothing");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        let read = read_checked_in(tmp.path()).unwrap().expect("the file is checked in");
+        let fingerprints: BTreeSet<String> = read.into_iter().map(|e| e.fingerprint).collect();
+        assert_eq!(fingerprints, BTreeSet::from(["a".to_string(), "b".to_string()]));
+    }
+
+    /// [FR-SC-25]: no file is no checked-in baseline; a file with a field it
+    /// does not define — a message carried along, say — or of another format
+    /// version is a configuration error naming the file (exit 2), never read
+    /// as an empty baseline.
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    #[test]
+    fn a_missing_checked_in_baseline_is_none_and_a_malformed_one_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_checked_in(tmp.path()).unwrap(), None);
+        std::fs::create_dir_all(tmp.path().join(".logos")).unwrap();
+        let path = tmp.path().join(".logos/security-baseline.json");
+        let cases = [
+            (r#"{"version":1,"findings":[{"fingerprint":"a","rule_id":"r","path":null,"message":"m"}]}"#, "message"),
+            (r#"{"version":1,"findings":[],"message":"m"}"#, "message"),
+            (r#"{"version":2,"findings":[]}"#, "format version 2"),
+            ("not json", "security bless"),
+        ];
+        for (text, named) in cases {
+            std::fs::write(&path, text).unwrap();
+            let err = read_checked_in(tmp.path()).expect_err(text);
+            assert_eq!(crate::error::exit_code(&err), 2, "{err:#}");
+            let message = format!("{err:#}");
+            assert!(message.contains(".logos/security-baseline.json") && message.contains(named), "{message}");
+        }
+        std::fs::write(&path, r#"{"version":1,"findings":[]}"#).unwrap();
+        assert_eq!(read_checked_in(tmp.path()).unwrap(), Some(Vec::new()), "an empty file is an empty baseline");
+
+        // A path that exists but cannot be read is refused too, never read as
+        // no file — or the ratchet would fall back to history.db unseen.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = read_checked_in(tmp.path()).expect_err("a directory is not a baseline file");
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:#}");
+        assert!(format!("{err:#}").contains("security-baseline.json"), "{err:#}");
+    }
+
+    /// A finding new to a checked-in baseline names the file it is missing
+    /// from, not `gate --save`; one in it passes ([FR-SC-25]).
+    ///
+    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+    #[test]
+    fn a_finding_new_to_the_checked_in_baseline_names_the_file() {
+        let findings = vec![finding("known", "rule.known", Severity::High, &[]), finding("new", "rule.new", Severity::High, &[])];
+        let mut checked_in = summary(findings, Some(&["known"]));
+        checked_in.baseline_source = BaselineSource::CheckedIn;
+        let verdict = check_security(&required(&[]), &checked_in);
+        assert_eq!(verdict.violations.len(), 1, "{:?}", verdict.violations);
+        let message = &verdict.violations[0].message;
+        assert!(message.contains("rule.new") && message.contains("not in the findings .logos/security-baseline.json records"), "{message}");
+        assert!(!message.contains("gate --save"), "{message}");
     }
 
     /// [FR-SC-10] acceptance / [ADR-79] §8: the security gate is not a metric

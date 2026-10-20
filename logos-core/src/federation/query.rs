@@ -1974,10 +1974,13 @@ pub fn workspace_reachability(
 /// [`MemberSecurity`], and the totals summed over them, each figure beside the
 /// population it was summed over ([NFR-CC-04]).
 ///
-/// Totals count only fresh, unsuppressed findings, and only from the members
-/// that have a fresh report (`members_counted`); what they leave out is in
-/// `excluded`. A member never scanned is counted in `members_never_scanned`,
-/// never as a member with no findings ([BR-66]). A member that could not be
+/// Totals count only fresh, unsuppressed findings — fresh per finding, by the
+/// one definition every security surface shares ([S-760]) — over the members
+/// with a stored report (`members_counted`); what they leave out is in
+/// `excluded`, and `reports_fresh` of `reports_stored` states how many of the
+/// stored reports are themselves fresh at HEAD. A member never scanned is
+/// counted in `members_never_scanned`, never as a member with no findings
+/// ([BR-66]). A member that could not be
 /// opened or read is a row with its `error`, and every other member still
 /// answers ([ADR-53]).
 ///
@@ -1985,6 +1988,7 @@ pub fn workspace_reachability(
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+/// [S-760]: ../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
 #[derive(Debug, Serialize)]
 pub struct WorkspaceSecurity {
     /// One row per member, in roster order.
@@ -1995,9 +1999,15 @@ pub struct WorkspaceSecurity {
     pub members_read: usize,
     /// Members read with no stored report at all.
     pub members_never_scanned: usize,
-    /// Members read with at least one fresh report: the members the totals
-    /// and the category counts come from.
+    /// Members read with at least one stored report: the members the totals
+    /// come from. The category counts come from fresh reports only
+    /// (`reports_fresh` of `reports_stored`; each category's `covered_in`).
     pub members_counted: usize,
+    /// Stored reports over the members read, a disabled scanner's included.
+    pub reports_stored: usize,
+    /// Of `reports_stored`, the reports that are fresh at HEAD: "N of M
+    /// reports fresh", its own figure beside the totals it qualifies.
+    pub reports_fresh: usize,
     /// Fresh, unsuppressed findings by severity, over `members_counted`.
     pub totals: SeverityCounts,
     /// The stored findings of the members read that the totals leave out.
@@ -2053,7 +2063,10 @@ pub fn workspace_security(registry: &EngineRegistry<Engine>) -> WorkspaceSecurit
 
 /// One member's [`MemberSecurity`] off its engine.
 fn member_security(engine: &Engine) -> anyhow::Result<MemberSecurity> {
-    let status = engine.security_status_probing(crate::security::VersionProbes::Consented)?;
+    // The roll-up never reads a row's coverage, so no member's tree is walked
+    // for it; only an installed gosec or Bandit with no stored report walks
+    // it, to decide whether it is `not_applicable` (S-769).
+    let status = engine.security_status_probing(crate::security::VersionProbes::Consented, false)?;
     let listings = crate::security::listings(
         engine.root(),
         &engine.scan_environment(),
@@ -2070,13 +2083,15 @@ fn roll_up_security(members: Vec<MemberResult<MemberSecurity>>) -> WorkspaceSecu
     let mut excluded = Excluded::default();
     let mut owasp: Vec<WorkspaceEdition> = Vec::new();
     let (mut read, mut never_scanned, mut counted) = (0, 0, 0);
+    let (mut reports_stored, mut reports_fresh) = (0, 0);
     for security in members.iter().filter_map(|m| m.result.as_ref()) {
         read += 1;
         match security.scan {
             MemberScan::NeverRun => never_scanned += 1,
-            MemberScan::Fresh => counted += 1,
-            MemberScan::Stale => {}
+            MemberScan::Fresh | MemberScan::Stale => counted += 1,
         }
+        reports_stored += security.reports_stored;
+        reports_fresh += security.reports_fresh;
         if let Some(findings) = &security.findings {
             totals.absorb(findings);
         }
@@ -2111,6 +2126,8 @@ fn roll_up_security(members: Vec<MemberResult<MemberSecurity>>) -> WorkspaceSecu
         members_read: read,
         members_never_scanned: never_scanned,
         members_counted: counted,
+        reports_stored,
+        reports_fresh,
         totals,
         excluded,
         owasp,
@@ -3281,6 +3298,8 @@ mod tests {
                 scanners_fresh: usize::from(scan == MemberScan::Fresh),
                 scanners_enabled: 1,
                 scanners: Vec::new(),
+                reports_stored: usize::from(scan != MemberScan::NeverRun),
+                reports_fresh: usize::from(scan == MemberScan::Fresh),
                 findings,
                 excluded,
                 owasp: vec![crate::security::MemberEdition {
@@ -3301,9 +3320,13 @@ mod tests {
     }
 
     /// The fold sums only the members read: a fresh member's counts, a stale
-    /// member's exclusions and never a figure for it, a never-scanned member
-    /// as such, and an unread member in the total alone. A category covered
-    /// nowhere stays `None`; one covered with no finding is `Some(0)`.
+    /// member's counts too — findings are fresh per finding, not per report
+    /// ([S-760]) — and its exclusions, a never-scanned member as such, and an
+    /// unread member in the total alone. Reports are summed apart, as "N of M
+    /// fresh". A category covered nowhere stays `None`; one covered with no
+    /// finding is `Some(0)`.
+    ///
+    /// [S-760]: ../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
     #[test]
     fn the_security_roll_up_sums_fresh_counts_over_the_members_read() {
         let rows = vec![
@@ -3324,7 +3347,7 @@ mod tests {
             security_row(
                 "c",
                 MemberScan::Stale,
-                None,
+                Some(counts(0, 2)),
                 Excluded { not_fresh: 4, suppressed: 0 },
                 &[("A01", None), ("A02", None), ("A03", None)],
             ),
@@ -3334,9 +3357,10 @@ mod tests {
         let rolled = roll_up_security(rows);
         assert_eq!(
             (rolled.members_total, rolled.members_read, rolled.members_never_scanned, rolled.members_counted),
-            (5, 4, 1, 2)
+            (5, 4, 1, 3)
         );
-        assert_eq!(rolled.totals, counts(3, 1));
+        assert_eq!((rolled.reports_fresh, rolled.reports_stored), (2, 3), "two of the three stored reports are fresh");
+        assert_eq!(rolled.totals, counts(3, 3));
         assert_eq!(rolled.excluded, Excluded { not_fresh: 4, suppressed: 1 });
         let names: Vec<&str> = rolled.members.iter().map(|m| m.member.as_str()).collect();
         assert_eq!(names, ["a", "b", "c", "d", "e"], "every row kept, in order");
@@ -3345,7 +3369,7 @@ mod tests {
         let summed: Vec<(&str, usize, Option<usize>)> =
             rolled.owasp[0].categories.iter().map(|c| (c.id, c.covered_in, c.findings)).collect();
         assert_eq!(summed, [("A01", 2, Some(2)), ("A02", 1, Some(0)), ("A03", 0, None)]);
-        assert_eq!(rolled.owasp[0].unclassified, 1, "the findings under no category are summed apart");
+        assert_eq!(rolled.owasp[0].unclassified, 3, "the findings under no category are summed apart");
     }
 
     /// No member read: nothing summed, and no edition is invented.
@@ -3357,6 +3381,7 @@ mod tests {
             error: Some("store obstructed".into()),
         }]);
         assert_eq!((rolled.members_total, rolled.members_read, rolled.members_counted), (1, 0, 0));
+        assert_eq!((rolled.reports_fresh, rolled.reports_stored), (0, 0));
         assert_eq!(rolled.totals, SeverityCounts::default());
         assert!(rolled.owasp.is_empty());
     }

@@ -23,6 +23,7 @@
 #   5. the verdicts the legs read: trust labels, status filters, failing rules,
 #      long lists, odd names;
 #   6. the manifest: the Stop hook is declared once, with room for its budget;
+#   7. the rules.toml [review] policy (S-754): only a gating entry blocks;
 #   8. the security leg (S-688): a new secret blocks once, redacted; no new finding
 #      is silent; no consent, no Gitleaks or no budget scans nothing and says so;
 #      which files are scanned, and which findings are new.
@@ -192,6 +193,16 @@ review_json() {
 }
 CHECK_OK='{"passed":true,"checked_rules":1,"rules_present":true,"violations":[],"ran_at":1,"freshness":"x","warnings":[]}'
 DEEP="$(off deep new null 6 4 resolved)"
+# gating OFFENDER: the offender as the binary writes it when a rules.toml [review]
+# policy gates on it (S-754): "gating":true after its trust.
+gating() { printf '%s,"gating":true}' "${1%\}}"; }
+# with_policy N: the review answer on stdin with the policy object the binary
+# appends after "notes" when the contract carries a [review] table, N gating.
+with_policy() {
+    local answer
+    answer="$(cat)"
+    printf '%s,"policy":{"gate_dimensions":["nesting","conciseness","cohesion","focus","uniqueness"],"gating":%s}}\n' "${answer%\}}" "$1"
+}
 
 # The security leg's answers, in the shapes `logos security scan|findings --json`
 # write (captured from the binary against a stub Gitleaks).
@@ -530,6 +541,23 @@ security findings --json --suppression active --path src/app.rs|$REPO"
     expect "$T a snapshot at the merge-base is not used when check evaluated a rule (review reads the tree then): cold, not probed" \
         "$RC|$(decision)|$(ncalls evolution)|$(has "$(jf systemMessage)" 'built in the background')" "0|ABSENT|0|yes"
     quiesce
+    for table in '[review]' '  [review]  # the branch gate' '[review.x]'; do
+        mkrepo cold; edit
+        review_json true "$DEEP" "" >"$STUB/review.json"
+        printf '{"limit":100,"snapshots":[{"snapshot_id":1,"commit_sha":"%s","signal":1}],"warnings":[]}' "$MB" >"$STUB/evolution.json"
+        printf '%s\n' "${CHECK_OK/\"checked_rules\":1/\"checked_rules\":0}" >"$STUB/check.json"
+        printf '%s\n' "$table" >"$REPO/.logos/rules.toml"
+        run "$B" "$REPO"
+        case "$table" in
+            '[review.x]')
+                expect "$T a [review.x] table is not the [review] policy (near miss): the merge-base snapshot is warm, review blocks" \
+                    "$RC|$(decision)|$(ncalls evolution)" "0|block|1" ;;
+            *)
+                expect "$T under a [review] table ($table) review never reads a recorded snapshot: cold, not probed, built in the background" \
+                    "$RC|$(decision)|$(ncalls evolution)|$(has "$(jf systemMessage)" 'built in the background')" "0|ABSENT|0|yes" ;;
+        esac
+        quiesce
+    done
     for other in prefix zeros; do
         mkrepo cold; edit
         case "$other" in prefix) other="${MB:0:12}" ;; *) other="0000000000000000000000000000000000000000" ;; esac
@@ -858,6 +886,40 @@ security findings --json --suppression active --path src/app.rs|$REPO"
     run "$B" "$REPO"
     expect "$T a pretty-printed payload with stop_hook_active on its own line: silent, logos not run" "$RC|$OUT|$(calls)" "0||"
     PAYLOAD='{"hook_event_name":"Stop","stop_hook_active":false,"session_id":"t"}'
+
+    # 7. the rules.toml [review] policy (S-754, FR-GV-25) ----------------------
+    mkrepo; edit
+    review_json true "$(gating "$DEEP")" "" | with_policy 1 >"$STUB/review.json"
+    run "$B" "$REPO"
+    expect "$T under [review], a gating entry blocks, named with its value, threshold and trust" \
+        "$RC|$(decision)|$(has "$(reason)" '- deep (src/app.rs:5): nesting_depth 6, threshold 4 [new, resolved]')" "0|block|yes"
+
+    mkrepo; edit
+    review_json true "$DEEP" "" | with_policy 0 >"$STUB/review.json"
+    run "$B" "$REPO"
+    expect "$T under [review], a new resolved entry the policy does not gate (a distributional or ungated dimension) never blocks: silent" \
+        "$RC|$OUT" "0|"
+
+    mkrepo; edit
+    review_json true "" "$(viol max_cc new null 7 3 resolved 'fn `f` has cyclomatic complexity 7 > max_cc = 3')" | with_policy 0 >"$STUB/review.json"
+    run "$B" "$REPO"
+    expect "$T under [review], a new violation is listed, never blocking (a failing rule blocks through check)" "$RC|$OUT" "0|"
+
+    mkrepo; edit
+    review_json true "$(off eq new null 12 null resolved cyclomatic_complexity),$(gating "$(off grew worsened 5 8 4 resolved nesting_depth app 3)")" "" | with_policy 1 >"$STUB/review.json"
+    run "$B" "$REPO"
+    expect "$T under [review], the gating entry blocks and the ungated one is listed beside it" \
+        "$(decision)|$(has "$(reason)" '- grew (src/app.rs:3): nesting_depth 5 -> 8, threshold 4 [worsened, resolved]')|$(has "$(reason)" '- eq (src/app.rs:5)')" "block|yes|yes"
+
+    mkrepo; edit
+    review_json true "$(off gating new null 6 4 resolved)" "" | with_policy 0 >"$STUB/review.json"
+    run "$B" "$REPO"
+    expect "$T under [review], an entry named gating is not a gating entry (near miss): silent" "$RC|$OUT" "0|"
+
+    mkrepo; edit
+    review_json true "$(gating "$DEEP")" "" >"$STUB/review.json"
+    run "$B" "$REPO"
+    expect "$T without a policy object the trust rule still decides (near miss): the resolved entry blocks" "$(decision)" block
 
     # 8. the security leg ----------------------------------------------------
     S="$T [security]"

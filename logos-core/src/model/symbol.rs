@@ -34,6 +34,9 @@ use super::convert;
 pub struct LogosSymbol(String);
 
 impl LogosSymbol {
+    /// The SCIP scheme every symbol Logos extracts carries.
+    pub const SCHEME: &'static str = "logos";
+
     /// Parse and canonicalise a SCIP symbol string.
     ///
     /// Validates `raw` against the SCIP symbol grammar and stores its canonical
@@ -86,6 +89,21 @@ impl LogosSymbol {
     /// one repo-relative declaration share it. `None` for a local symbol.
     pub fn descriptor_tail(&self) -> Option<&str> {
         self.fields().map(|f| f.tail)
+    }
+
+    /// The coordinate-less symbol whose descriptor tail is `tail`:
+    /// `logos . . . <tail>`, the inverse of
+    /// [`descriptor_tail`](Self::descriptor_tail) for a symbol Logos extracts,
+    /// whose manager and version are always empty ([ADR-85]).
+    /// [`with_coordinate`](Self::with_coordinate) places it under a coordinate.
+    ///
+    /// # Errors
+    /// Returns an error when `tail` is not a valid descriptor tail — a bare
+    /// name with no descriptor suffix, for one.
+    ///
+    /// [ADR-85]: ../../../../docs/specs/architecture/decisions/ADR-85.md
+    pub fn from_descriptor_tail(tail: &str) -> anyhow::Result<Self> {
+        Self::parse(&format!("{} {EMPTY_FIELD} {EMPTY_FIELD} {EMPTY_FIELD} {tail}", Self::SCHEME))
     }
 
     /// The fields of a global symbol, or `None` for a local one (`local <id>`,
@@ -325,6 +343,19 @@ mod tests {
         assert!(!local.is_coordinate_less());
         assert_eq!(local.coordinate(), None);
         assert_eq!(local.descriptor_tail(), None);
+    }
+
+    #[test]
+    fn a_descriptor_tail_rebuilds_its_coordinate_less_symbol() {
+        for tail in ["src/`lib.rs`/run().", "topic/orders#", "`my file.rs`/f().", "layer/domain/"] {
+            let sym = LogosSymbol::from_descriptor_tail(tail).unwrap_or_else(|e| panic!("{tail:?}: {e}"));
+            assert_eq!(sym.as_str(), format!("logos . . . {tail}"));
+            assert!(sym.is_coordinate_less());
+            assert_eq!(sym.descriptor_tail(), Some(tail), "the inverse of descriptor_tail");
+        }
+        for not_a_tail in ["", "run", "duplicate_group:0123456789abcdef"] {
+            assert!(LogosSymbol::from_descriptor_tail(not_a_tail).is_err(), "{not_a_tail:?} is no tail");
+        }
     }
 
     #[test]

@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use super::registry::{parse_version, Fill, ScopedPath, REGISTRY};
+use super::registry::{parse_version, Fill, Ignores, ScopedPath, Targets, REGISTRY};
 use super::{
-    scanner, CopyKind, Detection, Orchestrator, Outcome, ScanEnvironment, ScanReport,
+    scanner, Coverage, CopyKind, Detection, IgnoredPaths, Orchestrator, Outcome, ScanEnvironment, ScanReport,
     ScannerOutcome, Selection, OUTPUT_DIR, REQUIRES_BUILD,
 };
 use crate::config::{parse_config, parse_user_config, ConfigError, SECURITY_SCANNERS};
@@ -136,6 +136,7 @@ impl World {
              printf 'SEMGREP_ENABLE_VERSION_CHECK=%s TRIVY_SKIP_VERSION_CHECK=%s GOTOOLCHAIN=%s\\n' \
              \"$SEMGREP_ENABLE_VERSION_CHECK\" \"$TRIVY_SKIP_VERSION_CHECK\" \"$GOTOOLCHAIN\" >> '{env}'\n\
              printf 'cwd=%s\\npath=%s\\n' \"$(pwd -P)\" \"$PATH\" >> '{env}'\n\
+             printf 'lgtm=%s\\n' \"$LGTM_INDEX_FILTERS\" >> '{env}'\n\
              case \"$1\" in --version|version|-version) printf '%s\\n' '{version}'; exit 0;; esac\n\
              out=''; prev=''\n\
              for a in \"$@\"; do if [ \"$prev\" = '{flag}' ]; then out=\"$a\"; fi; prev=\"$a\"; done\n\
@@ -615,6 +616,7 @@ fn codeql_on_build_requiring_languages_is_skipped_with_the_reason_and_no_build_i
         }
     );
     assert_eq!(REQUIRES_BUILD, "requires a build — ingest a CI report");
+    assert_eq!(outcome(&report, "codeql").coverage, None, "nothing ran, so no coverage is stated");
     // The version probe is the only process CodeQL was started for.
     assert_eq!(w.invocations("codeql"), vec![strings(&["version", "--format=terse"])]);
     assert!(!w.root.join(OUTPUT_DIR).join("codeql").exists(), "no database was created");
@@ -707,7 +709,48 @@ fn codeql_with_no_language_it_analyses_is_not_applicable() {
         matches!(outcome(&report, "codeql").outcome, Outcome::NotApplicable { .. }),
         "{report:?}"
     );
+    assert_eq!(outcome(&report, "codeql").coverage, None, "nothing ran, so no coverage is stated");
     assert_eq!(w.runs("codeql"), Vec::<Vec<String>>::new());
+}
+
+/// S-769: a scanner that reads one language's files is `not applicable` on a
+/// project without one, and is never started — not even its version probe.
+/// The walk is the ignore-aware one ([`super::project_walk`]): a Go file in an
+/// ignored directory is no Go code, nor is a near miss (`main.go.md`, a
+/// directory named `x.go`). One Go file the project does not ignore makes
+/// gosec run again.
+#[test]
+fn a_scanner_with_none_of_its_files_is_not_applicable_and_never_started() {
+    let w = World::new(&[
+        (".gitignore", "/third_party/\n"),
+        ("third_party/lib.go", "package lib\n"),
+        ("third_party/lib.py", "x = 1\n"),
+        ("docs/main.go.md", "# not Go\n"),
+        ("pkg/x.go/README", "a directory, not a Go file\n"),
+        ("web/app.js", "1;\n"),
+    ]);
+    for name in ["gosec", "bandit", "semgrep"] {
+        w.stub(name, 0);
+    }
+    let report = w.scan(&Selection::Only(strings(&["gosec", "bandit", "semgrep"])));
+    for (name, files) in [("gosec", "Go source file (.go)"), ("bandit", "Python source file (.py, .pyw)")] {
+        let ran = outcome(&report, name);
+        let Outcome::NotApplicable { reason } = &ran.outcome else { panic!("{name}: {ran:?}") };
+        assert_eq!(reason, &format!("no {files} among the files the project does not ignore"), "{name}");
+        assert_eq!((ran.version.as_deref(), ran.coverage.as_ref()), (None, None), "{name} was never probed: {ran:?}");
+        assert!(w.invocations(name).is_empty(), "{name} was started: {:?}", w.invocations(name));
+    }
+    assert!(matches!(outcome(&report, "semgrep").outcome, Outcome::Ran { .. }), "a scanner with no rule runs: {report:?}");
+
+    fs::write(w.root.join("cmd.go"), "package main\n").unwrap();
+    let report = w.scan(&Selection::Only(strings(&["gosec"])));
+    assert!(matches!(outcome(&report, "gosec").outcome, Outcome::Ran { .. }), "{report:?}");
+    assert_eq!(w.runs("gosec").len(), 1, "one Go file the project keeps is enough");
+
+    // Bandit reads `.pyw` as well as `.py`: one such script is enough.
+    fs::write(w.root.join("tool.pyw"), "x = 1\n").unwrap();
+    let report = w.scan(&Selection::Only(strings(&["bandit"])));
+    assert!(matches!(outcome(&report, "bandit").outcome, Outcome::Ran { .. }), "{report:?}");
 }
 
 #[test]
@@ -844,6 +887,7 @@ fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
             database: Path::new("/db"),
             pinned_config: Path::new("/r/.logos/security/empty-config.yaml"),
             ignored: &[],
+            targets: &Targets::Root,
             root: None,
         };
         let full = s.render(s.run, &fill);
@@ -855,19 +899,23 @@ fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
         let runs: Vec<Vec<OsString>> =
             slot.runs(&scope).into_iter().map(|run| s.render(s.run, &Fill { scope: Some(run), ..fill })).collect();
         // Every placeholder before the path position renders one element but
-        // `Extra` (one per flag) and `Ignored` (none here: nothing is ignored).
+        // `Extra` (one per flag), `Ignored` (none here: nothing is ignored) and
+        // `Unignored`, whose full-scan targets are the full scan's path elements
+        // (`.` here: nothing is ignored) and which a scoped run leaves out.
         let before = &s.run[..s.run.iter().position(|a| *a == super::registry::Arg::Paths).unwrap()];
         let ignored = before.iter().filter(|a| matches!(a, super::registry::Arg::Ignored(_))).count();
-        let at = before.len() + extra.len() - 1 - ignored;
+        let unignored = before.iter().filter(|a| **a == super::registry::Arg::Unignored).count();
+        let at = before.len() + extra.len() - 1 - ignored - unignored;
+        let full_paths = if unignored > 0 { strings(&["."]) } else { strings(slot.full) };
         let (_, want_runs) = expected.iter().find(|(n, _)| *n == s.name).unwrap();
         assert_eq!(runs.len(), want_runs.len(), "{}: one run per slot group", s.name);
         for (scoped, want) in runs.iter().zip(want_runs.iter()) {
             // The full argv with its full-scan path elements swapped for these.
             let mut rebuilt: Vec<OsString> = full[..at].to_vec();
             rebuilt.extend(want.iter().map(OsString::from));
-            rebuilt.extend(full[at + slot.full.len()..].iter().cloned());
+            rebuilt.extend(full[at + full_paths.len()..].iter().cloned());
             assert_eq!(*scoped, rebuilt, "{}: only the path elements differ", s.name);
-            assert_eq!(full[at..at + slot.full.len()], strings(slot.full).iter().map(OsString::from).collect::<Vec<_>>()[..]);
+            assert_eq!(full[at..at + full_paths.len()], full_paths.iter().map(OsString::from).collect::<Vec<_>>()[..]);
         }
     }
 }
@@ -898,7 +946,9 @@ fn a_repository_scanner_config_that_can_name_code_to_run_refuses_that_scanner() 
         assert_eq!(*exit_code, None);
         assert!(stderr.starts_with(&format!("not run: the repository's {file}")), "{stderr}");
         assert!(w.runs("checkov").is_empty(), "{file}: checkov was never started on the repository");
+        assert_eq!(outcome(&report, "checkov").coverage, None, "{file}: a refused scanner states no coverage");
         assert!(matches!(outcome(&report, "bandit").outcome, Outcome::Ran { .. }));
+        assert_eq!(outcome(&report, "bandit").coverage, Some(Coverage::EXCLUDED), "{file}: one that ran does");
     }
 }
 
@@ -963,7 +1013,7 @@ fn a_symlink_in_a_directory_outputs_place_is_replaced_not_followed() {
     assert_eq!(fs::read_to_string(elsewhere.join("results_sarif.sarif")).unwrap(), "precious");
 }
 
-/// The stub's recorded `cwd=` and `path=` lines for `name`.
+/// The stub's recorded `cwd=`, `path=` or `lgtm=` lines for `name`.
 fn recorded(w: &World, name: &str, key: &str) -> Vec<String> {
     fs::read_to_string(w.rec.join(format!("{name}.env")))
         .unwrap_or_default()
@@ -1386,6 +1436,7 @@ fn two_files_of_one_go_package_name_the_package_once() {
         database: Path::new(""),
         pinned_config: Path::new(""),
         ignored: &[],
+        targets: &Targets::Root,
         root: None,
     };
     let argv = gosec.render(gosec.run, &fill);
@@ -1394,11 +1445,11 @@ fn two_files_of_one_go_package_name_the_package_once() {
 }
 
 /// The ignored directories as each scanner's own exclusion flag takes them,
-/// after the `.logos` it already excluded and before the user's extra flags
-/// (HF-5): a repeated flag for Trivy, Checkov and Dependency-Check, one comma
-/// list for Bandit, whose repeated `--exclude` keeps only the last. The
-/// scanners that take none — and every run on named paths — render exactly as
-/// with nothing ignored.
+/// after any `.logos` it already excluded and before the user's extra flags
+/// (HF-5): a repeated flag for Trivy, Checkov, Dependency-Check and gosec
+/// (S-773), one comma list for Bandit, whose repeated `--exclude` keeps only
+/// the last. The scanners that take none — and every run on named paths —
+/// render exactly as with nothing ignored.
 #[test]
 fn ignored_directories_reach_each_scanners_exclusion_flag() {
     let ignored = strings(&["notes", "target", "web/dist"]);
@@ -1411,6 +1462,7 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
         database: Path::new("/db"),
         pinned_config: Path::new("/r/.logos/security/empty-config.yaml"),
         ignored: &[],
+        targets: &Targets::Root,
         root: Some("/r"),
     };
     let with = Fill { ignored: &ignored, ..base };
@@ -1424,6 +1476,10 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
         ),
         ("bandit", &["--exclude", "./.logos,./notes,./target,./web/dist"]),
         (
+            "gosec",
+            &["-exclude-dir", "^notes(/|$)", "-exclude-dir", "^target(/|$)", "-exclude-dir", "^web/dist(/|$)"],
+        ),
+        (
             "checkov",
             &[
                 "--skip-path", ".logos", "--skip-path", r"^(\./|/r/)?notes(/|$)", "--skip-path",
@@ -1435,8 +1491,8 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
             &["--exclude", "**/.logos/**", "--exclude", "notes/**", "--exclude", "target/**", "--exclude", "web/dist/**"],
         ),
     ];
-    let excluding: Vec<&str> = REGISTRY.iter().filter(|s| s.excludes_ignored()).map(|s| s.name).collect();
-    assert_eq!(excluding, ["trivy", "bandit", "checkov", "dependency-check"]);
+    let flagged: Vec<&str> = REGISTRY.iter().filter(|s| s.takes_exclusion_flag()).map(|s| s.name).collect();
+    assert_eq!(flagged, ["trivy", "bandit", "gosec", "checkov", "dependency-check"]);
     for s in &REGISTRY {
         let plain: Vec<String> = s.render(s.run, &base).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let argv: Vec<String> = s.render(s.run, &with).iter().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -1449,10 +1505,12 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
         let user = argv.iter().position(|a| a == "--user-flag").unwrap();
         assert!(user >= at + want.len(), "{}: the user's extra flags come after Logos' own: {argv:?}", s.name);
         // Everything else is the argv with nothing ignored: the exclusions
-        // follow the `.logos` pair (Bandit's extend its one value in place).
-        let added = want.len() - 2;
+        // follow the `.logos` pair (Bandit's extend its one value in place),
+        // or, for gosec, which excludes no `.logos`, stand where it would.
+        let pair = if plain[at] == want[0] { 2 } else { 0 };
+        let added = want.len() - pair;
         let mut rebuilt = plain.clone();
-        rebuilt.splice(at..at + 2, want.iter().map(|w| (*w).to_string()));
+        rebuilt.splice(at..at + pair, want.iter().map(|w| (*w).to_string()));
         assert_eq!(argv, rebuilt, "{}: only the exclusions are added", s.name);
         assert_eq!(argv.len(), plain.len() + added, "{}", s.name);
         // A run on named paths reads exactly those, ignored or not.
@@ -1483,6 +1541,7 @@ fn checkovs_skip_expression_matches_the_directory_and_not_its_near_misses() {
         database: Path::new(""),
         pinned_config: Path::new(""),
         ignored: &ignored,
+        targets: &Targets::Root,
         root: Some("/srv/my.app"),
     };
     let argv = checkov.render(checkov.run, &fill);
@@ -1509,6 +1568,248 @@ fn checkovs_skip_expression_matches_the_directory_and_not_its_near_misses() {
     assert!(patterns.iter().all(|p| p.as_str().starts_with('^')));
 }
 
+/// Whether gosec 2.21 skips the package in `dir` (relative to `.`, as its
+/// walk of `./...` spells it) given these `-exclude-dir` values: each value,
+/// every `/` in it escaped and wrapped as `([\\/])?<value>([\\/])?`, is
+/// searched in the directory (its `helpers.go`).
+fn gosec_skips(values: &[String], dir: &str) -> bool {
+    values.iter().any(|v| {
+        let wrapped = format!(r"([\\/])?{}([\\/])?", v.replace('/', r"\/"));
+        regex::Regex::new(&wrapped).unwrap().is_match(dir)
+    })
+}
+
+/// The `-exclude-dir` values of a gosec argv.
+fn exclude_dirs(argv: &[String]) -> Vec<String> {
+    argv.windows(2).filter(|w| w[0] == "-exclude-dir").map(|w| w[1].clone()).collect()
+}
+
+/// gosec's tree expression, as gosec applies it, skips the ignored directory
+/// and every directory below it — the harness's `target/nested/`, which
+/// `^target$` does not reach — and no directory that merely contains the
+/// name, its characters escaped (S-773).
+#[test]
+fn gosecs_tree_expression_skips_the_directory_and_below_and_not_its_near_misses() {
+    let gosec = scanner("gosec").unwrap();
+    let ignored = strings(&["target", "web/dist", "my.app", "c++(1)"]);
+    let fill = Fill {
+        out: Path::new("/o"),
+        extra: &[],
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new(""),
+        ignored: &ignored,
+        targets: &Targets::Root,
+        root: Some("/srv/project"),
+    };
+    let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let values = exclude_dirs(&argv);
+    assert_eq!(values.len(), ignored.len(), "{argv:?}");
+    for dir in [
+        "target", "target/nested", "target/a/b", "web/dist", "web/dist/x", "my.app", "my.app/x", "c++(1)", "c++(1)/y",
+    ] {
+        assert!(gosec_skips(&values, dir), "{dir} is skipped");
+    }
+    for dir in [
+        "pkg/mytarget", "src/target", "src/target/nested", "targets", "mytarget", "target2", "web/distro",
+        "web/src/dist", "x/web/dist", "myxapp", "my.apps", "c(1)", "cc(1)", ".",
+    ] {
+        assert!(!gosec_skips(&values, dir), "{dir} stays scanned");
+    }
+    // Relative to `.`: the root is never spelled into a value, as Checkov's is.
+    assert!(values.iter().all(|v| v.starts_with('^') && !v.contains("srv")), "{values:?}");
+}
+
+/// gosec reads `excluded` only when its argv carries every ignored directory:
+/// a list that fills the budget exactly is passed whole, and one past it is
+/// cut — the coverage fact names the count `render` left out (S-773, BR-97).
+#[test]
+fn gosec_reads_excluded_only_when_every_ignored_directory_fits_the_budget() {
+    use super::registry::IGNORED_ARGV_BUDGET;
+    let gosec = scanner("gosec").unwrap();
+    // `-exclude-dir`, `^dir_00000000(/|$)` and a NUL after each: 32 bytes.
+    let per = "-exclude-dir".len() + "^dir_00000000(/|$)".len() + 2;
+    assert_eq!(IGNORED_ARGV_BUDGET % per, 0, "values of one length fill the budget exactly");
+    let fits = IGNORED_ARGV_BUDGET / per;
+    for (n, cut) in [(fits, 0), (fits + 1, 1), (fits + 3, 3)] {
+        let dirs: Vec<String> = (0..n).map(|i| format!("dir_{i:08}")).collect();
+        let fill = Fill {
+            out: Path::new("/o"),
+            extra: &[],
+            scope: None,
+            language: "",
+            database: Path::new(""),
+            pinned_config: Path::new(""),
+            ignored: &dirs,
+            targets: &Targets::Root,
+            root: Some("/srv/project"),
+        };
+        let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(exclude_dirs(&argv).len(), n - cut, "{n} ignored: what the argv carries");
+        let ignores = Ignores { dirs, misread: 0, targets: Targets::Paths(strings(&["src"])) };
+        let want = match cut {
+            0 => Coverage::EXCLUDED,
+            1 => Coverage::scanned("it is not given 1 ignored directory past the 64 KiB argument budget".to_string()),
+            n => Coverage::scanned(format!("it is not given {n} ignored directories past the 64 KiB argument budget")),
+        };
+        assert_eq!(gosec.coverage(&ignores), want, "{n} ignored");
+    }
+}
+
+/// S-773 on a fixture: a whole-project scan gives gosec one tree expression
+/// for the ignored `target/` and none for a near miss, so — read as gosec
+/// reads it — the packages in `target/` and `target/nested/` are skipped
+/// while `pkg/mytarget/`, `src/target/` and `targets/` stay scanned, and the
+/// outcome reads `excluded`. Nothing is written into the project outside
+/// `.logos/`, and a scoped re-scan of the ignored directory still reads it
+/// ([FR-SC-26] AC 4).
+///
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+#[test]
+fn gosec_skips_the_ignored_tree_and_keeps_pkg_mytarget_and_src_target_scanned() {
+    let go = "package x\n";
+    let w = World::new(&[
+        (".gitignore", "/target/\n"),
+        ("go.mod", "module example.com/fixture\n"),
+        ("app/main.go", go),
+        ("target/gen.go", go),
+        ("target/nested/gen.go", go),
+        ("pkg/mytarget/lib.go", go),
+        ("src/target/lib.go", go),
+        ("targets/lib.go", go),
+    ]);
+    w.stub("gosec", 0);
+    let before = tree_outside_logos(&w.root);
+    let report = w.scan(&Selection::Only(strings(&["gosec"])));
+    let o = outcome(&report, "gosec");
+    assert!(matches!(o.outcome, Outcome::Ran { .. }), "{o:?}");
+    assert_eq!(o.coverage, Some(Coverage::EXCLUDED));
+    let runs = w.runs("gosec");
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let values = exclude_dirs(&runs[0]);
+    assert_eq!(values, strings(&["^target(/|$)"]), "one expression, for the ignored directory alone");
+    let packages = ["app", "target", "target/nested", "pkg/mytarget", "src/target", "targets"];
+    let scanned: Vec<&str> = packages.into_iter().filter(|d| !gosec_skips(&values, d)).collect();
+    assert_eq!(scanned, ["app", "pkg/mytarget", "src/target", "targets"]);
+    assert_eq!(tree_outside_logos(&w.root), before, "nothing is written into the project");
+
+    // Trivy has no path position and runs whole, so the ignored set is walked
+    // for this scoped scan too: gosec must still pass none of it.
+    w.stub("trivy", 0);
+    fs::remove_dir_all(&w.rec).unwrap();
+    fs::create_dir_all(&w.rec).unwrap();
+    let scope = super::resolve_scope(&w.root, &strings(&["target"])).unwrap();
+    let scoped = w.open().unwrap().scan_in(&Selection::Only(strings(&["gosec", "trivy"])), Some(&scope)).unwrap();
+    assert!(w.runs("trivy")[0].iter().any(|a| a == "target"), "the ignored set was walked: {:?}", w.runs("trivy"));
+    let runs = w.runs("gosec");
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0].ends_with(&strings(&["-quiet", "./target/..."])), "scoped gosec reads target/: {:?}", runs[0]);
+    assert_eq!(outcome(&scoped, "gosec").coverage, None, "a scoped run states no coverage");
+}
+
+/// CodeQL has no harness evidence — it was not installed when the harness
+/// ran — so Logos gives it no exclusion and writes no config for one: its
+/// argv names no ignored directory and no config, nothing is written into the
+/// project outside `.logos/`, and its outcome reads `scanned` with its note
+/// (S-773).
+#[test]
+fn codeql_takes_no_unproven_exclusion_writes_no_config_and_says_it_read_the_ignored_files() {
+    let w = World::new(&[(".gitignore", "/target/\n"), ("app/main.py", "import os\n"), ("target/gen.py", "x\n")]);
+    w.stub("codeql", 0);
+    let before = tree_outside_logos(&w.root);
+    let report = w.scan(&Selection::Only(strings(&["codeql"])));
+    let o = outcome(&report, "codeql");
+    assert!(matches!(o.outcome, Outcome::Ran { .. }), "{o:?}");
+    let codeql = scanner("codeql").unwrap();
+    let note = "no exclusion is proven for it, so its database holds the ignored directories' files";
+    assert_eq!(o.coverage, Some(Coverage::scanned(note.to_string())), "the disclosure, word for word");
+    assert_eq!(codeql.exclusion_evidence, None);
+    let runs = w.runs("codeql");
+    assert_eq!(runs.len(), 2, "database create, then analyze: {runs:?}");
+    for argv in &runs {
+        assert!(
+            !argv.iter().any(|a| a.contains("target") || a.contains("config") || a.contains("paths-ignore")),
+            "{argv:?}"
+        );
+    }
+    // Nor through the variable its extractors read.
+    let lgtm = recorded(&w, "codeql", "lgtm");
+    assert_eq!(lgtm.len(), 3, "the probe, database create and analyze: {lgtm:?}");
+    assert!(lgtm.iter().all(String::is_empty), "LGTM_INDEX_FILTERS is never set: {lgtm:?}");
+    assert_eq!(tree_outside_logos(&w.root), before, "nothing is written into the project");
+}
+
+/// Every exclusion flag the registry calls proven is the argv its committed
+/// harness rows ran, on the version the tool manifest pins, and those rows
+/// show it skipping the ignored directory — `target/nested/` included — and
+/// keeping both near misses in all three checkout shapes ([FR-SC-26] AC 1,
+/// BR-97). A change to the template, the spelling or the pin that the
+/// harness has not re-run fails here.
+///
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+#[test]
+fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
+    let evidence = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/tests/fixtures/scanner-exclusions/verdicts.tsv");
+    let tsv = fs::read_to_string(&evidence).expect("the committed harness evidence");
+    let mut lines = tsv.lines();
+    assert_eq!(
+        lines.next(),
+        Some("scanner\tversion\tfixture\tmechanism\tstatus\tignored\tnear_miss\thits\tnote\targv"),
+        "the columns read below"
+    );
+    let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    let proven: Vec<_> = REGISTRY.iter().filter(|s| s.exclusion_evidence.is_some()).collect();
+    assert_eq!(proven.iter().map(|s| s.name).collect::<Vec<_>>(), ["gosec"]);
+    let ignored = strings(&["target"]);
+    for s in proven {
+        let mechanism = s.exclusion_evidence.unwrap();
+        let pin = &crate::tools::Manifest::builtin().tool(s.name).expect("a managed scanner").version;
+        let fill = Fill {
+            out: Path::new("<run>/out.sarif"),
+            extra: &[],
+            scope: None,
+            language: "",
+            database: Path::new(""),
+            pinned_config: Path::new(""),
+            ignored: &ignored,
+            targets: &Targets::Root,
+            root: None,
+        };
+        let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let argv = argv.join(" ");
+        let mine: Vec<&Vec<&str>> = rows.iter().filter(|r| r[0] == s.name && r[3] == mechanism).collect();
+        assert_eq!(mine.iter().map(|r| r[2]).collect::<Vec<_>>(), ["git", "worktree", "non-git"], "{}: {mechanism}", s.name);
+        for r in mine {
+            assert_eq!(r[1], pin, "{}: the row ran the pin", s.name);
+            assert!(r[4].starts_with("ran (exit "), "{}: {r:?}", s.name);
+            assert_eq!((r[5], r[6]), ("ignored skipped", "near miss kept"), "{}: {r:?}", s.name);
+            assert_eq!(r[9], argv, "{}: the row ran this template's argv", s.name);
+        }
+    }
+}
+
+/// Every file under `root` but `.logos/`, with its bytes, sorted.
+fn tree_outside_logos(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path == root.join(".logos") {
+                continue;
+            }
+            if entry.file_type().unwrap().is_dir() {
+                dirs.push(path);
+            } else {
+                files.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 /// Run `git` in `dir` for a fixture: never above the fixture, no maintenance.
 fn fixture_git(dir: &Path, ceiling: &Path, args: &[&str]) {
     let status = std::process::Command::new("git")
@@ -1530,6 +1831,7 @@ fn ignoring_world() -> World {
         (".gitignore", "target/\nnotes/\n.agents/\n*.log\na,b/\nctl*/\n*x/\n"),
         (".ignore", "scratch/\n"),
         ("src/main.rs", "fn main() {}\n"),
+        ("src/main.go", "package main\n"),
         ("src/app.py", "import os\n"),
         ("build.log", "x\n"),
         ("target/debug/deps/libx.rlib", "x"),
@@ -1573,17 +1875,27 @@ fn ignoring_world() -> World {
 #[test]
 fn the_ignored_directories_are_the_top_most_ones_the_project_itself_ignores() {
     let w = ignoring_world();
+    let ignores = super::project_ignores(&w.root);
     assert_eq!(
-        super::ignored_dirs(&w.root),
+        ignores.dirs,
         strings(&[".agents", "local", "notes", "scratch", "target", "a/build", "web/dist"]),
         "top-most only, shallowest first, never a file, never .git or .logos, never a misreadable name"
+    );
+    // a,b  ctl\nsrc  -x  q"x  g*x  g?x  g[x  g]x  g{x  g}x  b\x
+    assert_eq!(ignores.misread, 11, "each misreadable name is counted, not passed");
+    // Every walked path and no ignored directory, whatever its name: `a` and
+    // `web` hold one and are opened; the ignored file `build.log` is left out
+    // with them, and so is the symlink `linked`, which no target names.
+    assert_eq!(
+        ignores.targets,
+        Targets::Paths(strings(&[".github", ".gitignore", ".ignore", "a/.gitignore", "src", "web/.gitignore", "web/src"])),
     );
     // The same project reached through a symlink.
     let link = w.root.parent().unwrap().join("link");
     std::os::unix::fs::symlink(&w.root, &link).unwrap();
-    assert_eq!(super::ignored_dirs(&link), super::ignored_dirs(&w.root), "a symlinked root");
+    assert_eq!(super::project_ignores(&link), ignores, "a symlinked root");
     let w = World::new(&[("src/a.py", "")]);
-    assert!(super::ignored_dirs(&w.root).is_empty(), "nothing ignored, nothing excluded");
+    assert_eq!(super::project_ignores(&w.root), Ignores::NONE, "nothing ignored, nothing excluded, `.` targeted");
 }
 
 /// A full scan hands every excluding scanner the project's ignored
@@ -1635,21 +1947,59 @@ fn a_full_scan_keeps_every_scanner_out_of_the_projects_ignored_directories() {
     want.extend(pairs("--exclude", dirs.iter().map(|d| format!("{d}/**")).collect()));
     assert!(contains(&dc, &want), "dependency-check: {dc:?}");
 
-    for name in ["semgrep", "gitleaks", "osv-scanner", "gosec"] {
-        let argv = run(name);
-        assert!(!argv.iter().any(|a| dirs.iter().any(|d| a.contains(d))), "{name} takes none: {argv:?}");
+    let gosec = run("gosec");
+    let mut want = strings(&["-quiet"]);
+    want.extend(pairs("-exclude-dir", dirs.iter().map(|d| format!("^{}(/|$)", regex::escape(d))).collect()));
+    want.extend(strings(&["./..."]));
+    assert!(gosec.ends_with(&want), "gosec: {gosec:?}");
+
+    // Semgrep and OSV-Scanner are given every unignored path instead of `.`
+    // (S-772): `a` and `web` are opened around `a/build` and `web/dist`.
+    let targets = strings(&[".github", ".gitignore", ".ignore", "a/.gitignore", "src", "web/.gitignore", "web/src"]);
+    let semgrep = run("semgrep");
+    assert!(semgrep.ends_with(&[strings(&["--exclude", ".logos"]), targets.clone()].concat()), "semgrep: {semgrep:?}");
+    let osv = run("osv-scanner");
+    assert!(osv.ends_with(&[strings(&["--recursive"]), targets.clone()].concat()), "osv-scanner: {osv:?}");
+    let gitleaks = run("gitleaks");
+    assert!(!gitleaks.iter().any(|a| dirs.iter().any(|d| a.contains(d))), "gitleaks takes none: {gitleaks:?}");
+    // Only the targets are proven to keep a scanner out here (S-771), and they
+    // name none of the eleven misreadable directories either. The four that
+    // take the list through an unproven flag still get it above, but say
+    // `scanned` (BR-97); gosec's flag is proven (S-773), but it is not given
+    // the eleven, so it says `scanned` too, and why.
+    for o in &report.outcomes {
+        let coverage = o.coverage.as_ref().unwrap_or_else(|| panic!("{} states its coverage", o.scanner));
+        let excluded = ["semgrep", "osv-scanner"].contains(&o.scanner);
+        assert_eq!(coverage.ignored_paths == IgnoredPaths::Excluded, excluded, "{}: {coverage:?}", o.scanner);
+        assert_eq!(coverage.coverage_note.is_none(), excluded, "{}: a note exactly when scanned", o.scanner);
     }
+    let note = |name: &str| outcome(&report, name).coverage.clone().unwrap().coverage_note.unwrap();
+    for name in ["trivy", "bandit", "checkov", "dependency-check"] {
+        assert_eq!(note(name), super::registry::FLAG_UNPROVEN, "{name}");
+    }
+    assert_eq!(note("gosec"), "it is not given 11 ignored directories whose name an exclusion flag could misread");
 
     // A scoped re-scan: Bandit reads the named path, inside an ignored
     // directory or not; Trivy, which has no path position, still runs whole.
     fs::remove_dir_all(&w.rec).unwrap();
     fs::create_dir_all(&w.rec).unwrap();
     let scope = super::resolve_scope(&w.root, &strings(&["notes/old"])).unwrap();
-    w.open().unwrap().scan_in(&Selection::Only(strings(&["bandit", "trivy"])), Some(&scope)).unwrap();
+    let names = strings(&["semgrep", "bandit", "trivy", "osv-scanner"]);
+    let scoped = w.open().unwrap().scan_in(&Selection::Only(names), Some(&scope)).unwrap();
     let bandit = run("bandit");
     assert!(bandit.ends_with(&strings(&["--exclude", "./.logos", "notes/old"])), "scoped bandit: {bandit:?}");
+    let semgrep = run("semgrep");
+    assert!(semgrep.ends_with(&strings(&["--exclude", ".logos", "notes/old"])), "scoped semgrep: {semgrep:?}");
     let trivy = run("trivy");
     assert!(contains(&trivy, &pairs("--skip-dirs", strings(&dirs))), "unscoped trivy: {trivy:?}");
+    let osv = run("osv-scanner");
+    assert!(osv.ends_with(&[strings(&["--recursive"]), targets].concat()), "unscoped osv-scanner: {osv:?}");
+    // A run on named paths states no coverage; one that ran whole does.
+    for name in ["semgrep", "bandit"] {
+        assert_eq!(outcome(&scoped, name).coverage, None, "scoped {name}");
+    }
+    assert_eq!(outcome(&scoped, "osv-scanner").coverage, Some(Coverage::EXCLUDED));
+    assert!(outcome(&scoped, "trivy").coverage.is_some());
 }
 
 /// Thousands of ignored directories — a `__pycache__` in every package of a
@@ -1668,10 +2018,11 @@ fn a_huge_ignored_set_is_cut_to_the_argument_budget_keeping_the_shallowest() {
         database: Path::new(""),
         pinned_config: Path::new("/p"),
         ignored: &ignored,
+        targets: &Targets::Root,
         root: Some("/srv/project"),
     };
     let none = Fill { ignored: &[], ..fill };
-    for s in REGISTRY.iter().filter(|s| s.excludes_ignored()) {
+    for s in REGISTRY.iter().filter(|s| s.takes_exclusion_flag()) {
         let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let plain: Vec<String> = s.render(s.run, &none).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let added = argv.iter().map(|a| a.len() + 1).sum::<usize>() - plain.iter().map(|a| a.len() + 1).sum::<usize>();
@@ -1684,3 +2035,298 @@ fn a_huge_ignored_set_is_cut_to_the_argument_budget_keeping_the_shallowest() {
     }
 }
 
+
+/// The fixture shapes of the hand-run harness (S-771): a git checkout, a
+/// linked worktree of it, and a non-git copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Git,
+    Worktree,
+    NonGit,
+}
+
+/// The harness's fixture in `shape`: `.gitignore` `/target/`, a control in
+/// `app/`, the ignored `target/`, and the near misses `src/target/` and
+/// `targets/`, with a root `go.mod` beside them — and, unlike the harness, a
+/// Go file in `app/`, without which gosec has nothing to scan and is not
+/// started (S-769). In the worktree the ignored files exist in the linked
+/// checkout only, as a build would leave them.
+fn harness_world(shape: Shape) -> World {
+    const TRACKED: &[(&str, &str)] = &[
+        (".gitignore", "/target/\n"),
+        ("app/main.py", "eval(input())\n"),
+        ("app/main.go", "package main\n"),
+        ("src/target/main.py", "eval(input())\n"),
+        ("targets/main.py", "eval(input())\n"),
+        ("go.mod", "module example.com/fixture\n"),
+    ];
+    const IGNORED: (&str, &str) = ("target/main.py", "eval(input())\n");
+    let w = World::new(if shape == Shape::Worktree { &[] } else { TRACKED });
+    let base = w.root.parent().unwrap().to_path_buf();
+    let commit = |dir: &Path| {
+        fixture_git(dir, &base, &["init", "-q"]);
+        fixture_git(dir, &base, &["add", "-A"]);
+        fixture_git(dir, &base, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fixture"]);
+    };
+    match shape {
+        Shape::NonGit => {}
+        Shape::Git => commit(&w.root),
+        Shape::Worktree => {
+            let main = base.join("main");
+            for (path, body) in TRACKED {
+                fs::create_dir_all(main.join(path).parent().unwrap()).unwrap();
+                fs::write(main.join(path), body).unwrap();
+            }
+            commit(&main);
+            fs::remove_dir(&w.root).unwrap();
+            fixture_git(&main, &base, &["worktree", "add", "-q", w.root.to_str().unwrap()]);
+            assert!(w.root.join(".git").is_file(), "a linked worktree's .git is a file");
+        }
+    }
+    fs::create_dir_all(w.root.join("target")).unwrap();
+    fs::write(w.root.join(IGNORED.0), IGNORED.1).unwrap();
+    w
+}
+
+/// Each run's argv with the project root spelled `<root>` — as written, and
+/// as Checkov's expression escapes it — so two checkouts of one tree compare.
+fn rooted_runs(w: &World, name: &str) -> Vec<Vec<String>> {
+    let root = w.root.display().to_string();
+    let escaped = regex::escape(&root);
+    let rooted = |a: String| a.replace(&escaped, "<root>").replace(&root, "<root>");
+    w.runs(name).into_iter().map(|argv| argv.into_iter().map(rooted).collect()).collect()
+}
+
+/// Semgrep and OSV-Scanner are kept out of the ignored `target/` by the one
+/// mechanism the harness proves anchored on all three shapes for them — every
+/// unignored path as an explicit target, near misses included — and gosec by
+/// its tree expression (S-773); each whole-project outcome says what it did
+/// ([FR-SC-26]). A linked worktree and a non-git copy give the argv and the
+/// outcome of the git checkout.
+///
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+#[test]
+fn semgrep_and_osv_scanner_are_given_the_unignored_paths_in_every_checkout_shape() {
+    let targets = strings(&[".gitignore", "app", "go.mod", "src", "targets"]);
+    // Per shape, each scanner's name, rooted argv and coverage.
+    type Row = (String, Vec<Vec<String>>, Option<Coverage>);
+    let mut seen: Vec<(Shape, Vec<Row>)> = Vec::new();
+    for shape in [Shape::Git, Shape::Worktree, Shape::NonGit] {
+        let w = harness_world(shape);
+        w.all_stubs();
+        let report = w.scan(&Selection::All);
+        let semgrep = rooted_runs(&w, "semgrep");
+        assert_eq!(
+            semgrep,
+            vec![[
+                strings(&[
+                    "scan", "--config", "p/default", "--sarif", "--output", "<root>/.logos/security/semgrep.sarif",
+                    "--metrics", "off", "--disable-version-check", "--quiet", "--exclude", ".logos",
+                ]),
+                targets.clone(),
+            ]
+            .concat()],
+            "{shape:?}: semgrep"
+        );
+        assert_eq!(
+            rooted_runs(&w, "osv-scanner"),
+            vec![[
+                strings(&["--format", "sarif", "--output", "<root>/.logos/security/osv-scanner.sarif", "--recursive"]),
+                targets.clone(),
+            ]
+            .concat()],
+            "{shape:?}: osv-scanner"
+        );
+        assert_eq!(
+            rooted_runs(&w, "gosec"),
+            vec![strings(&[
+                "-fmt", "sarif", "-out", "<root>/.logos/security/gosec.sarif", "-no-fail", "-quiet", "-exclude-dir",
+                "^target(/|$)", "./...",
+            ])],
+            "{shape:?}: gosec"
+        );
+        let mut rows = Vec::new();
+        for o in &report.outcomes {
+            assert!(matches!(o.outcome, Outcome::Ran { .. }), "{shape:?}: {} ran: {:?}", o.scanner, o.outcome);
+            // Excluded only by a harness-proven mechanism; an unproven flag
+            // and a scanner that takes nothing say why they read `target/`.
+            let want = match o.scanner {
+                "semgrep" | "osv-scanner" | "gosec" => Coverage::EXCLUDED,
+                "trivy" | "bandit" | "checkov" | "dependency-check" => {
+                    Coverage::scanned(super::registry::FLAG_UNPROVEN.to_string())
+                }
+                _ => Coverage::scanned(scanner(o.scanner).unwrap().reads_ignored.unwrap().to_string()),
+            };
+            let coverage = o.coverage.clone().unwrap_or_else(|| panic!("{shape:?}: {} states its coverage", o.scanner));
+            assert_eq!(coverage, want, "{shape:?}: {}", o.scanner);
+            rows.push((o.scanner.to_string(), rooted_runs(&w, o.scanner), o.coverage.clone()));
+        }
+        seen.push((shape, rows));
+    }
+    let (_, git) = &seen[0];
+    for (shape, rows) in &seen[1..] {
+        assert_eq!(rows, git, "{shape:?} gives every scanner the git checkout's argv and outcome");
+    }
+}
+
+/// When the unignored paths cannot be passed, Semgrep and OSV-Scanner are
+/// given `.` as before, and their outcome says they read the ignored
+/// directories and why — never a silent `excluded`.
+#[test]
+fn unignored_paths_that_cannot_be_passed_fall_back_to_the_root_and_say_so() {
+    let budget = {
+        let w = World::new(&[(".gitignore", "/target/\n"), ("target/x.py", "x")]);
+        for i in 0..2500 {
+            fs::write(w.root.join(format!("generated_module_number_{i:05}.py")), "x").unwrap();
+        }
+        w
+    };
+    let cases: [(World, &str); 3] = [
+        (World::new(&[(".gitignore", "/target/\n"), ("target/x.py", "x"), ("-rf/x.py", "x")]), "begins with '-'"),
+        (budget, "exceed the 64 KiB argument budget"),
+        // Only an ignore rule outside the tree, and the ignored directory.
+        (World::new(&[(".ignore", "target/\n"), ("target/x.py", "x")]), "no path lies outside"),
+    ];
+    for (i, (w, why)) in cases.iter().enumerate() {
+        if i == 2 {
+            // `.ignore` itself is a path: hide it with a rule of its own.
+            fs::write(w.root.join(".ignore"), "target/\n.ignore\n").unwrap();
+        }
+        w.all_stubs();
+        let report = w.scan(&Selection::Only(strings(&["semgrep", "osv-scanner"])));
+        assert!(w.runs("semgrep")[0].ends_with(&strings(&[".logos", "."])), "{why}: semgrep is given `.`");
+        assert!(w.runs("osv-scanner")[0].ends_with(&strings(&["--recursive", "."])), "{why}: osv-scanner is given `.`");
+        for name in ["semgrep", "osv-scanner"] {
+            let coverage = outcome(&report, name).coverage.clone().unwrap();
+            assert_eq!(coverage.ignored_paths, IgnoredPaths::Scanned, "{why}: {name}");
+            let note = coverage.coverage_note.unwrap();
+            assert!(note.starts_with("it is given the whole project, because ") && note.contains(why), "{why}: {note}");
+        }
+    }
+}
+
+/// The coverage fact per scanner, from the same [`Ignores`] the argv is
+/// rendered with: every scanner has exactly one way to read the ignored
+/// directories — a flag that takes them, the unignored targets, or a note
+/// saying why it reads them — and states `excluded` only by the one mechanism
+/// the hand-run harness proves — the unignored targets when they could be
+/// passed, or a proven flag given every ignored directory (BR-97). An
+/// unproven flag reads `scanned` however much it took.
+#[test]
+fn each_scanner_states_its_coverage_from_the_mechanism_its_template_has() {
+    use super::registry::{Arg, FLAG_UNPROVEN};
+    for s in &REGISTRY {
+        let ways = [s.takes_exclusion_flag(), s.run.contains(&Arg::Unignored), s.reads_ignored.is_some()];
+        assert_eq!(ways.iter().filter(|w| **w).count(), 1, "{}: one way, {ways:?}", s.name);
+    }
+    let flagged = |misread| Ignores {
+        dirs: strings(&["target", "web/dist"]),
+        misread,
+        targets: Targets::Paths(strings(&["src", "web/src"])),
+    };
+    let mut pycache = strings(&["node_modules"]);
+    pycache.extend((0..5000).map(|i| format!("homeassistant/components/integration_{i:05}/__pycache__")));
+    let huge = Ignores { dirs: pycache, misread: 0, targets: Targets::Unpassable("the paths outside the ignored directories exceed the 64 KiB argument budget") };
+    // Only misreadable names ignored: something is ignored all the same.
+    let only_misread = Ignores { dirs: Vec::new(), misread: 1, targets: Targets::Paths(strings(&["src"])) };
+    for s in &REGISTRY {
+        assert_eq!(s.coverage(&Ignores::NONE), Coverage::EXCLUDED, "{}: nothing is ignored", s.name);
+        let [clean, misread, cut, only] = [&flagged(0), &flagged(1), &huge, &only_misread].map(|i| s.coverage(i));
+        match (s.takes_exclusion_flag(), s.run.contains(&Arg::Unignored)) {
+            (true, _) if s.exclusion_evidence.is_some() => {
+                assert_eq!(clean, Coverage::EXCLUDED, "{}: a proven flag given every directory", s.name);
+                for (c, why) in [
+                    (misread, "it is not given 1 ignored directory whose name"),
+                    (only, "it is not given 1 ignored directory whose name"),
+                    (cut, "past the 64 KiB argument budget"),
+                ] {
+                    assert_eq!(c.ignored_paths, IgnoredPaths::Scanned, "{}: {why}", s.name);
+                    assert!(c.coverage_note.as_deref().is_some_and(|n| n.contains(why)), "{}: {c:?}", s.name);
+                }
+            }
+            (true, _) => {
+                for c in [clean, misread, cut, only] {
+                    assert_eq!(c, Coverage::scanned(FLAG_UNPROVEN.to_string()), "{}: an unproven flag", s.name);
+                }
+            }
+            (_, true) => {
+                assert_eq!(clean, Coverage::EXCLUDED, "{}", s.name);
+                assert_eq!(misread, Coverage::EXCLUDED, "{}: a target list names no ignored directory", s.name);
+                assert_eq!(only, Coverage::EXCLUDED, "{}", s.name);
+                assert_eq!(cut.ignored_paths, IgnoredPaths::Scanned, "{}: an unpassable list", s.name);
+            }
+            _ => {
+                for c in [clean, misread, cut, only] {
+                    assert_eq!(c, Coverage::scanned(s.reads_ignored.unwrap().to_string()), "{}", s.name);
+                }
+            }
+        }
+    }
+}
+
+/// The targets as a scoped Fill renders them: Semgrep's path position reads
+/// the named paths, ignored or not, while OSV-Scanner — which has none — runs
+/// whole on the targets whatever the scope.
+#[test]
+fn unignored_targets_render_only_in_a_whole_project_run_of_a_path_capable_scanner() {
+    let targets = Targets::Paths(strings(&[".gitignore", "app", "src"]));
+    let fill = Fill {
+        out: Path::new("/o"),
+        extra: &[],
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new(""),
+        ignored: &[],
+        targets: &targets,
+        root: None,
+    };
+    let render = |name: &str, fill: &Fill<'_>| -> Vec<String> {
+        let s = scanner(name).unwrap();
+        s.render(s.run, fill).iter().map(|a| a.to_string_lossy().into_owned()).collect()
+    };
+    let scope = [ScopedPath { rel: "target".to_string(), is_dir: true }];
+    let scoped = Fill { scope: Some(&scope), ..fill };
+    assert!(render("semgrep", &fill).ends_with(&strings(&[".logos", ".gitignore", "app", "src"])));
+    assert!(render("semgrep", &scoped).ends_with(&strings(&[".logos", "target"])), "no exclusion in a scoped run");
+    assert!(render("osv-scanner", &fill).ends_with(&strings(&["--recursive", ".gitignore", "app", "src"])));
+    assert_eq!(render("osv-scanner", &scoped), render("osv-scanner", &fill));
+    for unpassable in [Targets::Root, Targets::Unpassable("why")] {
+        let fill = Fill { targets: &unpassable, ..fill };
+        assert!(render("semgrep", &fill).ends_with(&strings(&[".logos", "."])), "{unpassable:?}");
+        assert!(render("osv-scanner", &fill).ends_with(&strings(&["--recursive", "."])), "{unpassable:?}");
+    }
+}
+
+/// A symlink beside an ignored directory is never a target: Semgrep 1.85
+/// refuses a symlink given as a target (exit 2), and neither scanner follows
+/// one when it walks `.`, so naming one — to the ignored directory itself, to
+/// nowhere, or to a file — could only widen the scan or fail it.
+#[test]
+fn a_symlink_beside_an_ignored_directory_is_never_a_target() {
+    let w = World::new(&[(".gitignore", "/target/\n"), ("target/x.py", "x"), ("src/a.py", "x"), ("src/deep/b.py", "x")]);
+    for (link, to) in [("tlink", "target"), ("dangling", "nowhere"), ("CLAUDE.md", "src/a.py")] {
+        std::os::unix::fs::symlink(to, w.root.join(link)).unwrap();
+    }
+    assert_eq!(super::project_ignores(&w.root).targets, Targets::Paths(strings(&[".gitignore", "src"])));
+}
+
+/// A run that started and failed states what it did with the ignored
+/// directories; one Logos failed to prepare, so that no scanner process ever
+/// started, states nothing.
+#[test]
+fn only_a_scanner_process_that_started_states_its_coverage() {
+    let w = World::new(&[(".gitignore", "/target/\n"), ("target/x.py", "x"), ("src/a.py", "x"), ("src/a.go", "x")]);
+    w.stub("gosec", 2);
+    w.stub("gitleaks", 0);
+    // A directory where Gitleaks' report goes: Logos cannot clear it.
+    fs::create_dir_all(w.root.join(OUTPUT_DIR).join("gitleaks.sarif/keep")).unwrap();
+    let report = w.scan(&Selection::Only(strings(&["gosec", "gitleaks"])));
+    let gosec = outcome(&report, "gosec");
+    assert!(matches!(gosec.outcome, Outcome::Failed { exit_code: Some(2), .. }), "{gosec:?}");
+    assert_eq!(gosec.coverage, Some(Coverage::EXCLUDED), "its proven flag was given `target`");
+    let gitleaks = outcome(&report, "gitleaks");
+    assert!(matches!(gitleaks.outcome, Outcome::Failed { exit_code: None, .. }), "{gitleaks:?}");
+    assert!(w.runs("gitleaks").is_empty(), "gitleaks never started");
+    assert_eq!(gitleaks.coverage, None, "{gitleaks:?}");
+}

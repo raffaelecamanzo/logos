@@ -68,6 +68,7 @@ use logos_core::federation::{
     WorkspaceGovernance, WorkspaceStatistics,
 };
 use logos_core::federation::manifest::{self, ManifestDocument, ManifestSaveOutcome};
+use logos_core::history::security::Selector;
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::observability::Surface;
@@ -2081,8 +2082,8 @@ fn written<T: Serialize>(outcome: anyhow::Result<T>) -> Response {
 /// store via the always-purge `index` path, then diff node/edge/file counts and
 /// symbol sets against the **read-only** live graph, returning the
 /// [`VerifyReport`] verbatim as JSON. `ok:true` on a clean store; on drift the
-/// body carries the live-vs-reindex deltas and a capped leaked/orphaned-symbol
-/// sample the Config-tab control ([spa-frontend], S-207) renders.
+/// body carries the live-vs-reindex deltas, a capped leaked/orphaned-symbol
+/// sample and capped lost/extra edge lists the Config-tab control ([spa-frontend], S-207) renders.
 ///
 /// Unlike every other `/api/v1` endpoint this is a **`POST`**, not a `GET`: it
 /// rides the enumerated mutating-method slot ([`VERIFY_POST_ROUTE`](crate::VERIFY_POST_ROUTE))
@@ -2127,7 +2128,8 @@ pub(crate) async fn verify(MemberEngine(engine): MemberEngine) -> Response {
 // [ADR-80]: ../../docs/specs/architecture/decisions/ADR-80.md
 
 use axum::body::Bytes;
-use logos_core::jobs::{JobKind, JobSnapshot, JobState, ScanJobs, Started};
+use logos_core::jobs::lock::{peek, Busy};
+use logos_core::jobs::{JobKind, JobSnapshot, JobState, Refused, ScanJobs, Started};
 
 /// What `POST /api/v1/security/scan` reads. An empty body is `{}`.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -2163,6 +2165,9 @@ enum ScanStart {
     ConsentRequired(Vec<&'static str>),
     /// A `tool-install` job runs for the member (S-747): nothing started.
     Busy,
+    /// A scan or install started elsewhere — over MCP, from the CLI, in
+    /// another process — holds the project's lock (S-758): nothing started.
+    HeldElsewhere(Busy),
 }
 
 /// `GET /api/v1/security/scan[?repo=]` — the member's scan job with every
@@ -2180,7 +2185,9 @@ pub(crate) async fn security_scan_job(
 /// consent record and `consent` does not name it, nothing starts and the
 /// answer is `409` naming every scanner still pending. Otherwise the pending
 /// scanners — each one the dialog showed — are recorded in the user-level
-/// consent file, never in the repository, and the scan runs.
+/// consent file, never in the repository, and the scan runs. While a scan or
+/// install started elsewhere holds the project's lock (S-758), `409` naming
+/// it, and nothing is recorded or started.
 pub(crate) async fn security_scan_start(
     State(jobs): State<Arc<ScanJobs>>,
     MemberEngine(engine): MemberEngine,
@@ -2201,7 +2208,8 @@ pub(crate) async fn security_scan_start(
     let started = bridge(engine, "api_v1_security_scan_start", Surface::Web, move |e| -> anyhow::Result<ScanStart> {
         let root = e.root().to_path_buf();
         // Refused before anything is recorded, as the install start is;
-        // `start_unless` below holds the same rule under the runner's lock.
+        // `start_exclusive` below holds the same rule under the runner's
+        // lock.
         if jobs
             .snapshot(JobKind::ToolInstall, &root)
             .is_some_and(|job| job.state == JobState::Running)
@@ -2212,6 +2220,9 @@ pub(crate) async fn security_scan_start(
             .snapshot(JobKind::SecurityScan, &root)
             .is_some_and(|job| job.state == JobState::Running);
         if !running {
+            if let Some(busy) = peek(&e.security_lock_file()?)? {
+                return Ok(ScanStart::HeldElsewhere(busy));
+            }
             let pending = e.security_consent_pending()?;
             if pending.iter().any(|s| !request.consent.iter().any(|accepted| accepted == s)) {
                 return Ok(ScanStart::ConsentRequired(pending));
@@ -2224,8 +2235,10 @@ pub(crate) async fn security_scan_start(
         // installed since is refused by the scan itself, never consented to on
         // the user's behalf.
         // An install job (S-747) runs its own scan once it is done; a second
-        // scan beside it is refused, never run over the same store.
-        let started = jobs.start_unless(JobKind::SecurityScan, &root, &[JobKind::ToolInstall], move |job| {
+        // scan beside it is refused, never run over the same store, as is one
+        // beside a scan or install the project's lock names (S-758).
+        let lock_file = e.security_lock_file()?;
+        let started = jobs.start_exclusive(JobKind::SecurityScan, &root, &lock_file, &[JobKind::ToolInstall], move |job| {
             logos_core::observability::in_surface(Surface::Web, || {
                 let summary = member.security_scan_reporting(false, |step| {
                     job.emit(serde_json::to_value(step).unwrap_or_default());
@@ -2235,7 +2248,8 @@ pub(crate) async fn security_scan_start(
         })?;
         Ok(match started {
             Ok(started) => ScanStart::Started(started),
-            Err(_) => ScanStart::Busy,
+            Err(Refused::Running(_)) => ScanStart::Busy,
+            Err(Refused::Elsewhere(busy)) => ScanStart::HeldElsewhere(busy),
         })
     })
     .await;
@@ -2245,6 +2259,7 @@ pub(crate) async fn security_scan_start(
             let error = "scanners are being installed for this project; wait for the install to finish or cancel it, then scan".to_string();
             (StatusCode::CONFLICT, Json(ApiError { error })).into_response()
         }
+        Ok(ScanStart::HeldElsewhere(busy)) => (StatusCode::CONFLICT, Json(ApiError { error: busy.to_string() })).into_response(),
         Ok(ScanStart::ConsentRequired(scanners)) => {
             let error = format!(
                 "a scan needs consent first: {} may reach the network to refresh rules or vulnerability data",
@@ -2276,7 +2291,7 @@ pub(crate) async fn security_scan_cancel(
 // Start and cancel are intent-guarded POSTs (`SECURITY_INSTALL_POST_ROUTES`).
 // Nothing is downloaded until the one consent dialog has answered every line
 // the install needs; until then the start answers `409` with the plan the
-// dialog shows, and records nothing.
+// dialog shows, records nothing and starts no process (S-766).
 //
 // [FR-SC-24]: ../../docs/specs/requirements/FR-SC-24.md
 // [FR-SC-22]: ../../docs/specs/requirements/FR-SC-22.md
@@ -2326,6 +2341,9 @@ enum InstallStart {
     /// A job of this kind runs for the member — an install, or a scan:
     /// nothing started.
     Busy(JobKind),
+    /// A scan or install started elsewhere holds the project's lock (S-758):
+    /// nothing started.
+    HeldElsewhere(Busy),
 }
 
 /// `GET /api/v1/security/install[?repo=]` — the member's `tool-install` job,
@@ -2339,13 +2357,16 @@ pub(crate) async fn security_install_job(
 
 /// `POST /api/v1/security/install[?repo=]` — start the member's install.
 /// While a line it needs is unanswered — an install consent, a licence, the
-/// project's network consent for the scan — nothing is recorded or fetched
-/// and the answer is `409` with the plan. Otherwise the project's network
+/// project's network consent for the scan — nothing is recorded or fetched,
+/// no process starts (admission decides on recorded state only, never a
+/// copy's probed version) and the answer is `409` with the plan. Otherwise the project's network
 /// consent is recorded for the scanners the dialog showed, and the job
 /// installs (recording the install consent for exactly the lines accepted),
 /// then scans when asked. While an install or a scan runs for the member,
 /// `409` and nothing starts: unlike Run scan's, a second install is never
-/// joined, since its request may name other tools than the running one.
+/// joined, since its request may name other tools than the running one. The
+/// same holds for a scan or install started elsewhere — over MCP, from the
+/// CLI, in another process — whose `409` names it (S-758).
 pub(crate) async fn security_install_start(
     State(jobs): State<Arc<ScanJobs>>,
     MemberEngine(engine): MemberEngine,
@@ -2374,13 +2395,16 @@ pub(crate) async fn security_install_start(
     let member = Arc::clone(&engine);
     let started = bridge(engine, "api_v1_security_install_start", Surface::Web, move |e| -> anyhow::Result<InstallStart> {
         let root = e.root().to_path_buf();
-        // Refused before anything is recorded; `start_unless` below holds the
-        // same rule under the runner's lock.
+        // Refused before anything is recorded; `start_exclusive` below
+        // holds the same rule under the runner's lock.
         let busy = [JobKind::ToolInstall, JobKind::SecurityScan]
             .into_iter()
             .find(|kind| jobs.snapshot(*kind, &root).is_some_and(|job| job.state == JobState::Running));
         if let Some(kind) = busy {
             return Ok(InstallStart::Busy(kind));
+        }
+        if let Some(busy) = peek(&e.security_lock_file()?)? {
+            return Ok(InstallStart::HeldElsewhere(busy));
         }
         let (request, scan) = match e.security_install_admit(&ask)? {
             InstallAdmission::Ask(plan) => return Ok(InstallStart::Ask(plan)),
@@ -2393,7 +2417,8 @@ pub(crate) async fn security_install_start(
             }
         };
         let excluded = [JobKind::ToolInstall, JobKind::SecurityScan];
-        let started = jobs.start_unless(JobKind::ToolInstall, &root, &excluded, move |job| {
+        let lock_file = e.security_lock_file()?;
+        let started = jobs.start_exclusive(JobKind::ToolInstall, &root, &lock_file, &excluded, move |job| {
             logos_core::observability::in_surface(Surface::Web, || {
                 let done = member.security_install_job(&request, scan, |step| {
                     job.emit(serde_json::to_value(step).unwrap_or_default());
@@ -2403,7 +2428,8 @@ pub(crate) async fn security_install_start(
         })?;
         Ok(match started {
             Ok(started) => InstallStart::Started(started),
-            Err(running) => InstallStart::Busy(running.kind),
+            Err(Refused::Running(running)) => InstallStart::Busy(running.kind),
+            Err(Refused::Elsewhere(busy)) => InstallStart::HeldElsewhere(busy),
         })
     })
     .await;
@@ -2421,6 +2447,7 @@ pub(crate) async fn security_install_start(
             .to_string();
             (StatusCode::CONFLICT, Json(ApiError { error })).into_response()
         }
+        Ok(InstallStart::HeldElsewhere(busy)) => (StatusCode::CONFLICT, Json(ApiError { error: busy.to_string() })).into_response(),
         Err(e) => fail(e),
     }
 }
@@ -2446,11 +2473,21 @@ pub(crate) async fn security_install_cancel(
 //
 // [FR-SC-12]: ../../docs/specs/requirements/FR-SC-12.md
 
-/// What `POST /api/v1/security/suppress` reads.
+/// What `POST /api/v1/security/suppress` reads: one finding's `fingerprint`,
+/// or a `path` glob optionally narrowed by `rule` and `scanner` (S-770).
+/// Exactly one of `fingerprint` and `path` is checked when the selector is
+/// built, so both or neither is a `422` that says so.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuppressRequest {
-    fingerprint: String,
+    #[serde(default)]
+    fingerprint: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    rule: Option<String>,
+    #[serde(default)]
+    scanner: Option<String>,
     reason: String,
     /// `YYYY-MM-DD`, the last day the entry suppresses; absent or `null`
     /// suppresses until removed.
@@ -2458,11 +2495,19 @@ struct SuppressRequest {
     expires: Option<String>,
 }
 
-/// What `POST /api/v1/security/unsuppress` reads.
+/// What `POST /api/v1/security/unsuppress` reads: the selector of the entry
+/// to remove, as a finding's `suppression.by` or the entry itself spells it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnsuppressRequest {
-    fingerprint: String,
+    #[serde(default)]
+    fingerprint: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    rule: Option<String>,
+    #[serde(default)]
+    scanner: Option<String>,
 }
 
 /// A triage body, or the `400` that names the shape it should have had.
@@ -2474,29 +2519,35 @@ fn triage_body<T: serde::de::DeserializeOwned>(body: &[u8], shape: &str) -> Resu
 }
 
 /// `POST /api/v1/security/suppress[?repo=]` — add a suppression for one
-/// finding: the written file, the entry and the file's entry count.
+/// finding, or for every finding under a path: the written file, the entry and
+/// the file's entry count.
 pub(crate) async fn security_suppress(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
-    let request: SuppressRequest =
-        match triage_body(&body, r#"{"fingerprint": …, "reason": …, "expires": "YYYY-MM-DD" | null}"#) {
-            Ok(request) => request,
-            Err(refused) => return refused.into_response(),
-        };
+    let request: SuppressRequest = match triage_body(
+        &body,
+        r#"{"fingerprint": …} or {"path": …, "rule"?: …, "scanner"?: …}, with "reason": … and "expires": "YYYY-MM-DD" | null"#,
+    ) {
+        Ok(request) => request,
+        Err(refused) => return refused.into_response(),
+    };
     let outcome = bridge(engine, "api_v1_security_suppress", Surface::Web, move |e| {
-        e.security_suppress(&request.fingerprint, &request.reason, request.expires.as_deref())
+        let selector = Selector::from_parts(request.fingerprint, request.path, request.rule, request.scanner)?;
+        e.security_suppress(selector, &request.reason, request.expires.as_deref())
     })
     .await;
     written(outcome)
 }
 
-/// `POST /api/v1/security/unsuppress[?repo=]` — remove the suppression for one
-/// finding: the written file, the entry removed and the entries left.
+/// `POST /api/v1/security/unsuppress[?repo=]` — remove one suppression entry:
+/// the written file, the entry removed and the entries left.
 pub(crate) async fn security_unsuppress(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
-    let request: UnsuppressRequest = match triage_body(&body, r#"{"fingerprint": …}"#) {
-        Ok(request) => request,
-        Err(refused) => return refused.into_response(),
-    };
+    let request: UnsuppressRequest =
+        match triage_body(&body, r#"{"fingerprint": …} or {"path": …, "rule"?: …, "scanner"?: …}"#) {
+            Ok(request) => request,
+            Err(refused) => return refused.into_response(),
+        };
     let outcome = bridge(engine, "api_v1_security_unsuppress", Surface::Web, move |e| {
-        e.security_unsuppress(&request.fingerprint)
+        let selector = Selector::from_parts(request.fingerprint, request.path, request.rule, request.scanner)?;
+        e.security_unsuppress(selector)
     })
     .await;
     written(outcome)

@@ -1,0 +1,27 @@
+[[ignore]]
+path = "Cargo.lock"
+rule = "CVE-2026-63127"
+reason = "rmcp 1.7.0 advisory CVE-2026-63127 (GHSA-33f5-2c5q-wgwj) is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
+expires = 2027-04-19
+
+[[ignore]]
+path = "Cargo.lock"
+rule = "CVE-2026-63128"
+reason = "rmcp 1.7.0 advisory CVE-2026-63128 (GHSA-9pj6-vhgr-3mwh) is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
+expires = 2027-04-19
+
+[[ignore]]
+path = "Cargo.lock"
+rule = "CVE-2026-64684"
+reason = "rmcp 1.7.0 advisory CVE-2026-64684 (GHSA-9g45-5xwm-f3wc) is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
+expires = 2027-04-19
+
+[[ignore]]
+path = "Cargo.lock"
+rule = "GHSA-c9xm-49cp-xcr9"
+reason = "rmcp 1.7.0 advisory GHSA-c9xm-49cp-xcr9 is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
+expires = 2027-04-19
+
+[[ignore]]
+path = "logos-core/tests/fixtures"
+reason = "Test fixtures: projects and planted secrets that exercise Logos's own scanners, security context and masking (for example security-context/axum's Dockerfile and Cargo.lock). Never built, shipped or deployed. Owner-approved stopgap until CR-246 tells findings in test code from shipped code."

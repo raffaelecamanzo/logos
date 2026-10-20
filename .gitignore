@@ -5,7 +5,13 @@ notes/
 # Logos self-analysis store (coordinator quality bracket snapshots on main).
 # The dev harness runs the pinned `logos` against this repo; its store/DB and
 # derived state are ephemeral and never committed. See the dogfooding plan.
-.logos/
+**/.logos/*
+# The committed files in it: the reasoned, expiring suppressions (FR-SC-11) and,
+# once `logos security bless` writes it, the checked-in security baseline (FR-SC-25).
+# A directory pattern cannot be negated, hence `**/.logos/*` (any depth, as
+# `.logos/` was) rather than `.logos/`; only the root files are un-ignored.
+!/.logos/security-ignore.toml
+!/.logos/security-baseline.json
 
 # Local-only agent/harness config — kept out of version control per
 # working-directory preference (make them local to this checkout).

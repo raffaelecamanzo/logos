@@ -21,11 +21,27 @@
 //! - `security:max_severity` — any finding at or above the cap.
 //! - `security:fail_on_owasp:<id>` — any finding in the named category.
 //!
+//! Both thresholds compare [`Severity::gated_as`]: an `unrated` finding is
+//! gated as `medium`, the rank its default level gave it before it read
+//! `unrated` (S-768), so no verdict changed with the spelling.
+//!
 //! **Missing evidence** ([ADR-79] §7) is not a violation: a required scanner
 //! with no fresh scan at HEAD is a [`MissingScan`], which the surfaces map to
 //! exit 5 ([FR-CL-03]). The gate never runs a scanner.
 //!
+//! **The ratchet's baseline has one source per checkout** ([FR-SC-25]). When
+//! the checked-in `.logos/security-baseline.json` exists it is the baseline,
+//! and the set `gate --save` records in the gitignored `history.db` is not
+//! read; otherwise that set is. So a fresh CI clone, which has no `history.db`,
+//! still reads a blessed finding as known. Only `logos security bless` writes
+//! the file — fingerprint, rule id and project-relative path per finding, no
+//! message, snippet or secret — sorted and rendered byte-identically for an
+//! unchanged set ([NFR-RA-06]), as `check --bless` writes the constraint
+//! ratchet's `rules-baseline.json` ([FR-GV-23]).
+//!
 //! [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+//! [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+//! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 //! [FR-SC-11]: ../../../docs/specs/requirements/FR-SC-11.md
 //! [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
 //! [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
@@ -34,10 +50,12 @@
 //! [S-668]: ../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
-use crate::config::SecurityRules;
+use crate::config::{ConfigError, SecurityRules};
 use crate::model::Severity;
 use crate::models::quality::{MissingScan, Violation};
 
@@ -49,6 +67,16 @@ pub(crate) const RULE_MAX_SEVERITY: &str = "security:max_severity";
 pub(crate) const RULE_FAIL_ON_OWASP: &str = "security:fail_on_owasp:";
 /// The command that records the ratchet's baseline.
 pub(crate) const SAVE_COMMAND: &str = "logos gate --save";
+/// The checked-in baseline's root-relative path, as every message names it
+/// ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+pub(crate) const CHECKED_IN_FILE_REL: &str = ".logos/security-baseline.json";
+/// The command that writes the checked-in baseline — its only writer.
+pub(crate) const BLESS_COMMAND: &str = "logos security bless";
+/// The checked-in baseline's format version. A file carrying any other is
+/// refused.
+const CHECKED_IN_VERSION: u32 = 1;
 
 /// Where the gate's security evidence comes from — implemented by
 /// `security::SecurityGateEvidence`, which the engine builds over itself and
@@ -86,9 +114,30 @@ pub(crate) struct SecuritySummary {
     /// Every finding of every scanner's latest stored scan, fresh or not, in the
     /// reader's order.
     pub findings: Vec<SummaryFinding>,
-    /// The fingerprints `gate --save` recorded; `None` when it never ran under
-    /// a `[security]` table — not the same as an empty set.
+    /// The ratchet's baseline fingerprints, from [`baseline_source`](Self::baseline_source);
+    /// `None` when no file is checked in and `gate --save` never ran under a
+    /// `[security]` table — not the same as an empty set.
     pub baseline: Option<BTreeSet<String>>,
+    /// Where [`baseline`](Self::baseline) was read from.
+    pub baseline_source: BaselineSource,
+    /// The checked-in baseline's `(rule id, project-relative path)` pairs —
+    /// empty for the store's — matched for a finding with an
+    /// [`unbound_location`](SummaryFinding::unbound_location) only.
+    pub baseline_locations: BTreeSet<(String, String)>,
+}
+
+/// Where the ratchet's baseline comes from: one source per checkout
+/// ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum BaselineSource {
+    /// The set `gate --save` recorded in `history.db` — read only when no
+    /// file is checked in.
+    #[default]
+    Store,
+    /// The checked-in [`CHECKED_IN_FILE_REL`].
+    CheckedIn,
 }
 
 /// One scanner's state at HEAD, as `logos security status` reports it.
@@ -110,6 +159,9 @@ pub(crate) enum ScanFreshness {
     /// Stored, but HEAD moved or a scanned file changed; the detail says which.
     Stale(String),
     NeverRun,
+    /// Installed, with nothing to scan in this project (S-769): never a
+    /// missing scan.
+    NotApplicable,
     NotInstalled,
     Disabled,
 }
@@ -121,11 +173,27 @@ pub(crate) struct SummaryFinding {
     pub scanner: String,
     /// Its fingerprint — the ratchet's and the ignore file's key.
     pub fingerprint: String,
+    /// The keys it was stored under before a re-key ([FR-SC-17]): a baseline
+    /// that recorded one of them recorded this finding.
+    ///
+    /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+    pub legacy_fingerprints: Vec<String>,
+    /// The project-relative path of a finding that binds to no indexed file
+    /// and is reported by an absolute path under the root (OSV-Scanner on a
+    /// lockfile). Its fingerprint then carries the checkout's directory, so a
+    /// checked-in baseline also knows it by rule id and this path — a stopgap
+    /// until the osv-scanner 2.x identity change re-keys such findings.
+    pub unbound_location: Option<String>,
     pub rule_id: String,
     pub severity: Severity,
     /// The bound repo-relative path, else the report's own, else `None`.
     pub path: Option<String>,
     pub line: Option<i64>,
+    /// A secret found only in history (S-767): its place is its commit's, not
+    /// today's code, and is named so.
+    pub historical: bool,
+    /// The short commit a history-mode finding is anchored to, when known.
+    pub short_commit: Option<String>,
     /// Full OWASP category ids in both editions (`A05:2025`, `A03:2021`).
     pub owasp: Vec<String>,
     /// Whether an unexpired ignore entry suppresses it.
@@ -133,21 +201,49 @@ pub(crate) struct SummaryFinding {
 }
 
 impl SummaryFinding {
+    /// Whether `recorded` holds this finding, under its key or one it had
+    /// before a re-key — a checked-in baseline is never re-keyed (S-764 ×
+    /// S-765), so a secret blessed under its old key stays known.
+    fn recorded_in(&self, recorded: &BTreeSet<String>) -> bool {
+        recorded.contains(&self.fingerprint) || self.legacy_fingerprints.iter().any(|old| recorded.contains(old))
+    }
+
+    /// Whether `locations` (a checked-in baseline's) records this finding by
+    /// rule id and project-relative path: only one with an
+    /// [`unbound_location`](Self::unbound_location); a bound finding is known by
+    /// its fingerprint alone.
+    fn located_in(&self, locations: &BTreeSet<(String, String)>) -> bool {
+        self.unbound_location
+            .as_ref()
+            .is_some_and(|path| locations.contains(&(self.rule_id.clone(), path.clone())))
+    }
+
     /// `path:line`, `path`, or `(no location)` — never the finding's message,
-    /// which a secret-class finding has redacted anyway.
+    /// which a secret-class finding has redacted anyway. A historical one says
+    /// so, with its short commit when known: that place is history, never
+    /// today's code.
     fn location(&self) -> String {
-        match (&self.path, self.line) {
+        let place = match (&self.path, self.line) {
             (Some(path), Some(line)) => format!("{path}:{line}"),
             (Some(path), None) => path.clone(),
             (None, _) => "(no location)".to_string(),
+        };
+        match (self.historical, &self.short_commit) {
+            (false, _) => place,
+            (true, Some(commit)) => format!("{place} (historical, commit {commit})"),
+            (true, None) => format!("{place} (historical)"),
         }
     }
 
     /// The sentence naming the finding: severity, rule, scanner and location.
+    /// An `unrated` one says what it is gated as.
     fn named(&self) -> String {
+        let severity = match self.severity {
+            Severity::Unrated => format!("unrated (gated as {})", Severity::Unrated.gated_as().as_str()),
+            rated => rated.as_str().to_string(),
+        };
         format!(
-            "{} finding `{}` ({}) at {}",
-            self.severity.as_str(),
+            "{severity} finding `{}` ({}) at {}",
             self.rule_id,
             self.scanner,
             self.location()
@@ -178,7 +274,9 @@ fn names(name: &str, row: &ScannerFreshness) -> bool {
 /// The required scanners with no fresh scan at HEAD ([FR-SC-10], [ADR-79] §7),
 /// in `required_scanners` order, one per scanner however often or in whatever
 /// case it is named. Each message names the state and what produces the scan:
-/// the gate never runs a scanner.
+/// the gate never runs a scanner. A scanner with nothing to scan here
+/// ([`ScanFreshness::NotApplicable`], S-769) is not missing: no scan of it
+/// could exist.
 ///
 /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
 /// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
@@ -193,7 +291,7 @@ pub(crate) fn missing_scans(rules: &SecurityRules, summary: &SecuritySummary) ->
             continue;
         }
         let (state, why) = match row.map(|row| &row.state) {
-            Some(ScanFreshness::Fresh) => continue,
+            Some(ScanFreshness::Fresh | ScanFreshness::NotApplicable) => continue,
             Some(ScanFreshness::Stale(detail)) => ("stale", format!("its scan is stale: {detail} — {RUN}")),
             Some(ScanFreshness::NeverRun) => ("never_run", format!("it is installed but has never run here — {RUN}")),
             Some(ScanFreshness::NotInstalled) => (
@@ -254,12 +352,15 @@ pub(crate) fn check_security(rules: &SecurityRules, summary: &SecuritySummary) -
     let mut violations = Vec::new();
 
     let suppress_hint = "fix it, or suppress it with a reason in .logos/security-ignore.toml";
-    for f in active.iter().filter(|f| f.severity >= rules.ratchet_min_severity) {
+    let recorder = match summary.baseline_source {
+        BaselineSource::Store => format!("the findings `{SAVE_COMMAND}` recorded"),
+        BaselineSource::CheckedIn => format!("the findings {CHECKED_IN_FILE_REL} records"),
+    };
+    for f in active.iter().filter(|f| f.severity.gated_as() >= rules.ratchet_min_severity) {
         let message = match &summary.baseline {
-            Some(recorded) if recorded.contains(&f.fingerprint) => continue,
+            Some(recorded) if f.recorded_in(recorded) || f.located_in(&summary.baseline_locations) => continue,
             Some(_) => format!(
-                "new {}: not in the findings `{SAVE_COMMAND}` recorded — {suppress_hint} \
-                 (fingerprint {})",
+                "new {}: not in {recorder} — {suppress_hint} (fingerprint {})",
                 f.named(),
                 f.fingerprint
             ),
@@ -274,7 +375,7 @@ pub(crate) fn check_security(rules: &SecurityRules, summary: &SecuritySummary) -
     }
 
     if let Some(cap) = rules.max_severity {
-        for f in active.iter().filter(|f| f.severity >= cap) {
+        for f in active.iter().filter(|f| f.severity.gated_as() >= cap) {
             let message = format!(
                 "{} is at or above max_severity = \"{}\" — {suppress_hint} (fingerprint {})",
                 f.named(),
@@ -333,12 +434,130 @@ pub(crate) fn check_security(rules: &SecurityRules, summary: &SecuritySummary) -
 ///
 /// [FR-SC-11]: ../../../docs/specs/requirements/FR-SC-11.md
 pub(crate) fn baseline_fingerprints(summary: &SecuritySummary) -> Vec<(String, String)> {
-    summary
-        .findings
-        .iter()
-        .filter(|f| !f.suppressed)
-        .map(|f| (f.scanner.clone(), f.fingerprint.clone()))
-        .collect()
+    baselined(summary).map(|f| (f.scanner.clone(), f.fingerprint.clone())).collect()
+}
+
+/// The findings a baseline records, whichever its source: every unsuppressed
+/// finding of every stored scan ([`baseline_fingerprints`]).
+fn baselined(summary: &SecuritySummary) -> impl Iterator<Item = &SummaryFinding> {
+    summary.findings.iter().filter(|f| !f.suppressed)
+}
+
+/// One finding the checked-in baseline records ([FR-SC-25]): its fingerprint,
+/// rule id and project-relative path, and nothing else — no message, snippet,
+/// line or secret value. The path is `None` for a finding with no location, or
+/// one reported outside the project.
+///
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BaselineEntry {
+    pub fingerprint: String,
+    pub rule_id: String,
+    pub path: Option<String>,
+}
+
+impl BaselineEntry {
+    /// The file's order: by path, then rule id, then fingerprint, so a review
+    /// reads the blessed findings file by file.
+    fn key(&self) -> (&Option<String>, &str, &str) {
+        (&self.path, &self.rule_id, &self.fingerprint)
+    }
+}
+
+/// The on-disk document. `deny_unknown_fields`, so a hand-added field — a
+/// message, say — fails loud rather than being carried along.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckedInFile {
+    version: u32,
+    findings: Vec<BaselineEntry>,
+}
+
+/// The checked-in baseline's entries for `summary` — the findings
+/// [`baseline_fingerprints`] records — sorted and without repeats, each path
+/// made project-relative by `relative` ([FR-SC-25]).
+///
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+pub(crate) fn baseline_entries(
+    summary: &SecuritySummary,
+    relative: impl Fn(&str) -> Option<String>,
+) -> Vec<BaselineEntry> {
+    let mut entries: Vec<BaselineEntry> = baselined(summary)
+        .map(|f| BaselineEntry {
+            fingerprint: f.fingerprint.clone(),
+            rule_id: f.rule_id.clone(),
+            path: f.path.as_deref().and_then(&relative),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.key().cmp(&b.key()));
+    entries.dedup();
+    entries
+}
+
+/// Where the checked-in baseline lives under `root`.
+pub(crate) fn checked_in_path(root: &Path) -> PathBuf {
+    root.join(CHECKED_IN_FILE_REL)
+}
+
+/// The canonical rendering of `entries` (already in [`baseline_entries`]'
+/// order): two-space indent, trailing newline — byte-identical for an equal
+/// set ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(crate) fn render_checked_in(entries: &[BaselineEntry]) -> String {
+    let file = CheckedInFile { version: CHECKED_IN_VERSION, findings: entries.to_vec() };
+    let mut text = serde_json::to_string_pretty(&file).expect("a document of strings serialises");
+    text.push('\n');
+    text
+}
+
+/// Write `entries` to the checked-in baseline under `root` atomically. An
+/// unchanged file is left untouched, mtime included; returns whether the bytes
+/// changed. Called by [`BLESS_COMMAND`] only.
+///
+/// # Errors
+/// A failed write is a [`ConfigError`] (exit 2).
+pub(crate) fn write_checked_in(root: &Path, entries: &[BaselineEntry]) -> Result<bool> {
+    let path = checked_in_path(root);
+    let text = render_checked_in(entries);
+    if std::fs::read(&path).is_ok_and(|current| current == text.as_bytes()) {
+        return Ok(false);
+    }
+    let write_err = |source: std::io::Error| ConfigError::Write { path: path.clone(), source };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(write_err)?;
+    }
+    crate::config::atomic::publish(&path, text.as_bytes(), None).map_err(write_err)?;
+    Ok(true)
+}
+
+/// The entries of the checked-in baseline under `root`, or `None` when no file
+/// is checked in ([FR-SC-25]).
+///
+/// # Errors
+/// An exit-2 [`ConfigError`] when the file is unreadable, malformed, carries a
+/// field it does not define, or is of another format version.
+///
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+pub(crate) fn read_checked_in(root: &Path) -> Result<Option<Vec<BaselineEntry>>> {
+    let path = checked_in_path(root);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ConfigError::Io { path, source }.into()),
+    };
+    let invalid = |message: String| ConfigError::InvalidValue { key: CHECKED_IN_FILE_REL.to_string(), message };
+    let file: CheckedInFile = serde_json::from_str(&text)
+        .map_err(|e| invalid(format!("{e} — re-run `{BLESS_COMMAND}` to rewrite it")))?;
+    if file.version != CHECKED_IN_VERSION {
+        return Err(invalid(format!(
+            "format version {} is not the supported version {CHECKED_IN_VERSION}",
+            file.version
+        ))
+        .into());
+    }
+    Ok(Some(file.findings))
 }
 
 /// A security violation: always an `error`, a `constraint` row (the

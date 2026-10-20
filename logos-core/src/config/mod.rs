@@ -97,10 +97,11 @@ pub(crate) use globs::ConfigGlobs;
 /// [CR-003]: ../../../docs/requests/CR-003-documentation-graph-layer.md
 pub(crate) use globs::DocGlobs;
 pub use rules::{
-    Boundary, Budget, Constraints, CountBaseline, CountBudget, Coverage, EffectiveCoverage,
-    EffectiveHistory, ForbiddenImport, GodContainersBudget, History, Layer, MaxDead,
-    MaxDeadBaseline, MetricThresholds, RatchetBudget, RatchetFlag, RatioBaseline, RatioBudget,
-    RequireDocumented, RequireTested, Rules, SecurityRules,
+    Boundary, Budget, Constraints, CountBaseline, CountBudget, Coverage, DriftBudget,
+    EffectiveCoverage, EffectiveHistory, ForbiddenImport, GodContainersBudget, History, Layer,
+    MaxDead, MaxDeadBaseline, MetricThresholds, RatchetBudget, RatchetFlag, RatioBaseline,
+    RatioBudget, RequireDocumented, RequireTested, ReviewAccept, ReviewRules, Rules,
+    SecurityRules,
 };
 pub use project::{
     derive_project_id, is_valid_coordinate, normalise_remote, resolve_project_id, Project,

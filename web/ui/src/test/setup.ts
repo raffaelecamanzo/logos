@@ -40,6 +40,13 @@ if (!window.matchMedia) {
     }) as unknown as MediaQueryList;
 }
 
+// jsdom lays nothing out, so it omits `Element.scrollIntoView`; a view that scrolls
+// a result into view (the Security finding detail, HF-1) calls it, and a test that
+// asserts the scroll spies on this no-op.
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 // An in-memory localStorage shim for the jsdom environments that omit Storage (the
 // theme persists its choice there, `theme/theme.ts`). Mirrors the matchMedia shim
 // above — installed only when the runtime lacks it.

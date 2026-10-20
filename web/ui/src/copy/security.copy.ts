@@ -11,12 +11,19 @@
  * Logos could not decide reads unknown, never unreachable (S-669).
  */
 
-import type { SecurityFindingContext, SecurityStaleBecause, SecuritySuppression } from "../api/types.ts";
+import type {
+  SecurityCommitAnchor,
+  SecurityEntryStatus,
+  SecurityFindingContext,
+  SecuritySelector,
+  SecurityStaleBecause,
+  SecuritySuppression,
+} from "../api/types.ts";
 
 import { plural, type CopyEntry } from "./types.ts";
 
 export const scannerMatrix: CopyEntry = {
-  what: "Each security scanner's state here: not installed, disabled, installed but never run, stale since HEAD moved, or fresh with its finding count.",
+  what: "Each security scanner's state here: not installed, disabled, installed but never run, not applicable when the project has none of the files it reads, stale since HEAD moved, or fresh with its finding count — why its last scan failed, if it did — and whether a whole-project scan keeps it out of the directories the project ignores.",
   why: "A scanner that has not run on this commit has looked at nothing, so its silence is not a clean result.",
 };
 
@@ -90,6 +97,12 @@ export const SCANNER_STATE_TEXT = {
    *  a newer report (one produced in CI, or by a tool Logos does not run). */
   stale: (because: SecurityStaleBecause, command: string) => `${STALE_BECAUSE[because]}; run ${command}.`,
   disabled: "Disabled in .logos/config.toml; enable it there to scan with it.",
+  /** Nothing it reads is in the project (S-769): no scan is missing. */
+  notApplicable: (reason: string) => `Nothing to scan: ${reason}.`,
+  /** Its last scan failed: a badge, then the one-line cause from its log and
+   *  where that log is. */
+  lastFailed: "last scan failed",
+  failureCause: (cause: string | undefined, log: string) => `${cause !== undefined ? `${cause} — ` : ""}the output is in ${log}.`,
   fresh: (findings: number, suppressed: number) =>
     `${findings} ${plural(findings, "finding", "findings")}${suppressed > 0 ? `, ${suppressed} suppressed` : ""}`,
 } as const;
@@ -105,6 +118,18 @@ export const OWASP_TEXT = {
   covered: (findings: number) => `${findings} ${plural(findings, "finding", "findings")}`,
   unclassified: (n: number) =>
     `${n} ${plural(n, "finding has", "findings have")} no OWASP category: no CWE, or one the edition does not list.`,
+} as const;
+
+/** The sentences of a finding count — the Security page's and the workspace
+ *  roll-up's, one spelling (S-760): a finding counts when no current entry
+ *  suppresses it and its own file is unchanged since the scan. */
+export const FINDING_COUNT_TEXT = {
+  /** The counted findings in words, with what they are. */
+  totals: (critical: number, high: number, medium: number, low: number, info: number, unrated: number) =>
+    `${critical} critical · ${high} high · ${medium} medium · ${low} low · ${info} info · ${unrated} unrated — fresh, unsuppressed findings only`,
+  /** What the count leaves out, and why. */
+  excluded: (notFresh: number, suppressed: number) =>
+    `Left out: ${notFresh} ${plural(notFresh, "finding", "findings")} in files changed since the scan, and ${suppressed} suppressed.`,
 } as const;
 
 /** Why a finding has no OWASP category under the edition shown (FR-SC-04). */
@@ -126,7 +151,17 @@ const UNBOUND_BECAUSE: Record<NonNullable<SecurityFindingContext["enclosing"]["u
   not_indexed: "its file is not in the index (a lockfile, say)",
   stale: "its file changed since the scan, so its line may point elsewhere",
   no_symbol: "its line lies inside no symbol",
+  historical: "the secret is only in its commit's history — its file is gone, or its line holds other code now",
 };
+
+/** A secret found only in history (S-767): the label beside its location and
+ *  the tooltip on its short commit. The label is the `historical` binding token
+ *  and the short commit is the payload's own, so the page reads both exactly
+ *  as the CLI and MCP print them. */
+export const ANCHOR_TEXT = {
+  historical: "historical",
+  commit: (anchor: SecurityCommitAnchor) => `Found in commit ${anchor.commit}, at ${anchor.path}`,
+} as const;
 
 /** Why the graph cannot rule out a route reaching a symbol (S-669). */
 const UNRESOLVED_BECAUSE: Record<NonNullable<SecurityFindingContext["reachability"]["unresolved_because"]>, string> = {
@@ -188,8 +223,8 @@ export const SCAN_OUTCOME_TEXT = {
   not_selected: "not selected",
   requires_build: "not run: every language present needs a build",
   not_applicable: (reason: string) => `not run: ${reason}`,
-  failed: (exitCode: number | null, log: string | null) =>
-    `failed${exitCode !== null ? ` (exit ${exitCode})` : ""}${log !== null ? `; its output is in ${log}` : ""}`,
+  failed: (exitCode: number | null, log: string | null, cause: string) =>
+    `failed${exitCode !== null ? ` (exit ${exitCode})` : ""}: ${cause}${log !== null ? `; its output is in ${log}` : ""}`,
 } as const;
 
 /** The first-use consent dialog (FR-SC-07): it names the scanners, and says
@@ -243,6 +278,15 @@ export const INSTALL_OUTCOME_TEXT = {
   cancelled: "cancelled: nothing of it was left",
 } as const;
 
+/** The matrix's ignored-paths cell (FR-SC-26): whether a whole-project scan keeps
+ *  the scanner out of the project's ignored directories; `scanned` is followed by
+ *  the server's one-line note. Absent — not installed, disabled — reads a dash. */
+export const IGNORED_PATHS_TEXT = {
+  excluded: "excluded",
+  scanned: "scanned",
+  absent: "—",
+} as const;
+
 /** The matrix's copy cell: which copy runs, and a newer pin when there is one. */
 export const COPY_TEXT = {
   managed: "managed",
@@ -279,11 +323,21 @@ export const INSTALL_CONSENT_TEXT = {
 export const IGNORE_FILE = ".logos/security-ignore.toml";
 
 /** A suppressed or expired finding's label beside its state badge: the reason
- *  it was accepted for, and until when. */
+ *  it was accepted for, and until when — and, for a path entry (S-770), which
+ *  entry covers it, since removing that entry unsuppresses everything under it. */
 export function suppressionNote(suppression: SecuritySuppression): string {
-  const { reason, expires } = suppression;
-  if (suppression.state === "expired") return `${reason} (expired after ${expires ?? "its date"})`;
-  return expires === null ? reason : `${reason} (until ${expires})`;
+  const { reason, expires, by } = suppression;
+  const covers = "path" in by ? ` — covers ${selectorText(by)}` : "";
+  if (suppression.state === "expired") return `${reason} (expired after ${expires ?? "its date"})${covers}`;
+  return (expires === null ? reason : `${reason} (until ${expires})`) + covers;
+}
+
+/** How an entry's selector reads: a fingerprint's first twelve digits, or the
+ *  path glob with its narrowing. */
+export function selectorText(selector: SecuritySelector): string {
+  if ("fingerprint" in selector) return `fingerprint ${selector.fingerprint.slice(0, 12)}…`;
+  const narrowing = [selector.rule && `rule ${selector.rule}`, selector.scanner && `scanner ${selector.scanner}`].filter(Boolean);
+  return [`everything under ${selector.path}`, ...narrowing].join(", ");
 }
 
 /** The suppression dialog and the findings table's triage actions. */
@@ -302,4 +356,31 @@ export const SUPPRESS_TEXT = {
   unsuppress: "Unsuppress",
   saveFailed: (detail: string) => `The suppression was not written: ${detail}`,
   removeFailed: (detail: string) => `The suppression was not removed: ${detail}`,
+  // "Everything under this path" (S-770).
+  scope: "What to suppress",
+  scopeFinding: "Only this finding",
+  scopePath: "Everything under this path",
+  path: "Path",
+  pathHint: "A glob relative to the project root; a directory covers everything under it. The whole project (*, **, .) is refused.",
+  onlyRule: (rule: string) => `Only rule ${rule}`,
+  onlyScanner: (scanner: string) => `Only ${scanner} findings`,
+  pathRequired: "Name the path the suppression covers.",
+} as const;
+
+export const suppressionEntries: CopyEntry = {
+  what: `Every entry of ${IGNORE_FILE}: what it suppresses, why, until when, and how many stored findings it suppresses now. An entry that names no finding is orphaned.`,
+  why: "An orphaned entry is a fixed finding or a typo, and a path entry can cover more than one finding: the count shows how much risk each entry accepts.",
+};
+
+/** The Suppressions widget (S-770). */
+export const SUPPRESSIONS_TEXT = {
+  title: "Suppressions",
+  figure: (entries: number, findings: number) =>
+    `${entries} ${plural(entries, "entry", "entries")} suppressing ${findings} ${plural(findings, "finding", "findings")}`,
+  caption: `The entries of ${IGNORE_FILE}`,
+  count: (n: number) => `${n} suppressed`,
+  /** The one state an entry is in, orphaned first: it is the one to act on. */
+  state: (e: SecurityEntryStatus) => (e.orphaned ? "orphaned" : e.expired ? "expired" : "active"),
+  shouldName: (fingerprint: string) => `should name fingerprint ${fingerprint.slice(0, 12)}…`,
+  remove: (selector: SecuritySelector) => `Remove the entry for ${selectorText(selector)}`,
 } as const;

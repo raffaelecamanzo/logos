@@ -5,7 +5,7 @@
 <h1 align="center">Logos</h1>
 
 <p align="center">
-  <strong>Yet Another Graph-based Tool for AI Agent code navigation and quality enforcement</strong>
+  <strong>Guidance on governance, security and test coverage for agents and humans</strong>
 </p>
 
 <p align="center">
@@ -26,8 +26,28 @@
 
 ---
 
-Logos turns your repository into a **queryable code graph** — every symbol, call,
-import, route and doc reference — and serves it to your AI coding agent over
+Logos's primary value is guidance in three areas: compliance and governance,
+security, and test coverage. It gives AI agents and the people working with them
+concrete insight into where an application stands, so that its quality,
+robustness and security improve over time.
+
+- **Governance and compliance.** Architecture rules in `.logos/rules.toml` are
+  checked with `logos check`. The quality gate fails a change that regresses a
+  saved baseline, and the Health signal scores the codebase on ten structural
+  dimensions.
+- **Security.** Logos manages the security scanners (installed and run only on
+  your command, with your consent), shows each finding in its code context (the
+  enclosing symbol, its reachability and its blast radius), groups findings by
+  OWASP Top 10 category, and applies a ratchet: a new finding at or above a
+  chosen severity fails the gate, while known ones do not.
+- **Coverage.** Logos ingests LCOV and Cobertura reports and binds them to the
+  code graph by matching each report path to an indexed file, so coverage sits
+  beside complexity and churn in the Health and Files & Risk views instead of
+  staying a single percentage.
+
+All of this rests on one foundation: Logos turns your repository into a
+**queryable code graph** — every symbol, call, import, route and doc reference —
+and serves it to your AI coding agent over
 [MCP](https://modelcontextprotocol.io), to you on the command line, and in a local
 web dashboard.
 

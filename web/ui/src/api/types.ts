@@ -327,6 +327,79 @@ export interface GateResult {
   freshness: string;
   message: string;
   warnings: string[];
+  /** Under a `rules.toml [review]` table: the signal's change from the baseline,
+   *  per dimension with its driving symbols (FR-GV-26). Absent without the
+   *  table, or with no comparable baseline. */
+  attribution?: SignalAttribution;
+  /** The `gate --save --reason` the baseline was blessed with (FR-GV-16). */
+  baseline_reason?: string;
+  /** Under a `rules.toml [review]` table: the aggregate judged by its
+   *  `drift_budget` (FR-GV-25), as `gate` judges it. Absent without the table. */
+  drift?: SignalDrift;
+}
+
+/** The signal's movement judged by a `drift_budget` (mirrors `SignalDrift`). */
+export interface SignalDrift {
+  baseline: number;
+  current: number;
+  /** `baseline − current`; negative when the signal rose. */
+  drop: number;
+  /** The budget in points; `null` is `"report"`, which never fails. */
+  budget: number | null;
+  exceeded: boolean;
+}
+
+/** One member of a near-clone group a driver names (mirrors `DriverMember`). */
+export interface DriverMember {
+  node_id: string | null;
+  name: string;
+  file: string;
+  line: number | null;
+}
+
+/** One symbol, or one near-clone group, behind a dimension's share (mirrors
+ *  `AttributionDriver`). */
+export interface AttributionDriver {
+  status: "new" | "worsened" | "improved" | "resolved" | "unchanged";
+  name: string;
+  node_id: string | null;
+  file: string;
+  line: number | null;
+  measure: string | null;
+  before: number | null;
+  after: number | null;
+  /** A near-clone group's members; absent for a symbol. */
+  members?: DriverMember[];
+}
+
+/** One dimension's share of the change (mirrors `DimensionContribution`). */
+export interface DimensionContribution {
+  dimension: string;
+  /** The normalized value before; `null` when not applicable there. */
+  before: number | null;
+  after: number | null;
+  /** Signal points, to two decimals. */
+  points: number;
+  /** At most five, largest change first. */
+  drivers: AttributionDriver[];
+  /** How many drivers there were before the cap. */
+  driver_count: number;
+}
+
+/** The aggregate's change attributed per dimension in log space (mirrors
+ *  `SignalAttribution`, FR-GV-26): the contributions sum to `exact_change`
+ *  within `residual`, and `rounding` is what the integer signals add. */
+export interface SignalAttribution {
+  before: number | null;
+  after: number | null;
+  change: number | null;
+  exact_change: number | null;
+  rounding: number | null;
+  /** Largest share first. */
+  contributions: DimensionContribution[];
+  residual: number | null;
+  not_attributable_because?: string;
+  drivers_not_named_because?: string;
 }
 
 /** Usage of one tool on one surface within the window (mirrors `ToolUsage`). */
@@ -590,7 +663,11 @@ export type FixUnitKind = "class" | "function" | "duplicate_group" | "clone_grou
  *  counterfactual, always ≥ 1 (a unit recovering no whole point is not ranked). */
 export interface FixUnit {
   kind: FixUnitKind;
-  node_id: number;
+  /** The unit's identity, kept across a re-index (CR-238): a class's or
+   *  function's symbol id without the repository coordinate (`Offender.node_id`'s),
+   *  a group's `<kind>:<digest>` of its sorted members. `null` on a snapshot
+   *  written before it was recorded — never a storage id. */
+  node_id: string | null;
   name: string;
   file: string;
   line: number | null;
@@ -604,7 +681,8 @@ export interface FixUnit {
 
 /** One unit labelled an outlier on one measure (mirrors `OutlierLabel`). */
 export interface OutlierLabel {
-  node_id: number;
+  /** The labelled unit's identity — `FixUnit.node_id`'s; `null` when not recorded. */
+  node_id: string | null;
   name: string;
   file: string;
   line: number | null;
@@ -1155,7 +1233,10 @@ export interface VerifyCensus {
  *  NFR-RA-06, ADR-46): the live graph diffed against a throwaway shadow reindex.
  *  The count deltas are `live − reindex`: a positive `node_delta` (with
  *  `leaked_symbols`) is the drift signature — stale rows the live store leaked;
- *  `orphaned_symbols` are reindex-only symbols the live graph is missing. */
+ *  `orphaned_symbols` are reindex-only symbols the live graph is missing.
+ *  `lost_edges` / `extra_edges` name the edges that differ (CR-236); the server
+ *  always sends them (empty on a clean store) — they are typed optional only so
+ *  older fixtures that predate them still type-check. */
 export interface VerifyReport {
   /** `true` when the live graph matches a fresh reindex — the `CONSISTENT` verdict. */
   ok: boolean;
@@ -1173,8 +1254,26 @@ export interface VerifyReport {
   orphaned_total: number;
   /** A deterministic, lexically-ordered, capped sample of `orphaned_total`. */
   orphaned_symbols: string[];
+  /** Edges a fresh reindex has and the live graph lacks (CR-236); exact count. */
+  lost_edges_total?: number;
+  /** A deterministic, capped sample of `lost_edges_total`. */
+  lost_edges?: DriftedEdge[];
+  /** Edges the live graph has and a fresh reindex lacks (CR-236); exact count. */
+  extra_edges_total?: number;
+  /** A deterministic, capped sample of `extra_edges_total`. */
+  extra_edges?: DriftedEdge[];
   structural: DoctorReport;
   message: string;
+}
+
+/** One edge that differs between the live graph and a fresh reindex (mirrors
+ *  `DriftedEdge`, CR-236, FR-GV-19). A file is `null` for an unbound endpoint. */
+export interface DriftedEdge {
+  kind: string;
+  source_symbol: string;
+  target_symbol: string;
+  source_file: string | null;
+  target_file: string | null;
 }
 
 // ── The cross-service workspace read-models (S-249/S-250, CR-061, FR-WS-04/05/06,
@@ -2595,8 +2694,9 @@ export interface WorkspaceStatistics {
 // snippet (ADR-79 §2), and a secret-class one is stored with a fixed, redacted
 // message — the page still renders `[redacted]` for it.
 
-/** A finding's normalised severity (mirrors `Severity`). */
-export type SecuritySeverity = "critical" | "high" | "medium" | "low" | "info";
+/** A finding's normalised severity (mirrors `Severity`). `unrated`: the report
+ *  gave no rating (S-768); a threshold gates it as `medium`. */
+export type SecuritySeverity = "critical" | "high" | "medium" | "low" | "info" | "unrated";
 
 /** The copy of a scanner that runs (mirrors `InstalledCopy`). */
 export interface SecurityInstalledCopy {
@@ -2605,8 +2705,10 @@ export interface SecurityInstalledCopy {
   version: string | null;
   update_available: string | null;
   /** Present when no version probe ran (mirrors `Unprobed`): the page probes
-   *  only a scanner the project's scan consent names (HF-3). */
-  unprobed?: "not_consented";
+   *  only a scanner the project's scan consent names (HF-3), an install
+   *  plan's `kept` copies are never probed (S-766), and no readout probes one
+   *  with nothing to scan here (S-769). */
+  unprobed?: "not_consented" | "state_only" | "nothing_to_scan";
 }
 
 /** A stored report's tally, on a `stale` or `fresh` row. */
@@ -2628,11 +2730,29 @@ export type SecurityScanState =
   | { state: "not_installed" }
   | { state: "disabled" }
   | { state: "never_run" }
+  /** Installed, no report stored, and nothing it reads is in the project (S-769):
+   *  no scan is missing. */
+  | { state: "not_applicable"; reason: string }
   | ({ state: "stale"; because: SecurityStaleBecause } & StoredScan)
   | ({ state: "fresh" } & StoredScan);
 
+/** What a whole-project run does with the project's ignored directories
+ *  (mirrors `IgnoredPaths`, FR-SC-26): `scanned` always comes with a one-line
+ *  `coverage_note` saying why. */
+export type SecurityIgnoredPaths = "excluded" | "scanned";
+
+/** The coverage fact a whole-project run carries (mirrors `Coverage`, flattened):
+ *  absent when the scanner did not run, or ran only on the paths a scoped scan named.
+ *  On a status row it forecasts a whole-project scan of the tree as it is now, and is
+ *  absent when the scanner is not installed, disabled, or refused by the repository's
+ *  config. */
+export interface SecurityCoverage {
+  ignored_paths?: SecurityIgnoredPaths;
+  coverage_note?: string;
+}
+
 /** One row of the scanner matrix (mirrors `ScannerStatus`). */
-export type SecurityScannerStatus = SecurityScanState & {
+export type SecurityScannerStatus = SecurityScanState & SecurityCoverage & {
   /** The registry name, or the driver name of an unregistered tool. */
   scanner: string;
   /** The SARIF driver name its reports carry. */
@@ -2648,6 +2768,9 @@ export type SecurityScannerStatus = SecurityScanState & {
   licence?: { accepted: string[]; pinned_accepted: boolean };
   /** The failure log, when its last scan failed. */
   last_failure: string | null;
+  /** Why that scan failed, in one masked line read from the log (S-769); absent
+   *  without a failure log. */
+  last_failure_cause?: string;
 };
 
 /** `security status` (mirrors `SecurityStatus`). */
@@ -2657,6 +2780,8 @@ export interface SecurityStatus {
   scanners: SecurityScannerStatus[];
   /** Stored reports from tools that are not registered scanners. */
   other_reports: SecurityScannerStatus[];
+  /** Every entry of the ignore file with the findings it suppresses counted (S-770). */
+  suppressions: SecurityEntryStatus[];
 }
 
 /** How a claim can be trusted (mirrors `Confidence`). */
@@ -2668,7 +2793,7 @@ export interface SecurityFindingContext {
   enclosing: {
     confidence: SecurityConfidence;
     symbol: SymbolRef | null;
-    unbound_because: "no_location" | "not_indexed" | "stale" | "no_symbol" | null;
+    unbound_because: "no_location" | "not_indexed" | "stale" | "no_symbol" | "historical" | null;
   };
   reachability: {
     confidence: SecurityConfidence;
@@ -2699,16 +2824,34 @@ export interface SecurityFindingContext {
   } | null;
 }
 
-/** A suppression entry's verdict on one finding (mirrors `Suppression`). */
-export type SecuritySuppression =
-  | { state: "suppressed"; reason: string; expires: string | null }
-  | { state: "expired"; reason: string; expires: string | null };
+/** What an ignore entry suppresses (mirrors `Selector`): one finding by its
+ *  fingerprint, or every finding at or under a path glob, optionally narrowed to
+ *  one rule and one scanner (S-770). */
+export type SecuritySelector = { fingerprint: string } | { path: string; rule?: string; scanner?: string };
 
-/** One ignore entry (mirrors `IgnoreEntry`). */
-export interface SecurityIgnoreEntry {
-  fingerprint: string;
+/** A suppression entry's verdict on one finding (mirrors `Suppression`). `by` is
+ *  the entry's selector: what Unsuppress removes. */
+export type SecuritySuppression =
+  | { state: "suppressed"; reason: string; expires: string | null; by: SecuritySelector }
+  | { state: "expired"; reason: string; expires: string | null; by: SecuritySelector };
+
+/** One ignore entry (mirrors `IgnoreEntry`, its selector flattened). */
+export type SecurityIgnoreEntry = SecuritySelector & {
   reason: string;
   expires: string | null;
+};
+
+/** One ignore entry audited against the stored findings (mirrors `EntryStatus`). */
+export interface SecurityEntryStatus {
+  entry: SecurityIgnoreEntry;
+  /** Past its `expires` date: it no longer suppresses. */
+  expired: boolean;
+  /** It names no finding — fixed, a typo, or a glob matching nothing. */
+  orphaned: boolean;
+  /** The findings it suppresses; `0` when expired or orphaned. */
+  suppressed: number;
+  /** For an entry orphaned by a finding's identity change, the fingerprint it should name. */
+  should_name: string | null;
 }
 
 /** What a triage write left on disk (mirrors `IgnoreWrite`, S-672): the file
@@ -2732,7 +2875,9 @@ export interface SecurityFinding {
   message: string;
   /** A secret-class finding: its message reads `[redacted]` on the page. */
   redacted: boolean;
-  binding: "bound" | "unmatched" | "ambiguous" | "unbound";
+  /** `historical`: a secret found only in history, anchored to its commit and
+   *  bound to no file of today's tree (S-767). */
+  binding: "bound" | "unmatched" | "ambiguous" | "unbound" | "historical";
   report_path: string | null;
   path: string | null;
   start_line: number | null;
@@ -2741,11 +2886,26 @@ export interface SecurityFinding {
   end_column: number | null;
   /** The same `FRESHNESS_*` tokens coverage uses: `n/a` when no file is bound. */
   freshness: Freshness;
+  /** The commit a history-mode finding is anchored to (mirrors `CommitAnchor`,
+   *  S-767); `null` when the report named none. `short_commit` is the spelling
+   *  the CLI and MCP print too. */
+  anchor: SecurityCommitAnchor | null;
+  /** Why the severity reads as it does, when that is not plain: an `unrated`
+   *  finding's "the scanner gave none" (S-768); absent for a rating. */
+  severity_reason?: string;
   /** The 2025 categories; the page reads the edition it shows from `editions`. */
   owasp: string[];
   unclassified: SecurityUnclassified | null;
   suppression: SecuritySuppression | null;
   context: SecurityFindingContext;
+}
+
+/** The commit a history-mode finding is anchored to (mirrors `CommitAnchor`). */
+export interface SecurityCommitAnchor {
+  commit: string;
+  short_commit: string;
+  /** The path the report named at that commit. */
+  path: string;
 }
 
 /** Why a finding sits under no category (mirrors `Unclassified`). */
@@ -2774,7 +2934,7 @@ export interface SecurityFindings {
   total: number;
   findings: SecurityFinding[];
   categories: SecurityCategoryCoverage[];
-  suppressions: unknown[];
+  suppressions: SecurityEntryStatus[];
 }
 
 /** An OWASP Top 10 edition. */
@@ -2816,6 +2976,9 @@ export interface SecurityPage {
   findings: SecurityFindings;
   /** 2025 then 2021: switching edition reads this, never the network. */
   editions: SecurityEditionClassification[];
+  /** The page's own finding count — fresh per finding, unsuppressed — and what
+   *  it leaves out: the figure the roll-up row and Files & Risk read too (S-760). */
+  counts: SecurityFindingTally;
   /** `null` without a `rules.toml [security]` table. */
   gate: SecurityGateBand | null;
 }
@@ -2837,7 +3000,7 @@ export type SecurityRunOutcome =
   | { outcome: "not_selected" }
   | { outcome: "requires_build"; languages: string[]; reason: string }
   | { outcome: "not_applicable"; reason: string }
-  | { outcome: "failed"; exit_code: number | null; log: string | null; stderr: string };
+  | { outcome: "failed"; exit_code: number | null; log: string | null; stderr: string; cause: string };
 
 /** How a scoped scan treated one scanner (mirrors `RunScope`, FR-SC-17). */
 export type SecurityRunScope = { kind: "paths"; paths: string[] } | { kind: "unscoped"; reason: string };
@@ -2849,7 +3012,8 @@ export type SecurityScannerRun = {
   driver: string;
   version: string | null;
   scope?: SecurityRunScope;
-} & SecurityRunOutcome;
+} & SecurityRunOutcome &
+  SecurityCoverage;
 
 /** What a scan returns (mirrors `SecurityScanSummary`). */
 export interface SecurityScanSummary {
@@ -2905,7 +3069,8 @@ export interface ScanConsentRequired {
 // ── Workspace security (mirrors `WorkspaceSecurityAnswer`, S-674, FR-SC-16) ─────
 // The wire mirrors of `logos-core/src/security/rollup.rs` and
 // `federation::query::WorkspaceSecurity`. Every count is of fresh, unsuppressed
-// findings; a member never scanned has no count at all (`null`), never 0 (BR-66).
+// findings, fresh per finding — the one definition every security surface shares
+// (S-760); a member never scanned has no count at all (`null`), never 0 (BR-66).
 
 /** Whether a member has a current scan (mirrors `MemberScan`). */
 export type MemberSecurityScan = "never_run" | "stale" | "fresh";
@@ -2917,15 +3082,23 @@ export interface SecuritySeverityCounts {
   medium: number;
   low: number;
   info: number;
+  /** Findings the report gave no rating (S-768), never folded into `medium`. */
+  unrated: number;
   total: number;
 }
 
 /** The stored findings the counts leave out, by why (mirrors `Excluded`). */
 export interface SecurityExcluded {
-  /** In a report that is not fresh: stale, or from a scanner now disabled. */
+  /** Unsuppressed findings whose own file changed since the scan. */
   not_fresh: number;
-  /** In a fresh report, suppressed by a current entry. */
+  /** Suppressed by a current entry, whatever their file's state. */
   suppressed: number;
+}
+
+/** Every stored finding, counted or left out (mirrors `FindingTally`). */
+export interface SecurityFindingTally {
+  counted: SecuritySeverityCounts;
+  excluded: SecurityExcluded;
 }
 
 /** One member's security roll-up (mirrors `MemberSecurity`). */
@@ -2935,7 +3108,11 @@ export interface MemberSecurity {
   /** Registered scanners not disabled, plus unregistered tools with a stored report. */
   scanners_enabled: number;
   scanners: SecurityScannerStatus[];
-  /** `null` unless `scan` is `fresh`: nothing current to count. */
+  /** Stored reports, a disabled scanner's included. */
+  reports_stored: number;
+  /** Of `reports_stored`, those fresh at HEAD. */
+  reports_fresh: number;
+  /** `null` only when no report is stored (`never_run`): nothing to count from. */
   findings: SecuritySeverityCounts | null;
   excluded: SecurityExcluded;
   owasp: {
@@ -2964,8 +3141,12 @@ export interface WorkspaceSecurity {
   members_total: number;
   members_read: number;
   members_never_scanned: number;
-  /** Members with a fresh report: the population the totals are summed over. */
+  /** Members with a stored report: the population the totals are summed over; category counts come from fresh reports only. */
   members_counted: number;
+  /** Stored reports over the members read. */
+  reports_stored: number;
+  /** Of `reports_stored`, those fresh at HEAD: "N of M reports fresh". */
+  reports_fresh: number;
   totals: SecuritySeverityCounts;
   excluded: SecurityExcluded;
   /** `unclassified`: counted findings under no category of the edition. */

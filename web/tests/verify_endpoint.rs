@@ -198,6 +198,11 @@ async fn clean_store_returns_ok_true_json() {
     assert!(body.contains("\"node_delta\":0"), "zero node delta on a clean store: {body}");
     assert!(body.contains("\"leaked_total\":0"), "no leaked symbols on a clean store: {body}");
     assert!(body.contains("\"orphaned_total\":0"), "no orphaned symbols on a clean store: {body}");
+    // The edge lists (CR-236) are present and empty on a clean store.
+    assert_eq!(report["lost_edges_total"], serde_json::json!(0), "{body}");
+    assert_eq!(report["lost_edges"], serde_json::json!([]), "{body}");
+    assert_eq!(report["extra_edges_total"], serde_json::json!(0), "{body}");
+    assert_eq!(report["extra_edges"], serde_json::json!([]), "{body}");
     // The report is the serialized read-model verbatim (FR-UI-25) — spot-check its
     // structural shape so a reshaped `VerifyReport` can't silently pass.
     for key in ["\"live\"", "\"reindex\"", "\"structural\"", "\"edge_delta\"", "\"file_delta\""] {
@@ -246,6 +251,15 @@ async fn drifted_store_returns_deltas_and_leaked_sample() {
         leaked.iter().any(|s| s.as_str().unwrap_or_default().contains("gone")),
         "the leaked sample names the removed file's symbols: {body}",
     );
+    // The leak's stale edges are named too (CR-236): each with its kind, both
+    // endpoint symbols and both endpoint files.
+    assert!(report["extra_edges_total"].as_u64().unwrap() >= 1, "extra edges counted: {body}");
+    let extra = report["extra_edges"].as_array().unwrap();
+    assert!(!extra.is_empty(), "the extra-edge sample is non-empty: {body}");
+    for key in ["kind", "source_symbol", "target_symbol", "source_file", "target_file"] {
+        assert!(extra[0].get(key).is_some(), "an extra edge carries {key}: {body}");
+    }
+    assert_eq!(report["lost_edges_total"], serde_json::json!(0), "a pure leak loses no edge: {body}");
 }
 
 // ── Off-serve-loop execution (ADR-46 risk mitigation) ──────────────────────────

@@ -146,7 +146,7 @@ use crate::graph_store::{EdgeRow, FunctionMetricRow, NewMetricSnapshot, NodeRow}
 use crate::hydrate::GraphView;
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
-    GraphDimensionNotApplicable, MetricSnapshot, MetricValue, Offender, WhereToStart, WorstOffenders,
+    FixUnit, GraphDimensionNotApplicable, MetricSnapshot, MetricValue, Offender, WhereToStart, WorstOffenders,
 };
 use crate::runtime::Runtime;
 
@@ -445,23 +445,110 @@ pub fn compute(
 ///
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 fn signal_of(m: &MetricSnapshot) -> Option<u32> {
-    (!m.empty).then(|| {
-        aggregate(
-            &applicable_original_dimensions(
-                m.modularity_not_applicable.is_none().then_some(&m.modularity),
-                m.acyclicity_not_applicable.is_none().then_some(&m.acyclicity),
-                m.depth_not_applicable.is_none().then_some(&m.depth),
-                &m.equality,
-                &m.redundancy,
-            ),
-            &applicable_new_dimensions(&m.nesting, &m.conciseness, &m.cohesion, &m.focus, &m.uniqueness),
-        )
+    signal_terms(m).map(|terms| terms.signal())
+}
+
+/// The terms the aggregate is the geometric mean of ([`signal_of`] reduces
+/// exactly these): each **applicable** dimension's normalized value, named as
+/// [`FixUnit::DIMENSIONS`](crate::models::quality::FixUnit::DIMENSIONS) names
+/// it, in canonical order. `None` is the [ADR-12] empty-graph sentinel.
+///
+/// The attribution of an aggregate change ([FR-GV-26]) reads these, so the
+/// change it decomposes is the very number the gate compares, over the very
+/// dimensions that entered it.
+///
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+pub(crate) fn signal_terms(m: &MetricSnapshot) -> Option<SignalTerms> {
+    (!m.empty).then(|| SignalTerms {
+        original: applicable_original_dimensions(
+            m.modularity_not_applicable.is_none().then_some(&m.modularity),
+            m.acyclicity_not_applicable.is_none().then_some(&m.acyclicity),
+            m.depth_not_applicable.is_none().then_some(&m.depth),
+            &m.equality,
+            &m.redundancy,
+        ),
+        extended: applicable_new_dimensions(&m.nesting, &m.conciseness, &m.cohesion, &m.focus, &m.uniqueness),
     })
 }
 
-/// The normalized values of the **applicable** original dimensions, in canonical
-/// order (modularity, acyclicity, depth, equality, redundancy) — the three graph
-/// dimensions contribute only when applicable ([FR-QM-18]; Modularity since
+/// One applicable dimension of the signal: its name and normalized value.
+pub(crate) type SignalTerm = (std::borrow::Cow<'static, str>, f64);
+
+/// The applicable dimensions of one non-empty measurement ([`signal_terms`]).
+/// Kept apart as the reduction keeps them: only an original can collapse the
+/// signal to `0` ([ADR-12]).
+///
+/// Serialized for the review's before-state cache with each value as its
+/// IEEE-754 bits ([`exact_terms`]): `serde_json` reads a decimal back to the
+/// nearest double only approximately, and a value one bit off makes a cached
+/// rerun's attribution differ from the run that built the cache ([NFR-RA-06]).
+///
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SignalTerms {
+    /// The applicable original dimensions, in canonical order.
+    #[serde(with = "exact_terms")]
+    pub(crate) original: Vec<SignalTerm>,
+    /// The applicable CR-005 dimensions, in canonical order.
+    #[serde(with = "exact_terms")]
+    pub(crate) extended: Vec<SignalTerm>,
+}
+
+/// The values of `terms`, in order.
+fn values(terms: &[SignalTerm]) -> Vec<f64> {
+    terms.iter().map(|(_, n)| *n).collect()
+}
+
+/// [`SignalTerm`]s as `(name, bits)` pairs, so a value reads back bit for bit.
+mod exact_terms {
+    use std::borrow::Cow;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::SignalTerm;
+
+    pub(super) fn serialize<S: Serializer>(terms: &[SignalTerm], serializer: S) -> Result<S::Ok, S::Error> {
+        let bits: Vec<(&str, u64)> = terms.iter().map(|(name, n)| (name.as_ref(), n.to_bits())).collect();
+        bits.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<SignalTerm>, D::Error> {
+        let bits = Vec::<(Cow<'static, str>, u64)>::deserialize(deserializer)?;
+        Ok(bits.into_iter().map(|(name, n)| (name, f64::from_bits(n))).collect())
+    }
+}
+
+impl SignalTerms {
+    /// The 0–10000 signal these terms reduce to — [`aggregate`] itself.
+    pub(crate) fn signal(&self) -> u32 {
+        aggregate(&values(&self.original), &values(&self.extended))
+    }
+
+    /// `ln(S / 10000)` before rounding: the mean log [`aggregate`] takes the
+    /// `exp` of. Not finite when [`collapsed`](Self::collapsed).
+    pub(crate) fn log_mean(&self) -> f64 {
+        log_mean(&values(&self.original), &values(&self.extended))
+    }
+
+    /// `true` when an applicable original is exactly `0`: the signal is the
+    /// [ADR-12] short-circuit's `0`, not a geometric mean.
+    ///
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+    pub(crate) fn collapsed(&self) -> bool {
+        self.original.iter().any(|(_, n)| *n == 0.0)
+    }
+
+    /// Every term, originals first, in canonical order.
+    pub(crate) fn all(&self) -> impl Iterator<Item = &SignalTerm> {
+        self.original.iter().chain(&self.extended)
+    }
+}
+
+/// The normalized values of the **applicable** original dimensions, each with
+/// its name, in canonical order (modularity, acyclicity, depth, equality,
+/// redundancy) — the three graph dimensions contribute only when applicable ([FR-QM-18]; Modularity since
 /// [CR-156]), exactly as Cohesion/Focus do in [`applicable_new_dimensions`].
 /// Equality and Redundancy always apply. What this returns is both the set the
 /// geometric mean spans and the set the [ADR-12] zero short-circuit inspects, so
@@ -478,17 +565,17 @@ fn applicable_original_dimensions(
     depth: Option<&MetricValue>,
     equality: &MetricValue,
     redundancy: &MetricValue,
-) -> Vec<f64> {
-    [modularity, acyclicity, depth, Some(equality), Some(redundancy)]
-        .into_iter()
-        .flatten()
-        .map(|v| v.normalized)
+) -> Vec<SignalTerm> {
+    FixUnit::DIMENSIONS[..5]
+        .iter()
+        .zip([modularity, acyclicity, depth, Some(equality), Some(redundancy)])
+        .filter_map(|(&name, v)| v.map(|v| (name.into(), v.normalized)))
         .collect()
 }
 
-/// The normalized values of the **applicable** new dimensions, in canonical
-/// order (nesting, conciseness, cohesion, focus, uniqueness) — Cohesion and
-/// Focus contribute only when applicable, so a class-less repo yields four (or
+/// The normalized values of the **applicable** new dimensions, each with its
+/// name, in canonical order (nesting, conciseness, cohesion, focus, uniqueness)
+/// — Cohesion and Focus contribute only when applicable, so a class-less repo yields four (or
 /// fewer) entries and the aggregate denominator shrinks accordingly ([FR-QM-14],
 /// [ADR-21] applicability drop-out).
 ///
@@ -500,16 +587,12 @@ fn applicable_new_dimensions(
     cohesion: &Option<MetricValue>,
     focus: &Option<MetricValue>,
     uniqueness: &MetricValue,
-) -> Vec<f64> {
-    let mut dims = vec![nesting.normalized, conciseness.normalized];
-    if let Some(c) = cohesion {
-        dims.push(c.normalized);
-    }
-    if let Some(f) = focus {
-        dims.push(f.normalized);
-    }
-    dims.push(uniqueness.normalized);
-    dims
+) -> Vec<SignalTerm> {
+    FixUnit::DIMENSIONS[5..]
+        .iter()
+        .zip([Some(nesting), Some(conciseness), cohesion.as_ref(), focus.as_ref(), Some(uniqueness)])
+        .filter_map(|(&name, v)| v.map(|v| (name.into(), v.normalized)))
+        .collect()
 }
 
 /// What [`snapshot`] persisted: the appended row's id, its read-model, and the
@@ -1947,14 +2030,22 @@ fn aggregate(original: &[f64], new_dims: &[f64]) -> u32 {
     if original.contains(&0.0) {
         return 0;
     }
-    // Log-space sum in canonical order: applicable originals, then the
-    // applicable new dimensions. The denominator is the number of dimensions
-    // that actually entered (applicability drop-out, FR-QM-14).
-    let ln_sum: f64 = original.iter().chain(new_dims.iter()).map(|n| n.ln()).sum();
-    let count = (original.len() + new_dims.len()) as f64;
-    let signal = ((ln_sum / count).exp() * 10_000.0).round();
+    let signal = (log_mean(original, new_dims).exp() * 10_000.0).round();
     // exp of a non-positive mean never exceeds 1.0 (and the floored inputs keep it
     // well above 0), but clamp both ends defensively so the persisted CHECK
     // (0..=10000) can never fire on float residue.
     signal.clamp(0.0, 10_000.0) as u32
+}
+
+/// The mean of the logs the aggregate is the `exp` of: the log-space sum in
+/// canonical order — applicable originals, then the applicable new dimensions
+/// — over the number of dimensions that actually entered (applicability
+/// drop-out, [FR-QM-14]). One body for [`aggregate`] and the exact signal the
+/// attribution decomposes ([`SignalTerms::log_mean`]), so the two cannot drift.
+///
+/// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
+fn log_mean(original: &[f64], new_dims: &[f64]) -> f64 {
+    let ln_sum: f64 = original.iter().chain(new_dims.iter()).map(|n| n.ln()).sum();
+    let count = (original.len() + new_dims.len()) as f64;
+    ln_sum / count
 }

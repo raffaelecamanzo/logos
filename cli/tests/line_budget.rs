@@ -753,12 +753,71 @@ fn adapter_lines() -> usize {
 /// `logos_core::tools::surface`'s.
 ///
 /// [FR-SC-23]: ../../docs/specs/requirements/FR-SC-23.md
+///
+/// **S-755 1118→1121** for `gate --save --reason` ([FR-GV-16]), measured
+/// 1118→1121 (+3), no headroom. Sibling sessions in Sprint 107 Iteration 3 add
+/// their own deltas to the 1118 this one branched from; the merged budget is
+/// the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: `--reason` on `Gate` (attribute + field) | **+2** |
+/// | `dispatch.rs`: `reason` named in the `Gate` pattern, passed to `Engine::gate_with_reason` | **+1** |
+/// | | **+3** |
+///
+/// Routing, not logic: the drift-budget check, the exit-2 refusal and the
+/// stored record are `logos_core::governance`'s.
+///
+/// [FR-GV-16]: ../../docs/specs/requirements/FR-GV-16.md
+///
+/// **S-757 1121→1124** for `review --branches` ([FR-GV-28]), measured
+/// 1121→1124 (+3), no headroom. Sibling sessions in Sprint 107 Iteration 5 add
+/// their own deltas to the 1121 this one branched from; the merged budget is
+/// the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: `--branches` on `Review` (attribute + field) | **+2** |
+/// | `dispatch.rs`: a `Review` arm guarded on `branches`, calling `Engine::review_branches` | **+1** |
+/// | | **+3** |
+///
+/// Routing, not logic: the measurement, the sum and the projection are
+/// `logos_core::governance`'s, the call the MCP tool makes.
+///
+/// [FR-GV-28]: ../../docs/specs/requirements/FR-GV-28.md
+///
+/// **S-764 1124→1126** for `security bless` ([FR-SC-25]), measured 1124→1126
+/// (+2), no headroom. Sibling sessions in Sprint 107 Iteration 6 add their own
+/// deltas to the 1124 this one branched from; the merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Bless` variant of `SecurityCommands` | **+1** |
+/// | `dispatch.rs`: its arm, calling `Engine::security_bless` | **+1** |
+/// | | **+2** |
+///
+/// Routing, not logic: which findings are blessed, the file format and the
+/// exit 5 are `logos_core`'s.
+///
+/// [FR-SC-25]: ../../docs/specs/requirements/FR-SC-25.md
+///
+/// **Sprint 107 review D1 1126→1130** for stopping a scan or install on SIGINT
+/// or SIGTERM, measured 1126→1130 (+4), no headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `dispatch.rs`: the `Security` arm becomes a block that installs the stop handler, then matches as before | **+3** |
+/// | `dispatch.rs`: the slim build's `Serve` arm installs it with a clean exit | **+1** |
+/// | | **+4** |
+///
+/// Routing, not logic: the handler, the kill of every foreground run's process
+/// groups and the exit code are `logos_core::jobs::stop_on_signal`'s.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 1118,
-        "cli adapter exceeds the 1118 production-LOC budget (NFR-MA-02): \
+        lines <= 1130,
+        "cli adapter exceeds the 1130 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

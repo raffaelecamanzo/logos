@@ -460,7 +460,7 @@ fn parse_numstat_count(field: &str) -> Option<i64> {
 ///
 /// `core.quotePath=false` keeps non-ASCII paths literal (no octal quoting) so
 /// the parser sees real bytes; nothing else touches global config.
-fn git(root: &Path, args: &[&str]) -> std::io::Result<Output> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> std::io::Result<Output> {
     Command::new("git")
         .arg("-C")
         .arg(root)

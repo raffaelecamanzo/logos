@@ -43,7 +43,8 @@
 //! consent dialog has answered every line they need, and otherwise returns the
 //! [plan](InstallPlan) the dialog shows — each tool, support install and
 //! pending licence acknowledgement a line of its own, the opt-in tools offered
-//! unticked. The CLI keeps its licence refusal. [`install_job`] is the
+//! unticked. It decides on recorded state only and starts no process. The
+//! CLI keeps its licence refusal. [`install_job`] is the
 //! `tool-install` job's work: the install, then the scan, cancellable.
 //!
 //! No MCP tool calls into this module: an agent cannot grant itself consent
@@ -66,8 +67,8 @@ use super::{
 use crate::config::{load_install_consent, load_scan_consent, record_install_consent, ConfigError};
 use crate::jobs::spawn::inside_root;
 use crate::security::{
-    consent_pending, Availability, CopyKind, InstalledCopy, Orchestrator, ScanEnvironment,
-    ScanProgress, Selection,
+    consent_pending, Availability, CopyKind, InstalledCopy, Orchestrator, Probe, ScanEnvironment,
+    ScanProgress, Selection, Unprobed,
 };
 
 /// What `logos security install` asks for.
@@ -244,19 +245,21 @@ fn enabled_tools(
 }
 
 /// `names` split into the tools left as they are — a usable copy is there —
-/// and the tools to install, by the precedence detection uses.
+/// and the tools to install, by the precedence detection uses, each copy's
+/// version read as `probe` says.
 fn partition(
     orchestrator: &Orchestrator,
     manifest: &Manifest,
     names: &[String],
     update: bool,
+    probe: Probe,
 ) -> (Vec<KeptTool>, Vec<String>) {
     let mut kept = Vec::new();
     let mut planned = Vec::new();
     for name in names {
         // A set override is the user's choice even when it cannot run: a
         // managed copy installed beside it would never be used.
-        let copy = orchestrator.copy_in_use(name).or_else(|| {
+        let copy = orchestrator.copy_in_use_with(name, probe).or_else(|| {
             orchestrator.override_of(name).map(|path| InstalledCopy {
                 copy: CopyKind::Override,
                 binary: path.to_path_buf(),
@@ -292,7 +295,7 @@ fn install_selected(
         None => Source::Network,
     };
 
-    let (kept, planned) = partition(&orchestrator, manifest, names, request.update);
+    let (kept, planned) = partition(&orchestrator, manifest, names, request.update, Probe::Run);
     if planned.is_empty() {
         // Nothing to install, so no tools directory or platform is needed.
         return Ok(SecurityInstall {
@@ -489,7 +492,9 @@ pub enum ConsentLine {
 pub struct InstallPlan {
     /// Each tool's line, its support lines, then the licence lines.
     pub lines: Vec<ConsentLine>,
-    /// The tools left as they are: a usable copy is already there.
+    /// The tools left as they are: a copy is already there. No version is
+    /// probed, so each reads `version: null`, `unprobed: "state_only"`; a
+    /// managed copy's `update_available` still comes from its directory.
     pub kept: Vec<KeptTool>,
     /// For Install & scan, the scanners this project's network consent does
     /// not name yet: those installed now, those about to be, and the offered
@@ -517,8 +522,16 @@ pub enum InstallAdmission {
 /// accepted by its `<tool> <version>`, each pending licence ticked, and —
 /// for Install & scan — each scanner short of the project's network consent
 /// accepted. An offered opt-in tool counts only when ticked. Otherwise the
-/// answer is the [plan](InstallPlan) the dialog shows. Starts no process and
-/// writes nothing.
+/// answer is the [plan](InstallPlan) the dialog shows.
+///
+/// Decides on recorded state only (S-766): the copies there, the managed
+/// versions, the consent records and the config. It starts no process — no
+/// copy's version is probed — and writes nothing. A `PATH` copy with no
+/// managed copy beside it is therefore [kept](KeptTool) whatever its version,
+/// as the page shows it installed. Beside a managed copy, admission sees the
+/// managed one, since only a version could prefer the `PATH` copy. The job,
+/// once the dialog is answered, installs at most the tools admitted here: its
+/// own probed partition can only keep more of them.
 ///
 /// # Errors
 /// A [`ConfigError`] (exit 2): an unknown tool, an `opt_in` tool that is not
@@ -548,8 +561,11 @@ pub fn admit_install(
         .into());
     }
     let orchestrator = Orchestrator::open_in(root, env)?.with_manifest(manifest.clone());
-    let (kept, planned) = partition(&orchestrator, manifest, &named, ask.update);
-    let (_, offered) = partition(&orchestrator, manifest, &offered_names, false);
+    // Which copies are there, never what they print: nothing runs before the
+    // dialog is answered.
+    let state = Probe::Skip(Unprobed::StateOnly);
+    let (kept, planned) = partition(&orchestrator, manifest, &named, ask.update, state);
+    let (_, offered) = partition(&orchestrator, manifest, &offered_names, false, state);
     let chosen: Vec<String> = planned
         .iter()
         .chain(offered.iter().filter(|t| ask.opt_in.contains(t)))
@@ -776,11 +792,15 @@ pub fn install_job(
 }
 
 /// Whether a found copy stays: any override, a `PATH` copy at or above the
-/// minimum, a managed copy — unless `update` asks for the pinned one.
+/// minimum, a managed copy — unless `update` asks for the pinned one. A `PATH`
+/// copy whose version was not probed stays: it is the user's own, and the
+/// Security page shows it installed.
 fn keeps(manifest: &Manifest, tool: &str, copy: &InstalledCopy, update: bool) -> bool {
     match copy.copy {
         CopyKind::Override => true,
-        CopyKind::Path => manifest.meets_minimum(tool, copy.version.as_deref()),
+        CopyKind::Path => {
+            copy.unprobed.is_some() || manifest.meets_minimum(tool, copy.version.as_deref())
+        }
         CopyKind::Managed => !(update && copy.update_available.is_some()),
     }
 }

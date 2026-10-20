@@ -414,9 +414,13 @@ GitHub Actions and a plain-shell variant, plus a local reproduction — see
 [CI integration](ci-integration.md).
 
 **Session gating (AI agent loop):** call `logos:session_start` before a batch
-of edits and `logos:session_end` after — the MCP tools save a baseline at the
-start and compare the final state at the end, exiting the gate if the agent
-session introduced a regression.
+of edits and `logos:session_end` after. `session_start` saves a baseline only where
+none exists and never moves an existing one, so `session_end` compares the final
+state against the baseline a human last blessed with `logos gate --save`, and
+fails the gate if the agent session left a regression. The one exception is a
+baseline that no longer compares, because the metric semantics or thresholds
+changed since it was saved: `session_start` resets it onto the pre-edit
+snapshot, with the `baseline reset: …` notice `gate` gives.
 
 See [commands.md](commands.md#quality--governance) for all flags and
 [metrics.md](metrics.md) for how the signal is computed.
@@ -492,8 +496,9 @@ external orchestration tooling
   guards the worktree's own `sync` too — parity, not a separate rule.
   Symmetrically, a worktree living *under* the primary root is excluded from
   the **primary's** graph by the nested-`.git`-boundary rule.
-- **Wrap the work in a session bracket.** `logos:session_start` /
-  `logos gate --save` on entering the worktree and `logos:session_end` /
+- **Wrap the work in a session bracket.** `logos gate --save` on entering the
+  worktree (`logos:session_start` saves one only when the worktree's store has
+  none) and `logos:session_end` /
   `logos gate` on leaving it score *that worktree's own* `.logos/logos.db`, so
   the aggregate quality delta you read at the end reflects only what happened
   in the worktree.
@@ -571,7 +576,7 @@ the quality signal.
 ```bash
 logos security scan --consent        # first scan here: record network consent, run installed scanners
 logos security ingest ci/out.sarif   # or fold in any SARIF 2.1.0 report from CI
-logos security status                # one state per scanner: never_run / fresh / stale / ...
+logos security status                # one state per scanner: never_run / not_applicable / fresh / stale / ...
 logos security findings --severity high --suppression active
 ```
 

@@ -219,7 +219,7 @@ Production npm dependencies compiled into the embedded dashboard bundle (CR-049,
 
 | Package | Version | License | Source |
 |---------|---------|---------|--------|
-| echarts | 5.6.0 | Apache-2.0 | https://www.npmjs.com/package/echarts |
+| echarts | 6.1.0 | Apache-2.0 | https://www.npmjs.com/package/echarts |
 | js-tokens | 4.0.0 | MIT | https://www.npmjs.com/package/js-tokens |
 | loose-envify | 1.4.0 | MIT | https://www.npmjs.com/package/loose-envify |
 | react | 18.3.1 | MIT | https://www.npmjs.com/package/react |
@@ -227,7 +227,7 @@ Production npm dependencies compiled into the embedded dashboard bundle (CR-049,
 | scheduler | 0.23.2 | MIT | https://www.npmjs.com/package/scheduler |
 | tslib | 2.3.0 | 0BSD | https://www.npmjs.com/package/tslib |
 | uplot | 1.6.32 | MIT | https://www.npmjs.com/package/uplot |
-| zrender | 5.6.1 | BSD-3-Clause | https://www.npmjs.com/package/zrender |
+| zrender | 6.1.0 | BSD-3-Clause | https://www.npmjs.com/package/zrender |
 
 ## Non-crate components
 

@@ -13,12 +13,17 @@
 //!   [`ChildGuard::spawn`], which the spawning code calls in place of
 //!   `Command::spawn`; the job is found on the spawning thread, so the code
 //!   between the job and the spawn passes nothing down.
+//! - [`ScanJobs::shutdown`] cancels every running job the same way and waits,
+//!   to a bound, for each to end: what `serve` calls when it stops (S-759), so
+//!   no child outlives it and each job's own cleanup has run.
 //!
 //! The runner knows nothing about what a job does: each kind supplies the
 //! closure that runs its steps. The security scan is the first kind; [S-747]
-//! adds the tool install, which may end in a scan. Two kinds that must not
-//! overlap on a member start through [`ScanJobs::start_unless`], which refuses
-//! while the other runs.
+//! adds the tool install, which may end in a scan. Both start through
+//! [`ScanJobs::start_exclusive`], which refuses while a kind they must not
+//! overlap runs, and takes the project's [`lock`] so that no scan or install
+//! started anywhere else — over MCP, from the CLI, in another process — runs
+//! beside them (S-758).
 //!
 //! [analysis-jobs]: ../../../docs/specs/architecture/components/analysis-jobs.md
 //! [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
@@ -32,19 +37,25 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+pub mod lock;
+mod stop;
+
+pub use stop::{stop_on_signal, StopExit};
 pub(crate) mod spawn;
+
+use lock::{Busy, Holder, ProjectLock};
 
 /// Events a job keeps for replay. Past it the oldest are dropped and counted
 /// in [`JobSnapshot::events_dropped`].
 pub const EVENT_CAP: usize = 256;
 
 /// What a job does. One job of a kind runs per member at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JobKind {
     /// Every installed, enabled scanner, then the ingest of each report.
@@ -65,7 +76,7 @@ impl JobKind {
 }
 
 /// A job's identity: unique within one [`ScanJobs`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct JobId(u64);
 
@@ -139,6 +150,16 @@ impl fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// Why [`ScanJobs::start_exclusive`] started nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Refused {
+    /// A job of an excluded kind runs for the member in this runner.
+    Running(JobSnapshot),
+    /// A scan or install started elsewhere — over MCP, from the CLI, in
+    /// another process — holds the project's lock.
+    Elsewhere(Busy),
+}
+
 /// The running and the last finished job of each kind, per member.
 #[derive(Default)]
 pub struct ScanJobs {
@@ -163,25 +184,43 @@ impl ScanJobs {
         F: FnOnce(&JobContext) -> anyhow::Result<serde_json::Value> + Send + 'static,
     {
         Ok(self
-            .start_unless(kind, member, &[], work)?
-            .expect("no kind excludes the start"))
+            .start_with(kind, member, &[], None, work)?
+            .expect("no kind excludes the start and no lock is taken"))
     }
 
-    /// [`start`](Self::start), unless a job of one of `excluded` is running
-    /// for `member`: then nothing starts and that job comes back as `Err`.
-    /// The check and the start happen under one lock, so two kinds that must
-    /// not overlap never both run. A running job of `kind` itself is still
-    /// joined.
+    /// [`start`](Self::start), holding the project lock in `lock_file` for as
+    /// long as the job runs ([`lock`], S-758), unless a job of one of
+    /// `excluded` runs for `member` here ([`Refused::Running`]) or a scan or
+    /// install started elsewhere holds the lock ([`Refused::Elsewhere`]):
+    /// then nothing starts. A running job of `kind` itself is still joined,
+    /// before the lock is looked at. The checks, the lock and the start happen
+    /// under the runner's own lock, so two starts here never both run and a
+    /// second start of the same kind always joins.
     ///
     /// # Errors
-    /// As [`start`](Self::start).
-    pub fn start_unless<F>(
+    /// As [`start`](Self::start), and the lock file's own I/O error.
+    pub fn start_exclusive<F>(
+        &self,
+        kind: JobKind,
+        member: &Path,
+        lock_file: &Path,
+        excluded: &[JobKind],
+        work: F,
+    ) -> io::Result<Result<Started, Refused>>
+    where
+        F: FnOnce(&JobContext) -> anyhow::Result<serde_json::Value> + Send + 'static,
+    {
+        self.start_with(kind, member, excluded, Some(lock_file), work)
+    }
+
+    fn start_with<F>(
         &self,
         kind: JobKind,
         member: &Path,
         excluded: &[JobKind],
+        lock_file: Option<&Path>,
         work: F,
-    ) -> io::Result<Result<Started, JobSnapshot>>
+    ) -> io::Result<Result<Started, Refused>>
     where
         F: FnOnce(&JobContext) -> anyhow::Result<serde_json::Value> + Send + 'static,
     {
@@ -193,18 +232,29 @@ impl ScanJobs {
                 .filter(|job| job.is_running())
         });
         if let Some(blocking) = blocking {
-            return Ok(Err(blocking.snapshot()));
+            return Ok(Err(Refused::Running(blocking.snapshot())));
         }
         if let Some(running) = slots.get(&key).filter(|job| job.is_running()) {
             tracing::info!(target: "logos::jobs", kind = kind.as_str(), member = %member.display(), job = %running.id, "job joined");
             return Ok(Ok(Started { joined: true, job: running.snapshot() }));
         }
-        let job = Arc::new(Job::new(JobId(self.next_id.fetch_add(1, Ordering::Relaxed)), kind));
+        let id = JobId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let held = match lock_file {
+            None => None,
+            Some(path) => match ProjectLock::take(path, &Holder::here(kind, Some(id)))? {
+                Ok(held) => Some(held),
+                Err(busy) => {
+                    tracing::info!(target: "logos::jobs", kind = kind.as_str(), member = %member.display(), "job refused: {busy}");
+                    return Ok(Err(Refused::Elsewhere(busy)));
+                }
+            },
+        };
+        let job = Arc::new(Job::new(id, kind));
         let context = JobContext { job: Arc::clone(&job) };
         let member_name = member.display().to_string();
         std::thread::Builder::new()
             .name(format!("logos-job-{}", kind.as_str()))
-            .spawn(move || run(context, &member_name, work))?;
+            .spawn(move || run(context, &member_name, held, work))?;
         tracing::info!(target: "logos::jobs", kind = kind.as_str(), member = %member.display(), job = %job.id, "job started");
         let snapshot = job.snapshot();
         slots.insert(key, job);
@@ -232,14 +282,37 @@ impl ScanJobs {
         }
         Some(job.snapshot())
     }
+
+    /// Cancel every running job, as [`cancel`](Self::cancel) does each one,
+    /// then wait until each has ended or `grace` has passed. A cancelled job
+    /// ends once its work notices — its children are already killed — so the
+    /// wait is what lets the work clean up after itself (an install removes
+    /// its partial download) before the process exits. Returns whether every
+    /// job ended within `grace`.
+    pub fn shutdown(&self, grace: Duration) -> bool {
+        let running: Vec<Arc<Job>> = lock(&self.slots)
+            .values()
+            .filter(|job| job.is_running())
+            .cloned()
+            .collect();
+        for job in &running {
+            tracing::info!(target: "logos::jobs", kind = job.kind.as_str(), job = %job.id, "job cancel at shutdown");
+            job.children.cancel();
+        }
+        let deadline = Instant::now() + grace;
+        running.iter().all(|job| job.wait_until(deadline))
+    }
 }
 
 /// Dropping the runner cancels every running job, killing each child's
-/// process group. That covers a runner torn down in process: a router dropped
-/// when its serve returns (`serve --mcp --ui` once the MCP host disconnects),
-/// and every test. It does not cover a process killed by a signal: no
-/// destructor runs then, and a child in a process group of its own does not
-/// receive the terminal's Ctrl-C, so it runs to its own end.
+/// process group, but does not wait for the jobs to end: `serve` calls
+/// [`ScanJobs::shutdown`] for that. Dropping covers a runner torn down in
+/// process without it, such as every test. Neither covers a process killed by
+/// SIGKILL, or by a signal it does not handle (`serve` and the CLI's scans and
+/// installs handle SIGINT and SIGTERM): no code runs then, and a child in a
+/// process group of its own runs to its own end — beside a scan the freed
+/// project lock then admits; the next install discards the staging such a
+/// process left ([`crate::tools`]).
 impl Drop for ScanJobs {
     fn drop(&mut self) {
         for job in lock(&self.slots).values() {
@@ -277,18 +350,53 @@ impl JobContext {
     }
 }
 
-/// Whether the job running on this thread was cancelled; `false` on a thread
-/// that runs no job. Work deep inside a job checks it between steps, so a
+/// Whether the job or [`foreground`] run on this thread was cancelled; `false`
+/// on a thread that runs neither. Work deep inside a job checks it between steps, so a
 /// cancel also stops what has not started yet.
 pub fn cancelled() -> bool {
     CURRENT.with(|current| current.borrow().as_ref().is_some_and(|c| c.is_cancelled()))
 }
 
+/// Run `work` with this thread's children registered as a **foreground** run:
+/// a scan or install the CLI or the MCP surface runs in the calling thread,
+/// not as a job. Each child [`ChildGuard::spawn`] starts during it joins the
+/// run, so [`cancel_foreground`] — what a stop signal calls before the process
+/// ends, or a stopping `serve` — kills its whole process group, as a job's
+/// cancel does, and [`cancelled`] then reads `true`. On a thread that already
+/// runs a job or a foreground run, `work` runs within that one.
+pub fn foreground<R>(work: impl FnOnce() -> R) -> R {
+    if CURRENT.with(|current| current.borrow().is_some()) {
+        return work();
+    }
+    let children = Arc::new(Children::default());
+    lock(&FOREGROUND).push(Arc::clone(&children));
+    CURRENT.with(|current| *current.borrow_mut() = Some(Arc::clone(&children)));
+    /// Ends the run however `work` ends, a panic included.
+    struct Ended(Arc<Children>);
+    impl Drop for Ended {
+        fn drop(&mut self) {
+            CURRENT.with(|current| *current.borrow_mut() = None);
+            lock(&FOREGROUND).retain(|run| !Arc::ptr_eq(run, &self.0));
+        }
+    }
+    let _ended = Ended(children);
+    work()
+}
+
+/// Cancel every [`foreground`] run in this process: kill the process group of
+/// each child it has running and refuse any child it starts after. A process
+/// killed by SIGKILL runs nothing, so its children run to their own end.
+pub fn cancel_foreground() {
+    for run in lock(&FOREGROUND).iter() {
+        run.cancel();
+    }
+}
+
 /// A child process started in a process group of its own and registered with
-/// the job running on this thread, so that [`ScanJobs::cancel`] kills its
-/// whole group. On a thread that runs no job it is a plain spawn in a group of
-/// its own. Keep it alive until the child's group is reaped; dropping it
-/// unregisters the child.
+/// the job or [`foreground`] run on this thread, so that [`ScanJobs::cancel`]
+/// or [`cancel_foreground`] kills its whole group. On a thread that runs
+/// neither it is a plain spawn in a group of its own. Keep it alive until the
+/// child's group is reaped; dropping it unregisters the child.
 pub struct ChildGuard {
     registration: Option<(Arc<Children>, u32)>,
 }
@@ -343,15 +451,20 @@ impl Drop for ChildGuard {
 // ── internals ────────────────────────────────────────────────────────────────
 
 thread_local! {
-    /// The children of the job running on this thread, if one is.
+    /// The children of the job or [`foreground`] run on this thread, if one is.
     static CURRENT: RefCell<Option<Arc<Children>>> = const { RefCell::new(None) };
 }
+
+/// The children of every [`foreground`] run in this process.
+static FOREGROUND: Mutex<Vec<Arc<Children>>> = Mutex::new(Vec::new());
 
 struct Job {
     id: JobId,
     kind: JobKind,
     started: Instant,
     inner: Mutex<JobInner>,
+    /// Notified when the job ends.
+    ended: Condvar,
     children: Arc<Children>,
 }
 
@@ -381,6 +494,7 @@ impl Job {
                 error: None,
                 ran_ms: None,
             }),
+            ended: Condvar::new(),
             children: Arc::new(Children::default()),
         }
     }
@@ -409,6 +523,23 @@ impl Job {
         inner.result = result;
         inner.error = error;
         inner.ran_ms = Some(millis(self.started));
+        self.ended.notify_all();
+    }
+
+    /// Wait until the job has ended or `deadline` has passed; whether it ended.
+    fn wait_until(&self, deadline: Instant) -> bool {
+        let mut inner = lock(&self.inner);
+        while inner.state == JobState::Running {
+            let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else {
+                return false;
+            };
+            inner = self
+                .ended
+                .wait_timeout(inner, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        true
     }
 }
 
@@ -441,15 +572,20 @@ impl Children {
     }
 }
 
-/// The job thread's body: run `work` with this thread's job set, then record
-/// how it ended.
-fn run<F>(context: JobContext, member: &str, work: F)
+/// The job thread's body: run `work` with this thread's job set and holding
+/// `held`, then record how it ended. The lock is released before the job
+/// reads ended, so whoever waited for the end finds the project free.
+fn run<F>(context: JobContext, member: &str, held: Option<ProjectLock>, work: F)
 where
     F: FnOnce(&JobContext) -> anyhow::Result<serde_json::Value>,
 {
     CURRENT.with(|current| *current.borrow_mut() = Some(Arc::clone(&context.job.children)));
-    let outcome = catch_unwind(AssertUnwindSafe(|| work(&context)));
+    let outcome = catch_unwind(AssertUnwindSafe(|| match &held {
+        Some(held) => held.holding(|| work(&context)),
+        None => work(&context),
+    }));
     CURRENT.with(|current| *current.borrow_mut() = None);
+    drop(held);
     let job = &context.job;
     let (state, result, error) = match outcome {
         Ok(Ok(value)) => (JobState::Completed, Some(value), None),

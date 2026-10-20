@@ -10,7 +10,7 @@
 # macOS).
 #
 # Layers:
-#   1. the six guarded actions, one fixture each, the reason naming its target;
+#   1. the eight guarded actions, one fixture each, the reason naming its target;
 #   2. other spellings of the same actions: the MCP twin under both tool
 #      prefixes, other file tools, path spellings, shell writes and invocations;
 #   3. pass-through: unguarded .logos/ edits, reads of guarded files, unrelated
@@ -159,7 +159,7 @@ for B in "${BASHES[@]}"; do
     # shellcheck disable=SC2016 # expanded by the bash under test
     T="[bash $("$B" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')]"
 
-    # --- 1. the six guarded actions ---------------------------------------------
+    # --- 1. the eight guarded actions -------------------------------------------
     asks "Write .logos/rules.toml asks, naming the file" \
         "$(file_payload Write file_path "$ENROLLED/.logos/rules.toml")" ".logos/rules.toml"
     asks "Edit .logos/rules-baseline.json asks, naming the file" \
@@ -172,8 +172,18 @@ for B in "${BASHES[@]}"; do
         "$(bash_payload 'logos check --bless')" "logos check --bless"
     asks "Bash 'logos security ingest' asks, naming the command" \
         "$(bash_payload 'logos security ingest empty.sarif')" "logos security ingest"
+    asks "Write .logos/security-baseline.json asks, naming the file" \
+        "$(file_payload Write file_path "$ENROLLED/.logos/security-baseline.json")" ".logos/security-baseline.json"
+    asks "Bash 'logos security bless' asks, naming the command" \
+        "$(bash_payload 'logos security bless')" "logos security bless"
 
     # --- 2. other spellings of the same actions ---------------------------------
+    # A re-bless's reason (S-755, FR-GV-16) never waives the guard: an agent is
+    # still asked, before or after the flag.
+    asks "logos gate --save --reason asks, naming the command" \
+        "$(bash_payload 'logos gate --save --reason "Equality drift from a new dispatcher"')" "logos gate --save"
+    asks "logos gate --reason=… --save asks, naming the command" \
+        "$(bash_payload 'logos gate --reason=intrinsic --save')" "logos gate --save"
     asks "the MCP twin under the plugin prefix asks, naming the command" \
         "$(mcp_payload mcp__plugin_logos_logos__bless_rules)" "logos check --bless"
     asks "the MCP twin under the project .mcp.json prefix asks" \
@@ -289,6 +299,24 @@ logos gate --save')" "logos gate --save"
     asks "logos found by \`command -v logos\`" "$(bash_payload '`command -v logos` check --bless')" "logos check --bless"
     # shellcheck disable=SC2016
     asks "logos held in a variable" "$(bash_payload 'L=logos; $L gate --save')" "logos gate --save"
+    # The checked-in security baseline (S-764, FR-SC-25): its writer and the file.
+    asks "logos security bless by path, with global flags" \
+        "$(bash_payload '~/.logos-bin/1.20.0/logos --json security --project . bless')" "logos security bless"
+    asks "logos security bless after another command in a list" \
+        "$(bash_payload 'logos security scan --consent && logos security bless')" "logos security bless"
+    # shellcheck disable=SC2016
+    asks "logos security bless held in a variable" \
+        "$(bash_payload 'L=logos; $L security bless')" "logos security bless"
+    asks "an Edit of .logos/security-baseline.json asks" \
+        "$(file_payload Edit file_path ".logos/security-baseline.json")" ".logos/security-baseline.json"
+    asks "rm of .logos/security-baseline.json asks" \
+        "$(bash_payload 'rm -f .logos/security-baseline.json')" ".logos/security-baseline.json"
+    asks "a redirect into .logos/security-baseline.json asks" \
+        "$(bash_payload 'echo {} > .logos/security-baseline.json')" ".logos/security-baseline.json"
+    asks "a member's .logos/security-baseline.json asks" \
+        "$(file_payload Write file_path "$ENROLLED/svc/.logos/security-baseline.json")" ".logos/security-baseline.json"
+    asks "a bare security-baseline.json after cd .logos asks" \
+        "$(bash_payload 'cd .logos && rm security-baseline.json')" ".logos/security-baseline.json"
 
     # --- 3. pass-through --------------------------------------------------------
     passes "an Edit of an unguarded .logos/ file passes" \
@@ -339,6 +367,14 @@ logos gate --save')" "logos gate --save"
     passes "near miss: 'logos security scan' passes" "$(bash_payload 'logos security scan --path src')"
     passes "near miss: 'ingest' before security passes" "$(bash_payload 'logos ingest security')"
     passes "near miss: 'security ingest' without logos passes" "$(bash_payload 'echo security ingest r.sarif')"
+    passes "cat of the security baseline passes" "$(bash_payload 'cat .logos/security-baseline.json')"
+    passes "git add of the security baseline passes" "$(bash_payload 'git add .logos/security-baseline.json')"
+    passes "near miss: .logos/security-baseline.json.bak passes" \
+        "$(file_payload Write file_path ".logos/security-baseline.json.bak")"
+    passes "near miss: 'bless' before security passes" "$(bash_payload 'logos bless security')"
+    passes "near miss: 'security bless' without logos passes" "$(bash_payload 'echo security bless')"
+    passes "near miss: 'bless' in another command of the list passes" \
+        "$(bash_payload 'logos security status; echo bless')"
     passes "near miss: 'ingest' in another command of the list passes" "$(bash_payload 'logos security status; npm ingest x')"
     passes "near miss: security_ingest under a foreign server passes" "$(mcp_payload mcp__other__security_ingest)"
     passes "near miss: the other security MCP tools pass" "$(mcp_payload mcp__plugin_logos_logos__security_findings)"

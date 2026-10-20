@@ -33,6 +33,17 @@
   color: var(--text-1);
 }
 
+/* The suppression dialog's scope: one finding, or everything under a path (S-770). */
+.scope {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  border: 0;
+  color: var(--text-1);
+}
+
 /* The finding detail's facts: a term column and its value. */
 .facts {
   display: grid;
@@ -49,4 +60,24 @@
 .facts dd {
   margin: 0;
   color: var(--text-1);
+}
+
+/* The finding detail sits below every other widget: it is scrolled to, so a little
+   room above keeps its top rule in view (HF-1). */
+.detail {
+  scroll-margin-top: var(--space-4);
+}
+
+/* The heading the detail takes focus on when a finding is shown (tabindex -1: moved
+   to, never tabbed to). The widget title clips its overflow, so the focus ring is
+   drawn inside the heading rather than outside it, where it would be cut off. */
+.detailTitle:focus-visible {
+  outline-offset: -2px;
+}
+
+/* A blast-radius section: a list's title and table, or its empty-state sentence.
+   Each one after the first is spaced from the section above, so no title, table or
+   sentence touches the next (HF-1). */
+.impactSection + .impactSection {
+  margin-top: var(--space-4);
 }

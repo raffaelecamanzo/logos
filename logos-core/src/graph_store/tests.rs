@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        38,
-        "v38 = migration 38 (S-523 CR-171 graph-dimension applicability)"
+        40,
+        "v40 = migration 40 (S-761 CR-238 the where-to-start rows carry an identity)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 38,
+        recorded, 40,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 38);
+        assert_eq!(store.schema_version().unwrap(), 40);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 38);
+    assert_eq!(store.schema_version().unwrap(), 40);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 38, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 40, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 38);
+    assert_eq!(reopened.schema_version().unwrap(), 40);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -931,6 +931,51 @@ fn all_edges_returns_every_edge_in_canonical_order() {
 }
 
 #[test]
+fn symbol_edges_keys_each_edge_by_endpoint_symbols_and_files_in_canonical_order() {
+    let store = mem();
+    let fa = seed_file(&store, "src/a.rs", "rust");
+    let fb = seed_file(&store, "src/b.rs", "rust");
+    // Node ids are NOT in symbol order (`local 9` is inserted before `local 1`), so
+    // a missing or wrong ORDER BY cannot be satisfied by the table's scan order.
+    let c = seed_in_file(&store, 9, "c", fb);
+    let a = seed_in_file(&store, 0, "a", fa);
+    let b = seed_in_file(&store, 1, "b", fb);
+    // An endpoint unbound to a file reads `None`, never a dropped edge.
+    let loose = seed(&store, 2, "loose", NodeKind::Module);
+    // Insert out of canonical order to prove the query sorts, not the caller.
+    store.insert_edge(c, a, EdgeKind::Calls).unwrap();
+    store.insert_edge(b, loose, EdgeKind::References).unwrap();
+    store.insert_edge(a, b, EdgeKind::References).unwrap();
+    store.insert_edge(a, b, EdgeKind::Calls).unwrap();
+
+    let edges = store.symbol_edges().expect("symbol_edges succeeds");
+    let row = |kind, source: &str, target: &str, sf: Option<&str>, tf: Option<&str>| SymbolEdgeRow {
+        kind,
+        source: source.to_string(),
+        target: target.to_string(),
+        source_file: sf.map(str::to_string),
+        target_file: tf.map(str::to_string),
+    };
+    // Ordered by (kind, source symbol, target symbol): Calls=2 before References=4;
+    // within Calls `local 0` before `local 9` though `local 9` has the lower node id,
+    // and within References `local 0` before `local 1`.
+    assert_eq!(
+        edges,
+        vec![
+            row(EdgeKind::Calls, "local 0", "local 1", Some("src/a.rs"), Some("src/b.rs")),
+            row(EdgeKind::Calls, "local 9", "local 0", Some("src/b.rs"), Some("src/a.rs")),
+            row(EdgeKind::References, "local 0", "local 1", Some("src/a.rs"), Some("src/b.rs")),
+            row(EdgeKind::References, "local 1", "local 2", Some("src/b.rs"), None),
+        ]
+    );
+}
+
+#[test]
+fn symbol_edges_is_empty_on_a_fresh_store() {
+    assert!(mem().symbol_edges().unwrap().is_empty());
+}
+
+#[test]
 fn all_nodes_and_all_edges_are_empty_on_a_fresh_store() {
     let store = mem();
     assert!(store.all_nodes().unwrap().is_empty());
@@ -1098,11 +1143,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v38 forward-only).
+    // data (the runner applies v2..v40 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        38,
+        40,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -3557,7 +3602,7 @@ fn populated_ranking() -> WhereToStart {
         units: vec![
             FixUnit {
                 kind: FixUnitKind::Class,
-                node_id: 7,
+                node_id: Some("src/`s.rs`/Split#".into()),
                 name: "Split".into(),
                 file: "src/s.rs".into(),
                 line: Some(4),
@@ -3568,7 +3613,7 @@ fn populated_ranking() -> WhereToStart {
             },
             FixUnit {
                 kind: FixUnitKind::CloneGroup,
-                node_id: 3,
+                node_id: Some("clone_group:0123456789abcdef".into()),
                 name: "unbound".into(),
                 file: String::new(),
                 line: None,
@@ -3586,7 +3631,7 @@ fn populated_ranking() -> WhereToStart {
                 threshold: Some(2),
                 labelled: 1,
                 labels: vec![OutlierLabel {
-                    node_id: 7,
+                    node_id: Some("src/`s.rs`/Split#".into()),
                     name: "Split".into(),
                     file: "src/s.rs".into(),
                     line: Some(4),
@@ -3615,8 +3660,9 @@ fn populated_ranking() -> WhereToStart {
 
 /// The ranking round-trips through the append and the latest read field for
 /// field, in computed order: units by rank, measures in their pinned order,
-/// a missing fence and a missing threshold read back as `None`, and a unit
-/// bound to no file stores `NULL` and reads `""`.
+/// a missing fence and a missing threshold read back as `None`, a unit bound
+/// to no file stores `NULL` and reads `""`, and an identity — a symbol's and a
+/// group's — reads back as written (migration 40).
 #[test]
 fn the_where_to_start_rows_round_trip_through_the_latest_read() {
     let mut store = mem();

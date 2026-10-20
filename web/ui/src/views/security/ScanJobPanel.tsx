@@ -383,7 +383,7 @@ function outcomeText(run: SecurityScannerRun): string {
     case "ran":
       return SCAN_OUTCOME_TEXT.ran(run.findings);
     case "failed":
-      return SCAN_OUTCOME_TEXT.failed(run.exit_code, run.log);
+      return SCAN_OUTCOME_TEXT.failed(run.exit_code, run.log, run.cause);
     case "requires_build":
       return SCAN_OUTCOME_TEXT.requires_build;
     case "not_applicable":

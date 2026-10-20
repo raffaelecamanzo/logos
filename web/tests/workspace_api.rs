@@ -3637,9 +3637,10 @@ async fn workspace_security_rolls_up_fresh_unsuppressed_findings_per_member() {
     // stale tool's one are excluded and counted apart.
     let scanned = &rollup_row(&v, "scanned")["result"];
     assert_eq!(scanned["scan"], "fresh", "{scanned}");
-    assert_eq!(scanned["findings"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "total": 2}));
+    assert_eq!(scanned["findings"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "unrated": 0, "total": 2}));
     assert_eq!(scanned["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1}));
     assert_eq!((scanned["scanners_fresh"].as_u64(), scanned["scanners_enabled"].as_u64()), (Some(1), Some(2)), "{scanned}");
+    assert_eq!((scanned["reports_fresh"].as_u64(), scanned["reports_stored"].as_u64()), (Some(1), Some(2)), "{scanned}");
     let state_of = |name: &str| {
         scanned["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == name).map(|r| r["state"].clone())
     };
@@ -3663,8 +3664,12 @@ async fn workspace_security_rolls_up_fresh_unsuppressed_findings_per_member() {
     assert_eq!(v["complete"], false, "{v}");
     assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
 
+    // "N of M reports fresh" is its own field beside the totals: the semgrep
+    // report is fresh, the unregistered tool's is not.
+    assert_eq!((s["reports_fresh"].as_u64(), s["reports_stored"].as_u64()), (Some(1), Some(2)), "{s}");
+
     // Totals: only the scanned member's fresh, unsuppressed findings.
-    assert_eq!(s["totals"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "total": 2}));
+    assert_eq!(s["totals"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "unrated": 0, "total": 2}));
     assert_eq!(s["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1}));
 
     // OWASP: Injection holds the one counted injection — neither the suppressed

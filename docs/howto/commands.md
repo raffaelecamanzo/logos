@@ -41,7 +41,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`check`](#check---rules-file---allow-no-rules) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate---save---threshold-n---label-l) | ✅ | CI quality gate on the signal |
 | [`health`](#health) | ✅ | Architecture health — DB integrity, schema, FTS, structural + admission drift |
-| [`session-start`](#session-start--session-end) | ✅ | Record the quality baseline before edits (the CLI half of the session gate) |
+| [`session-start`](#session-start--session-end) | ✅ | Start the session before edits; saves the quality baseline when none exists (the CLI half of the session gate) |
 | [`session-end`](#session-start--session-end) | ✅ | Re-score against the baseline; exit 1 on regression (5 on a missing required security scan) |
 | [`doctor`](#doctor) | ✅ | Fast structural-integrity + admission tripwire; exit 1 on drift |
 | [`verify`](#verify) | ✅ | Deep reindex-diff consistency check; exit 1 on drift |
@@ -60,6 +60,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`security ingest`](#security-ingest-report) | ✅ | Ingest a SARIF 2.1.0 report from any tool into the evidence store |
 | [`security status`](#security-status) | ✅ | Each scanner's state — not installed, disabled, never run, stale or fresh — and the consent state |
 | [`security findings`](#security-findings) | ✅ | Stored findings with their OWASP categories and suppressions, filtered |
+| [`security bless`](#security-bless) | ✅ | Write the stored findings to the checked-in `.logos/security-baseline.json`, the ratchet's baseline in every checkout (CLI-only) |
 
 ---
 
@@ -95,7 +96,7 @@ spelling before reading an empty answer as "nothing".
 the repository they run in, and refuse `--repo` as an unknown argument (exit 2):
 `index`, `sync`, `scan`, `check`, `gate`, `verify`, `doctor`, `session-start`,
 `session-end`, `coverage ingest`, `coverage refresh`, `security scan`, `security ingest`,
-`quality-report` and `hook`. Their
+`security bless`, `quality-report` and `hook`. Their
 MCP twins — `scan`, `rescan`, `check_rules`, `bless_rules`, `verify`, `doctor`, `session_start`,
 `session_end`, `coverage_ingest`, `coverage_refresh`, `security_scan`, `security_ingest` — take no `repo` either, and say they act on
 the default member. `affected`, `implements`, `referencing-docs`, `doc-gaps`,
@@ -819,7 +820,10 @@ Utils` on a PHP tree where `Utils` is both a class and its file module returns
 the class. The nodes it passed over are listed
 under `alternatives`, in that order, and each one's `symbol` reaches it when
 passed back to `node`. The key is absent when nothing was passed over: a SCIP
-symbol is exact, and a name only one node carries has no alternative. `callers`,
+symbol is exact, and a name only one node carries has no alternative. A symbol id
+without its repository coordinate — the `node_id` an `offenders`, `review` or
+single-symbol `improvements` entry carries, such as ``src/`lib.rs`/deep_one().``
+— is exact too, and carries no note. `callers`,
 `callees`, `impact` and `explore` resolve a bare name by the same rule and name
 what they passed over in the same `alternatives` key (see below).
 
@@ -1214,6 +1218,18 @@ Security page's scan start and cancel (`/api/v1/security/scan`,
 request is answered `405`. Combined
 `--mcp --ui` runs both on one engine and one watcher: stdout stays JSON-RPC-clean
 for the MCP host while the web surface logs to stderr.
+
+**Stopping it.** Ctrl-C (SIGINT) or SIGTERM stops `serve --ui` cleanly, and so
+does the MCP host disconnecting under `--mcp --ui`. A Security page scan or
+install still running is cancelled first: its `curl`, `uv` or scanner processes
+are killed and the partial download is removed. `serve` waits up to 10 seconds
+in all for those jobs to end, then exits 0. `serve --mcp` alone stops on Ctrl-C
+or SIGTERM too, with exit 0. A scan an MCP client started through the
+`security_scan` tool is not one of these jobs, but however `serve` stops, its
+scanners are killed as well. A `serve`
+killed by SIGKILL, or by any other signal (SIGHUP when its terminal closes), does
+none of this, so its download or scanner runs on to its own end; the next
+install of any scanner discards what it left in the staging directory.
 
 A **debounced filesystem watcher** runs alongside the engine: file changes
 are coalesced over a 300 ms window (configurable via `[watcher] debounce_ms`
@@ -2569,6 +2585,10 @@ across files earns a `coverage: …` entry in `warnings`, as it does in `gate`
 and `session-start`; it never changes the exit code. Both are explained in
 [metrics.md](metrics.md#applicability-and-the-na-drop-out).
 
+Under a `rules.toml [review]` table, `warnings` also carries a [trend warning](configuration.md#review--the-branch-delta-gate)
+when Equality, Modularity, Acyclicity or Depth fell in each of the last
+`trend_window` recorded snapshots (default 2). It never changes the exit code.
+
 Since logos 1.9.0 the lists are **persisted with the snapshot** — by `scan`,
 `gate`, `session_start` and `session_end` alike — so the read-only Health page
 (`GET /api/v1/health`) shows exactly what the snapshot computed. `worst_offenders`
@@ -2602,6 +2622,7 @@ also carries four fields, so a review can say which symbol got better or worse:
 
 - `node_id` is the symbol id without its repository coordinate. It is the same
   identity a `check --bless` entry uses, and it does not change on re-index.
+  `node`, `impact`, `callers` and `callees` resolve it.
   It is `null` on a Depth row, which names a chain of directories, not a symbol.
   An Acyclicity row names its cycle by one member, and a re-index can pick a
   different member for the same cycle. So compare cycles by their members,
@@ -2708,6 +2729,28 @@ a layer or boundary edge or a project-wide count, is also matched by its message
 `introduced_clone_groups` lists the near-clone groups whose members no group at
 the merge-base has, and marks each member that was in no group before.
 
+`attribution` explains how far the 0–10000 signal moved from the merge-base to
+the branch. The signal is a geometric mean of the dimensions, so the change
+splits into one share per dimension when you work in log space:
+
+- `change` is the difference between the two integer signals.
+- `exact_change` is the difference between the unrounded signals. The
+  `contributions` sum to it.
+- `rounding` is what rounding each signal to an integer adds (under one point).
+- `residual` is what the contributions, each rounded to two decimals, leave
+  unexplained.
+
+Each contribution gives a dimension's `before` and `after` normalized values
+(`null` where the dimension is not applicable) and its `points`, largest share
+first. It also lists the `drivers`, the offenders that pushed the dimension the
+way it moved: `new` and `worsened` entries for a fall, `resolved` and `improved`
+entries for a rise, largest change first. At most five are listed;
+`driver_count` gives the total. For Uniqueness the drivers are the near-clone
+groups that appeared or went, each with its `members`. Modularity has no
+offender list, so its share names no drivers. `not_attributable_because` says
+why a change has no shares: a signal is `n/a`, or an applicable original
+dimension is 0.
+
 Every entry has a `trust` label:
 
 - `resolved`: the file is indexed as it stands, and its language binds relations
@@ -2738,7 +2781,18 @@ object missing from the repository, say), the answer is `measured: false` with
 `not_measured_because`, nothing is classified, and the command exits **1**.
 Otherwise it exits 0. Like `check`, it re-materialises the graph's derived
 annotations under the current `rules.toml` first. It is advisory: it writes no snapshot or violation set
-and never changes a `check` or `gate` exit code. The MCP twin is the `review`
+and never changes a `check` or `gate` exit code by itself.
+
+Under a [`rules.toml [review]`](configuration.md#review--the-branch-delta-gate)
+table, `gate` and `session-end` judge this same delta, and the answer says how.
+`policy` carries the declared `gate_dimensions` and how many listed offenders
+gate (`gating`), and each such offender carries `"gating": true`: `new` or
+`worsened`, in a gating dimension, with trust `resolved`. A recorded snapshot is
+then never the before-state (`before_state` is `shadow-index`), since a gate may
+have recorded it over the very work under review. Without the table neither
+field appears. Under the table `warnings` also carries the [trend warning](configuration.md#review--the-branch-delta-gate)
+of a distributional dimension in decline, read from the recorded snapshots;
+without it there is no `warnings` key. The MCP twin is the `review`
 tool. Both return the same bytes, and a rerun returns identical output.
 `sections` holds one entry per further delta section: today, `security`.
 
@@ -2765,7 +2819,8 @@ and each entry names its `method`:
 `counts` has `introduced`, `touched`, `resolved`, `stale`, `pre_existing` and
 `suppressed`; `findings` lists the
 classified entries, ordered by class, path and line. An entry carries `status`,
-`method`, `scanner`, `fingerprint`, `rule_id`, `severity`, `owasp`, `message`
+`method`, `scanner`, `fingerprint`, `rule_id`, `severity` (an `unrated` one
+also carries `severity_reason`), `owasp`, `message`
 (the redacted text for a secret-class finding, which `redacted` flags),
 `path`, `start_line`, `end_line`, `freshness`, `reachability` and `confidence`.
 `suppressed` lists the findings an unexpired ignore entry covers, apart, with each
@@ -2796,6 +2851,16 @@ hunks.
   "violation_counts": {"new": 0, "worsened": 0, "improved": 0, "resolved": 0, "unchanged": 0},
   "introduced_clone_groups": [],
   "stale_files": [],
+  "attribution": {"before": 8300, "after": 8297, "change": -3, "exact_change": -2.6,
+    "rounding": -0.4, "residual": 0.0,
+    "contributions": [
+      {"dimension": "nesting", "before": 0.9812, "after": 0.9794, "points": -1.64,
+       "drivers": [{"status": "new", "name": "beta", "node_id": "src/`deep.rs`/beta().",
+         "file": "src/deep.rs", "line": 9, "measure": "nesting_depth",
+         "before": null, "after": 6}],
+       "driver_count": 1},
+      …
+    ]},
   "sections": {"security": {"measured": true, "not_measured_because": null,
     "scanners": [{"scanner": "semgrep", "method": "hunk", "latest_head": "9f2c…"}],
     "findings": [{"status": "introduced", "method": "hunk", "scanner": "semgrep",
@@ -2810,6 +2875,108 @@ hunks.
             "an unchanged entry is counted in offender_counts or violation_counts and not listed"]
 }
 ```
+
+#### `review --branches <B1> <B2> …`: shared budgets before a merge
+
+```bash
+logos review --base main --branches b1 b2 b3 --json [--repo <MEMBER>]
+```
+
+Answers "would merging these branches together break a shared limit that
+each one fits on its own?". Four sessions that each add one engine edge pass
+`check` one by one, and only the merge exceeds `max_fan_out`. This command
+catches that case before the merge.
+
+For each branch it measures the tip and its merge-base with `--base`, and
+takes the difference as that branch's **share**. It then adds every share to
+the value at the base commit and lists each limit the sum takes past its
+ceiling. The limits are:
+
+- every declared `[constraints]` budget: per module (`max_fan_in`,
+  `max_fan_out`), per function (`max_cc`, `max_fn_lines`,
+  `max_nesting_depth`), per file (`no_god_files`), and the project-wide counts
+  (`max_cycles`, `max_dead`, `max_duplicates`, `max_brain_methods`);
+- a numeric `[review] drift_budget`. The merge is projected to score the base
+  commit's signal less every branch's drop, and its drift is measured from
+  the gate's blessed baseline, as the gate after the merge would judge it.
+  This holds whenever this checkout has a baseline saved under the current
+  metric semantics and thresholds. Without one, the drift is measured from
+  the base commit's signal. **The answer therefore depends on this checkout's
+  baseline**: another checkout can answer differently, and a note says which
+  reference was used.
+
+`max_clone_ratio` and an enforced `no_god_containers` are not projected; they
+are listed under `not_projected` with the reason. So is `drift_budget =
+"report"`.
+
+It is **report only**: it exits 0 whatever it finds, so a merge step or a
+reviewer decides what to do. The answer also lists:
+
+- `branches`: every branch you named. One that does not resolve, shares no
+  history with the base, or cannot be indexed reads `measured: false` with
+  the reason, and is left out of the sum. So does one whose commits a branch
+  named before it already holds. A branch built on a branch named before it
+  is measured from that branch's tip and names it in `stacked_on`, so their
+  shared commits count once.
+- `subjects`: the denominator, the (limit, subject) pairs evaluated. That
+  is each module, function or file with a value above 0 on some side, plus
+  every project-wide count, even at 0.
+- `exceeded`: each limit, with its subject (a module key, a function's symbol
+  id, a file, or `""` for a project-wide count), its file and trust label,
+  `limit`, `base`, `projected` and each branch's `share`. `exceeds_alone`
+  marks a share that breaks the limit by itself.
+
+A limit the base already exceeds is listed only when a branch raises it;
+`check` reports the rest.
+
+Every side is a committed tree: uncommitted work is not counted, and neither
+`HEAD` nor the live graph is measured. Each tree is shadow-indexed once and
+cached by commit under `.logos/review-cache/`, so the first run can take as
+long as an index per branch, and a rerun prints the same bytes. A share is a
+difference, so a change two branches both make independently is counted
+twice, where the merge would count it once. The same holds for a branch whose
+work already reached the base by a squash merge. A ratchet budget is projected against its `max`;
+its blessed set is not read.
+
+The MCP twin is the `review` tool with `branches`.
+
+```json
+{
+  "base": "main", "base_origin": "stated", "base_commit": "0b18…",
+  "measured": true, "not_measured_because": null,
+  "branches": [
+    {"name": "b1", "commit": "5703…", "merge_base": "0b18…", "measured": true, "not_measured_because": null},
+    {"name": "b2", "commit": "654b…", "merge_base": "0b18…", "measured": true, "not_measured_because": null},
+    {"name": "gone", "commit": null, "merge_base": null, "measured": false,
+     "not_measured_because": "gone does not resolve to a commit"}
+  ],
+  "limits": ["max_fan_out"],
+  "not_projected": [],
+  "subjects": 1,
+  "exceeded": [
+    {"rule": "max_fan_out", "subject": "module:src/`engine.rs`/", "file": "src/engine.rs",
+     "trust": "resolved", "limit": 3, "base": 2, "projected": 4,
+     "shares": [{"branch": "b1", "share": 1, "exceeds_alone": false},
+                {"branch": "b2", "share": 1, "exceeds_alone": false}]}
+  ],
+  "notes": ["each side is a full index of a committed tree — …", …]
+}
+```
+
+A `drift` key appears only when the summed drops exceed a numeric
+`drift_budget`. It carries:
+
+- `baseline`: the reference signal;
+- `current`: the projected signal;
+- `drop`, `budget` and `exceeded`;
+- each branch's `shares`. `exceeds_alone` counts the base's own distance
+  from the reference;
+- `reference`: `{"kind": "baseline", "snapshot_id": N}`, or `{"kind": "base",
+  "reason": "…"}` when no comparable baseline exists (none saved, or saved
+  under other metric semantics or thresholds).
+
+A base already past the budget is listed only when the branches lower the
+signal further.
 
 ### `improvements`
 
@@ -2826,17 +2993,27 @@ rerun on an unchanged store returns identical output.
 
 - A **unit** is a class (Cohesion, Focus), a function (Nesting, Conciseness), an
   exact-duplicate group (Redundancy) or a near-clone group (Uniqueness). Each
-  carries its `kind`, `node_id` (the node's numeric id in this index; a
-  duplicate or near-clone group is named by its lowest production member),
-  `name`, `file`, `line`, `dimensions`, `points`, a `detail` describing the
-  offending magnitude, and `outliers`: the measures it is labelled an outlier on.
+  carries its `kind`, `node_id`, `name`, `file`, `line`, `dimensions`,
+  `points`, a `detail` describing the offending magnitude, and `outliers`: the
+  measures it is labelled an outlier on.
+- **`node_id` survives a re-index.** For a class or a function it is the symbol
+  id without its repository coordinate, the same identity an
+  [`offenders`](#offenders---path-glob---dimension-d) entry carries; pass it to
+  `node` or `impact` and it resolves to that symbol. For a duplicate or
+  near-clone group it is `duplicate_group:` or `clone_group:` followed by a
+  digest of its members' identities, sorted. It stays the same while the member
+  set does, and a member more or fewer makes it another group. A group is named
+  (`name`, `file`, `line`) by its member first in that order. A snapshot
+  recorded before units carried an identity reads `node_id: null`, never the
+  old numeric id. A near-clone group's `detail` still names its cluster number
+  (`clone group #N`), which a re-index can change.
 - **`points` is an estimate.** It is the quality signal recomputed with that one
   unit's contribution removed and nothing else changed, minus the current
   signal. It is not a promise: fixing two units recovers about the sum of their
   points, not exactly that. The payload's `basis` field says so in words.
 - Units are ordered by points descending, then dimension (Modularity, Acyclicity,
   Depth, Equality, Redundancy, Nesting, Conciseness, Cohesion, Focus,
-  Uniqueness), then node id. A unit that recovers less than one whole point is
+  Uniqueness), then `node_id`. A unit that recovers less than one whole point is
   not listed. Equality, Depth, Acyclicity and Modularity never appear in `units`,
   because splitting a function or a module has no single result; their lists are
   `offenders`.
@@ -2860,12 +3037,12 @@ single unit recovers a whole point. That is not the same as clean.
   "recorded": true,
   "basis": "estimate: the signal recomputed with this one unit's contribution removed and nothing else changed, minus the current signal; advisory, never gated",
   "units": [
-    {"kind": "function", "node_id": 10, "name": "deep_one", "file": "src/lib.rs", "line": 49,
+    {"kind": "function", "node_id": "src/`lib.rs`/deep_one().", "name": "deep_one", "file": "src/lib.rs", "line": 49,
      "dimensions": ["nesting"], "points": 159, "detail": "nesting depth 6", "outliers": ["nesting"]}
   ],
   "outliers": [
     {"measure": "nesting", "units": 9, "fence": 1.0, "threshold": 4, "labelled": 1,
-     "labels": [{"node_id": 10, "name": "deep_one", "file": "src/lib.rs", "line": 49, "value": 6}]}
+     "labels": [{"node_id": "src/`lib.rs`/deep_one().", "name": "deep_one", "file": "src/lib.rs", "line": 49, "value": 6}]}
   ]
 }
 ```
@@ -2974,6 +3151,7 @@ logos gate                      # compare to last saved baseline; exit 1 on regr
 logos gate --save               # score and persist a new baseline
 logos gate --threshold 8000     # also fail if signal drops below 8000
 logos gate --save --label "v1.2.0"
+logos gate --save --reason "the new dispatcher is intrinsic to the feature"
 ```
 
 The CI quality gate. Without `--save`, compares the current signal to the
@@ -2986,8 +3164,10 @@ informational (exit 0) unless `--threshold` is set.
 If the baseline was scored under a different `metric_version` or a different
 structural-threshold set (`thresholds_hash`), the two signals aren't comparable;
 the gate **auto-re-baselines once**, reports `baseline reset: metric semantics
-changed` or `baseline reset: metric thresholds changed`, and passes
-informationally. The next gate compares normally. This is what lets you re-tune
+changed (v7 8292 → v8 8295)` or `baseline reset: metric thresholds changed (v8
+8292 → v8 8295)` — the replaced baseline's metric version and signal, then the
+run's, also in `--json` as `baseline_reset` — and passes informationally. The
+next gate compares normally. This is what lets you re-tune
 a `[metric_thresholds]` value without a spurious CI failure — see
 [metrics.md](metrics.md#versioned-baseline--automatic-re-baseline-on-semantics-or-threshold-change).
 
@@ -2998,6 +3178,55 @@ metric baseline. A compare then fails (exit 1) on a new finding past the ratchet
 or on a cap, listing each under `security_violations`. A required scanner with
 no fresh scan at HEAD exits **5**, listed under `missing_scans`, and a `--save`
 that exits 5 leaves the security baseline unrecorded. The signal never moves.
+With a checked-in `.logos/security-baseline.json` ([`security bless`](#security-bless))
+that file is the ratchet's baseline instead, and `--save` records none beside it.
+
+Under a [`rules.toml [review]`](configuration.md#review--the-branch-delta-gate)
+table a compare judges the branch, not just the number. It measures the
+[`review`](#review---base-ref) delta against the merge-base of `HEAD` and the
+default branch, and fails (exit 1) on each `new` or `worsened` offender in a
+gating dimension, listed under `gating_entries` with its value, threshold and
+trust label and named in `message` (one line, wrapped here):
+
+```text
+signal 8297 drifted 3 below the baseline 8300 (drift_budget "report": reported, never failing);
+1 gating branch-delta entry against the merge-base 5f0c2e91a7b3: nesting `parse_block`
+(src/parser.rs:212) nesting_depth 6, threshold 4 [new, trust resolved]
+```
+
+The aggregate is then a drift budget in place of `baseline − ε`: `drift`
+carries `baseline`, `current`, `drop` (how far the signal fell; negative when it
+rose), `budget` (`null` for `"report"`) and `exceeded`, and the gate fails on
+the aggregate only when `exceeded` is true. `--threshold` still applies. A delta
+that cannot be measured adds a `[review]:` warning and judges no entry.
+A distributional dimension that fell in each of the last `trend_window`
+recorded snapshots adds a [trend warning](configuration.md#review--the-branch-delta-gate) to `warnings`; it never changes the verdict
+or the exit code.
+Without the table neither field is printed and the gate is exactly as above.
+
+Under the table the result also carries `attribution`: the signal's change from
+the baseline, split per dimension with its driving symbols, in the same shape
+[`review`](#review---base-ref) prints it. `baseline_reason` is the reason the
+baseline was saved with, when it has one.
+
+**A re-bless says why.** `--save` stores two things with the new baseline. One
+is the attribution of the change it blesses, measured from the baseline it
+replaces. The other is the `--reason` text, if you give one. Under the table, a
+save whose drop exceeds a numeric `drift_budget` requires `--reason`. Without
+one it exits **2**, names the drop and the flag, and leaves the baseline as it
+was:
+
+```text
+logos gate --save --reason "Equality drift from the new scan dispatcher; split tracked in CR-240"
+```
+
+`--reason` without `--save` is a usage error. A save within the budget, or one
+made without the table, needs no reason. The attribution is stored either way,
+but the output carries it only under the table. Any save that gives no reason
+clears the reason the previous baseline had; `session-start` never moves a comparable
+baseline, so it keeps the reason too. An agent's
+`gate --save` still asks the human first, whatever reason it gives (see the
+[plugin guardrail](plugin.md#the-guardrail)).
 
 ### `quality-report [--hook-json]`
 
@@ -3304,7 +3533,7 @@ caller had passed no flag and nothing of theirs was touched
 ### `session-start` / `session-end`
 
 ```bash
-logos session-start            # record the quality baseline BEFORE edits
+logos session-start            # start the session BEFORE edits
 # ... make your changes ...
 logos session-end              # re-score and compare; exit 1 on regression
 ```
@@ -3312,21 +3541,42 @@ logos session-end              # re-score and compare; exit 1 on regression
 The session gate ([FR-GV-04](../specs/requirements/FR-GV-04.md),
 [FR-GV-05](../specs/requirements/FR-GV-05.md)) without an MCP host, so an agent
 directed at the CLI can run the same mandatory bracket the MCP
-`server-instructions` describe. `session-start` computes a fresh snapshot,
-upserts it as the project baseline and reports the `session_id` (the snapshot
-row id), the recorded signal and the freshness line; it always exits 0.
-`session-end` re-scores and compares against that baseline, exiting **1** on an
+`server-instructions` describe. `session-start` computes a fresh snapshot and
+reports the `session_id` (the snapshot row id), its signal and the freshness
+line; it always exits 0. When no baseline is saved, it saves that snapshot as
+the project baseline, whatever the security ratchet's state. Once a baseline exists, `session-start` never
+moves it: the message says `baseline kept`, and only
+[`gate --save`](#gate---save---threshold-n---label-l) re-blesses — the command
+an agent's [guardrail](plugin.md#the-guardrail) asks the human about. So an
+agent's session cannot bless its own regression. The one exception is a
+baseline that no longer compares, because the metric semantics or thresholds
+changed since it was saved: `session-start` resets it onto the pre-edit
+snapshot with the notice `gate` gives (`baseline reset: …`, and `baseline_reset`
+in `--json`), so `session-end`
+still judges the session's edits.
+`session-end` re-scores and compares against the baseline, exiting **1** on an
 aggregate regression beyond epsilon — the same verdict projection
 [`gate`](#gate---save---threshold-n---label-l) makes, and what lets a shell
 script or CI step notice a failing gate.
 
 Under a [`rules.toml [security]`](configuration.md#security--the-security-gate)
-table both commands behave as `gate --save` and `gate` do. `session-start` also
-records the security ratchet's baseline, and its message says so. If a required
-scan is missing it says the security baseline was not saved, and it still
-exits 0. `session-end` also fails (exit 1) on a security violation, and exits
+table `session-end` behaves as `gate` does. `session-start` decides each
+baseline on its own, before the edits: it saves a missing gate baseline
+whatever the ratchet's source, and records the security ratchet's baseline when
+neither the checked-in `.logos/security-baseline.json` nor `history.db` holds
+one, and its message says so. If a required scan is missing it says the security
+baseline was not saved, and it still exits 0. It never overwrites a baseline
+that exists (`baseline kept`, `security baseline kept`), so a finding an agent
+introduces during the session stays new. `session-end` also fails (exit 1) on a security violation, and exits
 **5** when a required scanner has no fresh scan at HEAD. Every commit makes such
 a scan stale, so re-run the scan before `session-end`.
+
+Under a [`rules.toml [review]`](configuration.md#review--the-branch-delta-gate)
+table `session-end` judges the branch delta as `gate` does: it fails on a gating
+entry, and on the aggregate only past `drift_budget`. `session-start` is
+unchanged. The verdict holds on a rerun over the same work, committed or not:
+the before-state is the merge-base tree, never a snapshot an earlier
+`session-end` recorded over that work.
 
 The baseline lives in the store, not in process memory, so the two commands work
 across separate invocations. Both are payload-identical with their
@@ -3428,7 +3678,13 @@ The deep, on-demand consistency check. It reindexes the project into a
 throwaway **shadow store**, censuses both stores, and diffs node/edge/file
 counts and symbol sets against the live graph — surfacing **leaked** symbols
 (present live, absent from a fresh index) and **orphaned** symbols (the reverse),
-with a capped sample of each, plus the embedded `doctor` report — which carries
+with a capped sample of each, and the **lost** edges (in a fresh index, missing
+live) and **extra** edges (live-only) — `lost_edges` / `extra_edges` in the JSON,
+each naming its `kind`, `source_symbol`, `target_symbol`, `source_file` and
+`target_file`, capped at 50 with the exact `lost_edges_total` /
+`extra_edges_total` beside each (a count such as `edges -32` says the graph
+drifted, the lists say where). Any lost or extra edge fails the check, even when
+the edge counts match. The report also embeds the `doctor` report — which carries
 the same structural fields *and* the admission tripwire's `unadmitted_files`/
 `unadmitted_sample`, read inside `verify`'s single read-only checkout so every
 count in the payload reflects one consistent snapshot. It catches drift `doctor`
@@ -3541,11 +3797,14 @@ carries a `findings` cell — `count` of the file's unsuppressed findings and th
 finding reads as such. A finding whose file changed since the scan is **stale**:
 it is tallied apart as `stale`, never counted, and never lifts `highest`; a
 finding an unexpired entry in `.logos/security-ignore.toml` suppresses is not
-counted either, while an expired entry no longer suppresses. A project with no
-stored scan, or whose only stored scans are `--path` re-scans (no full scan
-behind any report), has no `findings` cell on any row — no column, rather than a
-column of zeros for files nothing scanned — and `--with-findings` then changes
-nothing. `--with-findings` ranks the
+counted either, while an expired entry no longer suppresses. These are the counts
+of [the one definition](security.md#one-definition-of-a-counted-finding), so a
+project whose only stored scans are `--path` re-scans has the cell too, and a file
+those scans never read reads `0` — absence of a finding, not proof of a scan
+(`security status` reads `scoped_only` for that scanner). A finding bound to no file
+has no row here. A project with no stored scan has no `findings`
+cell on any row — no column, rather than a column of zeros for files nothing
+scanned — and `--with-findings` then changes nothing. `--with-findings` ranks the
 files with a fresh finding ahead of those without — highest severity first, then
 the count, then the usual score and path — and drops no file. The cell is the same
 on the CLI, the MCP `hotspots` tool (`with_findings`) and the web Files & Risk
@@ -3623,8 +3882,8 @@ in this section moves the 0–10000 signal, and it gates a merge only under a
 [`[security]` table](configuration.md#security--the-security-gate) in `rules.toml`. No snippet of source is ever
 stored. A secret-class finding's message is replaced before it is written, and
 every other message is stored with anything shaped like a secret masked.
-Each command below except `security install` and `security uninstall` has an
-MCP twin returning the same payload (`security_scan`, `security_ingest`,
+Each command below except `security install`, `security uninstall` and
+`security bless` has an MCP twin returning the same payload (`security_scan`, `security_ingest`,
 `security_status`, `security_findings`).
 
 ### `security scan [--consent] [--install] [--scanner <NAME>]… [--path <PATH>]…`
@@ -3653,6 +3912,13 @@ install consent for what it installs, and this project's scan consent — and
 without it, exit 2 names what is awaiting consent and nothing is downloaded. The
 payload is `{install, scan}`: the install payload, then the scan payload below.
 
+One scan or install of a project runs at a time, whichever surface or process
+started it: while one runs, `security scan` exits 3 naming it (`a security scan
+is already running on this project: job 4, started from the web UI by Logos
+process 81234 12 s ago`) and starts nothing. The same holds for `security
+install`, `scan --install` and the MCP `security_scan` tool
+([One scan or install at a time](security.md#running-scans-and-reading-the-results)).
+
 The first scan needs `--consent`, because a scanner may reach the network to
 refresh its rules or database; without it the command exits 2 naming the flag and
 the scanners. Later scans do not ask, and a newly installed or enabled scanner is
@@ -3670,7 +3936,7 @@ The payload has one entry per registered scanner, with its `outcome`:
 | `disabled` | `[security_scan.<scanner>] enabled = false` |
 | `not_selected` | Installed, but `--scanner` did not name it, or a `--path` scan left out a scanner it cannot narrow (below) |
 | `requires_build` | CodeQL only: every language present needs a build; ingest a CI report instead |
-| `not_applicable` | CodeQL only: no file in a language it analyses |
+| `not_applicable` | Nothing it reads is in the project, so nothing started: gosec with no `.go` file, Bandit with no `.py` or `.pyw` file, CodeQL with no file in a language it analyses. Ignored files do not count. `reason` says which files it looked for |
 | `failed` | It produced no report, or one that could not be ingested |
 
 One scanner failing never stops the others, and a failed scanner's previous
@@ -3679,10 +3945,12 @@ holding its whole captured output (`.logos/security/<scanner>.failed.log`;
 `null` if Logos could not write it, which never stops the other scanners), and
 in `stderr` the output's last lines with anything that looks like a secret
 replaced by `[masked]`: a password or token value, a URL's credentials, a private
-key block, or a long generated token. The full text stays in the log, which is
-under the gitignored `.logos/security/`. The log is removed the next time that
-scanner runs cleanly, and `security status` reports it as `last_failure` until
-then.
+key block, or a long generated token. It also carries `cause`: one masked line of
+that output, the first line that reports an error (the word `error`, `fatal` or
+`panic`) or else the last line, cut to 240 characters. The full text stays in the
+log, which is under the gitignored `.logos/security/`. The log is removed the next
+time that scanner runs cleanly or is `not_applicable`, and `security status` reports it as `last_failure`,
+with the same `last_failure_cause`, until then.
 
 Exit 2 also for an invalid `[security_scan]` table or user-level config; the
 scan then starts nothing.
@@ -3713,11 +3981,11 @@ scan:
   report over the same paths again is a no-op.
 - **Gitleaks** is the exception to "replaces". Its full scan reads git history,
   so a secret removed from a file is still there, and its findings in the
-  scanned paths are kept. A secret the scoped run finds that is one of them
-  (same file, same rule, same position, or the same column span when its lines
-  moved) keeps that finding's fingerprint, so `check`, `gate` and
-  `.logos/security-ignore.toml` still recognise it. Only a secret with no such
-  match is listed as new.
+  scanned paths are kept. A Gitleaks finding is keyed by its rule, its file and
+  a keyed digest of the secret, never by its position or commit, so a secret the
+  scoped run finds that is one of them has that finding's very fingerprint, and
+  `check`, `gate` and `.logos/security-ignore.toml` still recognise it. Only a
+  new secret is listed as new.
 - **Trivy, OSV-Scanner and Dependency-Check** read whole manifests, and **CodeQL**
   a database of every file, so none can be narrowed. Each entry says so in
   `scope` (`"whole-manifest only"`, or `"whole-project only"` for CodeQL). Named
@@ -3764,6 +4032,7 @@ One state per registered scanner:
 | `not_installed` | No binary was found and no report is stored |
 | `disabled` | Switched off in `[security_scan]` |
 | `never_run` | Installed, and no report is stored |
+| `not_applicable` | gosec or Bandit only: installed, no fresh report is stored (a stale one cannot be refreshed here), and nothing it reads is in the project, the scan's `not_applicable` above with the same `reason`. Never a missing scan for `check`, and not in the workspace roll-up's `scanners_enabled`. CodeQL with no language to analyse still reads `never_run` here |
 | `stale` | A report is stored, but HEAD moved since the full scan behind it (`because: head_moved`), a file it anchors changed (`files_changed`), or only `--path` re-scans stand behind it (`scoped_only`) |
 | `fresh` | A report is stored at this HEAD and no file holding one of its findings has changed. A report with no findings anchors no file, so only a new HEAD makes it stale |
 
@@ -3772,7 +4041,10 @@ One state per registered scanner:
 confused with a scanner that has not run. A stored report counts whether or not
 the scanner is installed here, so a report ingested from CI reads `fresh` or
 `stale`. `consent` lists the scanners consented to and the `pending` ones the
-next scan will ask for.
+next scan will ask for. `suppressions` lists every entry of
+`.logos/security-ignore.toml` as [`security findings`](#security-findings) does,
+each with `suppressed`, the findings it suppresses now, and flagged `expired` or
+`orphaned` (a path glob matching nothing is orphaned).
 
 An installed scanner also carries `installed`: the `copy` that runs —
 `override` (your user-level `path`), `path` (found on `PATH`) or `managed`
@@ -3825,6 +4097,13 @@ installs. An MCP client cannot give it: no MCP tool installs.
 nothing updates by itself, and a plain `install` leaves it. `--update` asks
 consent for the new version, installs it, and removes the old copy.
 
+**Interrupted installs.** An install stopped part-way leaves no tool, only its
+download or partial unpack in the `.staging` directory beside the tools. The
+next install, of any scanner, discards it, unless a Logos process that is still
+running is writing it. Installing the same scanner at the same version from two
+processes at once fails it in the second (`another Logos process is using the
+staging of <tool> <version>`); install it again once the first has ended.
+
 **Offline.** `--from <DIR>` reads each artifact from a directory instead of the
 network, under the file name its release URL ends in, with the same checksum
 check. Nothing is downloaded, so `curl` is not needed. An offline
@@ -3855,7 +4134,17 @@ directory, and runs the managed Dependency-Check on that runtime whatever your
 own `JAVA_HOME` says. The consent names `java` as a line of its own, with its
 download size, while it is not installed. A Dependency-Check you installed
 yourself still runs on your own Java. Its first scan downloads the NVD data,
-which takes a long time without an NVD API key.
+which takes a long time without an NVD API key, and Dependency-Check 13 fails
+outright without one: the scan reports it `failed` with the cause `the NVD API
+key is missing or rejected`, naming the remedy. Get a free key at
+https://nvd.nist.gov/developers/request-an-api-key and pass it through your
+user-level `config.toml` (never the repository's, which may not set
+`extra_args`):
+
+```toml
+[security_scan.dependency-check]
+extra_args = ["--nvdApiKey", "<key>"]
+```
 
 **CodeQL (opt-in, licensed).** Installed only when named, and only once you
 accept its licence: the CodeQL CLI may be used to analyse open-source codebases
@@ -3915,20 +4204,67 @@ logos security findings --suppression active             # what is not suppresse
 Lists the stored findings, each with its OWASP Top 10 categories (2025 by
 default; `--edition 2021` reclassifies without re-ingesting) and its suppression
 from `.logos/security-ignore.toml`. The filters are `--severity` (the least
-severity listed: `critical`, `high`, `medium`, `low`, `info`), `--scanner` (a
+severity listed: `critical`, `high`, `medium`, `low`, `info`, an `unrated`
+finding counting as `medium`; or `unrated`, which lists the unrated findings
+alone), `--scanner` (a
 registry name or the report's tool name), `--category` (an id such as
 `A05:2025`, or its number `A05`), `--path` (a project-relative file, or a
 directory holding it), and `--suppression active|suppressed`; together they
-intersect. An unknown severity, edition or suppression token exits 2.
+intersect. An unknown severity, edition or suppression token exits 2. A finding
+whose report gave no rating reads `unrated` and carries `severity_reason`
+(`"the scanner gave none"`); a rated finding has no `severity_reason`
+([security.md](security.md#severities-and-unrated)).
 
 The payload also says what the list is drawn from, so an empty list is never
 read as clean: `scanned` lists every stored report with its finding count
 (suppressed findings included, unlike `status`'s `findings`),
-`never_run` the installed, enabled scanners with none (as `security status` means
-it), and `notice` says when nothing is stored at all. `categories` gives every category of the edition: `covered`
+`never_run` the installed, enabled scanners with none and something to scan (as
+`security status` means it, so never a `not_applicable` one), and `notice` says when nothing is stored at all. `categories` gives every category of the edition: `covered`
 with the count of every stored finding under it (suppressed ones included, and
 whatever the filters), or `not_covered` when no enabled scanner whose report is stored can
 detect it. An installed scanner that has never run covers nothing: it has not
 looked. A `not_covered` category never reads as 0, though a
 finding can still fall under it and is listed. `suppressions` lists every
-ignore entry, flagged `expired` and `orphaned`.
+ignore entry — a `fingerprint`, or a `path` glob with its `rule` and `scanner` —
+with `suppressed`, the findings it suppresses now, flagged `expired` and
+`orphaned`; a finding's `suppression` names the entry under `by`. An orphaned entry that names a
+Gitleaks finding's earlier, per-commit fingerprint also carries `should_name`,
+the fingerprint that finding has now (the file is never rewritten). A Gitleaks
+finding lists in `commits` every commit its secret was found in, newest first,
+and a history-mode one carries `anchor` (`commit`, `short_commit`, `path`): the
+commit it is anchored to. Its `binding` is `historical`, with no `path` and an
+unbound `context`, when its secret is no longer on that line in today's tree.
+
+### `security bless`
+
+```bash
+logos security bless          # writes .logos/security-baseline.json
+git add .logos/security-baseline.json
+```
+
+Writes the security ratchet's baseline to the checked-in
+`.logos/security-baseline.json`: one entry per unsuppressed finding of every
+stored scan — the findings `gate --save` records — holding its `fingerprint`,
+`rule_id` and `path` relative to the project (`null` when the finding has no
+location or was reported outside the project), and nothing else: no message,
+snippet, line or secret value. Entries are sorted by path, rule id and
+fingerprint, so blessing an unchanged state writes the same bytes and leaves the
+file untouched. Runs no scanner.
+
+When the file exists, the [`[security]`](configuration.md#security--the-security-gate)
+ratchet reads it **instead of** the set `gate --save` records in the gitignored
+`.logos/history.db`: commit it and a fresh CI clone reads only new findings as
+new ([ci-integration.md](ci-integration.md#gating-on-security-findings-in-ci-a-checked-in-baseline)).
+A new finding's message then names the file it is missing from; `gate --save`
+and `session-start` record no ratchet baseline beside it. A malformed file, or
+one with a field it does not define, makes `check` and `gate` exit 2 naming it;
+the next `security bless` rewrites it.
+
+The payload: `file`, `recorded` (whether the file now holds the current
+findings), `changed` (whether its bytes changed), `findings` (how many it
+records), `missing_scans` and `message`. Under a `[security]` table whose
+required scanner has no fresh scan at HEAD it writes nothing and exits **5**,
+listing the scanner under `missing_scans`, as `gate --save` records nothing then.
+Without a table it writes the file, which the ratchet reads once one is added.
+The plugin guard asks before an agent runs it or writes the file
+([plugin.md](plugin.md)).

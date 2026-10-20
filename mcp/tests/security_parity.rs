@@ -219,14 +219,19 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     let mcp_scan = call(&client, "security_scan", json!({})).await.unwrap();
     assert_eq!(mcp_scan, cli_scan, "security_scan");
     assert_eq!(row(&mcp_scan, "gitleaks")["outcome"], "failed");
+    // S-769: the failure's one-line cause, masked, rides on the MCP payload.
+    assert_eq!(row(&mcp_scan, "gitleaks")["cause"], "error: password=[masked]");
     assert_eq!(row(&mcp_scan, "trivy")["outcome"], "not_installed");
     assert_eq!(row(&mcp_scan, "semgrep")["outcome"], "ran");
+    // FR-SC-26's coverage fact rides on the MCP payload too.
+    assert_eq!(row(&mcp_scan, "semgrep")["ignored_paths"], "excluded");
 
     // `fresh` with zero findings, on both surfaces, beside a scanner with two.
     let mcp_status = call(&client, "security_status", json!({})).await.unwrap();
     let bandit = row(&mcp_status, "bandit");
     assert_eq!((bandit["state"].as_str(), bandit["findings"].as_u64()), (Some("fresh"), Some(0)));
     assert_eq!(row(&mcp_status, "semgrep")["findings"], 2);
+    assert_eq!(row(&mcp_status, "semgrep")["ignored_paths"], "excluded");
 
     let filters = json!({"scanner": "semgrep", "severity": "medium"});
     let mcp_findings = call(&client, "security_findings", filters).await.unwrap();
@@ -338,4 +343,45 @@ async fn a_scoped_scan_is_one_payload_on_both_surfaces_and_an_outside_path_is_re
     assert!(unknown.message.contains("\"nmap\" is not a registered scanner"), "{}", unknown.message);
     client.cancel().await.ok();
     server.abort();
+}
+
+/// A secret found only in history is one payload on both surfaces ([S-767]):
+/// its `historical` binding, its commit with the short spelling every surface
+/// shows, and its unbound graph context.
+///
+/// [S-767]: ../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_found_only_in_history_is_one_payload_on_both_surfaces() {
+    let f = fixture();
+    fs::write(f.root.join("app/legacy.py"), "API_KEY = \"lgs_l3gacy_R8wY2pQ5nM4kT7\"\n").unwrap();
+    git(&f.root, &["add", "app/legacy.py"]);
+    git(&f.root, &["commit", "-q", "-m", "legacy client"]);
+    let out = Command::new("git").current_dir(&f.root).args(["rev-parse", "HEAD"]).output().unwrap();
+    let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    git(&f.root, &["rm", "-q", "app/legacy.py"]);
+    git(&f.root, &["commit", "-q", "-m", "drop the legacy client"]);
+    let report = f.root.parent().unwrap().join("history.sarif");
+    let result = json!({
+        "ruleId": "generic-api-key",
+        "message": { "text": "generic-api-key has detected secret for file app/legacy.py." },
+        "locations": [{ "physicalLocation": {
+            "artifactLocation": { "uri": "app/legacy.py" },
+            "region": { "startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 37, "snippet": { "text": "REDACTED" } }
+        } }],
+        "partialFingerprints": { "commitSha": commit, "email": "", "author": "", "date": "2026-10-01T09:00:00Z", "commitMessage": "" }
+    });
+    let body = json!({ "version": "2.1.0", "runs": [{ "tool": { "driver": { "name": "gitleaks", "semanticVersion": "v8.18.4" } }, "results": [result] }] });
+    fs::write(&report, body.to_string()).unwrap();
+    assert_eq!(f.direct(|e| e.security_ingest(&report))["historical"], 1);
+
+    let (client, server) = boot(&f).await;
+    let mcp = call(&client, "security_findings", json!({"scanner": "gitleaks"})).await.unwrap();
+    client.cancel().await.ok();
+    server.abort();
+    let filter = FindingsFilter::parse(None, Some("gitleaks"), None, None, None, None).unwrap();
+    assert_eq!(f.direct(|e| e.security_findings(&filter)), mcp, "security_findings");
+    let finding = &mcp["findings"][0];
+    assert_eq!(finding["binding"], "historical", "{mcp}");
+    assert_eq!(finding["anchor"], json!({ "commit": commit, "short_commit": &commit[..7], "path": "app/legacy.py" }));
+    assert_eq!(finding["context"]["enclosing"]["unbound_because"], "historical");
 }

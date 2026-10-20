@@ -834,8 +834,8 @@ instead.
 
 ### `.logos/security-ignore.toml` — suppressions
 
-Accepted security risk is recorded in a committed file, one entry per finding,
-each with a reason and an optional expiry:
+Accepted security risk is recorded in a committed file. Each entry names one
+finding, or every finding under a path, with a reason and an optional expiry:
 
 ```toml
 [[ignore]]
@@ -852,15 +852,35 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   fingerprint, a date that is not a calendar date, or a repeated fingerprint
   rejects the whole file with exit 2, naming the line. A suppression that
   silently did nothing would be worse than none.
+- **A path instead of a fingerprint.** `path = "tests/fixtures"` suppresses
+  every finding at or under a path the glob matches, relative to the project
+  root. `*` stays within a segment, `**` crosses segments, and a matched
+  directory covers what is under it. `rule = "<rule id>"` and
+  `scanner = "<scanner>"` narrow the entry; the scanner is matched in either
+  case. A glob covering the whole project (`*`, `**`, `.`, or one matching
+  every name at the root, such as `?*`), one escaping the
+  root, `fingerprint` and `path` in the same entry, or `rule`/`scanner` beside a
+  fingerprint rejects the file with exit 2, naming the line. When several
+  entries name a finding, the first unexpired one labels it, fingerprint
+  entries first. See
+  [security.md](security.md#one-entry-for-a-whole-path).
 - **Expiry.** From the day after `expires` the entry no longer suppresses: the
   finding comes back, and the entry is listed as `expired`.
+- **Counts.** `security status` and `security findings` list every entry under
+  `suppressions`, with `suppressed`, the number of findings it suppresses now.
 - **Orphans.** An entry that matches no stored finding is listed as `orphaned`
-  (the finding was fixed, or its scanner has not run here).
+  (the finding was fixed, its scanner has not run here, or its glob matches
+  nothing). An orphaned entry
+  naming a Gitleaks finding's earlier, per-commit fingerprint also carries
+  `should_name`: the fingerprint that finding has now. The file is never
+  rewritten.
 - **Visible, never silent.** A suppressed finding is still returned by
   `security findings`, with its reason; `--suppression active` hides it.
 - **Written from the Security page.** Its Suppress… and Unsuppress write the
-  file in one canonical spelling: one `[[ignore]]` table per entry, sorted by
-  fingerprint, with no comments. A file spelled any other way (the comment in the
+  file in one canonical spelling: one `[[ignore]]` table per entry, the
+  fingerprint entries sorted by fingerprint and then the path entries sorted by
+  path, rule and scanner, a path without a leading `./` or a trailing `/`, and
+  no comments. A file spelled any other way (the comment in the
   example above is enough) is refused with an error that says so, rather than
   rewritten without your comments. Edit such a file by hand.
 
@@ -930,12 +950,12 @@ command line is fixed in Logos:
 
 | Scanner | Binary | Version probe | Command line (`OUT` is under `.logos/security/`) |
 |---|---|---|---|
-| Semgrep | `semgrep` | `--version` | `scan --config p/default --sarif --output OUT --metrics off --disable-version-check --quiet --exclude .logos` *extra* `.` |
+| Semgrep | `semgrep` | `--version` | `scan --config p/default --sarif --output OUT --metrics off --disable-version-check --quiet --exclude .logos` *extra* *unignored* |
 | Trivy | `trivy` | `--version` | `fs --scanners vuln,secret,misconfig --format sarif --output OUT --skip-dirs .logos` *ignored* `--config .logos/security/empty-config.yaml` *extra* `.` |
 | Gitleaks | `gitleaks` | `version` | `detect --redact --no-banner --exit-code 0 --report-format sarif --report-path OUT` *extra* `--source .` |
-| OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output OUT` *extra* `--recursive .` |
+| OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output OUT` *extra* `--recursive` *unignored* |
 | Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos`(`,`*ignored*) *extra* `.` |
-| gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *extra* `./...` (with `GOTOOLCHAIN=local`) |
+| gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *ignored* *extra* `./...` (with `GOTOOLCHAIN=local`) |
 | Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet --skip-path .logos` *ignored* *extra* `--directory .` |
 | CodeQL | `codeql` | `version --format=terse` | per language: `database create DB --language=L --build-mode=none --source-root=. --overwrite`, then `database analyze DB --format=sarif-latest --output OUT` *extra*, with `OUT` in `.logos/security/codeql/`; Logos then merges every language's runs into one `codeql.sarif`, so a project's languages are one snapshot |
 | Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/**` *ignored* `--disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` *extra* |
@@ -945,13 +965,27 @@ command line is fixed in Logos:
 the way that scanner's flag takes it: `--skip-dirs target` for Trivy, appended
 to Bandit's one comma list (`./.logos,./target`), `--skip-path
 '^(\./|/abs/root/)?target(/|$)'` for Checkov (anchored at the project root,
-whether Checkov walks it as `.` or as its absolute path) and `--exclude
-target/**` for Dependency-Check, up to 64 KiB of arguments, shallowest first. A
-Bandit or Checkov run on named paths passes none, so it reads exactly the paths
-you named; Trivy and Dependency-Check, which a re-scan of paths runs over the
-whole project, still pass them. Semgrep and OSV-Scanner already skip what git
-ignores, and Gitleaks reads committed history.
-[Security](security.md#running-scans-and-reading-the-results) lists the edges.
+whether Checkov walks it as `.` or as its absolute path), `--exclude
+target/**` for Dependency-Check and `-exclude-dir '^target(/|$)'` for gosec (the
+directory and every directory below it, relative to the project root), up to
+64 KiB of arguments, shallowest first. A Bandit, Checkov or gosec run on named
+paths passes none, so it reads exactly the paths you named; Trivy and
+Dependency-Check, which a re-scan of paths runs over the whole project, still
+pass them.
+
+*unignored* is `.` when the project ignores nothing, and otherwise every path
+outside those directories, with a directory that holds one named by its entries
+(`.gitignore app go.mod src targets` beside an ignored `target/`). It is what
+keeps Semgrep and OSV-Scanner out of ignored directories in a git checkout, a
+linked worktree and a copy that is not a git repository alike. A Semgrep run on
+named paths takes those paths instead; OSV-Scanner, which a re-scan of paths
+runs over the whole project, still takes the list. A symbolic link is never
+named. Past 64 KiB of arguments, when a path starts with `-` or is not UTF-8, or
+when nothing lies outside the ignored directories, it is `.` again, and the scan
+says so. Gitleaks
+reads committed history, and CodeQL gets no exclusion.
+[Security](security.md#running-scans-and-reading-the-results) lists the edges,
+and how each scan states what it did with ignored directories.
 
 The commands were written against Semgrep 1.85, Trivy 0.74, Gitleaks 8.18,
 OSV-Scanner 1.9, Bandit 1.7.10, gosec 2.21, Checkov 3.2, CodeQL 2.19 and
@@ -1471,7 +1505,8 @@ you set, exactly as they fail on a broken rule.
 # a report's driver name ("Semgrep OSS"), either case. Default: [] (none).
 required_scanners = ["semgrep", "gitleaks"]
 # The ratchet: an unsuppressed finding at or above this severity fails unless
-# `logos gate --save` recorded it. info | low | medium | high | critical.
+# `logos gate --save` recorded it. info | low | medium | high | critical; an
+# `unrated` finding is gated as medium, and "unrated" is no value here.
 # Default: "high".
 ratchet_min_severity = "high"
 # Cap: any unsuppressed finding at or above this severity fails, recorded or
@@ -1492,7 +1527,17 @@ removed, the finding is new again until you fix it, suppress it again, or save
 again. Until a save is recorded, every finding at
 or above `ratchet_min_severity` is new, and the report says to run the save.
 The recorded set lives in `.logos/history.db` with the findings, not in the
-repository. `session_start` records it too.
+repository. `session_start` records it before the edits when none is saved
+and none is checked in, whatever the metric baseline's state, and never moves an
+existing one, so only `gate --save` accepts findings introduced since.
+
+**A checked-in baseline.** [`logos security bless`](commands.md#security-bless)
+writes the same findings — fingerprint, rule id and path only — to
+`.logos/security-baseline.json`. When that file exists the ratchet reads it
+**instead of** the set in `history.db`, in every checkout, so CI needs no cache;
+`gate --save` and `session-start` then record no set beside it, and only
+`security bless` changes it
+([ci-integration.md](ci-integration.md#gating-on-security-findings-in-ci-a-checked-in-baseline)).
 
 **The caps** ignore the recorded set. `max_severity = "critical"` fails on any
 unsuppressed critical finding, however old it is.
@@ -1517,6 +1562,111 @@ The table never moves the 0–10000 signal. Security is not a metric dimension,
 so adding, changing or removing the table changes no metric and triggers no
 re-baseline. A blank scanner name, or an `fail_on_owasp` entry other than
 `A01`..`A10` (optionally `:2025` or `:2021`), fails at load with exit 2.
+
+### `[review]` — the branch-delta gate
+
+Without this table, `gate` and `session-end` fail when the 0–10000 signal falls
+more than 1 point below the baseline, whatever made it fall. That one number
+cannot tell a new 6-deep function from the small Equality drift that any new
+above-average function causes. Adding the table changes what fails:
+
+- **A per-symbol regression fails.** `gate` and `session-end` compare the working
+  tree with the merge-base of `HEAD` and the default branch, as
+  [`logos review`](commands.md#review---base-ref) does. They fail (exit 1) on a
+  `new` or `worsened` offender in a dimension `gate_dimensions` names. The
+  failure names each one with its value, threshold and trust label.
+- **The aggregate becomes a drift budget.** The signal's fall below the baseline
+  fails the gate only past `drift_budget` points. The default, `"report"`,
+  reports the drift and never fails on it.
+
+```toml
+[review]
+# The dimensions whose new or worsened offenders fail the gate.
+# Default: the five below. "redundancy" (dead or duplicate functions) may be added.
+gate_dimensions = ["nesting", "conciseness", "cohesion", "focus", "uniqueness"]
+# How many signal points the aggregate may fall below the baseline before the
+# gate fails, or "report" to report the fall and never fail on it.
+# Default: "report".
+drift_budget = "report"
+# Who may waive a gating entry: "owner" (only a human) or "agent".
+# Default: "owner".
+accept = "owner"
+# How many declines in a row of one distributional dimension raise a trend
+# warning. At least 1. Default: 2.
+trend_window = 2
+```
+
+The dimension names are the ones `logos review` and `logos offenders` print:
+
+| Name | What a per-symbol entry is |
+|---|---|
+| `nesting` | a function nested at least `nesting_depth` deep (default 4) |
+| `conciseness` | a brain method: complexity, length and nesting all at or over their thresholds |
+| `cohesion` | a class whose methods split into unrelated groups (LCOM4 ≥ 2) |
+| `focus` | a god container: too many methods, or too long a span |
+| `uniqueness` | a member of a near-clone group |
+| `redundancy` | a dead or duplicate function (not gated by default: dead code rests on cross-file reachability) |
+
+**Distributional dimensions never gate.** Equality, Modularity, Acyclicity and
+Depth score a distribution or the module graph as a whole, so any feature moves
+them. Their entries are still listed by `review`, and their movement is bounded
+only through `drift_budget`.
+
+**A distributional dimension in decline warns.** When one of the four fell in
+each of the last `trend_window` recorded snapshots, `scan`, `gate`,
+`session-end` and `review` carry a warning that names it, its values oldest
+first (exact, as recorded), and the window:
+
+```text
+equality declined at each of the last 2 recorded snapshots that moved it: 0.9123458410127743 → 0.9081204475611208 → 0.9033771926630519 (review.trend_window = 2); a trend warning, never a failure
+```
+
+It never changes a verdict or an exit code. The snapshots are the ones
+[`logos evolution`](commands.md#evolution) lists: every `scan` and
+`gate` records one. A snapshot that did not move the dimension, such as a
+`gate` right after a `scan` of the same tree, neither breaks the run nor counts
+as a decline. A rise ends the run, and so does a snapshot the dimension did
+not apply on, an empty graph, or a change of metric semantics or thresholds,
+since values across those do not measure the same thing.
+
+**Which entries gate.** An entry gates when it is `new` or `worsened`, its
+dimension is in `gate_dimensions`, and its trust label is `resolved`. An entry in
+a file that changed since the last sync, or in a language the graph binds within
+files only, is listed and never gates. Every listed entry is already at or over
+its dimension's threshold: that is what makes it an offender. A `check` violation
+does not gate here; a failing rule already fails `check`.
+
+**Who may waive a gating entry.** Under `accept = "owner"`, no agent action can
+waive one. Today nothing waives one at all: the entries are judged against the
+merge-base, and `gate --save` does not move it. So `"agent"` changes nothing yet.
+
+**When the branch delta cannot be measured** — no default branch resolves, `HEAD`
+shares no history with it, or the merge-base tree cannot be indexed — the gate
+judges no entry and adds a warning that starts `[review]: the branch delta was
+not measured`. It never fails for that reason alone. The drift budget still
+applies.
+
+**The cost.** Every gate records a snapshot at `HEAD` over the working tree, so
+a snapshot recorded at the merge-base commit may hold uncommitted work made
+there. Once that work is committed, reading the snapshot as the before-state
+would make a failing entry look `unchanged`. So under this table the before-state
+is always the merge-base tree itself: it is indexed once per merge-base and
+cached in `.logos/review-cache/`, and a recorded snapshot is never read.
+
+`gate --save` and a first-run `session-start` record the baseline and judge
+nothing; a later `session-start` keeps the baseline it finds. A
+`gate --save` whose drop exceeds a numeric `drift_budget` must give
+`--reason "<why>"`, and exits 2 without it. The reason is stored with the
+baseline, together with the attribution of the change being blessed (see
+[`gate`](commands.md#gate---save---threshold-n---label-l)). Under the table,
+`gate`, `session-end` and the Health page show that attribution. Without the
+table, `gate`, `session-end`, `check` and the Stop hook print exactly what
+they printed before; `review` prints the same plus its `attribution`. A `gate_dimensions` entry
+that names a distributional dimension or an unknown one, a negative
+`drift_budget`, any other value of it than a number or `"report"`, an `accept`
+other than `"owner"` or `"agent"`, a `trend_window` that is not a whole number
+of at least 1, and an unknown key all fail at load with exit 2. The table never moves the signal or
+its baseline.
 
 ## Logging and telemetry
 

@@ -30,7 +30,7 @@ export const filesAbsence = {
  * what the count is, and how a stale finding reads.
  */
 export const filesFindingsNote =
-  "Findings column: unsuppressed security findings in the file as last scanned, with the highest severity. A stale label counts findings in a file that changed since the scan; they are not in the count.";
+  "Findings column: the security findings in the file that no entry suppresses and whose file is unchanged since the scan, with the highest severity — the count the Security page and the workspace roll-up state for findings bound to a file. A file a `--path`-only scan never read also reads 0; the Security page's scanner row says scoped_only. A stale label counts findings in a file that changed since the scan; they are not in the count.";
 
 /**
  * A catalogue's own nothing-ranked absence — this one's or Coverage's — closed

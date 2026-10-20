@@ -71,8 +71,8 @@ use crate::graph_store::{
 use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
-    CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvaluatedSetAbsence,
-    EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
+    BaselineReset, BaselineStamp, CheckRun, DocGap, DocGapsReport, DoctorReport, DriftedEdge, DsmReport, DsmRow,
+    EvaluatedSetAbsence, EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
     GraphDimensionNotApplicable, MetricRegression, MetricSnapshot, MetricValue, QualityReadout,
     RatchetReport, RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus,
     VerifyReport, Violation, WhereToStart, WorstOffenders,
@@ -105,6 +105,11 @@ pub use offenders::OffendersFilter;
 ///
 /// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
 pub(crate) mod review;
+/// The attribution of an aggregate change ([FR-GV-26], S-755): per-dimension
+/// contributions in log space, each with its driving symbols.
+///
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+mod attribution;
 /// The `rules.toml [security]` gate ([S-668](../../../docs/planning/journal.md#s-668-a-security-rule-table-gates-on-new-findings-and-caps-and-a-missing-scan-exits-5)).
 pub(crate) mod security;
 
@@ -2131,6 +2136,11 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // FR-QM-18: the languages the graph cannot see across files — advisory,
     // never a verdict, from the helper every scoring surface shares.
     warnings.extend(coverage_warnings(runtime)?);
+    // FR-GV-27: under `[review]`, a distributional dimension in decline warns
+    // over the series this scan just extended.
+    if let Some(policy) = compiled.rules.review.as_ref() {
+        warnings.extend(review::trend_warnings(runtime, policy)?);
+    }
 
     Ok(ScanResult {
         signal: metrics.aggregate_signal,
@@ -2235,6 +2245,8 @@ fn temporal_tier_from_report(report: crate::history::TemporalReport) -> Temporal
 ///
 /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
 pub(crate) struct PersistedSnapshot {
+    /// The row's id: everything else of this snapshot is read by it.
+    pub(crate) id: i64,
     /// The reconstructed [`MetricSnapshot`] breakdown.
     pub(crate) metrics: MetricSnapshot,
     /// The lists persisted with the row; `recorded: false` on a snapshot written
@@ -2262,11 +2274,13 @@ pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<PersistedSnapshot
     Ok(row.map(|mut row| {
         let mut worst_offenders = std::mem::take(&mut row.worst_offenders);
         let where_to_start = std::mem::take(&mut row.where_to_start);
+        let id = row.id;
         let metrics = metric_snapshot_from_row(row);
         // A snapshot written before CR-209 holds no row for the four lists it
         // added; name each one its own score says is not empty (NFR-CC-04).
         worst_offenders.unrecorded = crate::metrics::unrecorded_lists(&metrics, &worst_offenders);
         PersistedSnapshot {
+            id,
             metrics,
             worst_offenders,
             where_to_start,
@@ -2415,7 +2429,9 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<PersistedSnapshot>) -> S
         metrics,
         worst_offenders,
         where_to_start,
+        ..
     } = snapshot.unwrap_or(PersistedSnapshot {
+        id: 0,
         metrics: MetricSnapshot {
             empty: true,
             ..MetricSnapshot::default()
@@ -2442,13 +2458,14 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<PersistedSnapshot>) -> S
 /// The read-only gate **verdict**: compare the last persisted snapshot's signal
 /// to the saved baseline **without computing or persisting** a snapshot ([ADR-28]
 /// — the dashboard's Health verdict). Mirrors [`gate`]'s comparison for the
-/// comparable case (`current < baseline − ε` ⇒ FAIL, BR-10) but never
+/// comparable case (`current < baseline − ε` ⇒ FAIL, BR-10, or the
+/// `[review]` drift budget, FR-GV-25) but never
 /// re-baselines or writes: an incomparable baseline (different metric semantics
 /// or threshold hash) is reported as an informational pass, not an auto-save.
 /// A never-`scan`-ned store returns an `n/a` verdict naming the producing command.
 pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
     let snapshot = latest_metrics(engine)?;
-    gate_from_snapshot(engine, snapshot.as_ref().map(|s| &s.metrics))
+    gate_from_snapshot(engine, snapshot.as_ref())
 }
 
 /// Project an **already-read** snapshot into the read-only gate verdict.
@@ -2463,10 +2480,19 @@ pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
 /// it carries no cross-field invariant with the scan result — joining it to the
 /// snapshot read would buy no atomicity, only a wider read.
 ///
+/// Under a `rules.toml [review]` table the verdict carries the attribution the
+/// persisting gate reports ([FR-GV-26]), so the dashboard shows what `gate
+/// --json` and the MCP `session_end` do. The table is read without the parse
+/// cache, which writes; an unreadable contract attributes nothing here and
+/// leaves the verdict standing (the gate itself reports the contract fault).
+/// Its drivers are that snapshot's own offenders, read by its id — never by
+/// "latest" again, which a `scan` committing in between would move.
+///
 /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
-fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Result<GateResult> {
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+fn gate_from_snapshot(engine: &Engine, snapshot: Option<&PersistedSnapshot>) -> Result<GateResult> {
     let runtime = quality_runtime(engine)?;
-    let Some(metrics) = snapshot else {
+    let Some(PersistedSnapshot { id: snapshot_id, metrics, .. }) = snapshot else {
         return Ok(GateResult {
             passed: true,
             epsilon: EPSILON,
@@ -2491,9 +2517,16 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Res
         notes: Vec::new(),
         security_violations: Vec::new(),
         missing_scans: Vec::new(),
+        gating_entries: Vec::new(),
+        drift: None,
+        attribution: None,
+        baseline_reason: None,
+        baseline_reset: None,
     };
 
-    let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
+    let (baseline, record) = runtime.submit_read(|store| {
+        Ok((store.baseline_snapshot(SCOPE_PROJECT)?, store.baseline_record(SCOPE_PROJECT)?))
+    })?;
     match baseline {
         None => {
             result.message =
@@ -2519,8 +2552,31 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Res
         Some(base) => {
             result.baseline_signal = base.aggregate_signal.map(|s| s as u32);
             result.regressions = metric_regressions(&base, metrics);
-            match (metrics.aggregate_signal, base.aggregate_signal) {
-                (Some(current), Some(baseline_signal)) => {
+            // FR-GV-16: the reason of the baseline compared against, as the
+            // persisting gate reports it — never from one it cannot compare.
+            result.baseline_reason = record.and_then(|r| r.reason);
+            let review_table = crate::config::load_rules_from_root(engine.root())
+                .ok()
+                .and_then(|rules| rules.review);
+            if review_table.is_some() {
+                result.attribution = baseline_attribution(runtime, &base, *snapshot_id, metrics)?;
+            }
+            match (metrics.aggregate_signal, base.aggregate_signal, review_table) {
+                (Some(current), Some(baseline_signal), Some(policy)) => {
+                    // FR-GV-25, as `gate` judges it: the aggregate is a drift
+                    // budget under `[review]`. Per-symbol entries need a branch
+                    // delta, which a read-only verdict does not compute.
+                    let drift = review::signal_drift(baseline_signal as u32, current, policy.drift_budget);
+                    result.passed = !drift.exceeded;
+                    result.message = review::drift_message(&drift);
+                    result.drift = Some(drift);
+                    result.notes.push(
+                        "per-symbol `[review]` entries are judged by `gate` and `session_end`, not by this \
+                         read-only verdict"
+                            .to_string(),
+                    );
+                }
+                (Some(current), Some(baseline_signal), None) => {
                     // BR-10: fail iff current < baseline − epsilon.
                     let regressed = f64::from(current) < baseline_signal as f64 - EPSILON;
                     result.passed = !regressed;
@@ -2577,7 +2633,7 @@ pub(crate) fn latest_health(engine: &Engine) -> Result<LatestHealth> {
     // a second `latest_metrics` call here, in either projection or at a caller
     // that wants both fields ([CR-135] §3.2).
     let snapshot = latest_metrics(engine)?;
-    let gate = gate_from_snapshot(engine, snapshot.as_ref().map(|s| &s.metrics))?;
+    let gate = gate_from_snapshot(engine, snapshot.as_ref())?;
     // Offenders and the "where to start" ranking ride inside the same value, so
     // they describe the same row as the signal and the verdict (FR-QM-15,
     // FR-QM-17).
@@ -2618,6 +2674,19 @@ pub(crate) fn branch_review(
     security: impl FnOnce(&str) -> Result<SecurityEvidence>,
 ) -> Result<crate::models::quality::BranchReview> {
     review::branch_review(engine, base, security)
+}
+
+/// The summed branch deltas projected onto the shared limits ([FR-GV-28],
+/// S-757) — the engine's entry point to [`review::branches_review`], named
+/// here beside [`branch_review`] for the same fan-out reason.
+///
+/// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
+pub(crate) fn branches_review(
+    engine: &Engine,
+    base: Option<&str>,
+    branches: &[String],
+) -> Result<crate::models::quality::BranchesProjection> {
+    review::branches_review(engine, base, branches)
 }
 
 /// What the branch security delta classifies ([FR-SC-18], S-686), read by the
@@ -3082,25 +3151,192 @@ fn check_rules_run(
 /// stored finding as the ratchet's baseline, and a compare fails on a new
 /// finding or a cap. Without the table `evidence` is never called.
 ///
+/// Under a `rules.toml [review]` table ([FR-GV-25]) a compare judges the
+/// branch delta against the merge-base of `HEAD` and the default branch: a
+/// gating entry fails it, and the aggregate fails only past `drift_budget`.
+/// Under the table, saved or compared, a distributional dimension in decline
+/// adds a trend warning ([FR-GV-27]) and moves no verdict. Without the table
+/// nothing of it runs.
+///
+/// `save` records `reason` and the attribution of the change it blesses with
+/// the baseline ([FR-GV-16], [FR-GV-26]); under the table, a drop past a
+/// numeric `drift_budget` with no `reason` is a usage error (exit 2) and moves
+/// no baseline.
+///
 /// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
 /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
+/// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+/// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+/// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
 /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
 pub(crate) fn gate(
     engine: &Engine,
     threshold: Option<u32>,
     save: bool,
     reconcile: bool,
+    reason: Option<&str>,
     evidence: &dyn security::SecurityEvidence,
 ) -> Result<GateResult> {
     // The evidence is read before anything is written: an invalid ignore file
     // (exit 2) must leave the metric baseline as it was.
     let compiled = load_rules_cached(engine, None)?;
     let security = security_evidence(&compiled, evidence)?;
-    let mut result = gate_metrics(engine, threshold, save, reconcile)?;
+    // FR-GV-25: under a `[review]` table a compare also judges the branch
+    // delta, on the graph the metric half just reconciled.
+    let table = compiled.rules.review.as_ref();
+    let policy = table.filter(|_| !save);
+    let bless = save.then(|| Bless {
+        reason: reason.map(str::trim).filter(|r| !r.is_empty()),
+        policy: table,
+    });
+    let mut result = gate_metrics(engine, threshold, bless, reconcile, policy)?;
+    if policy.is_some() {
+        review::fold_into_gate(&mut result, review::branch_delta(engine, None)?);
+    }
     if let Some((table, summary)) = security {
         fold_security_into_gate(&mut result, table, &summary, save, evidence)?;
     }
+    // FR-GV-27: a warning beside the verdict, over the series including the
+    // snapshot this gate recorded; it never moves `passed`.
+    if let Some(table) = table {
+        result.warnings.extend(review::trend_warnings(quality_runtime(engine)?, table)?);
+    }
     Ok(result)
+}
+
+/// What `gate --save` blesses under ([FR-GV-16]): the `--reason` given, and
+/// the `[review]` table whose `drift_budget` decides whether one is required.
+///
+/// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+struct Bless<'a> {
+    reason: Option<&'a str>,
+    policy: Option<&'a crate::config::ReviewRules>,
+}
+
+/// The attribution of the change from the `baseline` snapshot to the one
+/// persisted as `current_id` ([FR-GV-26]): every dimension of the baseline's
+/// row, and both snapshots' uncapped offenders, each read by its own id, as
+/// its drivers. `None` when the baseline row is gone.
+///
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+fn baseline_attribution(
+    runtime: &Runtime,
+    baseline: &MetricSnapshotRow,
+    current_id: i64,
+    current: &MetricSnapshot,
+) -> Result<Option<crate::models::quality::SignalAttribution>> {
+    let base_id = baseline.id;
+    let (row, before, after) = runtime.submit_read(move |store| {
+        Ok((
+            store.metric_snapshot(base_id)?,
+            store.uncapped_offenders_of(base_id)?,
+            store.uncapped_offenders_of(current_id)?,
+        ))
+    })?;
+    Ok(row.map(|row| review::snapshot_attribution(&metric_snapshot_from_row(row), current, before.zip(after))))
+}
+
+/// `true` when `baseline` was scored under the semantics and thresholds
+/// `current` was, so the two signals compare ([FR-GV-10]).
+///
+/// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+fn comparable(baseline: &MetricSnapshotRow, current: &MetricSnapshot) -> bool {
+    incomparable_because(baseline, current).is_none()
+}
+
+/// The announced re-baseline `current` takes over `baseline` ([FR-GV-10],
+/// [S-762]): what made the two incomparable, and both ends as the notice names
+/// them — the metric-semantics version and the signal each was scored as. `None`
+/// when the two signals compare.
+///
+/// The one definition of "incomparable" and of the notice: `gate`,
+/// `session_end` and `session_start` each reset through it.
+///
+/// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+/// [S-762]: ../../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
+fn baseline_reset(baseline: &MetricSnapshotRow, current: &MetricSnapshot) -> Option<BaselineReset> {
+    let cause = incomparable_because(baseline, current)?;
+    Some(BaselineReset {
+        cause: cause.to_string(),
+        from: BaselineStamp {
+            metric_version: baseline.metric_version,
+            signal: baseline.aggregate_signal.map(|s| s as u32),
+        },
+        to: BaselineStamp {
+            metric_version: crate::metrics::METRIC_SEMANTICS_VERSION,
+            signal: current.aggregate_signal,
+        },
+    })
+}
+
+/// What makes `baseline` incomparable to `current` ([FR-GV-10]), as the
+/// announced re-baseline names it, or `None` when the two signals compare.
+///
+/// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+fn incomparable_because(baseline: &MetricSnapshotRow, current: &MetricSnapshot) -> Option<&'static str> {
+    if baseline.metric_version != crate::metrics::METRIC_SEMANTICS_VERSION {
+        Some("metric semantics changed")
+    } else if baseline.thresholds_hash.as_deref() != Some(current.thresholds_hash.as_str()) {
+        Some("metric thresholds changed")
+    } else {
+        None
+    }
+}
+
+/// Save `snapshot_id` as the baseline for `gate --save` ([FR-GV-04]) with what
+/// the re-bless records ([FR-GV-16]): the attribution of the change from the
+/// baseline it replaces, when that one compares, and the reason. Under a
+/// `[review]` table a drop past a numeric `drift_budget` requires a reason —
+/// without one this returns a [`ConfigError`](crate::config::ConfigError)
+/// (exit 2) and the baseline stays as it was.
+///
+/// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
+/// [FR-GV-16]: ../../../docs/specs/requirements/FR-GV-16.md
+fn save_baseline(
+    runtime: &Runtime,
+    snapshot_id: i64,
+    metrics: &MetricSnapshot,
+    bless: &Bless<'_>,
+    result: &mut GateResult,
+) -> Result<()> {
+    let baseline = runtime
+        .submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?
+        .filter(|base| comparable(base, metrics));
+    let attribution = match &baseline {
+        Some(base) => baseline_attribution(runtime, base, snapshot_id, metrics)?,
+        None => None,
+    };
+    let drift = match (&baseline, bless.policy) {
+        (Some(base), Some(policy)) => base
+            .aggregate_signal
+            .zip(metrics.aggregate_signal)
+            .map(|(before, now)| review::signal_drift(before as u32, now, policy.drift_budget)),
+        _ => None,
+    };
+    if let (Some(drift), None) = (drift.filter(|d| d.exceeded), bless.reason) {
+        return Err(crate::config::ConfigError::InvalidValue {
+            key: "gate --reason".to_string(),
+            message: format!(
+                "{}: a re-bless past the budget must say why — re-run with --reason \"<why>\"",
+                review::drift_message(&drift)
+            ),
+        }
+        .into());
+    }
+    let record = crate::graph_store::BaselineRecord {
+        reason: bless.reason.map(str::to_string),
+        attribution: attribution.as_ref().map(serde_json::to_string).transpose()?,
+    };
+    let created_at = unix_now();
+    runtime.submit_write(move |w| w.record_baseline(SCOPE_PROJECT, snapshot_id, created_at, &record))?;
+    result.baseline_signal = metrics.aggregate_signal;
+    result.message = format!("baseline saved (snapshot #{snapshot_id})");
+    result.baseline_reason = bless.reason.map(str::to_string);
+    // The output carries the attribution under the table only, so a gate
+    // without one reads as it always has; the record keeps it either way.
+    result.attribution = attribution.filter(|_| bless.policy.is_some());
+    Ok(())
 }
 
 /// The `[security]` table and the evidence summary it is judged over, or `None`
@@ -3119,27 +3355,47 @@ fn security_evidence<'a>(
         .transpose()
 }
 
-/// Record the ratchet's baseline for `gate --save` and `session_start`
-/// ([FR-SC-10]) — unless a required scan is `missing`, since a baseline recorded
+/// Record the ratchet's baseline for `gate --save` and a `session_start` that
+/// finds none ([FR-SC-10]) — unless a required scan is `missing`, since a baseline recorded
 /// over missing evidence would accept whatever that scan would have found.
 /// Returns the message fragment either way.
 ///
+/// With a checked-in `.logos/security-baseline.json` nothing is recorded: the
+/// file is the ratchet's baseline, a set recorded in `history.db` would never
+/// be read, and only `logos security bless` rewrites the file ([FR-SC-25]).
+///
 /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+/// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
 fn record_security_baseline(
     table: &crate::config::SecurityRules,
     summary: &security::SecuritySummary,
     missing: &[crate::models::quality::MissingScan],
     evidence: &dyn security::SecurityEvidence,
 ) -> Result<String> {
-    if missing.is_empty() {
-        let recorded = evidence.save_baseline(table, &security::baseline_fingerprints(summary))?;
-        return Ok(format!("security baseline saved ({recorded} finding fingerprints)"));
+    let missing_note = (!missing.is_empty()).then(|| {
+        let named: Vec<&str> = missing.iter().map(|m| m.scanner.as_str()).collect();
+        format!("required scan missing or stale at HEAD: {}", named.join(", "))
+    });
+    if summary.baseline_source == security::BaselineSource::CheckedIn {
+        let mut message = format!(
+            "security baseline not saved: the checked-in {} is the ratchet's baseline — `{}` \
+             rewrites it",
+            security::CHECKED_IN_FILE_REL,
+            security::BLESS_COMMAND
+        );
+        if let Some(note) = missing_note {
+            message.push_str("; ");
+            message.push_str(&note);
+        }
+        return Ok(message);
     }
-    let named: Vec<&str> = missing.iter().map(|m| m.scanner.as_str()).collect();
-    Ok(format!(
-        "security baseline not saved: required scan missing or stale at HEAD: {}",
-        named.join(", ")
-    ))
+    match missing_note {
+        None => {
+            let recorded = evidence.save_baseline(table, &security::baseline_fingerprints(summary))?;
+            Ok(format!("security baseline saved ({recorded} finding fingerprints)"))
+        }
+        Some(note) => Ok(format!("security baseline not saved: {note}")),
+    }
 }
 
 /// The security half of [`gate`] ([FR-SC-10]). A required scan missing is exit
@@ -3156,16 +3412,13 @@ fn fold_security_into_gate(
     evidence: &dyn security::SecurityEvidence,
 ) -> Result<()> {
     let missing = security::missing_scans(table, summary);
-    let append = |message: &mut String, detail: String| {
-        *message = if message.is_empty() { detail } else { format!("{message}; {detail}") };
-    };
     if save {
-        append(&mut result.message, record_security_baseline(table, summary, &missing, evidence)?);
+        append_detail(&mut result.message, record_security_baseline(table, summary, &missing, evidence)?);
     } else {
         let verdict = security::check_security(table, summary);
         if !verdict.violations.is_empty() {
             result.passed = false;
-            append(
+            append_detail(
                 &mut result.message,
                 format!("{} security violation(s)", verdict.violations.len()),
             );
@@ -3177,7 +3430,7 @@ fn fold_security_into_gate(
         result.passed = false;
         if !save {
             let named: Vec<&str> = missing.iter().map(|m| m.scanner.as_str()).collect();
-            append(
+            append_detail(
                 &mut result.message,
                 format!("required scan missing or stale at HEAD: {}", named.join(", ")),
             );
@@ -3187,13 +3440,24 @@ fn fold_security_into_gate(
     Ok(())
 }
 
+/// `detail` appended to a verdict `message`, `; `-separated.
+fn append_detail(message: &mut String, detail: String) {
+    *message = if message.is_empty() { detail } else { format!("{message}; {detail}") };
+}
+
 /// The metric half of [`gate`]: everything it did before the `[security]`
-/// table existed.
+/// table existed. Under a `[review]` `policy` the aggregate is judged by its
+/// drift budget instead of `baseline − ε` ([FR-GV-25]), and its change is
+/// attributed ([FR-GV-26]). `save` is `gate --save` ([`save_baseline`]).
+///
+/// [FR-GV-25]: ../../../docs/specs/requirements/FR-GV-25.md
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
 fn gate_metrics(
     engine: &Engine,
     threshold: Option<u32>,
-    save: bool,
+    save: Option<Bless<'_>>,
     reconcile: bool,
+    policy: Option<&crate::config::ReviewRules>,
 ) -> Result<GateResult> {
     let fresh = reconcile_step(engine, reconcile)?;
     let runtime = quality_runtime(engine)?;
@@ -3221,7 +3485,7 @@ fn gate_metrics(
 
     let mut result = GateResult {
         passed: true,
-        saved: save,
+        saved: save.is_some(),
         signal: metrics.aggregate_signal,
         baseline_signal: None,
         test_function_count: metrics.test_function_count,
@@ -3235,63 +3499,65 @@ fn gate_metrics(
         notes: fresh.notes,
         security_violations: Vec::new(),
         missing_scans: Vec::new(),
+        gating_entries: Vec::new(),
+        drift: None,
+        attribution: None,
+        baseline_reason: None,
+        baseline_reset: None,
     };
 
-    if save {
-        let created_at = unix_now();
-        runtime.submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, created_at))?;
-        result.baseline_signal = metrics.aggregate_signal;
-        result.message = format!("baseline saved (snapshot #{snapshot_id})");
+    if let Some(bless) = save {
+        save_baseline(runtime, snapshot_id, &metrics, &bless, &mut result)?;
         return Ok(result);
     }
 
-    let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
+    let (baseline, record) = runtime.submit_read(|store| {
+        Ok((store.baseline_snapshot(SCOPE_PROJECT)?, store.baseline_record(SCOPE_PROJECT)?))
+    })?;
+    // FR-GV-10 / BR-25 (CR-005): a baseline recorded under a different
+    // metrics-semantics version (e.g. the pre-CR-001 test-inclusive scope), or
+    // under thresholds since tuned in rules.toml, is incomparable to this run.
+    // A tuned threshold moves what several dimensions measure, so both take the
+    // SAME announced path: auto-re-baseline against the fresh snapshot, pass
+    // informationally — never a regression failure against an incomparable
+    // anchor (UAT-GV-06) — and name both ends (S-762). The next gate finds a
+    // matching version and hash and compares normally (UAT-QM-13 step 3).
+    if let Some(reset) = baseline.as_ref().and_then(|base| baseline_reset(base, &metrics)) {
+        let created_at = unix_now();
+        runtime.submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, created_at))?;
+        result.saved = true;
+        result.baseline_signal = metrics.aggregate_signal;
+        result.message = reset.notice();
+        result.baseline_reset = Some(reset);
+        return Ok(result);
+    }
     match baseline {
         None => {
-            // FR-GV-05: no baseline → informational pass.
+            // FR-GV-05: no baseline → informational pass. `gate --save` saves
+            // one, and so does the next `session_start`, which saves a missing
+            // gate baseline whatever the ratchet's source (S-763).
             result.message =
-                "no baseline saved — informational pass (save one with `gate --save` or \
-                 `session_start`)"
-                    .to_string();
-        }
-        Some(base) if base.metric_version != crate::metrics::METRIC_SEMANTICS_VERSION => {
-            // FR-GV-10: the baseline was recorded under a different
-            // metrics-semantics version (e.g. the pre-CR-001 test-inclusive
-            // scope) and is incomparable to this production-scope run. Auto-
-            // re-baseline against the fresh snapshot, announce it, and pass
-            // informationally — never a regression failure against an
-            // incomparable anchor (UAT-GV-06). The next gate finds a matching
-            // version and compares normally.
-            let created_at = unix_now();
-            runtime
-                .submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, created_at))?;
-            result.saved = true;
-            result.baseline_signal = metrics.aggregate_signal;
-            result.message = "baseline reset: metric semantics changed".to_string();
-            return Ok(result);
-        }
-        Some(base) if base.thresholds_hash.as_deref() != Some(metrics.thresholds_hash.as_str()) => {
-            // FR-GV-10 / BR-25 (CR-005): the effective detection thresholds were
-            // tuned in rules.toml since the baseline was saved — its hash no
-            // longer matches this run's. A tuned threshold moves what several
-            // dimensions measure, so the baseline is incomparable: take the SAME
-            // announced re-baseline path as a semantics-version change (auto-save,
-            // informational pass, distinct notice). The next gate finds a matching
-            // hash and compares normally (UAT-QM-13 step 3) — threshold tuning is
-            // always possible and never silently moves a gated comparison.
-            let created_at = unix_now();
-            runtime
-                .submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, created_at))?;
-            result.saved = true;
-            result.baseline_signal = metrics.aggregate_signal;
-            result.message = "baseline reset: metric thresholds changed".to_string();
-            return Ok(result);
+                "no baseline saved — informational pass (save one with `gate --save`)".to_string();
         }
         Some(base) => {
             result.baseline_signal = base.aggregate_signal.map(|s| s as u32);
             result.regressions = metric_regressions(&base, &metrics);
-            match (metrics.aggregate_signal, base.aggregate_signal) {
-                (Some(current), Some(baseline_signal)) => {
+            // FR-GV-16: the reason the compared baseline was blessed with. An
+            // auto-re-baseline above replaced it, and its reason with it.
+            result.baseline_reason = record.and_then(|r| r.reason);
+            // FR-GV-26: under `[review]` the change is attributed.
+            if policy.is_some() {
+                result.attribution = baseline_attribution(runtime, &base, snapshot_id, &metrics)?;
+            }
+            match (metrics.aggregate_signal, base.aggregate_signal, policy) {
+                (Some(current), Some(baseline_signal), Some(policy)) => {
+                    // FR-GV-25: the aggregate is a drift budget under `[review]`.
+                    let drift = review::signal_drift(baseline_signal as u32, current, policy.drift_budget);
+                    result.passed = !drift.exceeded;
+                    result.message = review::drift_message(&drift);
+                    result.drift = Some(drift);
+                }
+                (Some(current), Some(baseline_signal), None) => {
                     // BR-10: fail iff current < baseline − epsilon; per-metric
                     // movement is detail, never an independent failure.
                     let regressed = f64::from(current) < baseline_signal as f64 - EPSILON;
@@ -3432,14 +3698,24 @@ fn metric_regressions(base: &MetricSnapshotRow, current: &MetricSnapshot) -> Vec
         .collect()
 }
 
-/// `session_start` — the MCP spelling of `gate --save` ([FR-GV-04]).
+/// `session_start` — records the session's snapshot, and each missing
+/// baseline `session_end` compares against ([FR-GV-04]).
 ///
-/// Under a `rules.toml [security]` table it also records the security ratchet's
-/// baseline, as `gate --save` does ([FR-SC-10]); the message says when a missing
-/// required scan left it unrecorded.
+/// Each baseline is decided on its own, before the edits. A missing gate
+/// baseline is saved onto this snapshot. Under a `rules.toml [security]`
+/// table, a missing ratchet baseline — none checked in and none in
+/// `history.db` — is recorded as `gate --save` records it ([FR-SC-10]); the
+/// message says when a missing required scan left it unrecorded. An existing
+/// baseline is never overwritten ([CR-238]): an agent's session must not bless
+/// its own regressions or findings, so only the guarded `gate --save` moves
+/// them. The one exception is a gate baseline that no longer compares
+/// ([FR-GV-10]): it is reset onto this snapshot with the notice `gate` gives —
+/// kept, `session_end` would reset it onto the post-edit snapshot instead.
 ///
 /// [FR-GV-04]: ../../../docs/specs/requirements/FR-GV-04.md
+/// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
 /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
+/// [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
 pub(crate) fn session_start(
     engine: &Engine,
     evidence: &dyn security::SecurityEvidence,
@@ -3468,16 +3744,35 @@ pub(crate) fn session_start(
     )?;
 
     let started_at = unix_now();
-    runtime.submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, started_at))?;
-
-    let mut message = format!(
-        "session started — baseline saved (snapshot #{snapshot_id}); \
-         `session_end` compares against it"
-    );
+    let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
+    // FR-GV-10: an incomparable baseline is reset now, before the edits, with
+    // the notice `gate` gives. Kept, `session_end` would reset it onto the
+    // post-edit snapshot and bless what the session did.
+    let reset = baseline.as_ref().and_then(|base| baseline_reset(base, &metrics));
+    let mut message = match baseline {
+        Some(base) if reset.is_none() => {
+            format!("session started — snapshot #{snapshot_id} recorded; {}", kept_baseline(base.id))
+        }
+        _ => {
+            runtime.submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, started_at))?;
+            let saved = reset.as_ref().map_or("baseline saved".to_string(), BaselineReset::notice);
+            format!(
+                "session started — {saved} (snapshot #{snapshot_id}); \
+                 `session_end` compares against it"
+            )
+        }
+    };
+    // The ratchet's baseline is its one source's ([FR-SC-25]): the checked-in
+    // file when there is one, which this never writes, else `history.db`.
     if let Some((table, summary)) = security {
-        let missing = security::missing_scans(table, &summary);
         message.push_str("; ");
-        message.push_str(&record_security_baseline(table, &summary, &missing, evidence)?);
+        message.push_str(&match &summary.baseline {
+            Some(fingerprints) => kept_security_baseline(fingerprints, summary.baseline_source),
+            None => {
+                let missing = security::missing_scans(table, &summary);
+                record_security_baseline(table, &summary, &missing, evidence)?
+            }
+        });
     }
 
     Ok(SessionInfo {
@@ -3486,9 +3781,38 @@ pub(crate) fn session_start(
         signal: metrics.aggregate_signal,
         freshness: fresh.line(),
         message,
-        // FR-QM-18: advisory; session_start always records the baseline.
+        // FR-QM-18: advisory; session_start always records its snapshot.
         warnings: coverage_warnings(runtime)?,
+        baseline_reset: reset,
     })
+}
+
+/// The gate-baseline fragment of a `session_start` that keeps the baseline
+/// with id `kept` ([CR-238]).
+///
+/// [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+fn kept_baseline(kept: i64) -> String {
+    format!(
+        "baseline kept (snapshot #{kept}), `session_end` compares against it — only \
+         `gate --save` moves it"
+    )
+}
+
+/// The ratchet fragment of a `session_start` that keeps the baseline holding
+/// `fingerprints`, read from `source` ([CR-238]).
+///
+/// [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
+fn kept_security_baseline(fingerprints: &BTreeSet<String>, source: security::BaselineSource) -> String {
+    match source {
+        security::BaselineSource::CheckedIn => format!(
+            "security baseline kept ({} finding fingerprints, checked in at {})",
+            fingerprints.len(),
+            security::CHECKED_IN_FILE_REL
+        ),
+        security::BaselineSource::Store => {
+            format!("security baseline kept ({} finding fingerprints)", fingerprints.len())
+        }
+    }
 }
 
 /// `evolution` — the windowed snapshot series with per-metric deltas
@@ -4038,27 +4362,86 @@ fn doctor_report(report: StructuralReport, admission: AdmissionCensus) -> Doctor
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 const VERIFY_SAMPLE_CAP: usize = 50;
 
-/// One store's whole-graph census for [`verify`]: the row counts plus the set of
-/// every node's canonical symbol, read in one pass over a read-only connection.
+/// An edge's identity across two stores — `(kind discriminant, source symbol,
+/// target symbol)`; the storage rowids differ between the live store and a
+/// shadow reindex, the symbols do not. Ordered, so the drift lists are
+/// deterministic ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+type EdgeKey = (i32, String, String);
+
+/// What an [`EdgeKey`] maps to: the kind and the files of its two endpoints,
+/// carried so a drifted edge can name them ([FR-GV-19], [CR-236]).
+///
+/// [FR-GV-19]: ../../../docs/specs/requirements/FR-GV-19.md
+/// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
+type EdgeEnds = (EdgeKind, Option<String>, Option<String>);
+
+/// One store's whole-graph read for [`verify`]: the row counts, the set of
+/// every node's canonical symbol, and every edge keyed by symbol identity — read
+/// in one pass over a read-only connection.
 ///
 /// The counts drive the numeric deltas (they catch a Channel-A duplicate — two
 /// nodes for one `symbol_id` — that the deduplicated symbol *set* would hide),
-/// while the symbol set drives the leaked/orphaned diff (Channel B).
-fn census(store: &dyn GraphStore) -> Result<(VerifyCensus, BTreeSet<String>)> {
+/// the symbol set drives the leaked/orphaned diff (Channel B), and the edge map
+/// drives the lost/extra edge lists ([CR-236]).
+///
+/// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
+struct VerifyRead {
+    census: VerifyCensus,
+    symbols: BTreeSet<String>,
+    edges: BTreeMap<EdgeKey, EdgeEnds>,
+}
+
+fn census(store: &dyn GraphStore) -> Result<VerifyRead> {
     let counts = store.counts()?;
     let symbols = store
         .all_nodes()?
         .into_iter()
         .map(|n| n.symbol.as_str().to_string())
         .collect::<BTreeSet<String>>();
-    Ok((
-        VerifyCensus {
+    let edges = store
+        .symbol_edges()?
+        .into_iter()
+        .map(|e| {
+            (
+                (e.kind.as_i32(), e.source, e.target),
+                (e.kind, e.source_file, e.target_file),
+            )
+        })
+        .collect::<BTreeMap<EdgeKey, EdgeEnds>>();
+    Ok(VerifyRead {
+        census: VerifyCensus {
             files: counts.files,
             nodes: counts.nodes,
             edges: counts.edges,
         },
         symbols,
-    ))
+        edges,
+    })
+}
+
+/// The edges in `from` that `against` lacks: the exact total, and the first
+/// [`VERIFY_SAMPLE_CAP`] of them in key order as [`DriftedEdge`]s. Only the
+/// capped sample is cloned out of the map.
+fn edge_diff(
+    from: &BTreeMap<EdgeKey, EdgeEnds>,
+    against: &BTreeMap<EdgeKey, EdgeEnds>,
+) -> (u64, Vec<DriftedEdge>) {
+    let mut missing = from.iter().filter(|(key, _)| !against.contains_key(*key));
+    let sample = missing
+        .by_ref()
+        .take(VERIFY_SAMPLE_CAP)
+        .map(|((_, source, target), (kind, source_file, target_file))| DriftedEdge {
+            kind: *kind,
+            source_symbol: source.clone(),
+            target_symbol: target.clone(),
+            source_file: source_file.clone(),
+            target_file: target_file.clone(),
+        })
+        .collect::<Vec<_>>();
+    let total = (sample.len() + missing.count()) as u64;
+    (total, sample)
 }
 
 /// `verify` — the on-demand **deep** consistency check (CR-052, [FR-GV-19],
@@ -4066,8 +4449,9 @@ fn census(store: &dyn GraphStore) -> Result<(VerifyCensus, BTreeSet<String>)> {
 /// the always-purge [`index`](../../../docs/specs/requirements/FR-IX-01.md) path,
 /// census both stores, and diff node/edge/file counts + symbol sets against the
 /// live graph — reporting any drift with a capped sample of leaked (live-only)
-/// and orphaned (reindex-only) symbols. Embeds the fast structural check
-/// ([FR-GV-18]) as `structural`.
+/// and orphaned (reindex-only) symbols, and of the lost (reindex-only) and extra
+/// (live-only) edges ([CR-236]). Embeds the fast structural check ([FR-GV-18])
+/// as `structural`.
 ///
 /// It is the only check that catches **Channel-B orphans** — files the live store
 /// retains but a fresh index would drop — which the fast `doctor` census cannot
@@ -4091,6 +4475,7 @@ fn census(store: &dyn GraphStore) -> Result<(VerifyCensus, BTreeSet<String>)> {
 /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
+/// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
 pub(crate) fn verify(engine: &Engine) -> Result<VerifyReport> {
     let (runtime, registry, config) = engine.pipeline_ctx()?;
 
@@ -4098,9 +4483,8 @@ pub(crate) fn verify(engine: &Engine) -> Result<VerifyReport> {
     //    ONE read-only checkout so the counts, symbol set, structural verdict,
     //    and indexed-file list are a consistent snapshot. The reader pool never
     //    mutates the live store (FR-GV-19).
-    let (live, live_symbols, structural, indexed_files) = runtime.submit_read(|store| {
-        let (census, symbols) = census(store)?;
-        Ok((census, symbols, store.structural_check()?, store.indexed_files()?))
+    let (live_read, structural, indexed_files) = runtime.submit_read(|store| {
+        Ok((census(store)?, store.structural_check()?, store.indexed_files()?))
     })?;
     let authority = AdmissionAuthority::from_config(engine.root(), &config)?;
     let unadmitted: Vec<String> = indexed_files
@@ -4117,36 +4501,48 @@ pub(crate) fn verify(engine: &Engine) -> Result<VerifyReport> {
     //    path, torn down by the guard) and census it. The shadow Runtime is
     //    dropped before the guard so the writer releases the db first.
     let shadow = crate::pipeline::ShadowStore::create()?;
-    let (reindex, reindex_symbols) = {
+    let reindex_read = {
         let shadow_rt =
             crate::pipeline::shadow_reindex(registry, engine.root(), &config, &shadow)?;
-        let census = shadow_rt.submit_read(census)?;
+        let read = shadow_rt.submit_read(census)?;
         drop(shadow_rt);
-        census
+        read
     };
+    let (live, reindex) = (live_read.census, reindex_read.census);
     // `shadow` guard drops at end of function → db + `-wal`/`-shm` removed.
 
     // 3. Diff. Counts drive the numeric deltas; the symbol-set difference names
     //    the leaked (live-only) and orphaned (reindex-only) symbols. A BTreeSet
     //    difference is already lexically ordered (NFR-RA-06), so the sample is
-    //    deterministic before it is capped.
+    //    deterministic before it is capped. The edge maps are diffed the same
+    //    way: `lost` is what a fresh reindex has and the live graph does not,
+    //    `extra` the reverse (CR-236).
     let node_delta = live.nodes as i64 - reindex.nodes as i64;
     let edge_delta = live.edges as i64 - reindex.edges as i64;
     let file_delta = live.files as i64 - reindex.files as i64;
 
-    let leaked: Vec<String> = live_symbols.difference(&reindex_symbols).cloned().collect();
-    let orphaned: Vec<String> = reindex_symbols
-        .difference(&live_symbols)
+    let leaked: Vec<String> = live_read
+        .symbols
+        .difference(&reindex_read.symbols)
+        .cloned()
+        .collect();
+    let orphaned: Vec<String> = reindex_read
+        .symbols
+        .difference(&live_read.symbols)
         .cloned()
         .collect();
     let leaked_total = leaked.len() as u64;
     let orphaned_total = orphaned.len() as u64;
+    let (lost_edges_total, lost_edges) = edge_diff(&reindex_read.edges, &live_read.edges);
+    let (extra_edges_total, extra_edges) = edge_diff(&live_read.edges, &reindex_read.edges);
 
     let ok = node_delta == 0
         && edge_delta == 0
         && file_delta == 0
         && leaked_total == 0
         && orphaned_total == 0
+        && lost_edges_total == 0
+        && extra_edges_total == 0
         && structural.is_ok()
         && admission.is_ok();
 
@@ -4169,6 +4565,12 @@ pub(crate) fn verify(engine: &Engine) -> Result<VerifyReport> {
         }
         if orphaned_total > 0 {
             parts.push(format!("{orphaned_total} orphaned symbol(s) (reindex-only)"));
+        }
+        if lost_edges_total > 0 {
+            parts.push(format!("{lost_edges_total} lost edge(s) (reindex-only)"));
+        }
+        if extra_edges_total > 0 {
+            parts.push(format!("{extra_edges_total} extra edge(s) (live-only)"));
         }
         if !structural.is_ok() {
             parts.push(format!(
@@ -4193,6 +4595,10 @@ pub(crate) fn verify(engine: &Engine) -> Result<VerifyReport> {
         leaked_symbols: capped_sample(leaked),
         orphaned_total,
         orphaned_symbols: capped_sample(orphaned),
+        lost_edges_total,
+        lost_edges,
+        extra_edges_total,
+        extra_edges,
         structural: doctor_report(structural, admission),
         message,
     })

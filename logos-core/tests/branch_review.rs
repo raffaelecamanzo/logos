@@ -301,7 +301,7 @@ fn without_a_merge_base_snapshot_the_shadow_is_built_once_cached_and_reused() {
 fn a_contract_with_rules_classifies_its_violations_against_the_shadow() {
     let tmp = rust_repo();
     let root = tmp.path();
-    write(root, ".logos/rules.toml", "[constraints]\nmax_nesting_depth = 4\n");
+    write(root, ".logos/rules.toml", "[constraints]\nmax_nesting_depth = 4\nmax_cycles = 7\n");
     let engine = started(root);
     engine.scan(true).expect("a snapshot at main, which a contract with rules cannot use");
     git(root, &["checkout", "-q", "-b", "feature"]);
@@ -320,6 +320,10 @@ fn a_contract_with_rules_classifies_its_violations_against_the_shadow() {
     );
     assert!(deep[0].subject.ends_with("beta_depth_six()."), "{deep:?}");
     assert_eq!(delta.violation_counts.new, 1);
+    // S-757: a review's cache entry is the one it always was — the cycle count
+    // a projection records beside its violations is never written here.
+    let entry = fs::read_to_string(root.join(format!(".logos/review-cache/{}.json", rev(root, "main")))).unwrap();
+    assert!(!entry.contains("\"cycles\""), "a review records no cycle count: {entry}");
 
     // The cached before-state was measured under this contract; another
     // contract re-measures rather than reading it back.

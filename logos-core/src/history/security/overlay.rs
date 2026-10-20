@@ -12,9 +12,11 @@
 //!   them and the count stays true ([NFR-CC-04]).
 //! - **A project nothing was scanned in** has no overlay at all ([`None`]),
 //!   which is distinct from a scan that found nothing on a file (count `0`).
-//!   So has one whose every stored report comes from `--path` scans alone
-//!   ([S-685]): those read only their paths, so a `0` elsewhere would claim a
-//!   scan that never ran.
+//!   One whose every stored report comes from `--path` scans alone ([S-685])
+//!   has an overlay: freshness is the finding's own, so the same findings count
+//!   here as on the Security page and in the workspace roll-up ([S-760],
+//!   [`counts`](super::counts)). A file those scans never read shows `0`; the
+//!   page's scanner row says `scoped_only`.
 //!
 //! Pure over its input apart from the two reads in [`path_findings`]; ordered
 //! by path, so byte-identical across runs ([NFR-RA-06]).
@@ -25,6 +27,7 @@
 //! [S-666]: ../../../../docs/planning/journal.md#s-666-suppressions-live-in-a-committed-ignore-file-with-a-reason-and-an-expiry
 //! [S-671]: ../../../../docs/planning/journal.md#s-671-hotspots-and-files--risk-show-findings
 //! [S-685]: ../../../../docs/planning/journal.md#s-685-a-security-re-scan-can-target-one-scanner-and-a-set-of-paths
+//! [S-760]: ../../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,7 +37,6 @@ use chrono::NaiveDate;
 use serde::Serialize;
 
 use super::{label, read_latest, IgnoreFile, LabelledFinding, Severity};
-use crate::history::{FRESHNESS_FRESH, FRESHNESS_STALE};
 
 /// One path's findings cell.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -49,9 +51,9 @@ pub struct PathFindings {
 }
 
 /// The per-path findings of the latest stored reports, or `None` when no
-/// scanner has a stored report with a full scan behind it (never scanned, or
-/// scanned only on `--path`s: no column, not a column of zeros). A path with no
-/// finding is absent from the map — its cell is [`PathFindings::default`].
+/// scanner has a stored report (never scanned: no column, not a column of
+/// zeros). A path with no finding is absent from the map — its cell is
+/// [`PathFindings::default`].
 ///
 /// The ignore file is read only once a report is stored: with nothing scanned
 /// there is nothing to label, so a project that never scanned never depends on it.
@@ -61,11 +63,11 @@ pub struct PathFindings {
 /// otherwise only a store failure.
 pub fn path_findings(root: &Path, today: NaiveDate) -> Result<Option<BTreeMap<String, PathFindings>>> {
     let view = read_latest(root)?;
-    if !view.snapshots.iter().any(|s| s.full_head_sha.is_some()) {
+    if view.snapshots.is_empty() {
         return Ok(None);
     }
     let ignore = IgnoreFile::load(root)?;
-    Ok(Some(tally(&label(&view.findings, &ignore, today).findings)))
+    Ok(Some(tally(&label(&view.findings, &ignore, root, today).findings)))
 }
 
 /// Fold labelled findings into per-path cells. A finding bound to no file has
@@ -75,13 +77,12 @@ fn tally(findings: &[LabelledFinding]) -> BTreeMap<String, PathFindings> {
     for item in findings.iter().filter(|item| !item.is_suppressed()) {
         let Some(path) = item.finding.path.as_deref() else { continue };
         let cell = by_path.entry(path.to_string()).or_default();
-        match item.finding.freshness {
-            FRESHNESS_FRESH => {
-                cell.count += 1;
-                cell.highest = cell.highest.max(Some(item.finding.severity));
-            }
-            FRESHNESS_STALE => cell.stale += 1,
-            _ => {}
+        // Unsuppressed and not counted leaves the one other state: its file moved.
+        if item.is_counted() {
+            cell.count += 1;
+            cell.highest = cell.highest.max(Some(item.finding.severity));
+        } else {
+            cell.stale += 1;
         }
     }
     by_path
@@ -91,7 +92,7 @@ fn tally(findings: &[LabelledFinding]) -> BTreeMap<String, PathFindings> {
 mod tests {
     use super::*;
     use crate::history::security::{FindingBinding, SecurityFinding, Suppression};
-    use crate::history::FRESHNESS_NA;
+    use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE};
 
     fn item(path: Option<&str>, severity: Severity, freshness: &'static str) -> LabelledFinding {
         LabelledFinding {
@@ -112,6 +113,9 @@ mod tests {
                 start_column: None,
                 end_line: None,
                 end_column: None,
+                commits: Vec::new(),
+                legacy_fingerprints: Vec::new(),
+                anchor: None,
                 freshness,
             },
             suppression: None,
@@ -129,6 +133,18 @@ mod tests {
             cells["a.rs"],
             PathFindings { count: 3, highest: Some(Severity::High), stale: 0 }
         );
+    }
+
+    /// An `unrated` finding ranks just below `medium` (S-768): it lifts a cell
+    /// holding only lower ratings, and a `medium` beside it outranks it.
+    #[test]
+    fn an_unrated_finding_ranks_above_low_and_below_medium() {
+        let cell = |severities: &[Severity]| {
+            let items: Vec<_> = severities.iter().map(|&s| item(Some("a.rs"), s, FRESHNESS_FRESH)).collect();
+            tally(&items)["a.rs"].highest
+        };
+        assert_eq!(cell(&[Severity::Low, Severity::Unrated, Severity::Info]), Some(Severity::Unrated));
+        assert_eq!(cell(&[Severity::Unrated, Severity::Medium]), Some(Severity::Medium));
     }
 
     #[test]
@@ -155,9 +171,9 @@ mod tests {
         let day = NaiveDate::from_ymd_opt(2026, 1, 1);
         let mut suppressed = item(Some("a.rs"), Severity::High, FRESHNESS_FRESH);
         suppressed.suppression =
-            Some(Suppression::Suppressed { reason: "accepted".into(), expires: day });
+            Some(Suppression::Suppressed { reason: "accepted".into(), expires: day, by: "a".into() });
         let mut expired = item(Some("b.rs"), Severity::High, FRESHNESS_FRESH);
-        expired.suppression = Some(Suppression::Expired { reason: "accepted".into(), expires: day });
+        expired.suppression = Some(Suppression::Expired { reason: "accepted".into(), expires: day, by: "b".into() });
         let cells = tally(&[suppressed, expired]);
         assert!(!cells.contains_key("a.rs"), "a suppressed finding joins no cell");
         assert_eq!(cells["b.rs"].count, 1, "an expired suppression no longer suppresses");

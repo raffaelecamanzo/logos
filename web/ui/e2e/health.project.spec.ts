@@ -61,7 +61,7 @@ function populated(recorded: boolean) {
             recorded: true,
             basis: "estimate: the signal recomputed with this one unit's contribution removed and nothing else changed, minus the current signal; advisory, never gated",
             units: [{
-              kind: "function", node_id: 7, name: "deep_fn", file: "src/lib.rs", line: 12,
+              kind: "function", node_id: "src/`lib.rs`/deep_fn().", name: "deep_fn", file: "src/lib.rs", line: 12,
               dimensions: ["nesting"], points: 120, detail: "nesting depth 6", outliers: ["nesting"],
             }],
             outliers: [],

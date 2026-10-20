@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { HealthModel, MetricSnapshot, MetricValue, WhereToStart } from "../../api/types.ts";
+import type { HealthModel, MetricSnapshot, MetricValue, SignalAttribution, WhereToStart } from "../../api/types.ts";
 import { Badge, type BadgeTone } from "../../components/index.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import {
@@ -12,6 +12,7 @@ import {
   gate as gateCopy,
   OUTLIER_MEASURE,
   qualitySignal as qualitySignalCopy,
+  signalChange as signalChangeCopy,
   signalTrend as signalTrendCopy,
   whereToStart as whereToStartCopy,
 } from "../../copy/health.copy.ts";
@@ -1484,5 +1485,118 @@ describe("Where to start card: whole statements and the unit kind (review S-505)
       REAL.units.map((u) => u.kind),
     );
     expect(REAL.units.map((u) => u.kind)).toEqual(["clone_group", "function"]);
+  });
+});
+
+// ── Signal change (FR-GV-26, S-755) ─────────────────────────────────────────
+
+/** The attribution `gate --json` carries under a `[review]` table: Equality
+ *  driven by one new function, Uniqueness by a near-clone group, and a
+ *  dimension whose share rounds to zero. */
+const ATTRIBUTION: SignalAttribution = {
+  before: 8291,
+  after: 8288,
+  change: -3,
+  exact_change: -2.28,
+  rounding: -0.72,
+  contributions: [
+    {
+      dimension: "equality",
+      before: 0.493762,
+      after: 0.493195,
+      points: -0.95,
+      drivers: [
+        { status: "new", name: "admit_install", node_id: "x", file: "logos-core/src/tools/surface.rs", line: 120, measure: "cyclomatic_complexity", before: null, after: 33 },
+      ],
+      driver_count: 3,
+    },
+    {
+      dimension: "uniqueness",
+      before: 0.964548,
+      after: 0.963781,
+      points: -0.66,
+      drivers: [
+        {
+          status: "new", name: "cancelInstall", node_id: null, file: "web/ui/src/api/client.ts", line: 10, measure: "group_size", before: null, after: 2,
+          members: [
+            { node_id: null, name: "cancelInstall", file: "web/ui/src/api/client.ts", line: 10 },
+            { node_id: null, name: "cancelScan", file: "web/ui/src/api/client.ts", line: 30 },
+          ],
+        },
+      ],
+      driver_count: 1,
+    },
+    { dimension: "cohesion", before: 1, after: 1, points: 0, drivers: [], driver_count: 0 },
+  ],
+  residual: -0.67,
+};
+
+describe("Signal change widget (FR-GV-26, S-755)", () => {
+  it("is absent without an attribution — a gate without a [review] table", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(frames().map(widgetTitle)).not.toContain("Signal change");
+  });
+
+  it("states the change, its rounding and residual, and each moved dimension with its drivers", async () => {
+    const m = clone();
+    m.gate.attribution = ATTRIBUTION;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const titles = frames().map(widgetTitle);
+    expect(titles.indexOf("Signal change")).toBe(titles.indexOf("Gate") + 1);
+    const frame = widget("Signal change");
+    expectWidgetCopy(frame, signalChangeCopy);
+    expect(seen(part(frame, "figure"))).toBe(
+      "-3.00 points against the baseline · the shares below sum to -2.28; rounding to whole points adds -0.72, residual -0.67",
+    );
+    const rows = within(part(frame, "evidence")!).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["equality", "uniqueness"]);
+    const [equality, uniqueness] = rows.map((r) => within(r).getAllByRole("cell"));
+    expect(equality[1].textContent).toBe("-0.95");
+    const drivers = (cell: Element) =>
+      [...cell.querySelectorAll("[data-driver-status]")].map((d) => [d.getAttribute("data-driver-status"), seen(d)]);
+    expect(drivers(equality[2])).toEqual([["new", "admit_installnew · logos-core/src/tools/surface.rs:120"]]);
+    expect(seen(equality[2])).toMatch(/and 2 more$/);
+    expect(drivers(uniqueness[2])).toEqual([
+      ["new", "Near-clone group of 2: cancelInstall, cancelScannew · web/ui/src/api/client.ts:10"],
+    ]);
+  });
+
+  it("names why a change is not split, and the reason the baseline was saved with", async () => {
+    const m = clone();
+    m.gate.attribution = {
+      before: null, after: 8000, change: null, exact_change: null, rounding: null, contributions: [], residual: null,
+      not_attributable_because: "a side has no signal: its production graph is empty, so there is no change to attribute",
+    };
+    m.gate.baseline_reason = "an above-mean dispatcher is intrinsic";
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(widget("Signal change"), "figure"))).toBe(
+      "Not split by dimension: a side has no signal: its production graph is empty, so there is no change to attribute.",
+    );
+    expect(part(widget("Signal change"), "evidence")).toBeNull();
+
+    expect(seen(part(widget("Gate"), "figure"))).toContain("The baseline was saved with the reason: “an above-mean dispatcher is intrinsic”");
+
+    // Split by dimension, but with no driver named: the shares stay, and the
+    // figure says why no symbol is named — not that the change is unsplit.
+    cleanup();
+    const n = clone();
+    n.gate.attribution = {
+      ...ATTRIBUTION,
+      contributions: ATTRIBUTION.contributions.map((c) => ({ ...c, drivers: [], driver_count: 0 })),
+      drivers_not_named_because: "a snapshot predates recorded offender values",
+    };
+    stub(n);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const figure = seen(part(widget("Signal change"), "figure"));
+    expect(figure).toContain("No driving symbols named: a snapshot predates recorded offender values.");
+    expect(figure).not.toContain("Not split by dimension");
+    expect(within(part(widget("Signal change"), "evidence")!).getAllByRole("row")).toHaveLength(3);
   });
 });

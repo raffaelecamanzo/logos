@@ -5,27 +5,27 @@
     "units": [
       {
         "kind": "clone_group",
-        "node_id": 11,
+        "node_id": "clone_group:e1fe731629c4f616",
         "name": "sum_left",
         "file": "src/lib.rs",
         "line": 65,
         "dimensions": [
           "uniqueness"
         ],
-        "points": 377,
+        "points": 522,
         "detail": "clone group #11 \u00b7 3 members \u00d7 11 lines",
         "outliers": []
       },
       {
         "kind": "function",
-        "node_id": 10,
+        "node_id": "src/`lib.rs`/deep_one().",
         "name": "deep_one",
         "file": "src/lib.rs",
         "line": 49,
         "dimensions": [
           "nesting"
         ],
-        "points": 113,
+        "points": 155,
         "detail": "nesting depth 6",
         "outliers": [
           "nesting"
@@ -73,7 +73,7 @@
         "labelled": 1,
         "labels": [
           {
-            "node_id": 10,
+            "node_id": "src/`lib.rs`/deep_one().",
             "name": "deep_one",
             "file": "src/lib.rs",
             "line": 49,

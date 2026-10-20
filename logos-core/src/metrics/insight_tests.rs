@@ -18,16 +18,32 @@ use crate::models::quality::{FixUnit, FixUnitKind, MetricSnapshot, WhereToStart}
 
 use super::super::{compute, Thresholds};
 use super::{
-    rank, upper_fence_eighths, where_to_start, Inputs, OUTLIER_MIN_UNITS,
+    group_identity, rank, upper_fence_eighths, where_to_start, Inputs, OUTLIER_MIN_UNITS,
     WHERE_TO_START_CAP,
 };
 
 // ── fixture builders ─────────────────────────────────────────────────────────
 
+/// The repository coordinate every fixture symbol carries; an identity drops it.
+const COORDINATE: &str = "example.com/fixture";
+
+/// The identity of fixture node `n` — its symbol without the coordinate. Zero
+/// padded, so identity order is id order and a tie-break reads the same either
+/// way.
+fn ident(n: i64) -> String {
+    format!("fixture/n{n:04}.")
+}
+
+/// The identity of a group of `kind` over fixture nodes `members`.
+fn group_ident(kind: FixUnitKind, members: &[i64]) -> String {
+    let identities: Vec<String> = members.iter().map(|&n| ident(n)).collect();
+    group_identity(kind, &identities.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 fn node(id: i64, name: &str, kind: NodeKind, file: &str, lines: Option<(i64, i64)>) -> NodeRow {
     NodeRow {
         id: NodeId(id),
-        symbol: LogosSymbol::parse(&format!("local {id}")).expect("local symbol parses"),
+        symbol: LogosSymbol::parse(&format!("logos . {COORDINATE} . {}", ident(id))).expect("the fixture symbol parses"),
         kind,
         name: name.to_string(),
         file_path: Some(file.to_string()),
@@ -174,12 +190,24 @@ fn mixed() -> Member {
     member
 }
 
+/// The ranked class or function unit of fixture node `id`, found by identity.
 fn unit(ranking: &WhereToStart, kind: FixUnitKind, id: i64) -> &FixUnit {
     ranking
         .units
         .iter()
-        .find(|u| u.kind == kind && u.node_id == id)
+        .find(|u| u.kind == kind && u.node_id.as_deref() == Some(ident(id).as_str()))
         .unwrap_or_else(|| panic!("a {kind:?} unit for node {id} is ranked: {:#?}", ranking.units))
+}
+
+/// The ranked group unit of `kind` over fixture nodes `members`, found by its
+/// identity.
+fn group<'r>(ranking: &'r WhereToStart, kind: FixUnitKind, members: &[i64]) -> &'r FixUnit {
+    let id = group_ident(kind, members);
+    ranking
+        .units
+        .iter()
+        .find(|u| u.kind == kind && u.node_id.as_deref() == Some(id.as_str()))
+        .unwrap_or_else(|| panic!("a {kind:?} unit over {members:?} is ranked: {:#?}", ranking.units))
 }
 
 /// Assert a unit's stated points equal the re-run signal minus the current one.
@@ -295,7 +323,7 @@ fn a_duplicate_groups_points_equal_a_rerun_compute_with_k_minus_one_copies_gone(
     for id in [4, 5] {
         fixed.function_mut(id).is_duplicate = Some(false);
     }
-    let group = unit(&ranking, FixUnitKind::DuplicateGroup, 3);
+    let group = group(&ranking, FixUnitKind::DuplicateGroup, &[3, 4, 5]);
     assert_points(group, &current, &fixed);
     assert_eq!(group.dimensions, ["redundancy"]);
     assert_eq!(group.detail, "duplicate group · 3 members × 30 lines");
@@ -316,7 +344,7 @@ fn a_dead_duplicate_survives_so_the_figure_never_depends_on_id_order() {
         for id in [3, 4, 5].into_iter().filter(|&id| id != dead) {
             fixed.function_mut(id).is_duplicate = Some(false);
         }
-        let group = unit(&ranking, FixUnitKind::DuplicateGroup, 3);
+        let group = group(&ranking, FixUnitKind::DuplicateGroup, &[3, 4, 5]);
         assert_points(group, &current, &fixed);
         figures.push(group.points);
     }
@@ -332,7 +360,7 @@ fn a_clone_groups_points_equal_a_rerun_compute_with_its_members_unclustered() {
     for id in [6, 7] {
         fixed.function_mut(id).clone_group = None;
     }
-    let group = unit(&ranking, FixUnitKind::CloneGroup, 6);
+    let group = group(&ranking, FixUnitKind::CloneGroup, &[6, 7]);
     assert_points(group, &current, &fixed);
     assert_eq!(group.dimensions, ["uniqueness"]);
     assert_eq!(group.detail, "clone group #6 · 2 members × 40 lines");
@@ -349,18 +377,23 @@ fn a_group_the_scored_rows_do_not_bear_out_is_never_cleared() {
     member.duplicate_groups.push(vec![NodeId(8), NodeId(9), NodeId(10)]);
     member.function_mut(10).is_duplicate = Some(true); // one of three bears it out
     let ranking = member.rank();
-    let groups: Vec<i64> = ranking
+    let groups: Vec<Option<String>> = ranking
         .units
         .iter()
         .filter(|u| u.kind == FixUnitKind::DuplicateGroup)
-        .map(|u| u.node_id)
+        .map(|u| u.node_id.clone())
         .collect();
-    assert_eq!(groups, [3], "the group of one recovers nothing: {:#?}", ranking.units);
+    assert_eq!(
+        groups,
+        [Some(group_ident(FixUnitKind::DuplicateGroup, &[3, 4, 5]))],
+        "the group of one recovers nothing: {:#?}",
+        ranking.units
+    );
     let mut fixed = member.clone();
     for id in [4, 5] {
         fixed.function_mut(id).is_duplicate = Some(false);
     }
-    assert_points(unit(&ranking, FixUnitKind::DuplicateGroup, 3), &member, &fixed);
+    assert_points(group(&ranking, FixUnitKind::DuplicateGroup, &[3, 4, 5]), &member, &fixed);
 }
 
 /// Equality and Depth (and Acyclicity, Modularity) never carry points: a
@@ -393,11 +426,121 @@ fn equality_and_depth_never_enter_the_ranking() {
     }
 }
 
+// ── CR-238 D7: every unit and label keeps its identity across a re-index ─────
+
+/// `member` re-indexed: every storage id renumbered by `to`, and every
+/// identity kept — what a full re-index does to the same tree. The near-clone
+/// cluster numbers are storage-derived too, so they move with the ids.
+fn renumbered(member: &Member, to: impl Fn(i64) -> i64) -> Member {
+    let id = |n: NodeId| NodeId(to(n.0));
+    Member {
+        nodes: member.nodes.iter().map(|n| NodeRow { id: id(n.id), ..n.clone() }).collect(),
+        edges: member
+            .edges
+            .iter()
+            .map(|e| EdgeRow { source: id(e.source), target: id(e.target), kind: e.kind })
+            .collect(),
+        functions: member
+            .functions
+            .iter()
+            .map(|f| FunctionMetricRow { id: id(f.id), clone_group: f.clone_group.map(id), ..f.clone() })
+            .collect(),
+        test_ids: member.test_ids.iter().map(|&n| id(n)).collect(),
+        duplicate_groups: member
+            .duplicate_groups
+            .iter()
+            .map(|g| g.iter().map(|&n| id(n)).collect())
+            .collect(),
+    }
+}
+
+/// A class's or function's id is its symbol without the repository
+/// coordinate — the offender identity `node` and `impact` resolve — on the unit
+/// and on its label alike.
+#[test]
+fn a_single_symbol_units_id_is_its_symbol_without_the_coordinate() {
+    let ranking = labelled_member().rank();
+    let f1 = unit(&ranking, FixUnitKind::Function, 1);
+    assert_eq!(f1.node_id.as_deref(), Some("fixture/n0001."));
+    assert_eq!(unit(&ranking, FixUnitKind::Class, 20).node_id.as_deref(), Some("fixture/n0020."));
+    let nesting = ranking.outliers.iter().find(|m| m.measure == "nesting").unwrap();
+    assert!(nesting.labels.iter().any(|l| l.node_id == f1.node_id), "the label carries the unit's id: {nesting:?}");
+    let serialized = serde_json::to_string(&ranking).unwrap();
+    assert!(!serialized.contains(COORDINATE), "no id carries the coordinate: {serialized}");
+}
+
+/// The whole list survives a re-index that renumbers every storage id in
+/// reverse: the same units with the same ids, in the same order, named by the
+/// same symbols, with the same labels. Reversal is the hard case — every
+/// tie-break by storage id would flip, and every group would be named by
+/// another member. Only a near-clone group's descriptor moves, because it
+/// states the cluster number (`clone group #N`), which is storage-derived; the
+/// group's id does not depend on it.
+#[test]
+fn every_id_survives_a_renumbering_of_every_storage_id() {
+    let mut member = labelled_member();
+    member.function_mut(8).max_nesting_depth = Some(9); // ties f1, on points and on its label
+    let before = member.rank();
+    let after = renumbered(&member, |n| 1000 - n).rank();
+
+    let without_cluster_numbers = |w: &WhereToStart| -> WhereToStart {
+        let mut w = w.clone();
+        for u in w.units.iter_mut().filter(|u| u.kind == FixUnitKind::CloneGroup) {
+            u.detail = u.detail.split(" · ").skip(1).collect::<Vec<_>>().join(" · ");
+        }
+        w
+    };
+    assert_eq!(
+        without_cluster_numbers(&after),
+        without_cluster_numbers(&before),
+        "ids, order, names and labels are the identities' alone"
+    );
+    let clone = group(&after, FixUnitKind::CloneGroup, &[6, 7]);
+    assert_eq!(clone.detail, "clone group #994 · 2 members × 40 lines", "only the cluster number moved");
+    let at = |n: i64| after.units.iter().position(|u| u.node_id == Some(ident(n))).unwrap();
+    assert!(at(1) < at(8), "the tie still breaks by identity, though f8 now has the lower storage id");
+    assert_eq!(
+        group(&after, FixUnitKind::DuplicateGroup, &[3, 4, 5]).name,
+        "f03",
+        "a group is named by its first member in identity order, never by storage id"
+    );
+}
+
+/// A group's id is stable while its member set is, and changes when it does:
+/// it ignores the order members arrive in, a member more or fewer is another
+/// group, and a near-clone group of the same members is another unit than an
+/// exact-duplicate one. Each identity is hashed behind its length, so two
+/// member lists that concatenate alike never share an id.
+#[test]
+fn a_groups_id_is_stable_while_its_members_are_and_changes_when_they_do() {
+    let dup = FixUnitKind::DuplicateGroup;
+    let three = group_identity(dup, &["a/x().", "a/y().", "a/z()."]);
+    assert_eq!(group_identity(dup, &["a/z().", "a/x().", "a/y()."]), three, "member order is irrelevant");
+    assert_ne!(group_identity(dup, &["a/x().", "a/y()."]), three, "a member fewer");
+    assert_ne!(group_identity(dup, &["a/x().", "a/y().", "a/z().", "a/w()."]), three, "a member more");
+    assert_ne!(group_identity(FixUnitKind::CloneGroup, &["a/x().", "a/y().", "a/z()."]), three, "another kind");
+    assert_ne!(group_identity(dup, &["ab", "c"]), group_identity(dup, &["a", "bc"]), "no concatenation collides");
+    assert!(three.starts_with("duplicate_group:") && three.len() == "duplicate_group:".len() + 16, "{three}");
+
+    // Through the ranking: f8 joins the duplicate group, which becomes another unit.
+    let mut grown = mixed();
+    grown.function_mut(8).is_duplicate = Some(true);
+    grown.function_mut(8).line_count = Some(30);
+    grown.duplicate_groups[0].push(NodeId(8));
+    let ranking = grown.rank();
+    group(&ranking, dup, &[3, 4, 5, 8]);
+    assert!(
+        ranking.units.iter().all(|u| u.node_id != Some(group_ident(dup, &[3, 4, 5]))),
+        "the three-member id is gone: {:#?}",
+        ranking.units
+    );
+}
+
 // ── FR-QM-17 AC 2: ordering and byte-identity ────────────────────────────────
 
-/// Points descending, then the first dimension's canonical order, then node
-/// id — and two identical units tie on points and dimension, so the lower id
-/// comes first.
+/// Points descending, then the first dimension's canonical order, then
+/// identity — and two identical units tie on points and dimension, so the
+/// lower identity comes first.
 #[test]
 fn units_order_by_points_then_dimension_then_node_id() {
     let mut member = mixed();
@@ -407,7 +550,7 @@ fn units_order_by_points_then_dimension_then_node_id() {
         (
             -u.points,
             FixUnit::DIMENSIONS.iter().position(|d| *d == u.dimensions[0]).unwrap(),
-            u.node_id,
+            u.node_id.clone(),
         )
     };
     let keys: Vec<_> = ranking.units.iter().map(key).collect();
@@ -415,10 +558,10 @@ fn units_order_by_points_then_dimension_then_node_id() {
     sorted.sort();
     assert_eq!(keys, sorted, "the ranking is in key order");
 
-    let f1 = ranking.units.iter().position(|u| u.node_id == 1).unwrap();
-    let f8 = ranking.units.iter().position(|u| u.node_id == 8).unwrap();
+    let at = |n: i64| ranking.units.iter().position(|u| u.node_id == Some(ident(n))).unwrap();
+    let (f1, f8) = (at(1), at(8));
     assert_eq!(ranking.units[f1].points, ranking.units[f8].points, "the two tie");
-    assert!(f1 < f8, "on a tie the lower node id comes first");
+    assert!(f1 < f8, "on a tie the lower identity comes first");
 }
 
 /// The cap: a member with more offending units than [`WHERE_TO_START_CAP`]
@@ -449,8 +592,9 @@ fn the_ranking_is_capped_keeping_the_highest_points() {
     assert_eq!(all.len(), 15, "every offending unit recovers a point here");
     let ranking = member.rank();
     assert_eq!(ranking.units.len(), WHERE_TO_START_CAP);
-    let head: Vec<(i64, i64)> = all[..WHERE_TO_START_CAP].iter().map(|u| (u.node_id, u.points)).collect();
-    let kept: Vec<(i64, i64)> = ranking.units.iter().map(|u| (u.node_id, u.points)).collect();
+    let head: Vec<(Option<String>, i64)> =
+        all[..WHERE_TO_START_CAP].iter().map(|u| (u.node_id.clone(), u.points)).collect();
+    let kept: Vec<(Option<String>, i64)> = ranking.units.iter().map(|u| (u.node_id.clone(), u.points)).collect();
     assert_eq!(kept, head, "the cap keeps the head of the full order");
 }
 
@@ -536,8 +680,8 @@ fn an_outlier_above_the_fence_and_the_threshold_is_labelled() {
     let nesting = ranking.outliers.iter().find(|m| m.measure == "nesting").unwrap();
     assert!(nesting.units as usize >= OUTLIER_MIN_UNITS, "{} units", nesting.units);
     assert_eq!(nesting.threshold, Some(4));
-    let labelled: Vec<i64> = nesting.labels.iter().map(|l| l.node_id).collect();
-    assert!(labelled.contains(&1), "depth 9 is labelled: {nesting:?}");
+    let labelled: Vec<Option<String>> = nesting.labels.iter().map(|l| l.node_id.clone()).collect();
+    assert!(labelled.contains(&Some(ident(1))), "depth 9 is labelled: {nesting:?}");
     assert!(
         nesting.labels.iter().all(|l| l.value >= 4 && (l.value as f64) > nesting.fence.unwrap()),
         "every label is above the fence and at or above the threshold: {nesting:?}"
@@ -590,7 +734,7 @@ fn fewer_than_eight_units_emit_no_label() {
     eight.nodes.push(node(99, "g99", NodeKind::Function, "src/x.rs", None));
     eight.functions.push(row(99));
     let nesting = eight.rank().outliers.into_iter().find(|m| m.measure == "nesting").unwrap();
-    assert_eq!(nesting.labels.iter().map(|l| l.node_id).collect::<Vec<_>>(), [1]);
+    assert_eq!(nesting.labels.iter().map(|l| l.node_id.clone()).collect::<Vec<_>>(), [Some(ident(1))]);
 }
 
 /// Calibration is per member ([BR-56]): the same depth-6 function is an
@@ -607,7 +751,7 @@ fn each_member_is_calibrated_on_its_own_distribution() {
     for id in 3..=11 {
         deep.function_mut(id).max_nesting_depth = Some(6);
     }
-    let labels_of = |m: &Member| -> Vec<i64> {
+    let labels_of = |m: &Member| -> Vec<Option<String>> {
         m.rank()
             .outliers
             .into_iter()
@@ -615,13 +759,13 @@ fn each_member_is_calibrated_on_its_own_distribution() {
             .unwrap()
             .labels
             .iter()
-            .map(|l| l.node_id)
+            .map(|l| l.node_id.clone())
             .collect()
     };
     let alone = labels_of(&shallow);
-    assert!(alone.contains(&1), "depth 6 stands out among shallow functions: {alone:?}");
+    assert!(alone.contains(&Some(ident(1))), "depth 6 stands out among shallow functions: {alone:?}");
     assert!(
-        !labels_of(&deep).contains(&1),
+        !labels_of(&deep).contains(&Some(ident(1))),
         "depth 6 is ordinary where every function is that deep"
     );
     assert_eq!(labels_of(&shallow), alone, "the other member changed nothing here");
@@ -696,10 +840,14 @@ fn a_group_mass_is_members_times_the_rounded_mean_of_recorded_lines() {
     let ranking = member.rank();
     let mass = ranking.outliers.iter().find(|m| m.measure == "duplicate_mass").unwrap();
     assert_eq!(mass.units, 10);
-    let labels: Vec<(i64, i64)> = mass.labels.iter().map(|l| (l.node_id, l.value)).collect();
-    assert_eq!(labels, [(19, 903)], "{mass:?}");
+    let labels: Vec<(Option<String>, i64)> = mass.labels.iter().map(|l| (l.node_id.clone(), l.value)).collect();
     assert_eq!(
-        unit(&ranking, FixUnitKind::DuplicateGroup, 19).detail,
+        labels,
+        [(Some(group_ident(FixUnitKind::DuplicateGroup, &[19, 20, 21])), 903)],
+        "{mass:?}"
+    );
+    assert_eq!(
+        group(&ranking, FixUnitKind::DuplicateGroup, &[19, 20, 21]).detail,
         "duplicate group · 3 members × 301 lines"
     );
 }
@@ -721,9 +869,12 @@ fn labels_are_capped_but_a_ranked_unit_keeps_a_label_the_cap_cut() {
     let nesting = ranking.outliers.iter().find(|m| m.measure == "nesting").unwrap();
     assert_eq!(nesting.labelled, 12);
     assert_eq!(nesting.labels.len(), cap);
-    assert!(nesting.labels.iter().all(|l| l.node_id > 62), "the cap keeps the deepest: {nesting:?}");
+    assert!(
+        nesting.labels.iter().all(|l| l.node_id.as_deref() > Some(ident(62).as_str())),
+        "the cap keeps the deepest: {nesting:?}"
+    );
     let first = &ranking.units[0];
-    assert_eq!((first.node_id, first.outliers.as_slice()), (61, &["nesting"][..]));
+    assert_eq!((first.node_id.clone(), first.outliers.as_slice()), (Some(ident(61)), &["nesting"][..]));
 }
 
 /// A ranked unit carries every label of its own measures: f2 (CC 20, nesting
@@ -740,7 +891,7 @@ fn a_ranked_unit_carries_the_labels_of_each_of_its_measures() {
     assert_eq!(unit(&ranking, FixUnitKind::Function, 2).outliers, ["cc", "nesting"]);
     let span = ranking.outliers.iter().find(|m| m.measure == "span").unwrap();
     assert_eq!(span.units, 9);
-    assert_eq!(span.labels.iter().map(|l| l.node_id).collect::<Vec<_>>(), [40]);
+    assert_eq!(span.labels.iter().map(|l| l.node_id.clone()).collect::<Vec<_>>(), [Some(ident(40))]);
     assert_eq!(unit(&ranking, FixUnitKind::Class, 40).outliers, ["span"]);
 }
 
@@ -787,12 +938,15 @@ fn a_value_exactly_at_the_threshold_is_labelled() {
     let mut member = plain_member(14);
     member.function_mut(14).max_nesting_depth = Some(Thresholds::default().nest);
     let nesting = member.rank().outliers.into_iter().find(|m| m.measure == "nesting").unwrap();
-    assert_eq!(nesting.labels.iter().map(|l| (l.node_id, l.value)).collect::<Vec<_>>(), [(14, 4)]);
+    assert_eq!(
+        nesting.labels.iter().map(|l| (l.node_id.clone(), l.value)).collect::<Vec<_>>(),
+        [(Some(ident(14)), 4)]
+    );
 }
 
-/// Labels are ordered by value descending, then node id: among twenty depth-1
+/// Labels are ordered by value descending, then identity: among twenty depth-1
 /// functions, depths 9, 6 and a second 9 label as f30, f32 (the two 9s, lower
-/// id first), then f31.
+/// identity first), then f31.
 #[test]
 fn labels_order_by_value_descending_then_node_id() {
     let mut member = plain_member(32);
@@ -800,6 +954,6 @@ fn labels_order_by_value_descending_then_node_id() {
         member.function_mut(id).max_nesting_depth = Some(depth);
     }
     let nesting = member.rank().outliers.into_iter().find(|m| m.measure == "nesting").unwrap();
-    let order: Vec<(i64, i64)> = nesting.labels.iter().map(|l| (l.node_id, l.value)).collect();
-    assert_eq!(order, [(30, 9), (32, 9), (31, 6)]);
+    let order: Vec<(Option<String>, i64)> = nesting.labels.iter().map(|l| (l.node_id.clone(), l.value)).collect();
+    assert_eq!(order, [(Some(ident(30)), 9), (Some(ident(32)), 9), (Some(ident(31)), 6)]);
 }

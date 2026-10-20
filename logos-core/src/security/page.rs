@@ -28,7 +28,7 @@ use chrono::NaiveDate;
 use serde::Serialize;
 
 use super::context::{FindingContext, UnboundBecause};
-use super::{FindingsFilter, ScanEnvironment, SecurityFindings, SecurityGateBand, SecurityStatus};
+use super::{FindingTally, FindingsFilter, ScanEnvironment, SecurityFindings, SecurityGateBand, SecurityStatus};
 use crate::history::security::owasp::{CategoryCoverage, FindingClassification};
 use crate::history::security::OwaspEdition;
 use crate::tools::Manifest;
@@ -43,6 +43,12 @@ pub struct SecurityPage {
     /// Every stored finding (unfiltered: the page filters), classified under
     /// 2025, each in graph context.
     pub findings: SecurityFindings,
+    /// The stored findings the page counts — fresh per finding, unsuppressed —
+    /// and those it leaves out: the figure the workspace roll-up row and Files &
+    /// Risk read too ([S-760]).
+    ///
+    /// [S-760]: ../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
+    pub counts: FindingTally,
     /// The same findings under each edition, 2025 then 2021.
     pub editions: Vec<EditionClassification>,
     /// The `[security]` gate's verdict; `None` without the table.

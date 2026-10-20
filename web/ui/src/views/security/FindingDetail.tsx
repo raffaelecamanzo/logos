@@ -8,7 +8,14 @@
  * sizes only, so the lists come from `GET /api/v1/impact` on the enclosing
  * symbol — the same answer `logos impact` gives. No source snippet is rendered;
  * a secret-class message reads `[redacted]`.
+ *
+ * The detail sits below every other widget, so choosing a finding would change
+ * nothing the reader can see. Each `shown` request (HF-1) therefore moves focus
+ * to the heading, for keyboard and screen-reader users, and scrolls the widget
+ * into view — smoothly, unless the user prefers reduced motion.
  */
+
+import { useEffect, useRef } from "react";
 
 import { fetchImpact } from "../../api/client.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
@@ -21,12 +28,33 @@ import styles from "./SecurityView.module.css";
 export function FindingDetail({
   finding,
   classification,
+  shown,
 }: {
   finding: SecurityFinding | null;
   classification: Classification | null;
+  /** How many times a finding has been chosen: each increment brings the detail into view. */
+  shown: number;
 }) {
+  const heading = useRef<HTMLSpanElement>(null);
+  // Only a change in `shown` is a Show: the counter outlives this widget, which
+  // unmounts while a reload finds no findings, so a remount must not replay it.
+  const seen = useRef(shown);
+  useEffect(() => {
+    const el = heading.current;
+    if (shown === seen.current || el === null) return;
+    seen.current = shown;
+    // The scroll below is the one that moves the page; focusing must not jump it first.
+    el.focus({ preventScroll: true });
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    (el.closest(`.${styles.detail}`) ?? el).scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+  }, [shown]);
+  const title = (
+    <span ref={heading} tabIndex={-1} className={styles.detailTitle}>
+      Finding detail
+    </span>
+  );
   if (finding === null || classification === null) {
-    return <Widget title="Finding detail" copy={findingDetail} absence={SECURITY_ABSENCE.noneSelected} />;
+    return <Widget title={title} className={styles.detail} copy={findingDetail} absence={SECURITY_ABSENCE.noneSelected} />;
   }
   const { enclosing, reachability, blast_radius: blast } = finding.context;
   const reach =
@@ -37,7 +65,8 @@ export function FindingDetail({
         : CONTEXT_TEXT.unknown(reachability.unresolved_because);
   return (
     <Widget
-      title="Finding detail"
+      title={title}
+      className={styles.detail}
       badge={<Badge tone="muted">{finding.severity}</Badge>}
       copy={findingDetail}
       figure={
@@ -47,6 +76,14 @@ export function FindingDetail({
       }
     >
       <dl className={styles.facts}>
+        {finding.severity_reason !== undefined && (
+          <>
+            <dt>Severity</dt>
+            <dd>
+              {finding.severity}: {finding.severity_reason}
+            </dd>
+          </>
+        )}
         <dt>Message</dt>
         <dd>{findingMessage(finding)}</dd>
         <dt>OWASP</dt>
@@ -91,7 +128,11 @@ const ENTRY_COLUMNS: Column<ImpactEntry>[] = [
   { key: "dist", header: "Distance", numeric: true, sortValue: (e) => e.distance, cell: (e) => e.distance },
 ];
 
-/** The blast-radius lists, from `impact` on the enclosing symbol. */
+/**
+ * The blast-radius lists, from `impact` on the enclosing symbol. Each list — its
+ * title and table, or its empty-state sentence — is one `impactSection`, and a
+ * section that follows another is spaced from it by one token.
+ */
 function ImpactLists({ symbol }: { symbol: string }) {
   const impact = useApiResource<ImpactResult>(() => fetchImpact(symbol), [symbol]);
   return (
@@ -110,6 +151,7 @@ function ImpactLists({ symbol }: { symbol: string }) {
         ) : (
           <>
             <DataTable
+              className={styles.impactSection}
               caption={result.upstream_label}
               captionVisible
               columns={ENTRY_COLUMNS}
@@ -119,6 +161,7 @@ function ImpactLists({ symbol }: { symbol: string }) {
               empty="Nothing depends on it."
             />
             <DataTable
+              className={styles.impactSection}
               caption={result.downstream_label}
               captionVisible
               columns={ENTRY_COLUMNS}

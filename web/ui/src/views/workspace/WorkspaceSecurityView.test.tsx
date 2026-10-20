@@ -18,13 +18,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceRoster, WorkspaceSecurityAnswer } from "../../api/types.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
-import { OWASP_TEXT } from "../../copy/security.copy.ts";
+import { FINDING_COUNT_TEXT, OWASP_TEXT } from "../../copy/security.copy.ts";
 import {
   memberSecurity,
   WORKSPACE_SECURITY_ABSENCE,
   WORKSPACE_SECURITY_TEXT,
   workspaceOwasp,
 } from "../../copy/workspaceSecurity.copy.ts";
+import { SCOPED_ONLY_COUNTED, SCOPED_ONLY_EXCLUDED } from "../../test/scopedOnlyProject.ts";
 import { expectOneWidgetStack, widgetTitled } from "../../test/widgetStack.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -94,22 +95,22 @@ function withSecurity(patch: Partial<WorkspaceSecurityAnswer["security"]>): Work
 describe("the member roll-up (FR-SC-16)", () => {
   it("reads never run in every figure cell of a never-scanned member — never 0", async () => {
     await mount();
-    expect(figureCells(memberRow("idle"))).toEqual(Array(5).fill(WORKSPACE_SECURITY_TEXT.neverRun));
+    expect(figureCells(memberRow("idle"))).toEqual(Array(6).fill(WORKSPACE_SECURITY_TEXT.neverRun));
   });
 
   it("states the scanned member's fresh, unsuppressed counts and its scanners' freshness", async () => {
     await mount();
     const row = memberRow("scanned");
-    // critical, high, medium, low, info: the suppressed injection and the stale
+    // critical, high, medium, low, info, unrated: the suppressed injection and the stale
     // tool's finding are not here.
-    expect(figureCells(row)).toEqual(["0", "1", "1", "0", "0"]);
+    expect(figureCells(row)).toEqual(["0", "1", "1", "0", "0", "0"]);
     expect(within(row).getByText(WORKSPACE_SECURITY_TEXT.scannersFresh(1, 2))).toBeInTheDocument();
   });
 
   it("keeps an unopenable member as a named row with its reason, beside the others", async () => {
     await mount();
     const row = memberRow("broken");
-    expect(figureCells(row)).toEqual(Array(5).fill(WORKSPACE_SECURITY_TEXT.notRead));
+    expect(figureCells(row)).toEqual(Array(6).fill(WORKSPACE_SECURITY_TEXT.notRead));
     expect(within(row).getByText(/unable to open database file/)).toBeInTheDocument();
     // It hides neither other member.
     expect(memberRow("scanned")).toBeInTheDocument();
@@ -130,57 +131,100 @@ describe("the member roll-up (FR-SC-16)", () => {
   it("says the totals count only fresh, unsuppressed findings, over which members, and what they left out", async () => {
     await mount();
     const members = widgetTitled(document.body, "Members");
-    expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.totals(0, 1, 1, 0, 0))).toBeInTheDocument();
-    expect(WORKSPACE_SECURITY_TEXT.totals(0, 1, 1, 0, 0)).toContain("fresh, unsuppressed findings only");
+    expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.totals(0, 1, 1, 0, 0, 0))).toBeInTheDocument();
+    expect(WORKSPACE_SECURITY_TEXT.totals(0, 1, 1, 0, 0, 0)).toContain("fresh, unsuppressed findings only");
     expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.denominator(1, 3, 1))).toBeInTheDocument();
     expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.excluded(1, 1))).toBeInTheDocument();
   });
 
   it("puts each severity in its own column and its own place in the totals", async () => {
-    // Five distinct figures, so no two columns or sentence slots can be swapped
+    // Six distinct figures, so no two columns or sentence slots can be swapped
     // unnoticed (the real payload's critical and low are both 0).
-    const distinct = { critical: 3, high: 1, medium: 4, low: 2, info: 5, total: 15 };
+    const distinct = { critical: 3, high: 1, medium: 4, low: 2, info: 5, unrated: 6, total: 21 };
     const members = REAL.security.members.map((m) =>
       m.member === "scanned" && m.result ? { ...m, result: { ...m.result, findings: distinct } } : m,
     );
     await mount(withSecurity({ members, totals: distinct }));
-    expect(figureCells(memberRow("scanned"))).toEqual(["3", "1", "4", "2", "5"]);
+    expect(figureCells(memberRow("scanned"))).toEqual(["3", "1", "4", "2", "5", "6"]);
     const headers = within(widgetTitled(document.body, "Members"))
       .getAllByRole("columnheader")
       .slice(2)
       .map((h) => h.textContent?.replace(/[↕↑↓]/g, "").trim());
-    expect(headers).toEqual(["Critical", "High", "Medium", "Low", "Info"]);
+    expect(headers).toEqual(["Critical", "High", "Medium", "Low", "Info", "Unrated"]);
     const sentence = within(widgetTitled(document.body, "Members")).getByText(/critical ·/).textContent;
-    expect(sentence).toBe("3 critical · 1 high · 4 medium · 2 low · 5 info — fresh, unsuppressed findings only");
+    expect(sentence).toBe("3 critical · 1 high · 4 medium · 2 low · 5 info · 6 unrated — fresh, unsuppressed findings only");
   });
 
-  it("reads no fresh scan in every figure cell of a member whose reports are all stale", async () => {
+  it("counts a scoped-only member's findings by their own freshness, and states its reports apart (S-760)", async () => {
     const members = REAL.security.members.map((m) =>
-      m.member === "scanned" && m.result ? { ...m, result: { ...m.result, scan: "stale" as const, findings: null } } : m,
+      m.member === "scanned" && m.result
+        ? {
+            ...m,
+            result: { ...m.result, scan: "stale" as const, reports_stored: 1, reports_fresh: 0, findings: SCOPED_ONLY_COUNTED, excluded: SCOPED_ONLY_EXCLUDED },
+          }
+        : m,
     );
-    await mount(withSecurity({ members }));
-    // Neither a count nor "never run": reports are stored, and none is current.
-    expect(figureCells(memberRow("scanned"))).toEqual(Array(5).fill(WORKSPACE_SECURITY_TEXT.stale));
+    await mount(withSecurity({ members, totals: SCOPED_ONLY_COUNTED, excluded: SCOPED_ONLY_EXCLUDED, reports_stored: 1, reports_fresh: 0 }));
+    // The figure the member's own page states, not "no fresh scan".
+    expect(figureCells(memberRow("scanned"))).toEqual(["0", "0", "2", "0", "0", "0"]);
+    const { critical, high, medium, low, info, unrated } = SCOPED_ONLY_COUNTED;
+    const widget = widgetTitled(document.body, "Members");
+    expect(within(widget).getByText(FINDING_COUNT_TEXT.totals(critical, high, medium, low, info, unrated))).toBeInTheDocument();
+    expect(within(widget).getByText(WORKSPACE_SECURITY_TEXT.reportsFresh(0, 1))).toBeInTheDocument();
+  });
+
+  it("puts each left-out figure in its own place, in the spelling the manual gives (S-760)", async () => {
+    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1 } }));
+    const members = widgetTitled(document.body, "Members");
+    expect(within(members).getByText("Left out: 3 findings in files changed since the scan, and 1 suppressed.")).toBeInTheDocument();
+  });
+
+  it("says the OWASP counts rest on fresh reports only, not on the members counted (S-760)", async () => {
+    await mount();
+    const owasp = widgetTitled(document.body, "OWASP Top 10");
+    expect(
+      within(owasp).getByText("Category counts come from fresh reports only: 1 of 2 reports fresh at HEAD."),
+    ).toBeInTheDocument();
+    expect(within(owasp).queryByText(WORKSPACE_SECURITY_TEXT.denominator(1, 3, 1))).toBeNull();
+  });
+
+  it("states how many reports are fresh as its own field beside the totals (S-760)", async () => {
+    await mount();
+    const members = widgetTitled(document.body, "Members");
+    expect(WORKSPACE_SECURITY_TEXT.reportsFresh(1, 2)).toBe("1 of 2 reports fresh at HEAD.");
+    expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.reportsFresh(1, 2))).toBeInTheDocument();
+    expect(WORKSPACE_SECURITY_TEXT.reportsFresh(0, 1)).toBe("0 of 1 report fresh at HEAD.");
   });
 
   it("shows a member whose only findings are info, never a row of zeros", async () => {
-    const infoOnly = { critical: 0, high: 0, medium: 0, low: 0, info: 2, total: 2 };
+    const infoOnly = { critical: 0, high: 0, medium: 0, low: 0, info: 2, unrated: 0, total: 2 };
     const members = REAL.security.members.map((m) =>
       m.member === "scanned" && m.result ? { ...m, result: { ...m.result, findings: infoOnly } } : m,
     );
     await mount(withSecurity({ members, totals: infoOnly }));
-    expect(figureCells(memberRow("scanned"))).toEqual(["0", "0", "0", "0", "2"]);
+    expect(figureCells(memberRow("scanned"))).toEqual(["0", "0", "0", "0", "2", "0"]);
     const widget = widgetTitled(document.body, "Members");
-    expect(within(widget).getByText(WORKSPACE_SECURITY_TEXT.totals(0, 0, 0, 0, 2))).toBeInTheDocument();
-    expect(WORKSPACE_SECURITY_TEXT.totals(0, 0, 0, 0, 2)).toContain("2 info");
+    expect(within(widget).getByText(WORKSPACE_SECURITY_TEXT.totals(0, 0, 0, 0, 2, 0))).toBeInTheDocument();
+    expect(WORKSPACE_SECURITY_TEXT.totals(0, 0, 0, 0, 2, 0)).toContain("2 info");
   });
 
-  it("states the absence when no member has a fresh scan, rather than totals of 0", async () => {
-    const zero = { critical: 0, high: 0, medium: 0, low: 0, info: 0, total: 0 };
+  it("shows a member whose only findings are unrated in their own column, never as medium (S-768)", async () => {
+    const unratedOnly = { critical: 0, high: 0, medium: 0, low: 0, info: 0, unrated: 3, total: 3 };
+    const members = REAL.security.members.map((m) =>
+      m.member === "scanned" && m.result ? { ...m, result: { ...m.result, findings: unratedOnly } } : m,
+    );
+    await mount(withSecurity({ members, totals: unratedOnly }));
+    expect(figureCells(memberRow("scanned"))).toEqual(["0", "0", "0", "0", "0", "3"]);
+    const sentence = within(widgetTitled(document.body, "Members")).getByText(/critical ·/).textContent;
+    expect(sentence).toBe("0 critical · 0 high · 0 medium · 0 low · 0 info · 3 unrated — fresh, unsuppressed findings only");
+  });
+
+  it("states the absence when no member has a stored scan, rather than totals of 0", async () => {
+    const zero = { critical: 0, high: 0, medium: 0, low: 0, info: 0, unrated: 0, total: 0 };
     await mount(withSecurity({ members_counted: 0, totals: zero }));
     const members = widgetTitled(document.body, "Members");
-    expect(within(members).getByText(WORKSPACE_SECURITY_ABSENCE.noneFresh)).toBeInTheDocument();
-    expect(within(members).queryByText(WORKSPACE_SECURITY_TEXT.totals(0, 0, 0, 0, 0))).toBeNull();
+    expect(within(members).getByText(WORKSPACE_SECURITY_ABSENCE.noneScanned)).toBeInTheDocument();
+    expect(within(members).queryByText(WORKSPACE_SECURITY_TEXT.totals(0, 0, 0, 0, 0, 0))).toBeNull();
   });
 
   it("states that nothing is summed when no member could be read", async () => {

@@ -115,6 +115,185 @@ pub struct Rules {
     /// [BR-65]: ../../../../docs/specs/software-spec.md#328-security-findings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<SecurityRules>,
+
+    /// The branch-delta policy (`[review]`, [FR-GV-25], [ADR-89]) — `None` when
+    /// the contract has no such table. Like `[security]`, its presence is the
+    /// whole opt-in: without it `gate` and `session_end` are [FR-GV-05]
+    /// unchanged, and the serialised contract carries no `review` key.
+    ///
+    /// [FR-GV-25]: ../../../../docs/specs/requirements/FR-GV-25.md
+    /// [FR-GV-05]: ../../../../docs/specs/requirements/FR-GV-05.md
+    /// [ADR-89]: ../../../../docs/specs/architecture/decisions/ADR-89.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewRules>,
+}
+
+/// `rules.toml [review]` — the branch-delta gate ([FR-GV-25], [ADR-89]).
+///
+/// ```toml
+/// [review]
+/// gate_dimensions = ["nesting", "conciseness", "cohesion", "focus", "uniqueness"]  # the default
+/// drift_budget = "report"   # the default; or a number of signal points, e.g. 2
+/// accept = "owner"          # the default; or "agent"
+/// trend_window = 2          # the default; consecutive declines that warn
+/// ```
+///
+/// - **Per-symbol entries gate.** A `new` or `worsened` offender of the branch
+///   delta ([FR-GV-24]) in a dimension `gate_dimensions` names fails `gate` and
+///   `session_end`. Only a per-symbol dimension may be named
+///   ([`PER_SYMBOL_DIMENSIONS`](Self::PER_SYMBOL_DIMENSIONS)); a distributional
+///   one never gates per symbol ([BR-95]) and naming it fails the load.
+/// - **The aggregate is a drift budget.** The signal's drop below the baseline
+///   fails the gate only past `drift_budget` points; `"report"` reports it and
+///   never fails on it. It replaces the `baseline − ε` comparison.
+/// - **Who may waive a gating entry** ([BR-96]): `accept`. Under `"owner"`
+///   only a human can. No action waives one yet — the entries are judged
+///   against the merge-base, which no `gate --save` moves — so the two values
+///   behave alike until a waiver exists.
+/// - **A distributional dimension in decline warns** ([FR-GV-27]): one that
+///   declined in each of the last `trend_window` recorded snapshots that moved
+///   it raises a warning on `scan`, `gate` and `review`. It never fails.
+///
+/// [FR-GV-27]: ../../../../docs/specs/requirements/FR-GV-27.md
+/// [BR-96]: ../../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+/// [FR-GV-24]: ../../../../docs/specs/requirements/FR-GV-24.md
+/// [FR-GV-25]: ../../../../docs/specs/requirements/FR-GV-25.md
+/// [ADR-89]: ../../../../docs/specs/architecture/decisions/ADR-89.md
+/// [BR-95]: ../../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRules {
+    /// The dimensions whose `new`/`worsened` entries gate, as the branch delta
+    /// spells them.
+    #[serde(default = "ReviewRules::default_gate_dimensions")]
+    pub gate_dimensions: Vec<String>,
+    /// How far the signal may fall below the baseline before the gate fails.
+    #[serde(default)]
+    pub drift_budget: DriftBudget,
+    /// Who may waive a gating entry.
+    #[serde(default)]
+    pub accept: ReviewAccept,
+    /// How many consecutive declines of one distributional dimension raise
+    /// the trend warning; at least 1.
+    #[serde(default = "ReviewRules::default_trend_window")]
+    pub trend_window: u32,
+}
+
+impl Default for ReviewRules {
+    fn default() -> Self {
+        Self {
+            gate_dimensions: Self::default_gate_dimensions(),
+            drift_budget: DriftBudget::default(),
+            accept: ReviewAccept::default(),
+            trend_window: Self::default_trend_window(),
+        }
+    }
+}
+
+/// `[review] accept`: who may waive a gating entry ([BR-96]).
+///
+/// [BR-96]: ../../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewAccept {
+    /// Only a human (`gate --save --reason`, which the guard asks about).
+    #[default]
+    Owner,
+    /// An attribution an agent recorded may waive one too.
+    Agent,
+}
+
+impl ReviewRules {
+    /// The dimensions whose offenders are judged one symbol at a time: deep
+    /// nesting, brain methods (complexity), low cohesion, god containers
+    /// (size), near-clones (duplication), and dead or duplicate functions.
+    pub const PER_SYMBOL_DIMENSIONS: [&'static str; 6] =
+        ["nesting", "conciseness", "cohesion", "focus", "uniqueness", "redundancy"];
+
+    /// The dimensions that score a distribution or the module graph as a
+    /// whole: any feature moves them, so they never gate per symbol ([BR-95]).
+    ///
+    /// [BR-95]: ../../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+    pub const DISTRIBUTIONAL_DIMENSIONS: [&'static str; 4] = ["equality", "modularity", "acyclicity", "depth"];
+
+    /// Every per-symbol dimension but Redundancy, whose dead-code verdict rests
+    /// on cross-file reachability: it gates only when named.
+    fn default_gate_dimensions() -> Vec<String> {
+        Self::PER_SYMBOL_DIMENSIONS[..5].iter().map(|d| (*d).to_string()).collect()
+    }
+
+    /// Two declines in a row: one is a feature, two are a direction.
+    fn default_trend_window() -> u32 {
+        2
+    }
+
+    /// Reject a `gate_dimensions` entry that is not a per-symbol dimension —
+    /// a distributional one by [BR-95], anything else as unknown — and a
+    /// `drift_budget` that is negative or not a finite number, and a
+    /// `trend_window` of 0.
+    ///
+    /// [BR-95]: ../../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+    fn validate(&self) -> Result<(), super::error::ConfigError> {
+        for (idx, dimension) in self.gate_dimensions.iter().enumerate() {
+            if Self::PER_SYMBOL_DIMENSIONS.contains(&dimension.as_str()) {
+                continue;
+            }
+            let message = if Self::DISTRIBUTIONAL_DIMENSIONS.contains(&dimension.as_str()) {
+                format!(
+                    "{dimension:?} is a distributional dimension and never gates per symbol; \
+                     its drift is bounded by drift_budget"
+                )
+            } else {
+                format!(
+                    "{dimension:?} is not a per-symbol dimension: use {}",
+                    Self::PER_SYMBOL_DIMENSIONS.join(", ")
+                )
+            };
+            return Err(super::error::ConfigError::InvalidValue {
+                key: format!("review.gate_dimensions[{idx}]"),
+                message,
+            });
+        }
+        if let DriftBudget::Points(points) = self.drift_budget {
+            if !(points.is_finite() && points >= 0.0) {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: "review.drift_budget".to_string(),
+                    message: format!("{points} must be \"report\" or a non-negative number of signal points"),
+                });
+            }
+        }
+        if self.trend_window == 0 {
+            return Err(super::error::ConfigError::InvalidValue {
+                key: "review.trend_window".to_string(),
+                message: "0 must be at least 1: the number of consecutive declines that warn".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// `[review] drift_budget`: `"report"` (the default) or a number of 0–10000
+/// signal points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, expecting = "\"report\" or a number of signal points")]
+pub enum DriftBudget {
+    /// Report the drift; never fail on the aggregate alone.
+    Report(ReportOnly),
+    /// Fail when the signal falls more than this many points below the baseline.
+    Points(f64),
+}
+
+impl Default for DriftBudget {
+    fn default() -> Self {
+        Self::Report(ReportOnly::Report)
+    }
+}
+
+/// The one spelling of a report-only [`DriftBudget`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportOnly {
+    Report,
 }
 
 /// `rules.toml [security]` — the security gate ([FR-SC-10], [ADR-79] §6–7).
@@ -132,6 +311,9 @@ pub struct Rules {
 ///   Findings already recorded are tolerated; the set lives in `history.db`.
 /// - **Caps.** `max_severity` and `fail_on_owasp` fail on any unsuppressed
 ///   finding they match, recorded or not.
+/// - **Unrated.** A finding whose report gave it no rating reads `unrated`
+///   (S-768); the ratchet and `max_severity` gate it as `medium`. Neither
+///   threshold may be `unrated`.
 /// - **Required scanners.** A scanner named here that has no fresh scan at HEAD
 ///   — never run, stale, not installed or disabled — makes `check` and `gate`
 ///   exit **5**. A scanner this list does not name never does.
@@ -192,9 +374,22 @@ impl SecurityRules {
         categories
     }
 
-    /// Reject a blank scanner name and an `fail_on_owasp` entry that is not an
-    /// OWASP Top 10 category (`A01`..`A10`, optionally `:2025` or `:2021`).
+    /// Reject a blank scanner name, an `fail_on_owasp` entry that is not an
+    /// OWASP Top 10 category (`A01`..`A10`, optionally `:2025` or `:2021`),
+    /// and `unrated` as a threshold: it is no rank, and an unrated finding is
+    /// gated as `medium` ([`crate::model::Severity::gated_as`]).
     fn validate(&self) -> Result<(), super::error::ConfigError> {
+        let thresholds = [("ratchet_min_severity", Some(self.ratchet_min_severity)), ("max_severity", self.max_severity)];
+        for (key, threshold) in thresholds {
+            if threshold == Some(crate::model::Severity::Unrated) {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: format!("security.{key}"),
+                    message: "\"unrated\" is not a threshold: an unrated finding is gated as medium, so name a \
+                              rated severity (info, low, medium, high or critical)"
+                        .to_string(),
+                });
+            }
+        }
         for (idx, name) in self.required_scanners.iter().enumerate() {
             if name.trim().is_empty() {
                 return Err(super::error::ConfigError::InvalidValue {
@@ -404,6 +599,16 @@ impl CountBudget {
         match self {
             CountBudget::Absolute(max) => absolute_exceeded(count, *max, key, noun),
             CountBudget::Baseline(b) => baseline_exceeded(b, count, key, noun),
+        }
+    }
+
+    /// The count the budget lets through: the scalar, or `baseline + delta`
+    /// (saturating) — the ceiling [`exceeded_message`](Self::exceeded_message)
+    /// compares against.
+    pub(crate) fn ceiling(&self) -> u64 {
+        match self {
+            CountBudget::Absolute(max) => u64::from(*max),
+            CountBudget::Baseline(b) => baseline_ceiling(b),
         }
     }
 }
@@ -1319,6 +1524,11 @@ impl Rules {
         if let Some(security) = &self.security {
             security.validate()?;
         }
+        // FR-GV-25 / BR-95: a distributional or unknown dimension, or a
+        // negative drift budget, fails at load (exit 2).
+        if let Some(review) = &self.review {
+            review.validate()?;
+        }
         Ok(())
     }
 }
@@ -2118,14 +2328,154 @@ mod tests {
             ("fail_on_owasp = [\"A05:2017\"]", "security.fail_on_owasp[0]"),
             ("fail_on_owasp = [\"A05:\"]", "security.fail_on_owasp[0]"),
             ("fail_on_owasp = [\"A10\", \"B01\"]", "security.fail_on_owasp[1]"),
+            ("ratchet_min_severity = \"unrated\"", "security.ratchet_min_severity"),
+            ("max_severity = \"unrated\"", "security.max_severity"),
         ] {
             let rules: Rules = toml::from_str(&format!("[security]\n{bad}\n")).unwrap();
             let err = rules.validate().expect_err(bad).to_string();
             assert!(err.contains(key), "{bad}: {err}");
         }
-        for ok in ["required_scanners = [\"s\"]", "fail_on_owasp = [\"A10\", \"A01:2025\", \"A09:2021\"]"] {
+        for ok in [
+            "required_scanners = [\"s\"]",
+            "fail_on_owasp = [\"A10\", \"A01:2025\", \"A09:2021\"]",
+            "ratchet_min_severity = \"medium\"\nmax_severity = \"medium\"",
+        ] {
             let rules: Rules = toml::from_str(&format!("[security]\n{ok}\n")).unwrap();
             rules.validate().unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
+    }
+
+    // ── FR-GV-25 (S-754): the `[review]` table ────────────────────────────────
+
+    /// An empty table gates the five default per-symbol dimensions and reports
+    /// the drift; a full one parses each key as written, an integer budget
+    /// included.
+    #[test]
+    fn the_review_table_parses_with_its_defaults() {
+        let rules: Rules = toml::from_str("[review]\n").unwrap();
+        rules.validate().unwrap();
+        let table = rules.review.expect("an empty table is still present");
+        assert_eq!(table, ReviewRules::default());
+        assert_eq!(table.gate_dimensions, ["nesting", "conciseness", "cohesion", "focus", "uniqueness"]);
+        assert_eq!(table.drift_budget, DriftBudget::Report(ReportOnly::Report));
+        assert_eq!(table.accept, ReviewAccept::Owner);
+        for (text, accept) in [("owner", ReviewAccept::Owner), ("agent", ReviewAccept::Agent)] {
+            let rules: Rules = toml::from_str(&format!("[review]\naccept = \"{text}\"\n")).unwrap();
+            rules.validate().unwrap();
+            assert_eq!(rules.review.unwrap().accept, accept, "{text}");
+        }
+
+        for (budget, points) in [("2", 2.0), ("2.5", 2.5), ("0", 0.0)] {
+            let rules: Rules = toml::from_str(&format!(
+                "[review]\ngate_dimensions = [\"nesting\", \"redundancy\"]\ndrift_budget = {budget}\n"
+            ))
+            .unwrap();
+            rules.validate().unwrap();
+            let table = rules.review.unwrap();
+            assert_eq!(table.gate_dimensions, ["nesting", "redundancy"]);
+            assert_eq!(table.drift_budget, DriftBudget::Points(points), "{budget}");
+        }
+        let rules: Rules = toml::from_str("[review]\ndrift_budget = \"report\"\ngate_dimensions = []\n").unwrap();
+        rules.validate().unwrap();
+        assert!(rules.review.unwrap().gate_dimensions.is_empty(), "a drift-only policy is valid");
+    }
+
+    /// No table is `None` and the serialised contract carries no `review` key;
+    /// a present table round-trips through that JSON, `"report"` as a string.
+    #[test]
+    fn an_absent_review_table_leaves_the_serialised_contract_unchanged() {
+        let rules: Rules = toml::from_str("[constraints]\nmax_cc = 15\n").unwrap();
+        assert!(rules.review.is_none());
+        assert!(!serde_json::to_string(&rules).unwrap().contains("review"));
+
+        for text in ["[review]\n", "[review]\ndrift_budget = 2\ngate_dimensions = [\"focus\"]\n"] {
+            let rules: Rules = toml::from_str(text).unwrap();
+            let json = serde_json::to_string(&rules).unwrap();
+            assert_eq!(serde_json::from_str::<Rules>(&json).unwrap(), rules, "{json}");
+        }
+        let json = serde_json::to_string(&ReviewRules::default()).unwrap();
+        assert!(json.contains(r#""drift_budget":"report""#), "{json}");
+    }
+
+    /// A misconfigured table fails loud at load: an unknown key, a misspelt
+    /// budget word or a non-number at parse; a distributional or unknown
+    /// dimension, or a negative budget, at validation — each beside its near
+    /// miss, which passes.
+    #[test]
+    fn a_misconfigured_review_table_fails_loud() {
+        for bad in [
+            "trend_windw = 2",
+            "drift_budget = \"Report\"",
+            "drift_budget = \"reports\"",
+            "drift_budget = true",
+            "gate_dimensions = \"nesting\"",
+            "accept = \"Owner\"",
+            "accept = \"human\"",
+            "trend_window = -1",
+            "trend_window = 2.5",
+            "trend_window = \"2\"",
+        ] {
+            assert!(toml::from_str::<Rules>(&format!("[review]\n{bad}\n")).is_err(), "{bad} must not parse");
+        }
+        for (bad, key, says) in [
+            ("gate_dimensions = [\"equality\"]", "review.gate_dimensions[0]", "distributional"),
+            ("gate_dimensions = [\"nesting\", \"depth\"]", "review.gate_dimensions[1]", "distributional"),
+            ("gate_dimensions = [\"modularity\"]", "review.gate_dimensions[0]", "distributional"),
+            ("gate_dimensions = [\"acyclicity\"]", "review.gate_dimensions[0]", "distributional"),
+            ("gate_dimensions = [\"complexity\"]", "review.gate_dimensions[0]", "not a per-symbol dimension"),
+            ("gate_dimensions = [\"Nesting\"]", "review.gate_dimensions[0]", "not a per-symbol dimension"),
+            ("drift_budget = -1", "review.drift_budget", "non-negative"),
+            ("drift_budget = nan", "review.drift_budget", "non-negative"),
+            ("drift_budget = inf", "review.drift_budget", "non-negative"),
+            ("trend_window = 0", "review.trend_window", "at least 1"),
+        ] {
+            let rules: Rules = toml::from_str(&format!("[review]\n{bad}\n")).unwrap();
+            let err = rules.validate().expect_err(bad).to_string();
+            assert!(err.contains(key) && err.contains(says), "{bad}: {err}");
+        }
+        for ok in [
+            "gate_dimensions = [\"nesting\"]",
+            "gate_dimensions = [\"redundancy\"]",
+            "drift_budget = 0.0",
+            "drift_budget = \"report\"",
+            "trend_window = 1",
+        ] {
+            let rules: Rules = toml::from_str(&format!("[review]\n{ok}\n")).unwrap();
+            rules.validate().unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+    }
+
+    /// `trend_window` ([FR-GV-27]) defaults to 2, in an empty table as in the
+    /// default policy, and takes the number given.
+    ///
+    /// [FR-GV-27]: ../../../../docs/specs/requirements/FR-GV-27.md
+    #[test]
+    fn the_trend_window_defaults_to_two() {
+        assert_eq!(ReviewRules::default().trend_window, 2);
+        let rules: Rules = toml::from_str("[review]\n").unwrap();
+        assert_eq!(rules.review.unwrap().trend_window, 2);
+        let rules: Rules = toml::from_str("[review]\ntrend_window = 3\n").unwrap();
+        assert_eq!(rules.review.unwrap().trend_window, 3);
+    }
+
+    /// Every dimension the branch delta lists, and Modularity, is classified
+    /// exactly once: per-symbol or distributional. A dimension added to the
+    /// offender lists without a side here would be neither gateable nor named
+    /// in the BR-95 error.
+    #[test]
+    fn every_offender_dimension_is_either_per_symbol_or_distributional() {
+        let classified: Vec<&str> = ReviewRules::PER_SYMBOL_DIMENSIONS
+            .iter()
+            .chain(ReviewRules::DISTRIBUTIONAL_DIMENSIONS.iter())
+            .copied()
+            .collect();
+        let mut sorted = classified.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), classified.len(), "no dimension is on both sides: {classified:?}");
+        let mut listed: Vec<&str> = crate::models::quality::WorstOffenders::DIMENSIONS.to_vec();
+        listed.push("modularity");
+        listed.sort_unstable();
+        assert_eq!(sorted, listed);
     }
 }

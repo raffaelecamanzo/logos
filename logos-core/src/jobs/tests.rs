@@ -239,6 +239,85 @@ fn dropping_the_runner_kills_what_its_jobs_run() {
     }
 }
 
+/// Shutdown cancels every running job, of each kind and member, and returns
+/// once each has ended — not before, and not at the end of its grace: the
+/// children are gone and the cleanup the work does after the cancel has run.
+#[test]
+fn shutdown_cancels_every_running_job_and_waits_for_each_to_end() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = ScanJobs::new();
+    let mut started = Vec::new();
+    for (kind, name) in [(JobKind::SecurityScan, "a"), (JobKind::ToolInstall, "b")] {
+        let member = tmp.path().join(name);
+        let pids = tmp.path().join(format!("{name}.pids"));
+        let cleaned = tmp.path().join(format!("{name}.cleaned"));
+        let script = format!("sleep 60 & echo $$ $! > '{}'; wait", pids.display());
+        let marker = cleaned.clone();
+        jobs.start(kind, &member, move |ctx| {
+            let (mut child, _guard) = ChildGuard::spawn(Command::new("/bin/sh").args(["-c", &script]))?;
+            child.wait()?;
+            // Cleanup that takes a while, as removing a partial download may.
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::write(&marker, "")?;
+            if ctx.is_cancelled() {
+                return Err(Cancelled.into());
+            }
+            Ok(serde_json::json!("finished by itself"))
+        })
+        .unwrap();
+        started.push((kind, member, pids, cleaned));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !started.iter().all(|(.., pids, _)| std::fs::read_to_string(pids).is_ok_and(|s| s.ends_with('\n'))) {
+        assert!(Instant::now() < deadline, "the children never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let began = Instant::now();
+    assert!(jobs.shutdown(Duration::from_secs(30)), "every job ended within the grace");
+    // Woken as the last job ends, not at the end of the grace.
+    let waited = began.elapsed();
+    assert!(waited < Duration::from_secs(5), "shutdown returned once the jobs ended: {waited:?}");
+    for (kind, member, pids, cleaned) in &started {
+        let job = jobs.snapshot(*kind, member).expect("the job is known");
+        assert_eq!(job.state, JobState::Cancelled, "ended by the time shutdown returns: {job:?}");
+        assert!(cleaned.exists(), "{kind:?}: its cleanup ran before shutdown returned");
+        for pid in std::fs::read_to_string(pids).unwrap().split_whitespace().map(|p| p.parse::<u32>().unwrap()) {
+            assert!(gone(pid), "{kind:?}: process {pid} outlived the shutdown");
+        }
+    }
+}
+
+/// A job whose work never notices its cancel holds shutdown for the grace
+/// alone, and shutdown says it did not end.
+#[test]
+fn shutdown_waits_no_longer_than_its_grace() {
+    let jobs = ScanJobs::new();
+    let (release, hold) = mpsc::channel::<()>();
+    jobs.start(KIND, Path::new("/project"), move |_| {
+        hold.recv().ok();
+        Ok(serde_json::Value::Null)
+    })
+    .unwrap();
+    let began = Instant::now();
+    assert!(!jobs.shutdown(Duration::from_millis(200)), "the job is still running");
+    let waited = began.elapsed();
+    assert!(waited >= Duration::from_millis(200), "it waited the grace: {waited:?}");
+    assert!(waited < Duration::from_secs(5), "and no longer: {waited:?}");
+    release.send(()).unwrap();
+}
+
+/// With nothing running, shutdown returns at once.
+#[test]
+fn shutdown_with_no_running_job_returns_at_once() {
+    let jobs = ScanJobs::new();
+    jobs.start(KIND, Path::new("/project"), |_| Ok(serde_json::Value::Null)).unwrap();
+    let _ = ended(&jobs, Path::new("/project"));
+    let began = Instant::now();
+    assert!(jobs.shutdown(Duration::from_secs(30)));
+    assert!(began.elapsed() < Duration::from_secs(5));
+}
+
 /// A child's registration ends with its guard: a cancel after the spawning
 /// code is done with the child never reaches for its (possibly reused) id.
 #[test]
@@ -316,14 +395,16 @@ fn any_error_after_a_cancel_ends_the_job_cancelled() {
     assert_eq!((done.state, done.error), (JobState::Cancelled, None));
 }
 
-/// A kind started unless another runs (S-747: the scanner install and the
+/// A kind started exclusive of another (S-747: the scanner install and the
 /// scan) is refused while that other kind runs for the member, with its job
 /// returned and the work never run; another member, or the same kind, is not
 /// affected; once the other ends, it starts.
 #[test]
-fn a_start_unless_another_kind_runs_is_refused_while_it_runs() {
+fn an_exclusive_start_is_refused_while_an_excluded_kind_runs() {
+    let tmp = TempDir::new().unwrap();
     let jobs = ScanJobs::new();
     let member = Path::new("/project");
+    let lock_file = tmp.path().join("project.lock");
     let (release, hold) = mpsc::channel::<()>();
     let scan = jobs
         .start(JobKind::SecurityScan, member, move |_| {
@@ -334,27 +415,106 @@ fn a_start_unless_another_kind_runs_is_refused_while_it_runs() {
     let ran = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&ran);
     let refused = jobs
-        .start_unless(JobKind::ToolInstall, member, &[JobKind::SecurityScan], move |_| {
+        .start_exclusive(JobKind::ToolInstall, member, &lock_file, &[JobKind::SecurityScan], move |_| {
             counted.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::Value::Null)
         })
         .unwrap();
-    let blocking = refused.expect_err("an install beside a running scan is refused");
+    let Err(Refused::Running(blocking)) = refused else {
+        panic!("an install beside a running scan is refused by that scan: {refused:?}");
+    };
     assert_eq!((blocking.id, blocking.kind), (scan.job.id, JobKind::SecurityScan));
     assert!(jobs.snapshot(JobKind::ToolInstall, member).is_none(), "no install job is recorded");
 
     // Another member's install is independent of this member's scan.
     let other = jobs
-        .start_unless(JobKind::ToolInstall, Path::new("/other"), &[JobKind::SecurityScan], |_| Ok(serde_json::Value::Null))
+        .start_exclusive(JobKind::ToolInstall, Path::new("/other"), &tmp.path().join("other.lock"), &[JobKind::SecurityScan], |_| {
+            Ok(serde_json::Value::Null)
+        })
         .unwrap();
     assert!(other.is_ok(), "{other:?}");
 
     release.send(()).unwrap();
     assert_eq!(ended(&jobs, member).state, JobState::Completed);
     let started = jobs
-        .start_unless(JobKind::ToolInstall, member, &[JobKind::SecurityScan], move |_| Ok(serde_json::json!("installed")))
+        .start_exclusive(JobKind::ToolInstall, member, &lock_file, &[JobKind::SecurityScan], move |_| {
+            Ok(serde_json::json!("installed"))
+        })
         .unwrap()
         .expect("the scan ended, so the install starts");
     assert_eq!((started.joined, started.job.kind), (false, JobKind::ToolInstall));
     assert_eq!(ran.load(Ordering::SeqCst), 0, "the refused work never ran");
+}
+
+/// S-758: an exclusive job holds the project lock for as long as it runs — its
+/// work holds it on its own thread, a peek names the job, a second start of the
+/// same kind still joins it — and releases it before it reads ended, so the
+/// next start is never refused by a job that has finished.
+#[test]
+fn an_exclusive_job_holds_the_project_lock_while_it_runs_and_a_second_start_joins() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = ScanJobs::new();
+    let member = tmp.path();
+    let lock_file = tmp.path().join("run.lock");
+    let (seen, inside) = mpsc::channel::<bool>();
+    let (release, hold) = mpsc::channel::<()>();
+    let in_job = lock_file.clone();
+    let first = jobs
+        .start_exclusive(KIND, member, &lock_file, &[], move |_| {
+            seen.send(lock::held_here(&in_job)).unwrap();
+            hold.recv().ok();
+            Ok(serde_json::Value::Null)
+        })
+        .unwrap()
+        .expect("the project is free");
+    assert!(inside.recv_timeout(Duration::from_secs(10)).unwrap(), "the job's work holds the lock on its thread");
+
+    let busy = lock::peek(&lock_file).unwrap().expect("the running job holds the lock");
+    let holder = busy.holder.expect("the job wrote itself into the lock");
+    assert_eq!((holder.kind, holder.job, holder.pid), (KIND, Some(first.job.id), std::process::id()));
+
+    let second = jobs
+        .start_exclusive(KIND, member, &lock_file, &[], |_| Ok(serde_json::json!("a second scan")))
+        .unwrap()
+        .expect("a second start of the same kind is not refused by the lock its job holds");
+    assert_eq!((second.joined, second.job.id), (true, first.job.id));
+
+    release.send(()).unwrap();
+    assert_eq!(ended(&jobs, member).result, Some(serde_json::Value::Null), "the first job's work ran, not the joined one's");
+    assert_eq!(lock::peek(&lock_file).unwrap(), None, "the lock is free by the time the job reads ended");
+}
+
+/// S-758: while a scan or install started elsewhere holds the project lock, an
+/// exclusive start is refused naming it; its work never runs and no job is
+/// recorded.
+#[test]
+fn an_exclusive_start_is_refused_while_the_lock_is_held_elsewhere() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = ScanJobs::new();
+    let lock_file = tmp.path().join("run.lock");
+    let cli = lock::Holder { kind: JobKind::ToolInstall, surface: Some("cli".into()), job: None, pid: 4242, since: 0 };
+    let held = lock::ProjectLock::take(&lock_file, &cli).unwrap().unwrap();
+
+    let ran = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&ran);
+    let refused = jobs
+        .start_exclusive(KIND, tmp.path(), &lock_file, &[JobKind::ToolInstall], move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::Value::Null)
+        })
+        .unwrap();
+    let Err(Refused::Elsewhere(busy)) = refused else {
+        panic!("the held lock refuses the start: {refused:?}");
+    };
+    assert_eq!(busy.holder, Some(cli));
+    assert!(jobs.snapshot(KIND, tmp.path()).is_none(), "no job is recorded");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the refused work never ran");
+
+    drop(held);
+    let started = jobs
+        .start_exclusive(KIND, tmp.path(), &lock_file, &[], |_| Ok(serde_json::Value::Null))
+        .unwrap()
+        .expect("free once the other holder let go");
+    assert!(!started.joined);
 }

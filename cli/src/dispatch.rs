@@ -185,12 +185,13 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             threshold,
             save,
             label,
+            reason,
             no_reconcile,
         } => {
             if label.is_some() {
                 eprintln!("logos gate: --label is accepted but not persisted yet");
             }
-            out.report_gate(root, |e| e.gate(threshold, save, !no_reconcile), GateResult::exit_code)
+            out.report_gate(root, |e| e.gate_with_reason(threshold, save, !no_reconcile, reason.as_deref()), GateResult::exit_code)
         }
         // ARCHITECTURE health, and it PROJECTS ITS VERDICT (FR-GV-20 AC 1:
         // "`session_end`, `check_rules`, and `health` all fail (exit 1)" on
@@ -209,7 +210,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         Commands::Doctor => out.report_gate(root, |e| e.doctor(), |r| crate::violation_code(r.ok)),
         Commands::Verify => out.report_gate(root, |e| e.verify(), |r| crate::violation_code(r.ok)),
         // The session gate (FR-GV-04/05) without an MCP host (FR-CL-06):
-        // `session-start` records the baseline and always exits 0;
+        // `session-start` records its snapshot (the baseline on a first run) and always exits 0;
         // `session-end` projects the regression verdict onto exit 1 the way
         // `gate` does, so a CLI-directed agent can detect a failing gate.
         Commands::SessionStart => out.try_query(root, |e| e.session_start()),
@@ -232,7 +233,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // The branch delta (FR-GV-24): one `Engine` call shared with its MCP
         // twin. Advisory — it exits 1 only when it could not measure, and
         // says on stderr whether the shadow before-state was built or reused.
-        Commands::Review { base, member } => out.report_gate_for(root, &member, |e| {
+        // `--branches` (FR-GV-28): the shared-budget projection, report only (exit 0).
+        Commands::Review { base, branches, member } if !branches.is_empty() => out.try_query_for(root, &member, |e| e.review_branches(base.as_deref(), &branches)),
+        Commands::Review { base, member, .. } => out.report_gate_for(root, &member, |e| {
             let review = e.review(base.as_deref())?;
             if let Some(note) = review.before_state_cache.note() { eprintln!("logos review: {note}"); }
             Ok(review)
@@ -257,28 +260,36 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
         },
         // The security evidence tier (S-667): the same one-call-per-twin shape.
-        Commands::Security { command } => match command {
-            SecurityCommands::Scan { consent, install: false, scanners, paths } => {
-                let request = ScanRequest::new(scanners, paths);
-                out.try_query(root, |e| e.security_scan_selected(consent, &request, |_| {}))
+        // A scan or install stopped by SIGINT or SIGTERM kills the scanners and
+        // installers it started, then exits 128 + the signal: they run in
+        // process groups of their own, which the terminal's Ctrl-C does not
+        // reach, and must not outlive the project lock (sprint 107 review, D1).
+        Commands::Security { command } => {
+            logos_core::jobs::stop_on_signal(logos_core::jobs::StopExit::Interrupted);
+            match command {
+                SecurityCommands::Scan { consent, install: false, scanners, paths } => {
+                    let request = ScanRequest::new(scanners, paths);
+                    out.try_query(root, |e| e.security_scan_selected(consent, &request, |_| {}))
+                }
+                SecurityCommands::Scan { consent, install: true, .. } => out.try_query(root, |e| e.security_scan_install(consent)),
+                // Per-user installs need no index: the engine is only opened (FR-SC-22).
+                SecurityCommands::Install { scanners, all, update, from, consent, accept_codeql_licence } => {
+                    let accept_licences = accept_codeql_licence.then(|| "codeql".to_string()).into_iter().collect();
+                    let request = InstallRequest { tools: Selection::named_or_all(scanners, all), update, from, consent, accept_licences };
+                    Engine::open(root).security_install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
+                }
+                SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security_uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
+                SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
+                SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
+                SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, member } => {
+                    let tokens = [severity, scanner, category, path, suppression, edition];
+                    let [severity, scanner, category, path, suppression, edition] = tokens.each_ref().map(Option::as_deref);
+                    let filter = FindingsFilter::parse(severity, scanner, category, path, suppression, edition)?;
+                    out.try_query_for(root, &member, |e| e.security_findings(&filter))
+                }
+                SecurityCommands::Bless => out.report_gate(root, Engine::security_bless, logos_core::security::SecurityBless::exit_code),
             }
-            SecurityCommands::Scan { consent, install: true, .. } => out.try_query(root, |e| e.security_scan_install(consent)),
-            // Per-user installs need no index: the engine is only opened (FR-SC-22).
-            SecurityCommands::Install { scanners, all, update, from, consent, accept_codeql_licence } => {
-                let accept_licences = accept_codeql_licence.then(|| "codeql".to_string()).into_iter().collect();
-                let request = InstallRequest { tools: Selection::named_or_all(scanners, all), update, from, consent, accept_licences };
-                Engine::open(root).security_install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
-            }
-            SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security_uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
-            SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
-            SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
-            SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, member } => {
-                let tokens = [severity, scanner, category, path, suppression, edition];
-                let [severity, scanner, category, path, suppression, edition] = tokens.each_ref().map(Option::as_deref);
-                let filter = FindingsFilter::parse(severity, scanner, category, path, suppression, edition)?;
-                out.try_query_for(root, &member, |e| e.security_findings(&filter))
-            }
-        },
+        }
         // The session-start quality-report hook (S-638): a core command, not a
         // wiki one.
         Commands::Hook(args) => hook_emit(root, args, out),
@@ -307,6 +318,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         }
         #[cfg(not(feature = "ui"))]
         Commands::Serve { mcp: _ } => {
+            // No web runtime catches a stop signal here: an MCP scan's
+            // children are killed on SIGINT or SIGTERM, and serve exits 0.
+            logos_core::jobs::stop_on_signal(logos_core::jobs::StopExit::Clean);
             mcp::serve_stdio(root, host)?;
             Ok(0)
         }

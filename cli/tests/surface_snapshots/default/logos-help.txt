@@ -26,7 +26,7 @@ Commands:
   quality-report       Non-blocking quality readout for the report tier (FR-IN-07, CR-095): the freshly computed signal, the blessed baseline and their delta, plus the last recorded `check` findings — computed **without writing**, so it never appends to the evolution series or takes the graph write lock. Always exits 0; it reports, it never gates
   gate                 CI gate: regression vs the saved baseline (or under --threshold) exits 1
   health               ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift (FR-GV-18/FR-GV-20) and graph counts; an unhealthy graph exits 1. For INDEX freshness use `status`
-  session-start        Begin a quality session (FR-GV-04): record the baseline BEFORE edits — the CLI half of the session gate the MCP instructions call mandatory
+  session-start        Begin a quality session (FR-GV-04) BEFORE edits: save the baseline if none exists, never move one but reset one that no longer compares — the CLI half of the session gate the MCP instructions call mandatory
   session-end          End the quality session (FR-GV-05): re-score and compare to the baseline; an aggregate regression beyond epsilon exits 1
   doctor               Fast graph structural-integrity check (CR-052, FR-GV-18): asserts one node per symbol_id and zero orphan rows; drift exits 1
   verify               Deep graph consistency check (CR-052, FR-GV-19): reindex into a throwaway shadow store and diff node/edge/file counts + symbol sets against the live graph; reports leaked/orphaned symbols and drift, exits 1 on drift

@@ -10,6 +10,8 @@ import {
   filesRankedByRisk,
   ownershipDispersion,
 } from "../../copy/files.copy.ts";
+import { HOSTILE_NAME } from "../../test/renderedChart.ts";
+import { SCOPED_ONLY_COUNTED } from "../../test/scopedOnlyProject.ts";
 import { widgetTitled } from "../../test/widgetStack.ts";
 import { FilesView } from "./FilesView.tsx";
 
@@ -79,6 +81,39 @@ const widget = (title: string) => widgetTitled(document.body, title);
 const LONG_A = "logos-core/src/history/temporal/mining/window/commits.rs";
 const LONG_B = "logos-core/src/history/spatial/mining/window/commits.rs";
 const DEEP = "src/aaa/bbb/ccc/ddd/eee/fff/ggg/hhh/iii/zzz.rs";
+
+describe("the hotspot board renders a file path as text (S-776, NFR-SE-11)", () => {
+  it("shows a path carrying markup as that literal text in the lead figure and the table", async () => {
+    const m = model();
+    m.hotspots.files[0].path = HOSTILE_NAME;
+    m.temporal.files[0].path = HOSTILE_NAME;
+    stubFetch(() => m);
+    render(<FilesView />);
+    const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+    const figure = widget("Files ranked by risk").querySelector('[data-widget-part="figure"]')!;
+    expect(figure).toHaveTextContent(`top: ${HOSTILE_NAME}, score 40`);
+    expect(within(table).getByText(HOSTILE_NAME)).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("keeps it text when the path is long enough to be abbreviated", async () => {
+    // Over PATH_BUDGET with a middle to drop, so PathCell draws the abbreviated
+    // label AND the full path, in two spans.
+    const path = `logos-core/src/deep/dir/${HOSTILE_NAME}.rs`;
+    const m = model();
+    m.hotspots.files[0].path = path;
+    m.temporal.files[0].path = path;
+    stubFetch(() => m);
+    render(<FilesView />);
+    const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+    const cell = table.querySelector(`[data-path="${CSS.escape(path)}"]`)!;
+    expect(cell).toHaveAttribute("title", path);
+    const [label, full] = cell.querySelectorAll("span");
+    expect(label).toHaveTextContent(`logos-core/…/dir/${HOSTILE_NAME}.rs`);
+    expect(full).toHaveTextContent(path);
+    expect(document.querySelector("img")).toBeNull();
+  });
+});
 
 describe("FilesView (S-188, FR-UI-11)", () => {
   it("leads with the top hotspot and renders the merged risk table from /api/v1", async () => {
@@ -353,6 +388,28 @@ describe("FilesView (S-188, FR-UI-11)", () => {
       expect(link).toHaveAttribute("href", "/security?path=src%2Fhot.rs");
       expect(link).toHaveTextContent("3");
       expect(link).toHaveTextContent("high");
+    });
+
+    it("reads a scoped-only project's file at the same count as its Security page and roll-up (S-760)", async () => {
+      stubFetch(() => {
+        const m = model();
+        m.hotspots.files[0].findings = { count: SCOPED_ONLY_COUNTED.total, highest: "medium", stale: 0 };
+        return m;
+      });
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const hot = within(within(table).getByText("src/hot.rs").closest("tr")!);
+      expect(hot.getByRole("link")).toHaveTextContent(`${SCOPED_ONLY_COUNTED.total} medium`);
+    });
+
+    it("explains the column in the definition's words, and that a scoped-only 0 is not a scan", async () => {
+      stubFetch(() => scanned());
+      render(<FilesView />);
+      await screen.findByRole("table", { name: "Files ranked by risk" });
+      expect(filesFindingsNote).toContain("whose file is unchanged since the scan");
+      expect(filesFindingsNote).toContain("for findings bound to a file");
+      expect(filesFindingsNote).toContain("`--path`-only scan never read also reads 0");
+      expect(screen.getByText(filesFindingsNote)).toBeInTheDocument();
     });
 
     it("labels a stale finding and leaves it out of the count", async () => {

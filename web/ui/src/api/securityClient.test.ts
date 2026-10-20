@@ -97,18 +97,23 @@ describe("securityClient", () => {
     setScopedMember("api");
     const fp = "0a".repeat(32);
     const calls = stub(200, { file: ".logos/security-ignore.toml", entry: { fingerprint: fp, reason: "r", expires: null }, entries: 1 });
-    const written = await suppressFinding(fp, "r", "2027-01-31");
-    await unsuppressFinding(fp);
+    const written = await suppressFinding({ fingerprint: fp }, "r", "2027-01-31");
+    await unsuppressFinding({ fingerprint: fp });
+    // A path entry's selector rides in the same body, narrowing and all (S-770).
+    await suppressFinding({ path: "tests/fixtures", scanner: "gitleaks" }, "planted", null);
+    await unsuppressFinding({ path: "tests/fixtures", scanner: "gitleaks" });
     expect(written.file).toBe(".logos/security-ignore.toml");
     expect(calls.map((c) => [c.method, c.url, c.intent, c.body])).toEqual([
       ["POST", "/api/v1/security/suppress?repo=api", "test-intent-token", JSON.stringify({ fingerprint: fp, reason: "r", expires: "2027-01-31" })],
       ["POST", "/api/v1/security/unsuppress?repo=api", "test-intent-token", JSON.stringify({ fingerprint: fp })],
+      ["POST", "/api/v1/security/suppress?repo=api", "test-intent-token", JSON.stringify({ path: "tests/fixtures", scanner: "gitleaks", reason: "planted", expires: null })],
+      ["POST", "/api/v1/security/unsuppress?repo=api", "test-intent-token", JSON.stringify({ path: "tests/fixtures", scanner: "gitleaks" })],
     ]);
   });
 
   it("throws a refused triage write with the server's reason: the JSON `error`, else the text verbatim", async () => {
     stub(422, { error: "`reason` is empty: a suppression must say why the risk is accepted" });
-    const refused = await suppressFinding("0a".repeat(32), " ", null).catch((e: unknown) => e);
+    const refused = await suppressFinding({ fingerprint: "0a".repeat(32) }, " ", null).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(SecurityRequestError);
     expect([(refused as SecurityRequestError).status, (refused as SecurityRequestError).detail]).toEqual([
       422,
@@ -116,7 +121,7 @@ describe("securityClient", () => {
     ]);
 
     stub(403, "cross-origin write rejected");
-    const forbidden = await unsuppressFinding("0a".repeat(32)).catch((e: unknown) => e);
+    const forbidden = await unsuppressFinding({ fingerprint: "0a".repeat(32) }).catch((e: unknown) => e);
     expect([(forbidden as SecurityRequestError).status, (forbidden as SecurityRequestError).detail]).toEqual([403, "cross-origin write rejected"]);
   });
 

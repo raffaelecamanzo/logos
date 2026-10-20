@@ -10,7 +10,6 @@
 # Licence texts, verbatim and never edited: the Apache-2.0 licence, and the copy
 # of it vendored with a web asset.
 LICENSE:0a34ffca9f4f6a3cc545968aaf22bb29e8e8354c70f8f29f61fc6f65db769c54
-web/assets/vendor/licenses/echarts-LICENSE.txt:0a34ffca9f4f6a3cc545968aaf22bb29e8e8354c70f8f29f61fc6f65db769c54
 
 # A test's loop counter: the word in its ordinary sense of one repetition of an
 # experiment.

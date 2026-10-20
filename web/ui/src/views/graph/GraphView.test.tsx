@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import type {
   GraphElements,
@@ -12,7 +12,7 @@ import type {
 // through a fake instance that captures its event handlers (so a test can fire a
 // node click) and records setOption calls. The pure option-building is tested
 // directly in graphOptions.test.ts.
-const captured: { handlers: Record<string, (p: unknown) => void>; setOption: ReturnType<typeof vi.fn> } = {
+const captured: { handlers: Record<string, (p: unknown) => void>; setOption: Mock<(...args: unknown[]) => void> } = {
   handlers: {},
   setOption: vi.fn(),
 };
@@ -292,6 +292,77 @@ describe("GraphView migration (S-186, FR-UI-08 / FR-UI-21)", () => {
 });
 
 // ── S-617 (CR-203, FR-UI-39/40): the Graph view's tool panels ────────────────
+
+/** A node datum as the canvas commits it (the fields these tests read). */
+interface SentNode {
+  id: string;
+  displayLabel: string;
+  fixed: boolean;
+}
+
+/** Every series commit sent to the chart, oldest first: its nodes, link count and
+ *  merge options. The mount call (`series: []`) is the chart's setup, not a commit. */
+function seriesCommits() {
+  return captured.setOption.mock.calls.flatMap(([option, opts]) => {
+    const series = (option as { series?: { data: SentNode[]; links: unknown[] }[] }).series;
+    if (!series?.length) return [];
+    return [{ nodes: series[0].data, links: series[0].links.length, opts }];
+  });
+}
+const lastCommit = () => seriesCommits().at(-1);
+
+// S-776 (carried from S-775's review): every other test here would stay green with
+// the canvas's setOption calls deleted. These assert what the chart is sent.
+describe("what the Graph view sends the chart (S-776)", () => {
+  it("sets up a rich-text tooltip, so a hovered name is drawn on the canvas, never as HTML", async () => {
+    stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    await waitFor(() => expect(captured.setOption).toHaveBeenCalled());
+    const [setup] = captured.setOption.mock.calls[0] as [{ tooltip: { renderMode: string }; series: unknown[] }];
+    expect(setup.tooltip.renderMode).toBe("richText");
+    expect(setup.series).toEqual([]);
+  });
+
+  it("commits the loaded nodes and edges, replacing the series", async () => {
+    stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    await waitFor(() => expect(lastCommit()?.nodes.map((n) => n.id)).toEqual(["scip::a", "scip::b", "scip::r"]));
+    const commit = lastCommit()!;
+    expect(commit.nodes.map((n) => n.displayLabel)).toEqual(["alpha", "beta", "FR-UI-08"]);
+    expect(commit.links).toBe(2);
+    expect(commit.opts).toEqual({ replaceMerge: ["series"] });
+  });
+
+  it("restyles a lock in place: a plain merge that pins the locked node only", async () => {
+    stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    await waitFor(() => expect(typeof captured.handlers.click).toBe("function"));
+    await waitFor(() => expect(lastCommit()).toBeDefined());
+
+    act(() => captured.handlers.click({ dataType: "node", data: { id: "scip::a" } }));
+    await waitFor(() => expect(lastCommit()?.nodes.find((n) => n.id === "scip::a")?.fixed).toBe(true));
+    const commit = lastCommit()!;
+    expect(commit.opts, "a selection change keeps the layout: no replaceMerge").toBeUndefined();
+    expect(commit.nodes.filter((n) => n.fixed).map((n) => n.id)).toEqual(["scip::a"]);
+  });
+
+  it("replaces the series with the merged set when a node is expanded", async () => {
+    stubApi();
+    render(<GraphView />);
+    await screen.findByRole("application");
+    await waitFor(() => expect(typeof captured.handlers.click).toBe("function"));
+
+    act(() => captured.handlers.click({ dataType: "node", data: { id: "scip::a" } }));
+    await userEvent.click(screen.getByRole("button", { name: "Expand neighbours" }));
+    await waitFor(() => expect(lastCommit()?.nodes.map((n) => n.id)).toContain("scip::d"));
+    const commit = lastCommit()!;
+    expect(commit.opts).toEqual({ replaceMerge: ["series"] });
+    expect(commit.links).toBe(3);
+  });
+});
 
 describe("the Graph view's panels are registered tool panels in one stack (S-617)", () => {
   it("renders Query, Decisions & docs and the accessible table as panels, each under its TOOL_PANELS key", async () => {

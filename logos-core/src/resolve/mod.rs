@@ -614,8 +614,16 @@ fn swept_sources<'s>(
 /// of them names has lost the row that bound it. A capture row stands in for
 /// its source's own row only while that row keeps its snapshot binding; once
 /// the row is re-bound it decides alone, as on a cold index, which holds no
-/// capture rows. Only the kinds a ledger row binds are considered: containment
-/// and the framework pass's edges are other passes'.
+/// capture rows. Only the kinds a ledger row binds out of its own source are
+/// considered: containment and the framework pass's edges are other passes',
+/// and a `TracesTo` edge leaves the typed artifact that owns the row's source
+/// — the source or an ancestor — which rows of other, unswept sources (its
+/// sections) produce too, so the swept rows alone cannot decide it.
+///
+/// A doc mention's `DocReference` is one of them (S-751): the framework pass
+/// can promote a second node of the name it bound after the resolve, and the
+/// focused re-bind that follows finds two — so on a cold index too the row
+/// comes back unresolved, and its edge must not outlive it.
 ///
 /// [FR-SY-12]: ../../../docs/specs/requirements/FR-SY-12.md
 fn retract_unproduced(
@@ -659,6 +667,7 @@ fn retract_unproduced(
                     | EdgeKind::Implements
                     | EdgeKind::Instantiates
                     | EdgeKind::TypeUses
+                    | EdgeKind::DocReference
             ) && stale(edge)
         })
         .collect()

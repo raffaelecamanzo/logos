@@ -52,8 +52,9 @@ serde_json = { workspace = true }
 axum       = "0.7"
 # Async runtime for HTTP I/O ONLY (ADR-03): the web surface owns a current-thread
 # runtime and bridges to the synchronous core via spawn_blocking — tokio never
-# enters logos-core. `net` backs the loopback TcpListener.
-tokio      = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
+# enters logos-core. `net` backs the loopback TcpListener; `signal` lets a
+# `serve --ui` stop on SIGINT/SIGTERM and cancel its jobs first (S-759).
+tokio      = { workspace = true, features = ["rt", "net", "time", "macros", "sync", "signal"] }
 tracing    = { workspace = true }
 # OS-entropy source for the per-session intent (CSRF) token on the mutating
 # config-write/apply endpoints (NFR-SE-06, ADR-31). A thin FFI shim over the

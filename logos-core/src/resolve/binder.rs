@@ -942,10 +942,10 @@ impl Index {
     ///
     /// A thin orchestrator over focused sub-builders, each owning one lookup
     /// structure. Ordering is load-bearing: `members` lists and `by_name`
-    /// lists are id-sorted, `modules`/`by_symbol` are first-wins on a
-    /// duplicate key, and the module tree is built by an id-/name-sorted DFS —
-    /// so every helper preserves the same canonical iteration order the
-    /// monolith had, keeping the built `Index` byte-identical ([NFR-RA-06]).
+    /// lists are id-sorted, `by_symbol` is first-wins on a duplicate key, and
+    /// no node id decides which module holds a key two share — file roots go
+    /// in path order, inline modules before files (S-751) — so a store a sync
+    /// renumbered builds the `Index` a cold index does ([NFR-RA-06]).
     ///
     /// The path model for every file, with the package-file stems the rust
     /// plugin declares for `.rs` ([`PackageLayout::rust_stems_for_tests`],
@@ -1932,10 +1932,11 @@ fn build_containment(
 
 /// The path-derived module tree as `(modules, module_key)` — the forward
 /// `(crate, path)`→node map and its reverse. A parentless `Module` node is a
-/// *file module* keyed by its file path; inline `mod`s hang beneath it. File
-/// roots are visited id-sorted so the first id wins a (rare) path tie, exactly
-/// as the monolith did — except at a key a bodyless `mod x;` claims, which goes
-/// to the file it declares ([`hand_declarations_to_their_files`], S-585).
+/// *file module* keyed by its file path; inline `mod`s hang beneath it. No
+/// node id decides a key two modules share (S-751): an inline module holds it
+/// against a file module, the first file in path order holds it against
+/// another, and a key a bodyless `mod x;` claims goes to the file it declares
+/// ([`hand_declarations_to_their_files`], S-585).
 fn build_module_tree(
     nodes: &[NodeRow],
     parent: &HashMap<NodeId, NodeId>,
@@ -1949,25 +1950,28 @@ fn build_module_tree(
         .iter()
         .filter(|n| n.kind == NodeKind::Module && !parent.contains_key(&n.id))
         .collect();
-    // First-by-id wins a (rare) path tie — except among import-root files
-    // (S-519), where a module and its stub (`foo.py`, `foo.pyi`) share a key
-    // routinely and a node id changes on every re-extraction: the path decides
-    // there, so a sync keeps the winner a cold index picks ([NFR-RA-06]). They
-    // sit in their family's own crate, so the two orders never compete for a key.
+    // The path decides a tie, never a node id: an id changes on every
+    // re-extraction, so a sync that re-extracts one of two files sharing a key
+    // would hand it to the other, which a cold index never does ([NFR-RA-06]).
+    // Two files share a key routinely: `src/lib.rs` and `src/main.rs` (the
+    // crate root), and a fixture crate nested under a crate of its own name
+    // (S-751). A cold index writes files in discovery order — component-wise
+    // path order — so that is the order here. Import-root files (S-519; a
+    // module and its stub, `foo.py` and `foo.pyi`) keep their own string order,
+    // which a cold index already followed; they sit in their family's own
+    // crate, so the two orders never compete for a key.
     file_roots.sort_by_key(|n| {
-        let import_root_path = n
-            .file_path
-            .as_deref()
-            .filter(|p| layout.has_import_roots(p));
-        (import_root_path, n.id)
+        let path = n.file_path.as_deref();
+        let import_root_path = path.filter(|p| layout.has_import_roots(p));
+        (import_root_path, path.map(Path::new), n.id)
     });
     let mut files_at: HashMap<ModKey, Vec<(NodeId, String)>> = HashMap::new();
+    let mut keyed_roots: Vec<(NodeId, ModKey)> = Vec::new();
     for root in file_roots {
         let Some(path) = &root.file_path else {
             continue; // an orphaned module node cannot anchor a tree
         };
         let key = layout.module_key(path);
-        modules.entry(key.clone()).or_insert(root.id);
         module_key.insert(root.id, key.clone());
         files_at
             .entry(key.clone())
@@ -1975,12 +1979,20 @@ fn build_module_tree(
             .push((root.id, extension_of(path)));
         append_inline_modules(
             root.id,
-            key,
+            key.clone(),
             members,
             node_by_id,
             &mut modules,
             &mut module_key,
         );
+        keyed_roots.push((root.id, key));
+    }
+    // A file takes its key only where no inline module holds it: an inline
+    // `mod inner { … }` is the module, an `inner.rs` beside it no file declares
+    // is not (FR-RS-41) — whichever path sorts first. A declaration holding a
+    // key goes to its file below.
+    for (id, key) in keyed_roots {
+        modules.entry(key).or_insert(id);
     }
     hand_declarations_to_their_files(nodes, parent, members, &files_at, &mut modules, &module_key);
     (modules, module_key)
@@ -1997,10 +2009,11 @@ fn build_module_tree(
 /// (its file extension) at it — the path model keys `src/x.js` where it keys
 /// `src/x.rs`, and a Rust declaration never names a JavaScript file. With none
 /// (a `#[path]` attribute, which is not read, a missing file, or only another
-/// language's file at that path) the declaration keeps the key, taking it back
-/// from a foreign file that won it, and binds nothing beneath; with two (`x.rs`
-/// beside `x/mod.rs`, which rustc refuses) the declaration takes it back from
-/// whichever file won, so neither is guessed ([NFR-RA-05]). Where no file
+/// language's file at that path) the declaration keeps the key and binds
+/// nothing beneath; with two (`x.rs` beside `x/mod.rs`, which rustc refuses)
+/// it keeps it too, so neither is guessed ([NFR-RA-05]). No file has won a
+/// claimed key when this runs: nested modules take their keys before any
+/// file does ([`build_module_tree`], S-751). Where no file
 /// answers and two declarations claim one key (`mod x;` in both `src/lib.rs`
 /// and `src/main.rs`), the first in path order holds it. Declarations are
 /// visited in path order, never node order, so the outcome reads no node id: a
@@ -2011,8 +2024,8 @@ fn build_module_tree(
 /// line. An inline `mod x { … }` with contents, or with braces over several
 /// lines, is not one, and keeps the key exactly as before — also against a
 /// declaration of the same key from the other crate root (`src/lib.rs` and
-/// `src/main.rs` share the crate's root key): only a file module or another
-/// declaration holding a key is ever displaced.
+/// `src/main.rs` share the crate's root key): only another declaration
+/// holding a key is ever displaced.
 ///
 /// [FR-RS-41]: ../../../docs/specs/requirements/FR-RS-41.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md

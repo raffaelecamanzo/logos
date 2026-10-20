@@ -425,14 +425,29 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | | **+7** |
 ///
 /// [FR-SC-17]: ../../docs/specs/requirements/FR-SC-17.md
+///
+/// **S-757 1310→1315**: `branches` on `review` ([FR-GV-28]). Measured
+/// 1308→1313 (+5); the budget rises by that delta, the 2 lines of headroom it
+/// branched with kept. Sibling sessions in Sprint 107 Iteration 5 add their own
+/// deltas to the 1310 this one branched from; the merged budget is the sum.
+/// Delegation only: the projection is `Engine::review_branches`, the call the
+/// CLI makes.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `ReviewParams.branches` (doc and field) | **+2** |
+/// | the `review` tool: a `match` on `branches` choosing `review_branches` or `review` | **+3** |
+/// | | **+5** |
+///
+/// [FR-GV-28]: ../../docs/specs/requirements/FR-GV-28.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1310,
-        "mcp adapter exceeds the 1310 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1315,
+        "mcp adapter exceeds the 1315 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

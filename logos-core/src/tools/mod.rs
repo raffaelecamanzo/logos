@@ -21,7 +21,13 @@
 //!    a `.tar.gz`), and check it is a regular file.
 //! 4. **Move** the finished `<tool>-<version>` directory into place with one
 //!    `rename`. An install interrupted before this step leaves no tool
-//!    directory, only staging, which the next install of that tool discards.
+//!    directory, only staging.
+//!
+//! An install holds a lock on its staging entry while it writes it
+//! ([`StagingLock`]); the kernel drops the lock when the process ends, however
+//! it ends. Every install starts by discarding each staging entry no running
+//! install holds — what a killed `serve` or CLI left, of any tool — and leaves
+//! one another process is still writing alone (S-759).
 //!
 //! A tool that needs more than its binary — Dependency-Check's libraries,
 //! CodeQL's query packs — comes as a [tree](Layout::Tree) archive: step 3
@@ -42,8 +48,9 @@
 //! ([`surface`], S-744). Within one process installs run one at a time
 //! ([`INSTALL_LOCK`]), so two members' `tool-install` jobs in one `serve`
 //! never write the shared tools directory at once; a job cancelled while it
-//! waits its turn stops waiting (S-747). Concurrent installs
-//! of the same tool by two processes are not supported.
+//! waits its turn stops waiting (S-747). Two processes installing the same
+//! tool at the same version at once are not supported: the second fails that
+//! tool, its staging held by the first.
 //!
 //! [tool-installer]: ../../../docs/specs/architecture/components/tool-installer.md
 //! [ADR-88]: ../../../docs/specs/architecture/decisions/ADR-88.md
@@ -60,6 +67,7 @@ mod uv;
 mod tests;
 
 use std::cell::OnceCell;
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -79,6 +87,7 @@ use manifest::version_key;
 
 pub use crate::config::user_tools_dir;
 use crate::config::{ConfigError, USER_DATA_HOME_ENV};
+use crate::jobs::lock::open_lock_file;
 use crate::jobs::spawn::{self, is_executable, usable_path_entries, Launch};
 
 /// The reason every tool fails when no `curl` is on the search path.
@@ -446,6 +455,12 @@ impl Installer {
         let Some(_one_at_a_time) = install_turn() else {
             return Ok(InstallReport { tools: Vec::new() });
         };
+        // A symlink in place of the staging directory is removed, never
+        // swept through; `install_one` fails each tool if it cannot be.
+        let staging_root = self.tools_dir.join(STAGING_DIR);
+        if unlink_if_symlink(&staging_root).is_ok() {
+            sweep_stale_staging(&staging_root);
+        }
         let search_dirs = match &self.project_root {
             Some(root) => usable_path_entries(root, self.search_path.as_deref()),
             None => absolute_entries(self.search_path.as_deref()),
@@ -631,18 +646,34 @@ impl Installer {
                 );
             }
         }
-        // Whatever an interrupted earlier install of this tool left, at any
-        // version, is discarded, and so is a tool directory that does not hold
-        // a runnable binary.
-        for leftover in stale_staging(&self.tools_dir.join(STAGING_DIR), &entry.tool) {
-            if let Err(e) = remove_path_if_present(&leftover) {
+        if let Err(e) = fs::create_dir_all(self.tools_dir.join(STAGING_DIR)) {
+            return (
+                failed_io(FailStage::Install, "could not create", &self.tools_dir.join(STAGING_DIR), &e),
+                host,
+                0,
+            );
+        }
+        // Held until the staging entry is gone again, below.
+        let _held = match StagingLock::take(&staging) {
+            Ok(Some(held)) => held,
+            Ok(None) => {
+                let reason = format!(
+                    "another Logos process is using the staging of {} {}: try again once it ends",
+                    entry.tool, entry.version
+                );
+                return (failed(FailStage::Install, reason), host, 0);
+            }
+            Err(e) => {
                 return (
-                    failed_io(FailStage::Install, "could not remove", &leftover, &e),
+                    failed_io(FailStage::Install, "could not lock", &lock_path(&staging), &e),
                     host,
                     0,
-                );
+                )
             }
-        }
+        };
+        // What an interrupted earlier install at this version left is
+        // discarded, and so is a tool directory that does not hold a runnable
+        // binary.
         for leftover in [&staging, &dest] {
             if let Err(e) = remove_path_if_present(leftover) {
                 return (
@@ -1210,23 +1241,129 @@ fn remove_path_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The staging entries `<tool>-<version>` of `tool` under `staging_root`,
-/// whatever the version.
-fn stale_staging(staging_root: &Path, tool: &str) -> Vec<PathBuf> {
+/// The suffix of a staging entry's lock file, beside the entry.
+const LOCK_SUFFIX: &str = ".lock";
+
+/// `<entry>.lock`, the lock file of the staging entry `entry`.
+fn lock_path(entry: &Path) -> PathBuf {
+    let mut path = entry.as_os_str().to_owned();
+    path.push(LOCK_SUFFIX);
+    PathBuf::from(path)
+}
+
+/// An install's hold on its staging entry: an exclusive `flock` on the
+/// entry's lock file, which the kernel releases when the process ends —
+/// however it ends — so an entry whose lock can be taken belongs to no
+/// running install. Dropping it removes the lock file, then releases the
+/// lock.
+struct StagingLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+/// How many times [`StagingLock::take`] locks a lock file that turns out to
+/// have been replaced. Each retry means another process removed the file in
+/// between, which contention ends within one or two; the bound keeps a path
+/// that never names the file it opened from looping for ever.
+const LOCK_ATTEMPTS: usize = 8;
+
+/// What locking one opened lock file came to.
+enum Hold {
+    Held(StagingLock),
+    /// Another process holds it.
+    Busy,
+    /// Locked, but no longer the file at its path: its last holder removed
+    /// it, so the lock guards nothing and is taken again on the current file.
+    Unlinked,
+}
+
+impl StagingLock {
+    /// Take the lock of the staging entry `entry`, creating its lock file;
+    /// `None` while another process holds it. A symlink in place of the lock
+    /// file is removed, and the file is opened without following one.
+    ///
+    /// # Errors
+    /// The lock file cannot be opened or locked, or was replaced on every one
+    /// of [`LOCK_ATTEMPTS`].
+    fn take(entry: &Path) -> io::Result<Option<Self>> {
+        let path = lock_path(entry);
+        for _ in 0..LOCK_ATTEMPTS {
+            match hold(open_lock_file(&path)?, &path)? {
+                Hold::Held(held) => return Ok(Some(held)),
+                Hold::Busy => return Ok(None),
+                Hold::Unlinked => {}
+            }
+        }
+        Err(io::Error::other("the lock file was replaced each time it was locked"))
+    }
+}
+
+/// Lock `file`, opened from `path`. A holder removes the file before it
+/// releases the lock, so a process that opened it before the removal can
+/// lock it after: the lock counts only while `path` still names that file.
+fn hold(file: fs::File, path: &Path) -> io::Result<Hold> {
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Ok(Hold::Busy),
+        Err(fs::TryLockError::Error(e)) => return Err(e),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let locked = file.metadata()?;
+        let current = match fs::symlink_metadata(path) {
+            Ok(current) => current,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Hold::Unlinked),
+            Err(e) => return Err(e),
+        };
+        if (locked.dev(), locked.ino()) != (current.dev(), current.ino()) {
+            return Ok(Hold::Unlinked);
+        }
+    }
+    Ok(Hold::Held(StagingLock { path: path.to_path_buf(), _file: file }))
+}
+
+impl Drop for StagingLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Discard every staging entry under `staging_root` that no running install
+/// holds — the download or partial unpack of a process killed mid-install —
+/// with its lock file. An entry whose lock another process holds is left
+/// alone. Nothing here fails an install: an entry that cannot be removed is
+/// logged and left, and the install of that tool removes it or fails.
+fn sweep_stale_staging(staging_root: &Path) {
     let Ok(entries) = fs::read_dir(staging_root) else {
-        return Vec::new();
+        return;
     };
-    let prefix = format!("{tool}-");
-    entries
+    let names: BTreeSet<OsString> = entries
         .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_prefix(&prefix))
-                .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|e| {
+            let name = e.file_name();
+            match name.to_str().and_then(|n| n.strip_suffix(LOCK_SUFFIX)) {
+                Some(entry) => OsString::from(entry),
+                None => name,
+            }
         })
-        .collect()
+        .collect();
+    for name in names {
+        let entry = staging_root.join(&name);
+        let held = match StagingLock::take(&entry) {
+            Ok(Some(held)) => held,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(target: "logos::tools", entry = %entry.display(), "stale staging not locked: {e}");
+                continue;
+            }
+        };
+        match remove_path_if_present(&entry) {
+            Ok(()) => tracing::info!(target: "logos::tools", entry = %entry.display(), "stale staging removed"),
+            Err(e) => tracing::warn!(target: "logos::tools", entry = %entry.display(), "stale staging not removed: {e}"),
+        }
+        drop(held);
+    }
 }
 
 fn unlink_if_symlink(path: &Path) -> io::Result<()> {

@@ -28,9 +28,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use logos_core::config::INSTALL_CONSENT_FILE;
+use logos_core::jobs::{JobKind, ScanJobs};
 use logos_core::security::{CopyKind, Detection, Orchestrator, ScanEnvironment, Selection};
 use logos_core::tools::surface::InstallRequest;
 use logos_core::tools::{
@@ -289,6 +291,11 @@ printf '%s\n' "$*" >> "$rec/uv.log"
 # A uv that keeps user state leaves it under $HOME.
 mkdir -p "$HOME/.config/uv" && : > "$HOME/.config/uv/state"
 sub="$1"; shift
+# A test stopping an install mid-way makes `pip install` hang until killed.
+if [ "$sub" = pip ] && [ -f "$rec/hang-pip" ]; then
+  echo $$ > "$rec/uv.pid.tmp" && /bin/mv "$rec/uv.pid.tmp" "$rec/uv.pid"
+  exec /bin/sleep 60
+fi
 op=''
 case "$sub" in python|pip) op="$1"; shift ;; esac
 cache=''; offline=''; installdir=''; nobin=''; py=''; req=''; idx=''; pos=''
@@ -1212,4 +1219,41 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
         assert_eq!(run["outcome"], "ran", "{tool}: {run}");
     }
     assert_eq!(scan["findings"], 3, "one finding from each report: {scan}");
+}
+
+/// A `serve` stopped while `uv` installs a Python scanner shuts its job runner
+/// down (S-759): the `uv` hanging in `pip install` is killed, and the half-built
+/// environment in staging is gone by the time the shutdown returns.
+#[test]
+fn a_shutdown_mid_pip_install_kills_uv_and_leaves_no_staging() {
+    let w = World::new();
+    let manifest = w.manifest(None);
+    fs::write(w.rec().join("hang-pip"), "").unwrap();
+    let jobs = ScanJobs::new();
+    let installer = w.installer(&manifest);
+    jobs.start(JobKind::ToolInstall, &w.root(), move |_| {
+        installer.install(&["bandit"], &Source::Network)?;
+        Ok(Value::Null)
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let pid = loop {
+        if let Ok(pid) = fs::read_to_string(w.rec().join("uv.pid")) {
+            break pid.trim().to_string();
+        }
+        assert!(Instant::now() < deadline, "uv never reached pip install");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let staging = w.tools().join(STAGING_DIR);
+    assert!(!tree(&staging).is_empty(), "the environment is being built in staging");
+
+    assert!(jobs.shutdown(Duration::from_secs(10)), "the install ended within the grace");
+    let alive = || Command::new("/bin/kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive() {
+        assert!(Instant::now() < deadline, "uv {pid} outlived the shutdown");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(tree(&staging).is_empty(), "no partial environment is left: {:?}", tree(&staging));
+    assert!(!w.managed("bandit").exists(), "no bandit was installed");
 }
