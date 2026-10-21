@@ -1037,7 +1037,7 @@ fn a_contributed_init_step_runs_after_the_core_steps_with_the_same_options() {
     let dir = TempDir::new().unwrap();
     let step = contributed(false);
     let contributions: Vec<std::sync::Arc<dyn logos_core::init::InitContribution>> = vec![step.clone()];
-    let result = Engine::init_with_contributions(dir.path(), &interactive(), &contributions).unwrap();
+    let result = Engine::init_with_contributions(dir.path(), &interactive(), &contributions, &[]).unwrap();
 
     let targets: Vec<&str> = result.steps.iter().map(|s| s.target.as_str()).collect();
     assert_eq!(targets.last(), Some(&".logos/contributed"), "last, after the core steps: {targets:?}");
@@ -1045,7 +1045,7 @@ fn a_contributed_init_step_runs_after_the_core_steps_with_the_same_options() {
     assert_eq!(*step.seen.lock().unwrap(), [true], "run once, with `-i`'s options");
 
     let plain = TempDir::new().unwrap();
-    let without = Engine::init_with_contributions(plain.path(), &interactive(), &[]).unwrap();
+    let without = Engine::init_with_contributions(plain.path(), &interactive(), &[], &[]).unwrap();
     let with_init_with = Engine::init_with(TempDir::new().unwrap().path(), &interactive()).unwrap();
     let names = |r: &InitResult| r.steps.iter().map(|s| s.target.clone()).collect::<Vec<_>>();
     assert_eq!(names(&without), names(&with_init_with), "no contribution is `init_with` exactly");
@@ -1057,7 +1057,7 @@ fn a_failing_contributed_init_step_fails_init() {
     let dir = TempDir::new().unwrap();
     let contributions: Vec<std::sync::Arc<dyn logos_core::init::InitContribution>> =
         vec![contributed(true)];
-    let err = Engine::init_with_contributions(dir.path(), &InitOptions::default(), &contributions)
+    let err = Engine::init_with_contributions(dir.path(), &InitOptions::default(), &contributions, &[])
         .expect_err("the contribution's failure is init's");
     assert!(format!("{err:#}").contains(".logos/contributed"), "{err:#}");
 }
@@ -1279,6 +1279,15 @@ fn plant_emitted_skill(root: &Path, name: &str) {
     std::os::unix::fs::symlink(format!("../../.agents/skills/{name}"), root.join(".claude/skills").join(name)).unwrap();
 }
 
+/// The one skill name the core itself emitted before the split: the only name
+/// `init` retires (HF-10).
+const LEGACY_CORE_SKILL: &str = "logos-wiki";
+
+/// The part of a [`tree`] snapshot that holds skill copies and their pointers.
+fn skills_subtree(tree: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    tree.into_iter().filter(|(p, _)| p.starts_with(".agents") || p.starts_with(".claude/skills")).collect()
+}
+
 /// Every file under `root` outside `.logos/`, with its bytes.
 fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
@@ -1318,7 +1327,7 @@ fn plugin_enabled_init_i_migrates_a_legacy_setup() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     Engine::init_with(root, &interactive()).unwrap();
-    plant_emitted_skill(root, "gen");
+    plant_emitted_skill(root, LEGACY_CORE_SKILL);
     assert!(root.join(".mcp.json").is_file() && root.join(".claude/hooks/logos-quality-open.sh").is_file());
 
     let result = Engine::init_with(root, &plugin_enabled()).unwrap();
@@ -1327,7 +1336,7 @@ fn plugin_enabled_init_i_migrates_a_legacy_setup() {
         (".claude/settings.json", InitAction::Updated),
         (".mcp.json", InitAction::Removed),
         (".claude/hooks/logos-quality-open.sh", InitAction::Removed),
-        (".agents/skills/gen", InitAction::Removed),
+        (".agents/skills/logos-wiki", InitAction::Removed),
     ] {
         assert!(rows.contains(&expected), "{expected:?} in {rows:?}");
     }
@@ -1390,10 +1399,68 @@ fn detect_reads_the_project_scope_and_lets_it_override_the_user() {
 fn a_run_asked_to_materialize_skills_keeps_the_skill_copy() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    plant_emitted_skill(root, "gen");
+    plant_emitted_skill(root, LEGACY_CORE_SKILL);
     let result = Engine::init_with(root, &InitOptions { materialize_skill: true, ..plugin_enabled() }).unwrap();
     assert!(result.steps.iter().all(|s| !s.target.starts_with(".agents")), "{:?}", rows_of(&result));
-    assert!(root.join(".agents/skills/gen/SKILL.md").is_file());
+    assert!(root.join(".agents/skills/logos-wiki/SKILL.md").is_file());
+}
+
+/// A skill an extension owns stamps the header Logos stamps. Under a name that
+/// is not a legacy core name it survives a plugin-enabled `init -i` — whether or
+/// not the run materializes — with the user's edits and its pointer intact.
+#[cfg(unix)]
+#[test]
+fn a_logos_stamped_skill_under_no_legacy_name_survives_init_i() {
+    for materialize_skill in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        plant_emitted_skill(root, "extension-skill");
+        let skill = root.join(".agents/skills/extension-skill/SKILL.md");
+        let edited = format!("{}\nmy local edit\n", fs::read_to_string(&skill).unwrap());
+        fs::write(&skill, &edited).unwrap();
+        let before = tree(root);
+
+        let result = Engine::init_with(root, &InitOptions { materialize_skill, ..plugin_enabled() }).unwrap();
+        assert!(result.steps.iter().all(|s| !s.target.starts_with(".agents")), "{:?}", rows_of(&result));
+        assert_eq!(fs::read_to_string(&skill).unwrap(), edited, "materialize_skill={materialize_skill}: edits intact");
+        assert_eq!(skills_subtree(tree(root)), skills_subtree(before), "materialize_skill={materialize_skill}: copy and pointer untouched");
+    }
+}
+
+/// A legacy core skill is still retired when no extension claims it.
+#[cfg(unix)]
+#[test]
+fn a_legacy_core_skill_is_still_retired_by_init_i() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    plant_emitted_skill(root, LEGACY_CORE_SKILL);
+    let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+    assert!(rows_of(&result).contains(&(".agents/skills/logos-wiki".to_string(), InitAction::Removed)), "{:?}", rows_of(&result));
+    assert!(!root.join(".agents/skills/logos-wiki").exists());
+}
+
+/// The skill names the registered extensions own are never retired — even a
+/// legacy core name, and with no contribution composed at all (an inactive
+/// extension contributes no step, yet its names reach `init`).
+#[cfg(unix)]
+#[test]
+fn a_skill_an_extension_owns_is_never_retired_even_under_a_legacy_name() {
+    let owned = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let skills_after = |owners: &[String]| {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        plant_emitted_skill(root, LEGACY_CORE_SKILL);
+        let before = skills_subtree(tree(root));
+        let result = Engine::init_with_contributions(root, &plugin_enabled(), &[], owners).unwrap();
+        let kept = skills_subtree(tree(root)) == before;
+        (kept, rows_of(&result).iter().any(|(t, _)| t.starts_with(".agents")))
+    };
+    assert_eq!(skills_after(&owned(&[LEGACY_CORE_SKILL])), (true, false), "the owned copy and its pointer stay, with no row");
+    assert_eq!(skills_after(&owned(&["other", LEGACY_CORE_SKILL])), (true, false), "one owner among several is enough");
+    // An owner of some other name — even one the legacy name is a prefix of — does not shield it.
+    for other in [owned(&[]), owned(&["other"]), owned(&["logos-wiki-x"]), owned(&["logos"])] {
+        assert_eq!(skills_after(&other), (false, true), "{other:?}: unowned, it is retired");
+    }
 }
 
 /// `init --uninstall` after today's `init -i` (and an older skill copy)
@@ -1465,7 +1532,7 @@ fn legacy_registrations_stay_until_the_committed_settings_enable_the_plugin() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         Engine::init_with(root, &interactive()).unwrap();
-        plant_emitted_skill(root, "gen");
+        plant_emitted_skill(root, LEGACY_CORE_SKILL);
         fs::write(root.join(".claude/settings.json"), settings).unwrap();
 
         let result = Engine::init_with(root, &plugin_enabled()).unwrap();
@@ -1473,7 +1540,7 @@ fn legacy_registrations_stay_until_the_committed_settings_enable_the_plugin() {
         assert_eq!(step(&result, ".claude/hooks/logos-quality-open.sh").action, InitAction::Skipped);
         assert!(root.join(".mcp.json").is_file(), "{settings}: the committed MCP entry stays");
         assert!(root.join(".claude/hooks/logos-quality-open.sh").is_file());
-        assert!(root.join(".agents/skills/gen/SKILL.md").is_file());
+        assert!(root.join(".agents/skills/logos-wiki/SKILL.md").is_file());
         assert!(
             !step(&result, ".claude/settings.json").detail.contains("enrolled ("),
             "no enrolment is claimed: {:?}",

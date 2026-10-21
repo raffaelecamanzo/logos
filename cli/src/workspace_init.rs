@@ -139,7 +139,7 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
         match fallback {
             Some((interactive, hooks)) => {
                 let steps = host.init_steps();
-                out.print(&logos_core::Engine::init_with_contributions(root, &crate::init_options(interactive, hooks, &steps, crate::ask), &steps)?)?
+                out.print(&logos_core::Engine::init_with_contributions(root, &crate::init_options(interactive, hooks, &steps, crate::ask), &steps, &host.owned_skills())?)?
             }
             None => eprintln!("logos init --workspace: no candidate member repositories found under {} — nothing to do", workspace_root.display()),
         }
@@ -917,6 +917,38 @@ mod tests {
             tmp.path().join(logos_ext::testing::STUB_INIT_TARGET).is_file(),
             "the stub's init step ran on the fallback init"
         );
+    }
+
+    /// The fallback init passes the host's owned skill names too (HF-10): an
+    /// INACTIVE extension that owns `logos-wiki` keeps that copy through the
+    /// plugin-enabled `init -i` the user typed, as the plain `init` does.
+    #[test]
+    fn the_fallback_init_passes_the_hosts_owned_skills() {
+        struct Owner;
+        impl logos_ext::Extension for Owner {
+            fn id(&self) -> &'static str {
+                "owner"
+            }
+            fn required_feature(&self) -> Option<&'static str> {
+                Some("never-enabled")
+            }
+            fn owned_skills(&self) -> Vec<String> {
+                vec!["logos-wiki".to_string()]
+            }
+        }
+        let tmp = fixture(&["api", "web"]);
+        std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+        std::fs::write(tmp.path().join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
+        let skill = tmp.path().join(".agents/skills/logos-wiki/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "<!-- logos-wiki skill — emitted from Logos v1.9.0. -->\nmy edit\n").unwrap();
+        let host = logos_ext::ExtensionHost::new().register(Owner).expect("registers");
+        let out = Output { json: true, quiet: true };
+        let code = run(tmp.path(), Some((true, false)), false, &["*".to_string()], &out, |_, _| {
+            unreachable!("nothing was approved, so nothing is warmed")
+        }, &host);
+        assert_eq!(code.unwrap(), 0);
+        assert!(std::fs::read_to_string(&skill).unwrap().ends_with("my edit\n"), "the owned skill stays, edits intact");
     }
 
     /// The other half of the pair, and the reason the provenance exists at all:

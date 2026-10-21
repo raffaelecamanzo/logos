@@ -13,6 +13,23 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.20.5] — 2026-10-21
+
+### Fixed
+
+- **`init -i` with the Claude Code plugin enabled no longer deletes a skill an
+  extension owns.** The legacy-skill retirement removed every `.agents/skills/<name>/`
+  holding only a `SKILL.md` that carried the Logos emission header, and an
+  extension stamps that header on a skill it owns — so the skill, and the user's
+  edits to it, went when the extension was inactive or the `init -i` skill
+  question was answered `n`. The retirement now removes only the skill the core
+  itself emitted before the split (a closed list: `logos-wiki`), and never a
+  name an extension registers through the new `Extension::owned_skills`
+  (default: none). The names are read from every registered extension, active or
+  not (`ExtensionHost::owned_skills`, passed to `Engine::init_with_contributions`),
+  so a skill survives while its extension is inactive — unlicensed or expired —
+  and with it the user's edits. `init --uninstall` is unchanged.
+
 ## [1.20.4] — 2026-10-21
 
 ### Changed

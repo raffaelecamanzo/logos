@@ -244,8 +244,10 @@ enrolment (`extraKnownMarketplaces.logos` and `enabledPlugins`) into the
 committed `.claude/settings.json`, so every teammate is prompted to install it,
 and writes no `.mcp.json` entry and no readout hook. It removes the ones an
 earlier `init -i` wrote, and a skill copy it materialized, which would otherwise
-list every tool and print the readout twice. Each removal is its own `Removed`
-row. With the plugin absent, `-i` is exactly as described above.
+list every tool and print the readout twice. The skill copies removed are those of
+the core's own legacy skill (`logos-wiki`) only: a skill under any other name, or
+one an extension registers as its own (active or not), stays whatever its
+header says. Each removal is its own `Removed` row. With the plugin absent, `-i` is exactly as described above.
 
 **Uninstall (`--uninstall`)** — removes everything Logos wrote into the
 project: the `CLAUDE.md` managed block, the `logos` `.mcp.json` entry, the

@@ -1,6 +1,6 @@
 {
   "name": "logos",
-  "version": "1.20.2",
+  "version": "1.20.5",
   "description": "Structural code intelligence for an enrolled repository: the logos MCP server and the session-start quality readout, with a check that the logos binary is recent enough.",
   "author": {
     "name": "Raffaele Camanzo",

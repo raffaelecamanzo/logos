@@ -108,10 +108,12 @@ pub struct InitOptions {
     /// `.claude/settings.json` and removes the legacy `logos` `.mcp.json`
     /// entry instead of writing one,
     /// [`install_quality_report_hook`](Self::install_quality_report_hook)
-    /// removes the legacy readout hook instead of installing it, and a skill
-    /// copy an earlier `init -i` materialized is removed unless
-    /// [`materialize_skill`](Self::materialize_skill) is asked for. The
-    /// default reads the Claude Code settings ([`ClaudePlugin::Detect`]).
+    /// removes the legacy readout hook instead of installing it, and a copy of a
+    /// skill the core itself once emitted ([`retire::legacy_core_skill`]) is
+    /// removed unless [`materialize_skill`](Self::materialize_skill) is asked for
+    /// or an extension owns the name (the `owned_skills` the host passes to
+    /// `run`, from every registered extension, active or not). The default reads
+    /// the Claude Code settings ([`ClaudePlugin::Detect`]).
     ///
     /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
     pub claude_plugin: ClaudePlugin,
@@ -493,7 +495,11 @@ use crate::hooks::HOOKS_RELDIR;
 /// # Errors
 /// Only on I/O failures writing Logos-owned artifacts; judgment-call refusals
 /// surface as `Skipped` steps instead (DL-06, DL-07).
-pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
+pub(crate) fn run(
+    root: &Path,
+    options: &InitOptions,
+    owned_skills: &[String],
+) -> Result<Vec<InitStep>> {
     let mut steps = vec![
         write_if_absent(root, ".logos/config.toml", CONFIG_TEMPLATE)?,
         append_project_id_if_absent(root)?,
@@ -540,9 +546,12 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
     }
     // A composed extension that materializes skills owns them (FR-WK-08 as
     // modified by CR-218), so only a run not asked to materialize one removes
-    // the copy an earlier core `init -i` wrote.
+    // the copy an earlier core `init -i` wrote — and only a skill the core
+    // itself emitted, never one an extension owns (HF-10).
     if retire && !options.materialize_skill {
-        steps.extend(retire::emitted_skills(root)?);
+        steps.extend(retire::emitted_skills(root, |name| {
+            retire::legacy_core_skill(name) && !owned_skills.iter().any(|o| o == name)
+        })?);
     }
     Ok(steps)
 }
@@ -1393,7 +1402,7 @@ mod tests {
     fn committed_policy_is_what_run_writes_and_the_block_leaves_tracked() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".logos")).unwrap();
-        let steps = run(tmp.path(), &InitOptions::default()).expect("the default init runs");
+        let steps = run(tmp.path(), &InitOptions::default(), &[]).expect("the default init runs");
 
         // The `[project] id` row (S-702) names a key inside `config.toml`, not a
         // file of its own, so it is not a policy-file target.

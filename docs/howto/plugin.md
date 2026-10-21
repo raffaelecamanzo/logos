@@ -117,10 +117,14 @@ entries, each as its own `removed` row:
 | `.mcp.json` | `removed`: the `logos` entry, only while it holds exactly what `init` wrote |
 | `.claude/hooks/logos-quality-open.sh` | `removed`: the readout script and its `SessionStart` entry |
 
-A skill copy and its `.claude/skills` pointer go the same way. Foreign content in
-those files is never touched, and a second run reports every row `unchanged`. With
-the plugin absent, `init -i` prints and writes exactly what it did before. The
-full reference is [`init`](commands.md#init--i---hooks---workspace---yes---exclude-glob).
+A skill copy and its `.claude/skills` pointer go the same way, but only the one
+skill the core itself once emitted (`logos-wiki`): a skill under any other name
+is left alone whatever its header says, and so is a skill an extension registers
+as its own — even while that extension is inactive — whether or not you
+materialize skills in that run. Foreign content in those files is never
+touched, and a second run reports every row `unchanged`. With the plugin
+absent, `init -i` prints and writes exactly what it did before.
+The full reference is [`init`](commands.md#init--i---hooks---workspace---yes---exclude-glob).
 
 **`init -i` does not install git hooks.** It offers them on a terminal and the
 default is no; `logos init --hooks` installs them. The git hooks and the plugin

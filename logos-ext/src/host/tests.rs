@@ -269,3 +269,42 @@ fn the_process_registration_asks_the_gate_once() {
     logos_core::config::parse_config("[probe]\nk = 1\n", std::path::Path::new("config.toml"))
         .expect("[probe] was claimed under the same reading as the tools");
 }
+
+/// An extension whose one contribution is a skill name, optionally gated.
+struct SkillOwner {
+    id: &'static str,
+    requires: Option<&'static str>,
+    skill: &'static str,
+}
+
+impl Extension for SkillOwner {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn required_feature(&self) -> Option<&'static str> {
+        self.requires
+    }
+
+    fn owned_skills(&self) -> Vec<String> {
+        vec![self.skill.to_string()]
+    }
+}
+
+/// The skill names are the one contribution read from every REGISTERED extension,
+/// so an extension the gate leaves inactive still keeps its skill from `init`'s
+/// retirement (HF-10); the extensions that name no skill add nothing.
+#[test]
+fn the_owned_skills_are_every_registered_extensions_active_or_not() {
+    let host = ExtensionHost::new()
+        .register(SkillOwner { id: "open", requires: None, skill: "open-skill" })
+        .unwrap()
+        .register(SkillOwner { id: "off", requires: Some("off-feature"), skill: "off-skill" })
+        .unwrap()
+        .register(Probe::open("quiet"))
+        .unwrap()
+        .with_gate(Fixed(&["another-feature"]));
+    assert_eq!(active_ids(&host), ["open", "quiet"], "the gated one is inactive");
+    assert_eq!(host.owned_skills(), ["open-skill", "off-skill"], "yet its skill is owned");
+    assert!(ExtensionHost::new().owned_skills().is_empty(), "no extension, no skill");
+}

@@ -926,13 +926,15 @@ impl Engine {
     /// Returns an error if `.logos/` cannot be created, the store cannot be
     /// opened/migrated, or a Logos-owned artifact cannot be written.
     pub fn init_with(root: impl AsRef<Path>, options: &InitOptions) -> Result<InitResult> {
-        Self::init_with_contributions(root, options, &[])
+        Self::init_with_contributions(root, options, &[], &[])
     }
 
     /// [`Engine::init_with`] plus the `contributions` an extension host supplies
     /// ([FR-DS-04], [ADR-74]): each runs after the core steps, against the same
     /// resolved root and options, and its rows join [`InitResult::steps`].
-    /// With none it is exactly [`Engine::init_with`].
+    /// With none it is exactly [`Engine::init_with`]. `owned_skills` are the
+    /// skill names every registered extension owns, active or not: `init` never
+    /// retires a skill copy under one of them (HF-10).
     ///
     /// # Errors
     /// As [`Engine::init_with`], plus a contribution's own I/O failure.
@@ -943,6 +945,7 @@ impl Engine {
         root: impl AsRef<Path>,
         options: &InitOptions,
         contributions: &[std::sync::Arc<dyn crate::init::InitContribution>],
+        owned_skills: &[String],
     ) -> Result<InitResult> {
         crate::observability::traced(Tool::Init, || {
             // Resolve the hint exactly as `start` will ([ADR-15], [FR-WT-01]) so
@@ -952,7 +955,7 @@ impl Engine {
             let db_path = logos_dir.join("logos.db");
             let existed = db_path.exists();
             let engine = Self::start(root)?;
-            let mut steps = crate::init::run(root, options)?;
+            let mut steps = crate::init::run(root, options, owned_skills)?;
             // FR-CF-10: the store records the coordinate the config `init` just
             // completed resolves to, so `status` reads it before any index. A
             // config that does not load is `init`'s to report, never to fail on

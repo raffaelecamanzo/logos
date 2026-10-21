@@ -71,7 +71,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
                 crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor, host)
             } else {
                 let steps = host.init_steps();
-                out.print(&Engine::init_with_contributions(root, &init_options(interactive, hooks, &steps, crate::ask), &steps)?)?;
+                out.print(&Engine::init_with_contributions(root, &init_options(interactive, hooks, &steps, crate::ask), &steps, &host.owned_skills())?)?;
                 Ok(0)
             }
         }

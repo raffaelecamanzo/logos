@@ -4,7 +4,8 @@
 //! has moved them — are **extensions**: types implementing [`Extension`],
 //! registered with an [`ExtensionHost`] at one composition root, the binary's
 //! `main`, which hands the host to `logos_cli::run`. Every surface takes the
-//! host and asks it for the **active** extensions' contributions:
+//! host and asks it for the **active** extensions' contributions (the one
+//! exception, the owned skill names, is in the last row):
 //!
 //! | Contribution | Method | Consumed by |
 //! |---|---|---|
@@ -17,6 +18,7 @@
 //! | init steps | [`Extension::init_steps`] | `logos init` |
 //! | a UI manifest — navigation, views, config panels, Dashboard cards | [`Extension::ui_manifest`] | the SPA, through the server ([FR-UI-51]) |
 //! | telemetry tools | [`Extension::telemetry_tools`] | the stats read-model's classification |
+//! | owned skill names | [`Extension::owned_skills`], from **every registered** extension | `logos init`: a skill copy under one of these names is never retired |
 //!
 //! Every method but [`Extension::id`] has a no-op default, so an extension
 //! declares only what it contributes, and a later story adds a contribution
@@ -28,7 +30,10 @@
 //! The composing binary may supply a [`FeatureGate`] that reports the enabled
 //! features; a build that supplies none enables no feature, so it activates only
 //! extensions that name none ([BR-63]). An inactive extension contributes
-//! nothing, on any surface.
+//! nothing, on any surface — except the one thing that must outlive its
+//! licence: the names of the skills it owns ([`Extension::owned_skills`]), so
+//! `init` never deletes a skill copy, and the user's edits to it, because the
+//! extension is inactive today.
 //!
 //! # Direction
 //!
@@ -145,6 +150,16 @@ pub trait Extension: Send + Sync + 'static {
 
     /// The steps this extension adds to `logos init`, run after the core's.
     fn init_steps(&self) -> Vec<Arc<dyn InitContribution>> {
+        Vec::new()
+    }
+
+    /// The names of the agent skills this extension owns and materializes. Unlike
+    /// every other contribution, these are read from every **registered**
+    /// extension, active or not ([`ExtensionHost::owned_skills`]): a skill copy
+    /// under one of these names is never retired by `init`, so an extension that
+    /// is inactive today (unlicensed, expired) keeps the copy, and the user's
+    /// edits to it, for the day it is active again. The default owns none.
+    fn owned_skills(&self) -> Vec<String> {
         Vec::new()
     }
 

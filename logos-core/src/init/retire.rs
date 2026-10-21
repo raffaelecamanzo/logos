@@ -163,10 +163,22 @@ pub(crate) fn claude_md_block(root: &Path) -> Result<InitStep> {
     Ok(step(TARGET, InitAction::Updated, "managed block removed"))
 }
 
+/// The skills the core itself emitted before the split ([FR-WK-08]): a closed
+/// list. `init` retires a copy only under one of these names, never under any
+/// other, whatever its header says — an extension stamps the same header on a
+/// skill it owns, and that skill is not the core's to take back (HF-10).
+///
+/// [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
+const LEGACY_CORE_SKILLS: [&str; 1] = ["logos-wiki"];
+
+/// Is `name` one of the skills the core itself once emitted ([`LEGACY_CORE_SKILLS`])?
+pub(super) fn legacy_core_skill(name: &str) -> bool {
+    LEGACY_CORE_SKILLS.contains(&name)
+}
+
 /// The header line Logos stamped on a skill it materialized ([FR-WK-08]):
 /// `<!-- <name> skill — emitted from Logos v<version>…`. Matched against the
-/// directory's own name, so the core recognizes any skill it ever emitted
-/// without naming one.
+/// directory's own name; which names count is [`emitted_skills`]'s `removable`.
 ///
 /// [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
 fn emission_header(name: &str) -> String {
@@ -208,25 +220,28 @@ fn names_in(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Remove every skill copy an earlier `init -i` materialized, with its
-/// `.claude/skills` pointer: the symlink to `../../.agents/skills/<name>` it
+/// Remove each skill copy an earlier `init -i` materialized whose name
+/// `removable` accepts, with its `.claude/skills` pointer: the symlink to `../../.agents/skills/<name>` it
 /// created, or the copy it fell back to ([FR-WK-08]). One row per skill
 /// found; none when there is nothing of Logos's there.
 ///
 /// A copy the user has added files to is `Skipped` and kept, and so is a
-/// pointer that points anywhere else.
+/// pointer that points anywhere else. A skill whose name `removable` rejects
+/// is not looked at: `init` passes [`legacy_core_skill`] (minus the names an
+/// extension owns), `--uninstall` passes everything.
 ///
 /// # Errors
 /// Only on an I/O failure removing a Logos-written file.
 ///
 /// [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
-pub(crate) fn emitted_skills(root: &Path) -> Result<Vec<InitStep>> {
+pub(crate) fn emitted_skills(root: &Path, removable: impl Fn(&str) -> bool) -> Result<Vec<InitStep>> {
     let skills = root.join(SKILLS_REL);
     let pointers = root.join(SKILL_POINTERS_REL);
     let mut names = names_in(&skills);
     names.extend(names_in(&pointers));
     names.sort();
     names.dedup();
+    names.retain(|name| removable(name));
     let mut steps = Vec::new();
     for name in names {
         let content = skills.join(&name);
@@ -340,7 +355,7 @@ pub(crate) fn uninstall(root: &Path) -> Result<Vec<InitStep>> {
         readout_hook(root)?,
         super::plugin::unenrol(root)?,
     ];
-    steps.extend(emitted_skills(root)?);
+    steps.extend(emitted_skills(root, |_| true)?);
     steps.push(git_hooks(root)?);
     if steps.iter().any(|s| s.action == InitAction::Removed || s.action == InitAction::Updated) {
         // Innermost first; `remove_dir` only removes an empty directory, so
@@ -465,12 +480,12 @@ mod tests {
         fs::create_dir_all(root.join(SKILL_POINTERS_REL)).unwrap();
         std::os::unix::fs::symlink("../../.agents/skills/gen", root.join(".claude/skills/gen")).unwrap();
 
-        let steps = emitted_skills(root).unwrap();
+        let steps = emitted_skills(root, |_| true).unwrap();
         assert_eq!(steps.len(), 1, "{steps:?}");
         assert_eq!((steps[0].target.as_str(), steps[0].action), (".agents/skills/gen", InitAction::Removed));
         assert!(fs::symlink_metadata(root.join(".agents/skills/gen")).is_err());
         assert!(fs::symlink_metadata(root.join(".claude/skills/gen")).is_err());
-        assert!(emitted_skills(root).unwrap().is_empty(), "second run finds nothing");
+        assert!(emitted_skills(root, |_| true).unwrap().is_empty(), "second run finds nothing");
     }
 
     /// The copy fallback, and a dangling pointer left by a removed copy.
@@ -481,7 +496,7 @@ mod tests {
         let root = tmp.path();
         write(root, ".claude/skills/gen/SKILL.md", &emitted("gen"));
         std::os::unix::fs::symlink("../../.agents/skills/old", root.join(".claude/skills/old")).unwrap();
-        let steps = emitted_skills(root).unwrap();
+        let steps = emitted_skills(root, |_| true).unwrap();
         assert_eq!(steps.len(), 2, "{steps:?}");
         assert!(steps.iter().all(|s| s.action == InitAction::Removed));
         assert!(names_in(&root.join(SKILL_POINTERS_REL)).is_empty());
@@ -498,11 +513,11 @@ mod tests {
         fs::create_dir_all(root.join(".claude")).unwrap();
         std::os::unix::fs::symlink("../.agents/skills", root.join(SKILL_POINTERS_REL)).unwrap();
 
-        let steps = emitted_skills(root).unwrap();
+        let steps = emitted_skills(root, |_| true).unwrap();
         assert_eq!(steps.len(), 1, "{steps:?}");
         assert_eq!((steps[0].target.as_str(), steps[0].action), (".agents/skills/gen", InitAction::Removed));
         assert!(!root.join(".agents/skills/gen").exists());
-        assert!(emitted_skills(root).unwrap().is_empty(), "second run finds nothing");
+        assert!(emitted_skills(root, |_| true).unwrap().is_empty(), "second run finds nothing");
     }
 
     /// Near misses, each left in place: a skill without the header, one whose
@@ -525,7 +540,7 @@ mod tests {
         std::os::unix::fs::symlink("../../vendor/v", root.join(".claude/skills/v")).unwrap();
         std::os::unix::fs::symlink("../../.agents/skills/mine", root.join(".claude/skills/mine")).unwrap();
 
-        let steps = emitted_skills(root).unwrap();
+        let steps = emitted_skills(root, |_| true).unwrap();
         assert_eq!(steps.len(), 1, "only the edited copy reports, as Skipped: {steps:?}");
         assert_eq!((steps[0].target.as_str(), steps[0].action), (".agents/skills/gen", InitAction::Skipped));
         for kept in ["mine/SKILL.md", "other/SKILL.md", "gen/notes.md"] {
@@ -534,5 +549,39 @@ mod tests {
         assert!(fs::symlink_metadata(root.join(".claude/skills/x")).is_ok());
         assert!(root.join("vendor/v/SKILL.md").is_file(), "a symlinked foreign skill is not removed");
         assert!(fs::symlink_metadata(root.join(".claude/skills/mine")).is_ok(), "a pointer at a user skill");
+    }
+
+    /// The closed list names the one skill the core emitted, and nothing a
+    /// character away from it.
+    #[test]
+    fn the_legacy_core_names_are_closed() {
+        assert!(legacy_core_skill("logos-wiki"));
+        for near in ["", "logos-wik", "logos-wiki2", "xlogos-wiki", "Logos-wiki", "logos", "wiki", "gen"] {
+            assert!(!legacy_core_skill(near), "{near:?} is not a legacy core skill");
+        }
+    }
+
+    /// `init`'s retirement: a Logos-stamped skill under a legacy core name goes;
+    /// one under any other name stays, edits and pointer intact (HF-10).
+    #[cfg(unix)]
+    #[test]
+    fn init_retires_only_a_legacy_core_name() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let edited = format!("{}\nmy own notes\n", emitted("gen"));
+        write(root, ".agents/skills/logos-wiki/SKILL.md", &emitted("logos-wiki"));
+        write(root, ".agents/skills/gen/SKILL.md", &edited);
+        fs::create_dir_all(root.join(SKILL_POINTERS_REL)).unwrap();
+        for name in ["logos-wiki", "gen"] {
+            std::os::unix::fs::symlink(format!("../../.agents/skills/{name}"), root.join(SKILL_POINTERS_REL).join(name)).unwrap();
+        }
+
+        let steps = emitted_skills(root, legacy_core_skill).unwrap();
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert_eq!((steps[0].target.as_str(), steps[0].action), (".agents/skills/logos-wiki", InitAction::Removed));
+        assert!(fs::symlink_metadata(root.join(".agents/skills/logos-wiki")).is_err());
+        assert!(fs::symlink_metadata(root.join(".claude/skills/logos-wiki")).is_err());
+        assert_eq!(read(root, ".agents/skills/gen/SKILL.md"), edited, "an unlisted name keeps its edits");
+        assert!(fs::symlink_metadata(root.join(".claude/skills/gen")).is_ok(), "and its pointer");
     }
 }

@@ -91,7 +91,9 @@ impl ExtensionHost {
 
     /// The **active** extensions, in registration order: every one that names
     /// no feature, and every one whose feature the gate enables — from one
-    /// evaluation of the gate. Only these contribute to any surface.
+    /// evaluation of the gate. Only these contribute to any surface — except the
+    /// skill names, which [`ExtensionHost::owned_skills`] reads from every
+    /// registered extension.
     pub fn active(&self) -> Vec<Arc<dyn Extension>> {
         let enabled = self.enabled_features();
         self.extensions
@@ -179,6 +181,12 @@ impl ExtensionHost {
     /// The active extensions' init steps, in registration order.
     pub fn init_steps(&self) -> Vec<Arc<dyn InitContribution>> {
         self.active().iter().flat_map(|e| e.init_steps()).collect()
+    }
+
+    /// The skill names every **registered** extension owns, active or not
+    /// ([`Extension::owned_skills`]): the names `init` never retires.
+    pub fn owned_skills(&self) -> Vec<String> {
+        self.registered().flat_map(|e| e.owned_skills()).collect()
     }
 
     /// The active extensions' UI manifests, as `(extension id, manifest)`.

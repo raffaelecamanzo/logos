@@ -47,6 +47,10 @@ fn host(kind: &str) -> ExtensionHost {
             .expect("registers")
             .with_gate(TestGate::enabling(&[STUB_FEATURE])),
         "skill-reader" => ExtensionHost::new().register(SkillReader).expect("registers"),
+        "inactive-skill-owner" => ExtensionHost::new()
+            .register(SkillOwner)
+            .expect("registers")
+            .with_gate(TestGate::enabling(&[])),
         "public" => ExtensionHost::new(),
         other => panic!("test bug: unknown host {other}"),
     }
@@ -260,6 +264,60 @@ fn a_composed_init_step_is_asked_the_skill_question() {
     };
     assert_eq!(reported(&["--json", "init", "-i"]), "materialize_skill=true", "`-i` asks, and non-TTY says yes");
     assert_eq!(reported(&["--json", "init"]), "materialize_skill=false", "a plain `init` does not ask");
+}
+
+/// An INACTIVE extension (its feature is never enabled) that owns the skill the
+/// core once emitted, `logos-wiki`: it contributes no init step, so `init -i`
+/// asks no skill question — yet its registered skill name must still reach
+/// `init`'s retirement (HF-10).
+struct SkillOwner;
+
+impl logos_ext::Extension for SkillOwner {
+    fn id(&self) -> &'static str {
+        "skill-owner"
+    }
+
+    fn required_feature(&self) -> Option<&'static str> {
+        Some("skill-owner-feature")
+    }
+
+    fn owned_skills(&self) -> Vec<String> {
+        vec!["logos-wiki".to_string()]
+    }
+}
+
+/// `logos init -i` in a project whose committed settings enable the plugin, over
+/// a Logos-stamped `logos-wiki` skill copy with a local edit: the copy is
+/// retired by a build with no extension, and kept by one whose INACTIVE
+/// extension owns the name — edits intact, no row.
+#[test]
+fn an_inactive_extension_keeps_the_skill_it_owns_through_init_i() {
+    let init_i = |kind: &str| -> (Run, std::path::PathBuf) {
+        let project = TempDir::new().expect("a temp project");
+        let root = project.keep();
+        std::fs::create_dir_all(root.join(".claude")).expect("create .claude");
+        std::fs::write(root.join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).expect("settings");
+        let skill = root.join(".agents/skills/logos-wiki/SKILL.md");
+        std::fs::create_dir_all(skill.parent().expect("a dir")).expect("create the skill dir");
+        std::fs::write(
+            &skill,
+            "<!-- logos-wiki skill — emitted from Logos v1.9.0. -->\nmy local edit\n",
+        )
+        .expect("plant the skill");
+        (logos(kind, &root, &["--json", "init", "-i"]), root)
+    };
+
+    let (run, root) = init_i("public");
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(!root.join(".agents/skills/logos-wiki").exists(), "no extension: the legacy copy is retired");
+    std::fs::remove_dir_all(&root).expect("clean up");
+
+    let (run, root) = init_i("inactive-skill-owner");
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(init_targets(&run).iter().all(|(t, _)| !t.starts_with(".agents")), "{:?}", init_targets(&run));
+    let kept = std::fs::read_to_string(root.join(".agents/skills/logos-wiki/SKILL.md")).expect("the skill stays");
+    assert!(kept.ends_with("my local edit\n"), "edits intact: {kept}");
+    std::fs::remove_dir_all(&root).expect("clean up");
 }
 
 /// A project whose `config.toml` holds `table_body` as the stub's table.
