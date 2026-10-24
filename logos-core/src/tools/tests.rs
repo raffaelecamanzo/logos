@@ -525,3 +525,40 @@ fn a_lock_on_a_removed_lock_file_is_not_held_and_is_taken_on_the_current_file() 
     assert!(entry.join("trivy.tar.gz").is_file(), "a sweep leaves a held entry alone");
     drop(held);
 }
+
+/// The managed coverage tools (S-748, FR-CV-17): each a registered coverage
+/// tool, never a scanner — so no security surface sees it — pinned for all
+/// four platforms as a `.tar.gz` holding the binary the coverage registry
+/// runs, at its root. Only [`Manifest::entry`] and [`Manifest::coverage_tool`]
+/// find it, and the installer accepts it by name.
+#[test]
+fn the_managed_coverage_tool_is_cargo_llvm_cov_and_never_a_scanner() {
+    let manifest = Manifest::builtin();
+    let names: Vec<&str> = manifest.coverage.iter().map(|t| t.tool.as_str()).collect();
+    assert_eq!(names, ["cargo-llvm-cov"]);
+    let entry = &manifest.coverage[0];
+    assert!(crate::coverage::registry::tool(&entry.tool).is_some(), "a registered coverage tool");
+    assert!(REGISTRY.iter().all(|s| s.name != entry.tool), "not a scanner");
+    assert!(manifest.tool(&entry.tool).is_none(), "the security surfaces' lookup never finds it");
+    assert_eq!(manifest.entry(&entry.tool), Some(entry));
+    assert_eq!(manifest.coverage_tool(&entry.tool), Some(entry));
+    assert_eq!(manifest.entry("trivy"), manifest.tool("trivy"), "a scanner still resolves as one");
+    assert_eq!(manifest.coverage_tool("trivy"), None);
+    assert!(entry.is_default() && entry.python.is_none());
+    assert!(version_key(&entry.version) >= version_key(&entry.min_version));
+    assert!(manifest.meets_minimum(&entry.tool, Some(&entry.min_version)));
+    assert!(!manifest.meets_minimum(&entry.tool, Some("0.5.9")), "its minimum counts");
+    let platforms: Vec<Platform> = entry.artifacts.iter().map(|a| a.platform).collect();
+    assert_eq!(platforms, Platform::ALL);
+    for artifact in &entry.artifacts {
+        assert_eq!(artifact.defect(), None, "{}", artifact.url);
+        assert_eq!(artifact.host(), "github.com");
+        assert!(artifact.url.contains(&format!("/v{}/", entry.version)), "{}", artifact.url);
+        assert_eq!(artifact.layout, Layout::TarGz { member: entry.binary.clone() });
+        assert!(artifact.size > 0);
+    }
+    assert!(
+        Installer::new(PathBuf::from("/nonexistent")).entries(&["cargo-llvm-cov"]).is_ok(),
+        "the installer installs it by name"
+    );
+}

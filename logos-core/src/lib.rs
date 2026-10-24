@@ -35,6 +35,11 @@ pub mod annotate;
 /// read-models ([`Config`](config::Config) / [`Rules`](config::Rules)) and the
 /// contained, gitignore-aware discovery walk ([`config::discover`]).
 pub mod config;
+/// The coverage runner (S-736, ADR-87): the per-project execution consent a
+/// coverage run checks before it starts the project's own build and tests
+/// (FR-CV-13), and the built-in registry of coverage tools it detects and runs
+/// with a fixed argv (S-735, FR-CV-11).
+pub mod coverage;
 pub mod engine;
 /// The typed core error contract (S-026, ADR-14): the [`CoreError`](error::CoreError)
 /// enum and its [`Severity`](error::Severity) classification — fail-soft-where-safe

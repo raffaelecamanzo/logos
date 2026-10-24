@@ -116,6 +116,7 @@ impl World {
                 user_dir: Some(self.user()),
                 search_path: Some(self.bin().into_os_string()),
                 tools_dir: Some(self.tools()),
+                nvd_api_key: None,
             })
             .with_tools_manifest(self.manifest.clone())
     }

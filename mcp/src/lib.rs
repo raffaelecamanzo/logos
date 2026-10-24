@@ -3,8 +3,9 @@
 //!
 //! Hosts the rmcp [`ServerHandler`](rmcp::ServerHandler) exposing the
 //! namespaced `logos:*` tools (FR-MC-01..06): 8 navigation tools, 9 quality
-//! tools, 1 temporal tool (`hotspots`, CR-006), and 3 coverage tools
-//! (`coverage_ingest`/`coverage_status`/`coverage_refresh`, CR-007/CR-036), each wired to one
+//! tools, 1 temporal tool (`hotspots`, CR-006), and 4 coverage tools
+//! (`coverage_ingest`/`coverage_status`/`coverage_refresh`, CR-007/CR-036;
+//! `coverage_run`, CR-234), each wired to one
 //! [`Engine`](logos_core::Engine) method (the quality set delegates to the
 //! governance engine, S-020).
 //!
@@ -31,7 +32,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use logos_core::{federation::Backing, Engine};
+use logos_core::{federation::Backing, jobs::AnalysisJobs, Engine};
 use logos_ext::ExtensionHost;
 use rmcp::ServiceExt;
 
@@ -68,7 +69,14 @@ pub fn serve_stdio(root: impl AsRef<Path>, host: &ExtensionHost) -> Result<()> {
         .enable_time()
         .build()
         .context("building the MCP I/O runtime")?;
-    runtime.block_on(serve_stdio_on(Arc::new(Backing::Single(engine)), host))
+    // The server's jobs (S-738): a job still running when the host disconnects
+    // is cancelled, its children killed, before the process exits.
+    let jobs = Arc::new(AnalysisJobs::new());
+    let served = runtime.block_on(serve_stdio_on(Arc::new(Backing::Single(engine)), host, Arc::clone(&jobs)));
+    if !jobs.shutdown(logos_core::jobs::SHUTDOWN_GRACE) {
+        tracing::warn!(target: "logos::mcp", "a cancelled job had not ended when the MCP server stopped");
+    }
+    served
 }
 
 /// Run the MCP stdio serve loop on the **caller's** runtime over a shared serve
@@ -84,14 +92,15 @@ pub fn serve_stdio(root: impl AsRef<Path>, host: &ExtensionHost) -> Result<()> {
 /// Split out of [`serve_stdio`] so the combined `serve --mcp --ui` process
 /// (CR-012, FR-UI-01) can race this loop against the web surface on **one**
 /// runtime sharing **one** `Engine` and **one** watcher (the caller owns engine,
-/// watcher, and runtime). stdout stays exclusively MCP-owned (NFR-RA-01).
+/// watcher, and runtime). stdout stays exclusively MCP-owned (NFR-RA-01). Its
+/// jobs run on `jobs`, which the caller shuts down when the serve ends (S-738).
 ///
 /// # Errors
 /// Returns an error if the initialize handshake fails for a reason other than a
 /// pre-handshake disconnect (which winds down cleanly, exit 0), or the serve
 /// loop fails irrecoverably.
-pub async fn serve_stdio_on(backing: Arc<Backing<Engine>>, host: &ExtensionHost) -> Result<()> {
-    let service = match LogosMcp::over(backing, host).serve(rmcp::transport::stdio()).await {
+pub async fn serve_stdio_on(backing: Arc<Backing<Engine>>, host: &ExtensionHost, jobs: Arc<AnalysisJobs>) -> Result<()> {
+    let service = match LogosMcp::over(backing, host).with_jobs(jobs).serve(rmcp::transport::stdio()).await {
         Ok(service) => service,
         // A host that closes stdin before (or during) the initialize handshake
         // is a disconnect, not a fault: wind down cleanly with exit 0, same as

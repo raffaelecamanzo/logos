@@ -19,3 +19,52 @@
   width: 8rem;
   height: 0.6rem;
 }
+
+/* The Coverage page's run (S-739): the title-row controls, the live line and the
+   per-tool progress list above the tools table. */
+.controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.summary {
+  margin: 0 0 var(--space-3);
+  color: var(--text-1);
+}
+
+.alert {
+  margin: 0 0 var(--space-3);
+  color: var(--text-1);
+}
+
+.progress {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-4);
+  line-height: var(--leading-base);
+  color: var(--text-1);
+}
+
+/* A muted one-line sentence under a state badge: a hint, a log path. */
+.fix {
+  margin: var(--space-1) 0 0;
+}
+
+/* A failed tool's error output, in its disclosure. */
+.stderr {
+  margin: var(--space-1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The consent dialog's tool list and the custom command, shown verbatim. */
+.toolList {
+  margin: var(--space-3) 0;
+  padding-left: var(--space-4);
+  line-height: var(--leading-base);
+}
+
+.command {
+  margin: 0 0 var(--space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

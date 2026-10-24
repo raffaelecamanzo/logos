@@ -456,14 +456,30 @@ pub(crate) enum Commands {
     /// this checkout's comparable gate baseline (else the base commit's
     /// signal), so the answer depends on that baseline. Report only: it exits
     /// 0 whenever it answers.
+    ///
+    /// With `--headroom` (FR-GV-29) it lists, before any branch exists, the
+    /// room left under every one of those budgets on the same base and from the
+    /// same cached measurement: each subject's current value, allowance and
+    /// headroom, and the margin under a numeric `drift_budget`. Exits 0 when it
+    /// answers, 1 when it cannot measure the base.
     Review {
         /// The ref to compare against (default: the repository's default
         /// branch — origin/HEAD, else main, else master).
         #[arg(long, value_name = "REF")]
         base: Option<String>,
         /// Project these branches' summed deltas onto the shared limits.
-        #[arg(long, value_name = "BRANCH", num_args = 1..)]
+        #[arg(long, value_name = "BRANCH", num_args = 1.., conflicts_with = "headroom")]
         branches: Vec<String>,
+        /// List the room left under every shared budget on the base.
+        #[arg(long)]
+        headroom: bool,
+        /// With `--headroom`: only the budget subjects these project-relative
+        /// paths or symbol names resolve to (default: each budget's 10 tightest).
+        #[arg(long, value_name = "PATH-OR-SYMBOL", num_args = 1.., requires = "headroom")]
+        subjects: Vec<String>,
+        /// With `--headroom`: only subjects with at most N room left.
+        #[arg(long, value_name = "N", requires = "headroom")]
+        near: Option<u64>,
         #[command(flatten)] member: MemberArg,
     },
     /// Where to start (FR-QM-17): the ranked fix units the last snapshot
@@ -487,14 +503,16 @@ pub(crate) enum Commands {
         /// ranking (CR-076); default off — the whole-repo board is unchanged.
         #[arg(long)]
         production_scope: bool,
-        /// Rank hotspots with a fresh unsuppressed security finding first, highest
-        /// severity first (FR-SC-14); the findings column shows with or without it.
+        /// Rank hotspots with a fresh unsuppressed security finding in production
+        /// code first, highest severity first (FR-SC-14); the findings column
+        /// shows with or without it.
         #[arg(long)]
         with_findings: bool,
         #[command(flatten)] member: MemberArg,
     },
-    /// Coverage evidence tier: ingest external reports and read freshness-checked
-    /// status (the non-gated coverage tier — never moves the gate, BR-28).
+    /// Coverage evidence tier: run the project's coverage tools, ingest reports
+    /// and read freshness-checked status (the non-gated coverage tier — never
+    /// moves the gate, BR-28).
     Coverage {
         #[command(subcommand)]
         command: CoverageCommands,
@@ -567,20 +585,67 @@ pub(crate) enum Commands {
 /// `coverage` sub-subcommands (FR-CV-05/06): ingest external reports, read status.
 #[derive(Subcommand)]
 pub(crate) enum CoverageCommands {
-    /// Ingest an LCOV/Cobertura report into the evidence store (FR-CV-01).
+    /// Ingest an LCOV/Cobertura/JaCoCo/Go coverprofile report into the evidence store (FR-CV-01, FR-CV-12).
     Ingest {
         /// Path to the coverage report file.
         report: PathBuf,
-        /// Force the report format ("lcov" or "cobertura"); default auto-detects.
+        /// Force the report format ("lcov", "cobertura", "jacoco" or "gocover"); default auto-detects.
         #[arg(long)]
         format: Option<String>,
     },
     /// Per-file coverage freshness + the overall fraction (FR-CV-05/06).
     Status { #[command(flatten)] member: MemberArg },
     /// Run the configured `[coverage_ingest].refresh_cmd` and ingest its output
-    /// (FR-CV-10). The lone explicit coverage subprocess — never on the serve
-    /// path (ADR-38). Errors if no `refresh_cmd` is configured.
-    Refresh,
+    /// (FR-CV-10): `coverage run --tool custom`. Errors if no `refresh_cmd` is
+    /// configured. The first run, and the first after the command's text
+    /// changes, needs `--consent` (FR-CV-13). Exits 1 unless it ran cleanly.
+    Refresh { #[arg(long, help = "Record this project's coverage execution consent for the command, shown verbatim when asked for: it builds the project, runs its tests and may fetch dependencies")] consent: bool },
+    /// Run every enabled, installed coverage tool in sequence, then the
+    /// custom `refresh_cmd` when one is configured, and ingest each report
+    /// into one snapshot at HEAD (FR-CV-14). One outcome per tool: ran, ran
+    /// with tests failed (report ingested), failed, timed out, or why it did
+    /// not run. Needs `--consent` the first time, and again for a tool or a
+    /// command the consent does not name (FR-CV-13). Exits 1 unless every
+    /// tool it started ran cleanly.
+    Run {
+        /// Run only this tool: a registry name (cargo-llvm-cov, vitest, jest,
+        /// pytest-cov, maven, gradle, go) or `custom`.
+        #[arg(long, value_name = "ID")]
+        tool: Option<String>,
+        /// Record this project's coverage execution consent for what the run
+        /// starts: it builds the project, runs its tests and may fetch
+        /// dependencies.
+        #[arg(long)]
+        consent: bool,
+        /// Record this project's dependency consent, and add a missing vitest
+        /// coverage provider or pytest-cov as a dev dependency with the
+        /// project's own package manager (FR-CV-18): the run names the exact
+        /// command and the files it changes. The package manager may run
+        /// dependency lifecycle scripts; nothing is committed.
+        #[arg(long)]
+        dependency_consent: bool,
+    },
+    /// Install the coverage tools Logos manages — cargo-llvm-cov, pinned and
+    /// SHA-256-verified, into the user-level tools directory — when no usable
+    /// copy is there, and add the llvm-tools-preview component to your Rust
+    /// toolchain with your own rustup (FR-CV-17). A copy of your own (the
+    /// user-level path override, or one on PATH at or above the tested
+    /// minimum) is used and never downloaded. Needs `--consent` the first
+    /// time; without rustup, names the command to run by hand and changes
+    /// nothing. Exits 1 when cargo-llvm-cov had to be installed and was not,
+    /// or the component step failed. A copy of your own is kept and never
+    /// replaced — an override that cannot run included, which
+    /// `coverage status` then reports as not installed.
+    Install {
+        /// Install offline from a directory of pre-downloaded release
+        /// artifacts, verified exactly as a download is.
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Record the install consent for what is about to be downloaded, and
+        /// for running `rustup component add llvm-tools-preview`.
+        #[arg(long)]
+        consent: bool,
+    },
 }
 
 /// `security` sub-subcommands (FR-SC-01, FR-SC-06..08): each one `Engine` call
@@ -666,7 +731,8 @@ pub(crate) enum SecurityCommands {
     /// fresh — and the consent state (FR-SC-08).
     Status { #[command(flatten)] member: MemberArg },
     /// The stored findings with OWASP categories and suppressions; the filters
-    /// intersect (FR-SC-08).
+    /// intersect (FR-SC-08). Production code by default, with the number of
+    /// findings in test code it hid; `--scope all` lists every finding (FR-SC-28).
     Findings {
         /// Least severity listed: critical, high, medium, low or info; or `unrated` alone.
         #[arg(long)]
@@ -686,6 +752,9 @@ pub(crate) enum SecurityCommands {
         /// The OWASP edition: 2025 (default) or 2021.
         #[arg(long)]
         edition: Option<String>,
+        /// The code scope: production (default), test or all.
+        #[arg(long)]
+        scope: Option<String>,
         #[command(flatten)] member: MemberArg,
     },
     /// Write the stored findings, as fingerprint, rule id and path only, to
@@ -1413,6 +1482,7 @@ mod surface_parity {
         ("coverage_ingest", Twin("coverage ingest")),
         ("coverage_status", Twin("coverage status")),
         ("coverage_refresh", Twin("coverage refresh")),
+        ("coverage_run", Twin("coverage run")),
         // Security evidence tier (S-667).
         ("security_scan", Twin("security scan")),
         ("security_ingest", Twin("security ingest")),
@@ -1540,6 +1610,14 @@ mod surface_parity {
              findings from (FR-SC-25): blessing a finding is a human decision \
              made in code review, so an agent gets no tool for it, and the \
              plugin guard asks before an agent runs the command.",
+        ),
+        (
+            "coverage install",
+            "downloads and installs cargo-llvm-cov and runs `rustup component \
+             add` on the user's toolchain, under the per-user install consent \
+             (FR-CV-17, ADR-88 §6). An agent must not grant itself that \
+             consent, so MCP has no install tool: `coverage_status` names \
+             this command for the user to run instead.",
         ),
     ];
 
@@ -2071,11 +2149,18 @@ mod surface_parity {
             let path = repo_root().join(relative);
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
         };
-        vec![ManualPage {
-            label: "the security page (docs/howto/security.md)",
-            text: page("docs/howto/security.md"),
-            min_reconciled_claims: 23,
-        }]
+        vec![
+            ManualPage {
+                label: "the security page (docs/howto/security.md)",
+                text: page("docs/howto/security.md"),
+                min_reconciled_claims: 23,
+            },
+            ManualPage {
+                label: "the coverage page (docs/howto/coverage.md)",
+                text: page("docs/howto/coverage.md"),
+                min_reconciled_claims: 6,
+            },
+        ]
     }
 
     /// The inline `` `code` `` spans of a markdown text, whitespace-normalised so

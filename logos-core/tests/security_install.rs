@@ -99,6 +99,7 @@ impl World {
                 user_dir: Some(self.user()),
                 search_path: Some(self.bin().into_os_string()),
                 tools_dir: Some(tools),
+                nvd_api_key: None,
             })
             .with_tools_manifest(manifest.clone())
     }
@@ -204,7 +205,7 @@ fn scanner_script(tool: &str, version: &str) -> String {
         "#!/bin/sh\n\
          case \"$1\" in --version|version|-version) printf '%s\\n' '{tool} version {version}'; exit 0;; esac\n\
          out=''; prev=''\n\
-         for a in \"$@\"; do case \"$prev\" in --output|--report-path|-out) out=\"$a\";; esac; prev=\"$a\"; done\n\
+         for a in \"$@\"; do case \"$prev\" in --output|--output-file|--report-path|-out) out=\"$a\";; esac; prev=\"$a\"; done\n\
          if [ -n \"$out\" ]; then printf '%s' '{{\"version\":\"2.1.0\",\"runs\":[{{\"tool\":{{\"driver\":{{\"name\":\"{driver}\",\"rules\":[]}}}},\"results\":[]}}]}}' > \"$out\"; fi\n\
          exit 0\n"
     )
@@ -307,7 +308,7 @@ fn consent_then_only_the_missing_tools_install_and_a_users_own_copy_wins_and_sur
     let installed = json(&engine.security_install(&request(Selection::All, true)).unwrap());
     assert_eq!(
         installed["consent_recorded"],
-        json!(["gitleaks 8.18.4", "osv-scanner 1.9.2", "gosec 2.21.4"])
+        json!(["gitleaks 8.18.4", "osv-scanner 2.7.0", "gosec 2.29.0"])
     );
     assert_eq!(
         outcomes(&installed),
@@ -328,7 +329,7 @@ fn consent_then_only_the_missing_tools_install_and_a_users_own_copy_wins_and_sur
     let gosec = status_row(&engine, "gosec");
     assert_eq!(
         (gosec["installed"]["copy"].as_str(), gosec["installed"]["version"].as_str()),
-        (Some("managed"), Some("2.21.4"))
+        (Some("managed"), Some("2.29.0"))
     );
     assert_eq!(gosec["installed"]["update_available"], Value::Null);
 
@@ -426,6 +427,87 @@ fn install_from_a_directory_needs_no_network_and_verifies_each_artifact() {
     assert!(!w.tools().join("gosec").exists(), "nothing from the tampered artifact is installed");
     assert!(w.downloads().is_empty(), "no download was attempted: {:?}", w.downloads());
     assert_eq!(status_row(&engine, "trivy")["installed"]["copy"], "managed");
+}
+
+/// gosec 2.21.4 cannot type the standard library under Go 1.27; the pin is the
+/// release built for it (S-782). A 2.21.4 managed copy still runs — it stays at
+/// or above the minimum, so no scan loses its scanner — and `status` offers the
+/// pinned release as its update; the four platforms each name that release.
+#[test]
+fn a_managed_gosec_2_21_4_shows_the_go_1_27_release_as_its_update_and_keeps_running() {
+    use logos_core::tools::Platform;
+    let builtin = Manifest::builtin();
+    let entry = builtin.tool("gosec").expect("gosec is managed");
+    assert_eq!(entry.version, "2.29.0");
+    assert_eq!(entry.artifacts.len(), 4, "one artifact per platform");
+    for platform in Platform::ALL {
+        let artifact = entry.artifact(platform).unwrap_or_else(|| panic!("gosec has a {platform:?} release"));
+        assert!(
+            artifact.url.starts_with("https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_"),
+            "{}",
+            artifact.url
+        );
+        assert!(artifact.size > 0 && artifact.sha256.len() == 64, "{platform:?}");
+    }
+    assert!(builtin.meets_minimum("gosec", Some("2.21.4")), "the old copy is still usable");
+    assert!(!builtin.meets_minimum("gosec", Some("2.20.0")));
+
+    let w = World::new();
+    let old = w.manifest(&[("gosec", "2.21.4")]);
+    w.engine(&old).security_install(&request(Selection::Only(vec!["gosec".into()]), true)).unwrap();
+    assert!(w.managed("gosec", "2.21.4").is_file());
+    let engine = w.engine(&w.manifest(&[]));
+    let row = status_row(&engine, "gosec");
+    assert_eq!(
+        (row["installed"]["copy"].as_str(), row["installed"]["version"].as_str()),
+        (Some("managed"), Some("2.21.4")),
+        "the older managed copy still runs: {row}"
+    );
+    assert_eq!(row["installed"]["update_available"], "2.29.0", "{row}");
+}
+
+/// osv-scanner 1.9.2 has no `--output-file`, which the registry's command line
+/// now spells; the pin is 2.7.0 (S-779). A 1.9.2 managed copy is still found —
+/// the manifest's minimum stays 1.9.0, because a minimum above an installed
+/// managed copy makes it vanish instead of offering its update — and `status`
+/// names 2.7.0 as the update; the four platforms each name that release.
+#[test]
+fn a_managed_osv_scanner_1_9_2_shows_2_7_0_as_its_update_and_is_still_found() {
+    use logos_core::tools::Platform;
+    let builtin = Manifest::builtin();
+    let entry = builtin.tool("osv-scanner").expect("osv-scanner is managed");
+    assert_eq!(entry.version, "2.7.0");
+    assert_eq!(entry.artifacts.len(), 4, "one artifact per platform");
+    for platform in Platform::ALL {
+        let artifact = entry.artifact(platform).unwrap_or_else(|| panic!("osv-scanner has a {platform:?} release"));
+        let asset = match platform {
+            Platform::MacosArm64 => "darwin_arm64",
+            Platform::MacosX86_64 => "darwin_amd64",
+            Platform::LinuxX86_64 => "linux_amd64",
+            Platform::LinuxArm64 => "linux_arm64",
+        };
+        assert_eq!(
+            artifact.url,
+            format!("https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_{asset}"),
+            "{platform:?}"
+        );
+        assert!(artifact.size > 50_000_000 && artifact.sha256.len() == 64, "{platform:?}: a 2.x binary, not a 1.9.2 one");
+    }
+    assert!(builtin.meets_minimum("osv-scanner", Some("1.9.2")), "the old copy is still found");
+    assert!(!builtin.meets_minimum("osv-scanner", Some("1.8.5")));
+
+    let w = World::new();
+    let old = w.manifest(&[("osv-scanner", "1.9.2")]);
+    w.engine(&old).security_install(&request(Selection::Only(vec!["osv-scanner".into()]), true)).unwrap();
+    assert!(w.managed("osv-scanner", "1.9.2").is_file());
+    let engine = w.engine(&w.manifest(&[]));
+    let row = status_row(&engine, "osv-scanner");
+    assert_eq!(
+        (row["installed"]["copy"].as_str(), row["installed"]["version"].as_str()),
+        (Some("managed"), Some("1.9.2")),
+        "the older managed copy is still found: {row}"
+    );
+    assert_eq!(row["installed"]["update_available"], "2.7.0", "{row}");
 }
 
 /// A manifest pinning a newer version: `status` shows `update_available`, the
@@ -653,6 +735,7 @@ fn scan_install_with_nothing_missing_needs_no_tools_directory() {
             user_dir: Some(w.user()),
             search_path: Some(w.bin().into_os_string()),
             tools_dir: None,
+            nvd_api_key: None,
         })
         .with_tools_manifest(manifest);
 
@@ -681,6 +764,7 @@ fn an_install_outside_a_logos_project_writes_nothing_into_it() {
             user_dir: Some(w.user()),
             search_path: Some(w.bin().into_os_string()),
             tools_dir: Some(w.tools()),
+            nvd_api_key: None,
         })
         .with_tools_manifest(manifest.clone());
 
@@ -715,6 +799,7 @@ fn a_symlinked_logos_gets_no_lock_file_written_through_it() {
             user_dir: Some(w.user()),
             search_path: Some(w.bin().into_os_string()),
             tools_dir: Some(w.tools()),
+            nvd_api_key: None,
         })
         .with_tools_manifest(manifest.clone());
 

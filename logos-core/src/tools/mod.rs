@@ -2,6 +2,9 @@
 //! and removes the scanners Logos manages, from the
 //! [compiled-in manifest](Manifest::builtin): release binaries by the route
 //! below, and the Python scanners through a managed `uv` ([`uv`], S-745).
+//! The same route installs `cargo-llvm-cov`, the one managed
+//! [coverage tool](Manifest::coverage), and [`rustup`] adds the
+//! `llvm-tools-preview` component it needs to the user's toolchain (S-748).
 //!
 //! Managed tools live in one user-level **tools directory**
 //! ([`user_tools_dir`]), never inside a repository: one `<tool>/<version>/`
@@ -60,6 +63,7 @@
 
 mod java;
 mod manifest;
+mod rustup;
 pub mod surface;
 mod uv;
 
@@ -82,6 +86,7 @@ pub use manifest::{
     version_at_least, Archive, Artifact, Layout, Licence, ManagedPython, Manifest, OptIn, Platform,
     PythonPackage, ToolEntry, CODEQL_LICENCE,
 };
+pub use rustup::{ComponentOutcome, LLVM_TOOLS, LLVM_TOOLS_ADD};
 pub use uv::{PYTHON_DIR, UV_CACHE_DIR};
 use manifest::version_key;
 
@@ -257,7 +262,7 @@ pub enum UninstallOutcome {
 ///
 /// [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
 pub fn resolve(tools_dir: &Path, manifest: &Manifest, tool: &str) -> Option<ManagedTool> {
-    resolve_entry(tools_dir, manifest, manifest.tool(tool)?)
+    resolve_entry(tools_dir, manifest, manifest.entry(tool)?)
 }
 
 /// [`resolve`] for one manifest entry, `uv` and the Java runtime included. A
@@ -461,13 +466,7 @@ impl Installer {
         if unlink_if_symlink(&staging_root).is_ok() {
             sweep_stale_staging(&staging_root);
         }
-        let search_dirs = match &self.project_root {
-            Some(root) => usable_path_entries(root, self.search_path.as_deref()),
-            None => absolute_entries(self.search_path.as_deref()),
-        };
-        let child_path = (!search_dirs.is_empty())
-            .then(|| std::env::join_paths(&search_dirs).ok())
-            .flatten();
+        let (search_dirs, child_path) = self.child_search();
         let ctx = Context {
             search_dirs: &search_dirs,
             child_path: child_path.as_ref(),
@@ -547,13 +546,27 @@ impl Installer {
         Ok(removed)
     }
 
+    /// The search-path entries `curl`, `tar`, `uv` and `rustup` are looked up
+    /// on — absolute, and outside the [project](Self::for_project) when one is
+    /// set — and those entries joined, the `PATH` each runs with.
+    fn child_search(&self) -> (Vec<PathBuf>, Option<OsString>) {
+        let search_dirs = match &self.project_root {
+            Some(root) => usable_path_entries(root, self.search_path.as_deref()),
+            None => absolute_entries(self.search_path.as_deref()),
+        };
+        let child_path = (!search_dirs.is_empty())
+            .then(|| std::env::join_paths(&search_dirs).ok())
+            .flatten();
+        (search_dirs, child_path)
+    }
+
     fn entries<S: AsRef<str>>(&self, tools: &[S]) -> Result<Vec<&ToolEntry>, ConfigError> {
         tools
             .iter()
             .map(|name| {
                 let name = name.as_ref();
                 self.manifest
-                    .tool(name)
+                    .entry(name)
                     .ok_or_else(|| ConfigError::InvalidValue {
                         key: "tool".to_string(),
                         message: format!(
@@ -561,6 +574,7 @@ impl Installer {
                             self.manifest
                                 .tools
                                 .iter()
+                                .chain(&self.manifest.coverage)
                                 .map(|t| t.tool.as_str())
                                 .collect::<Vec<_>>()
                                 .join(", ")
@@ -909,10 +923,7 @@ struct Context<'a> {
 
 impl Context<'_> {
     fn find(&self, program: &str) -> Option<PathBuf> {
-        self.search_dirs
-            .iter()
-            .map(|dir| dir.join(program))
-            .find(|candidate| is_executable(candidate))
+        spawn::find_on_path(self.search_dirs, program)
     }
 
     fn launch<'a>(&'a self, cwd: &'a Path, deadline: Duration) -> Launch<'a> {

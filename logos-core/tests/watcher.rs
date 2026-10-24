@@ -327,6 +327,7 @@ fn out_of_band_edit_without_watcher_is_reflected_by_the_next_sync() {
 /// wall-clock posture as the NFR-PE-05 cold-start test (the dev profile pins
 /// tree-sitter opt-levels, keeping the budget honest in both profiles).
 #[test]
+#[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
 fn single_file_sync_meets_the_pe03_budget() {
     let (_tmp, root, engine) = indexed_project();
     write(
@@ -388,7 +389,7 @@ fn navigation_reads_survive_a_continuous_edit_stream() {
     );
     // Reads stayed live (NFR-PE-01 posture; the rigorous p95 lands in S-024).
     assert!(
-        slowest_read < Duration::from_secs(2),
+        cfg!(coverage) || slowest_read < Duration::from_secs(2),
         "a navigation read stalled for {slowest_read:?} during the stream"
     );
 }

@@ -142,7 +142,31 @@ case "$sub" in
                     emit "$STUB_DIR/${STUB_SCAN:-scan}.json"
                 fi
                 ;;
-            findings*) emit "$STUB_DIR/${STUB_FINDINGS:-findings}.json"; exit "${STUB_FINDINGS_RC:-0}" ;;
+            findings*)
+                # The scope filter arrived in 1.21.0 (FR-SC-28): there `security findings` lists production
+                # code unless `--scope all` is given, and a fixture <name>.production.json is that default
+                # listing; a 1.20.x binary rejects the flag and lists every finding.
+                scope="" prev="" had=0
+                for a in "$@"; do
+                    [ "$prev" = "--scope" ] && scope="$a"
+                    [ "$a" = "--scope" ] && had=1
+                    prev="$a"
+                done
+                v="${STUB_VERSION:-99.0.0}"
+                IFS=. read -r vmaj vmin _ <<<"${v%%-*}"
+                cap=0
+                { [ "$vmaj" -gt 1 ] || { [ "$vmaj" -eq 1 ] && [ "$vmin" -ge 21 ]; }; } 2>/dev/null && cap=1
+                if [ "$had" = 1 ] && [ "$cap" = 0 ]; then
+                    echo "error: unexpected argument '--scope' found" >&2
+                    exit 2
+                fi
+                f="$STUB_DIR/${STUB_FINDINGS:-findings}.json"
+                if [ "$cap" = 1 ] && [ "$scope" != all ] && [ -f "${f%.json}.production.json" ]; then
+                    f="${f%.json}.production.json"
+                fi
+                emit "$f"
+                exit "${STUB_FINDINGS_RC:-0}"
+                ;;
             *) echo "error: unrecognized: security $what" >&2; exit 2 ;;
         esac
         ;;
@@ -977,7 +1001,7 @@ run -- "$B0" "$SCR/sec-rescan.sh" --triage "$WORK/triage.json" --out "$WORK/resc
 expect "the scan's argv, one argument each: the scanner name keeps its space" "$(grep '^<security><scan><--scanner>' "$ARGV")" "<security><scan><--scanner><Semgrep OSS><--path><app/routes.py><--json>"
 expect "sync's argv, one argument each" "$(grep '^<sync>' "$ARGV")" "<sync><--><app/routes.py>"
 run STUB_FINDINGS=findings-after -- "$B0" "$SCR/sec-proof.sh" --triage "$WORK/triage.json" --delta "$WORK/delta.json" --rescan "$WORK/rescan.json" --entry s2
-expect "the proof asks for this scanner's findings of this file, each argument intact" "$(grep '^<security><findings>' "$ARGV" | tail -1)" "<security><findings><--json><--scanner><Semgrep OSS><--path><app/routes.py>"
+expect "the proof asks for this scanner's findings of this file in every scope, each argument intact" "$(grep '^<security><findings>' "$ARGV" | tail -1)" "<security><findings><--json><--scope><all><--scanner><Semgrep OSS><--path><app/routes.py>"
 
 # Several scanners: one scan each, every answer recorded, one failure fails the run.
 python3 -I - "$WORK/triage.json" "$WORK/triage-two.json" "$FX" <<'PY'
@@ -1314,6 +1338,139 @@ run STUB_FINDINGS=findings-after -- "$B0" "$SCR/sec-proof.sh" --triage "$WORK/tr
 expect "two files of one scanner: both proven" "$RC" 0
 expect "two files of one scanner: one findings read per file" "$(grep -c '^<security><findings>' "$ARGV")" 2
 contains "two files: the denominator counts both" "$ERR" "2 fix entries checked, 2 proven, 0 not proven"
+
+# --- 11. the scope filter: test code is read, on the logos that has the filter (S-797, FR-SC-28) ----
+
+echo "== 11. --scope all, behind a version gate"
+# A fix entry in a test file. On a logos with the scope filter, `security findings` lists production code
+# unless asked for `--scope all`; the stub's findings-testfile-still.production.json is that default
+# listing, with the test-file finding left out. A proof that read it would call the fix proven while the
+# finding is still stored.
+python3 -I - "$WORK/delta.json" "$WORK/delta-tf.json" "$FX" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[1]))
+fx = sys.argv[3]
+fp = lambda s: hashlib.sha256(s.encode()).hexdigest()
+for f in d["security"]["findings"]:
+    if f["fingerprint"] == fp("fix"):
+        f.update(path="tests/test_routes.py", code_scope="test")
+json.dump(d, open(sys.argv[2], "w"))
+base = json.load(open(f"{fx}/findings.json"))
+still = next(f for f in d["security"]["findings"] if f["fingerprint"] == fp("fix"))
+json.dump(dict(base, findings=[still]), open(f"{fx}/findings-tf-still.json", "w"))
+json.dump(dict(base, findings=[]), open(f"{fx}/findings-tf-still.production.json", "w"))
+json.dump(dict(base, findings=[]), open(f"{fx}/findings-tf-gone.json", "w"))
+scan = json.load(open(f"{fx}/scan.json"))
+scan["scanners"][0]["scope"] = {"kind": "paths", "paths": ["tests/test_routes.py"]}
+json.dump(scan, open(f"{fx}/scan-tf.json", "w"))
+PY
+mkdir -p "$GR/tests"
+printf 'def test_q():\n    assert True\n' >"$GR/tests/test_routes.py"
+run -- "$B0" "$SCR/sec-triage.sh" --delta "$WORK/delta-tf.json" --out "$WORK/triage-tf.json"
+TFID="$(py 'import json,sys; print(next(e["id"] for e in json.load(open(sys.argv[1]))["entries"] if e["fingerprint"]==open(sys.argv[2]).read()))' "$WORK/triage-tf.json" "$FX/fix-fp")"
+expect "the test-file fix entry is triaged as a fix" "$(py 'import json,sys; print([e["proposed"] for e in json.load(open(sys.argv[1]))["entries"] if e["id"]==sys.argv[2]][0])' "$WORK/triage-tf.json" "$TFID")" "fix"
+run STUB_SCAN=scan-tf -- "$B0" "$SCR/sec-rescan.sh" --triage "$WORK/triage-tf.json" --out "$WORK/rescan-tf.json" --entry "$TFID"
+expect "the test-file re-scan is recorded: exit 0" "$RC" 0
+python3 -I -c 'import os,sys; r=os.stat(sys.argv[1]).st_mtime; os.utime(sys.argv[2], (r-30, r-30))' "$WORK/rescan-tf.json" "$GR/tests/test_routes.py"
+
+tfproof() { # BASH FINDINGS-NAME [VAR=value ...]
+    local b="$1" f="$2"
+    shift 2
+    : >"$CALLS"
+    run STUB_FINDINGS="$f" "$@" -- "$b" "$SCR/sec-proof.sh" --triage "$WORK/triage-tf.json" --delta "$WORK/delta-tf.json" --rescan "$WORK/rescan-tf.json" --entry "$TFID"
+}
+NB11=0
+for B in "${BASHES[@]}"; do
+    NB11=$((NB11 + 1))
+    # A logos with the filter (the stub defaults to 99.0.0, and 1.21.0 is the first one).
+    for v in 99.0.0 1.21.0 1.21.0-dev 2.0.0 1.100.0; do
+        tfproof "$B" findings-tf-still STUB_VERSION="$v"
+        expect "[$B] logos $v: a test-file finding still stored reads as present: not proven, exit 1" "$RC" 1
+        contains "[$B] logos $v: the reason is the fingerprint, not an answer that never came" "$OUT" "the fingerprint is still listed after the re-scan"
+        contains "[$B] logos $v: the proof asked for every scope" "$(grep '^security findings' "$CALLS")" "security findings --json --scope all --scanner Semgrep OSS --path tests/test_routes.py"
+        tfproof "$B" findings-tf-gone STUB_VERSION="$v"
+        expect "[$B] logos $v: the finding really gone: proven, exit 0" "$RC" 0
+    done
+    # A 1.20.x logos has no filter and lists every finding: the flag is omitted, and the proof is the same.
+    for v in 1.20.5 1.20.0 1.20.99; do
+        tfproof "$B" findings-tf-still STUB_VERSION="$v"
+        expect "[$B] logos $v: a test-file finding still stored reads as present: not proven, exit 1" "$RC" 1
+        contains "[$B] logos $v: the reason is the fingerprint, not a rejected flag" "$OUT" "the fingerprint is still listed after the re-scan"
+        lacks "[$B] logos $v: the proof omits --scope" "$(grep '^security findings' "$CALLS")" "--scope"
+        tfproof "$B" findings-tf-gone STUB_VERSION="$v"
+        expect "[$B] logos $v: the finding really gone: proven, exit 0" "$RC" 0
+    done
+    den "[$B] proof"
+
+    # sec-coverage.sh reads the same listing: the flag where the filter exists, none where it does not.
+    : >"$CALLS"
+    run STUB_VERSION=1.21.0 -- "$B" "$SCR/sec-coverage.sh" --out "$WORK/cov-scope.json"
+    expect "[$B] coverage on 1.21.0: exit 0" "$RC" 0
+    expect "[$B] coverage on 1.21.0: the findings read asks for every scope" "$(grep '^security findings' "$CALLS")" "security findings --json --scope all"
+    : >"$CALLS"
+    run STUB_VERSION=1.20.5 -- "$B" "$SCR/sec-coverage.sh" --out "$WORK/cov-scope.json"
+    expect "[$B] coverage on 1.20.5: exit 0, the flag it would reject is not sent" "$RC" 0
+    expect "[$B] coverage on 1.20.5: the findings read is the plain one" "$(grep '^security findings' "$CALLS")" "security findings --json"
+    contains "[$B] coverage on 1.20.5: its denominator is stated" "$ERR" "denominator:"
+done
+expect "layer 11 ran under every distinct bash (${#BASHES[@]})" "$NB11" "${#BASHES[@]}"
+
+# Several test-file entries in one proof: two files of one scanner and a second scanner. Each read
+# must ask for every scope, not only the first: on a logos with the filter the production-only
+# listing (findings-tf3.production.json) holds none of the three, so a read that lost the flag
+# would call its fix PROVEN while the finding is still stored.
+python3 -I - "$WORK/triage-tf.json" "$WORK/rescan-tf.json" "$FX" "$TFID" "$WORK" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))
+r = json.load(open(sys.argv[2]))
+fx, tfid, work = sys.argv[3], sys.argv[4], sys.argv[5]
+base = json.load(open(f"{fx}/findings.json"))
+first = next(e for e in t["entries"] if e["id"] == tfid)
+def entry(id, scanner, path, fp, rule):
+    e = dict(first, id=id, scanner=scanner, path=path, fingerprint=fp * 64, rule_id=rule,
+             subject=f"{path}:3 {rule} [{fp * 12}]")
+    return e
+extra = [entry("t2", "Semgrep OSS", "tests/test_routes2.py", "e", "python.x.second-file"),
+         entry("t3", "Bandit", "tests/test_b.py", "f", "B608")]
+t["entries"] += extra
+json.dump(t, open(f"{work}/triage-tf3.json", "w"))
+row = dict(r["rescan"][0])
+r["rescan"][0] = dict(row, paths=["tests/test_routes.py", "tests/test_routes2.py"])
+r["rescan"].append(dict(row, scanner="bandit", driver="Bandit", version="1.7.10", paths=["tests/test_b.py"]))
+json.dump(r, open(f"{work}/rescan-tf3.json", "w"))
+stored = [dict(first, **{k: v for k, v in e.items() if k in ("fingerprint", "rule_id", "path", "scanner")}) for e in [first] + extra]
+stored = [dict(f, code_scope="test") for f in stored]
+scanned = base["scanned"] + [{"driver": "Bandit", "version": "1.7.10", "head_sha": "abc", "findings": 1}]
+json.dump(dict(base, scanned=scanned, findings=stored), open(f"{fx}/findings-tf3.json", "w"))
+json.dump(dict(base, scanned=scanned, findings=[]), open(f"{fx}/findings-tf3.production.json", "w"))
+PY
+for f in tests/test_routes2.py tests/test_b.py; do
+    mkdir -p "$GR/tests"
+    printf 'def test_x():\n    assert True\n' >"$GR/$f"
+done
+printf 'def test_q():\n    assert True\n' >"$GR/tests/test_routes.py"
+for B in "${BASHES[@]}"; do
+    for f in tests/test_routes.py tests/test_routes2.py tests/test_b.py; do
+        python3 -I -c 'import os,sys; r=os.stat(sys.argv[1]).st_mtime; os.utime(sys.argv[2], (r-30, r-30))' "$WORK/rescan-tf3.json" "$GR/$f"
+    done
+    : >"$ARGV"
+    run STUB_FINDINGS=findings-tf3 -- "$B" "$SCR/sec-proof.sh" --triage "$WORK/triage-tf3.json" --delta "$WORK/delta-tf.json" --rescan "$WORK/rescan-tf3.json" --entry "$TFID" --entry t2 --entry t3
+    expect "[$B] three test-file entries, all still stored: none proven, exit 1" "$RC" 1
+    expect "[$B] ... each one reads as present, not as gone" "$(printf '%s\n' "$OUT" | grep -c '^NOT PROVEN .*the fingerprint is still listed after the re-scan')" 3
+    expect "[$B] ... one findings read per file and scanner: 3" "$(grep -c '^<security><findings>' "$ARGV")" 3
+    expect "[$B] ... and every one of them asked for every scope, the second file and the second scanner included" \
+        "$(grep '^<security><findings>' "$ARGV" | grep -c '<--json><--scope><all><--scanner>')" 3
+    contains "[$B] ... denominator: three checked, none proven" "$ERR" "3 fix entries checked, 0 proven, 3 not proven"
+    : >"$ARGV"
+    run STUB_VERSION=1.20.5 STUB_FINDINGS=findings-tf3 -- "$B" "$SCR/sec-proof.sh" --triage "$WORK/triage-tf3.json" --delta "$WORK/delta-tf.json" --rescan "$WORK/rescan-tf3.json" --entry "$TFID" --entry t2 --entry t3
+    expect "[$B] logos 1.20.5: the same three, none proven, exit 1" "$RC" 1
+    expect "[$B] logos 1.20.5: no read named --scope" "$(grep '^<security><findings>' "$ARGV" | grep -c -- '--scope')" 0
+done
+# The stub is faithful to the two binaries: a 1.20.x logos rejects the flag, so a caller that sent it would fail.
+RC=0
+STUB_DIR="$FX" STUB_CALLS="$CALLS" STUB_VERSION=1.20.5 "$BIN/logos" security findings --json --scope all >/dev/null 2>&1 || RC=$?
+expect "the 1.20.x stub rejects --scope (so the omission above is what keeps the proof answering)" "$RC" 2
+(cd "$GR" && rm -rf tests)
 
 T=$((PASS + FAIL))
 echo

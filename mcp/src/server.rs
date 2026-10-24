@@ -22,6 +22,7 @@ use logos_core::federation::{
     MemberSelectionError, TypeReferences,
 };
 use logos_core::{governance::{DsmGranularity, OffendersFilter}, model::NodeKind, security::FindingsFilter, Engine};
+use logos_core::jobs::{AnalysisJobs, JobKind};
 use logos_ext::mcp::{InvalidParams, McpTool};
 use logos_ext::ExtensionHost;
 use rmcp::handler::server::tool::{ToolCallContext, ToolRoute, ToolRouter};
@@ -70,6 +71,8 @@ pub struct LogosMcp {
     /// The type-reference overlay, built on first query over the relation above
     /// and cached on member sync-stamps ([FR-WS-35]); never a coupling.
     type_refs: Arc<TypeReferences>,
+    /// `coverage_run`'s jobs (S-738); the web surface's under `serve --mcp --ui`.
+    jobs: Arc<AnalysisJobs>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -110,8 +113,17 @@ impl LogosMcp {
             bridge: Arc::new(ContractBridge::new()),
             build_deps: Arc::new(BuildDependencies::new()),
             type_refs: Arc::new(TypeReferences::new()),
+            jobs: Arc::new(AnalysisJobs::new()),
             tool_router: Self::with_extensions(core, host),
         }
+    }
+
+    /// Run this server's jobs on `jobs`, which the caller holds to stop them
+    /// when the serve ends: the web surface's runner under `serve` (S-738).
+    #[must_use]
+    pub fn with_jobs(mut self, jobs: Arc<AnalysisJobs>) -> Self {
+        self.jobs = jobs;
+        self
     }
 
     /// `core` plus every active extension tool of `host`, each as a dynamic
@@ -570,6 +582,12 @@ pub struct ReviewParams {
     pub base: Option<String>,
     /// Project these branches' summed deltas against `base` onto the shared limits (FR-GV-28) instead of reviewing HEAD; omit or [] for the branch delta.
     pub branches: Option<Vec<String>>,
+    /// List the room left under every shared budget on `base` (FR-GV-29) instead of reviewing HEAD; not with `branches`.
+    pub headroom: Option<bool>,
+    /// With `headroom`: project-relative file paths and symbol names to list the budget subjects of; omit for each budget's 10 tightest.
+    pub subjects: Option<Vec<String>>,
+    /// With `headroom`: only subjects with at most this much room left.
+    pub near: Option<u64>,
     /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
     pub repo: Option<String>,
 }
@@ -586,8 +604,8 @@ pub struct HotspotsParams {
     /// Drop whole test files (`is_test`-only) from the candidate set before
     /// ranking (default false — whole-repo board unchanged, CR-076).
     pub production_scope: Option<bool>,
-    /// Rank hotspots with a fresh unsuppressed security finding first, highest
-    /// severity first (default false, FR-SC-14).
+    /// Rank hotspots with a fresh unsuppressed security finding in production
+    /// code first, highest severity first (default false, FR-SC-14).
     pub with_findings: Option<bool>,
     /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
     pub repo: Option<String>,
@@ -606,9 +624,9 @@ pub struct RepoParams {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct CoverageIngestParams {
-    /// Path to the LCOV/Cobertura coverage report to ingest (FR-CV-01).
+    /// Path to the LCOV/Cobertura/JaCoCo/Go coverprofile coverage report to ingest (FR-CV-01, FR-CV-12).
     pub report: String,
-    /// Force the report format ("lcov" or "cobertura"); default auto-detects.
+    /// Force the report format ("lcov", "cobertura", "jacoco" or "gocover"); default auto-detects.
     pub format: Option<String>,
     /// Captured so it can be refused, never served: this tool acts on the
     /// default member only (FR-WS-42). Absent from the schema.
@@ -664,8 +682,24 @@ pub struct SecurityFindingsParams {
     pub suppression: Option<String>,
     /// The OWASP edition: "2025" (default) or "2021".
     pub edition: Option<String>,
+    /// The code scope: "production" (default), "test" or "all".
+    pub scope: Option<String>,
     /// Workspace member to answer for (its workspace-relative name); omit for the default member. An error under a single-root server.
     pub repo: Option<String>,
+}
+
+// `coverage_run` (FR-CV-14, S-737): the one tool to run, or every one. A plain
+// comment: schemars would serve a doc comment as the schema's description.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct CoverageRunParams {
+    /// Run only this tool: a registry name (cargo-llvm-cov, vitest, jest, pytest-cov, maven, gradle, go) or `custom`; omit to run every enabled, installed tool, then the custom entry when one is configured.
+    pub tool: Option<String>,
+    /// Captured so it can be refused, never served: this tool acts on the
+    /// default member only (FR-WS-42). Absent from the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub repo: Option<serde_json::Value>,
 }
 
 // The parameter of a write or gate tool that takes nothing else (FR-WS-42): only
@@ -905,9 +939,15 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "The branch delta (FR-GV-24): every offender (all nine dimensions, uncapped) and every check violation, classified new, worsened, improved, resolved or unchanged PER SYMBOL against the merge-base of HEAD and `base` (default: the repository's default branch). Changed entries are listed; unchanged ones are only counted (offender_counts, violation_counts). Each entry carries its value before and after, its threshold, and a trust label: resolved, stale (the file changed since the last sync — run sync), or the tag of a language the graph binds within files only. Also lists near-clone groups the branch introduced; `attribution` breaks the signal's change into per-dimension contributions in log space (points summing to exact_change, with the integer rounding and the residual stated), each naming its top driving symbols or clone groups, capped, with driver_count; and under sections.security the security findings the branch introduced, touched or resolved (FR-SC-18): each with its method (fingerprint against the report recorded at the merge-base, else hunk), freshness, severity, OWASP categories and reachability confidence; a finding removed on a file edited since the last scan reads stale, never resolved; suppressed findings are listed apart; messages stay redacted; never scanned reads measured:false. The before-state is the snapshot recorded at the merge-base, else a shadow index of that tree cached by commit (the first call may take as long as an index); no other commit is ever compared. Advisory: never moves check or gate. measured:false with not_measured_because means nothing was classified. Byte-stable; the CLI twin is `logos review --base <ref>`. With `branches` (FR-GV-28) it instead sums each branch's delta against `base` (tip minus merge-base, every side a committed tree) and projects it onto the shared limits — every projectable [constraints] budget, per module, function, file or project-wide count, and a numeric [review] drift_budget, whose drift is judged from this checkout's comparable gate baseline (else the base commit's signal; `drift.reference` and a note say which), so the answer depends on that baseline: `exceeded` (and `drift`) list each limit the combined merge would exceed, with every branch's share and whether it alone would; `subjects` is the denominator; a branch that cannot be measured is named in `branches` with why and left out of the sum; `not_projected` names declared limits it does not judge. Report only; the CLI twin is `logos review --base <ref> --branches <b1> <b2>`."
+        description = "The branch delta (FR-GV-24): every offender (all nine dimensions, uncapped) and every check violation, classified new, worsened, improved, resolved or unchanged PER SYMBOL against the merge-base of HEAD and `base` (default: the repository's default branch). Changed entries are listed; unchanged ones are only counted (offender_counts, violation_counts). Each entry carries its value before and after, its threshold, and a trust label: resolved, stale (the file changed since the last sync — run sync), or the tag of a language the graph binds within files only. Also lists near-clone groups the branch introduced; `attribution` breaks the signal's change into per-dimension contributions in log space (points summing to exact_change, with the integer rounding and the residual stated), each naming its top driving symbols or clone groups, capped, with driver_count; and under sections.security the security findings the branch introduced, touched or resolved (FR-SC-18): each with its method (fingerprint against the report recorded at the merge-base, else hunk), freshness, severity, OWASP categories and reachability confidence; a finding removed on a file edited since the last scan reads stale, never resolved; suppressed findings are listed apart; messages stay redacted; never scanned reads measured:false. The before-state is the snapshot recorded at the merge-base, else a shadow index of that tree cached by commit (the first call may take as long as an index); no other commit is ever compared. Advisory: never moves check or gate. measured:false with not_measured_because means nothing was classified. Byte-stable; the CLI twin is `logos review --base <ref>`. With `branches` (FR-GV-28) it instead sums each branch's delta against `base` (tip minus merge-base, every side a committed tree) and projects it onto the shared limits — every projectable [constraints] budget, per module, function, file or project-wide count, and a numeric [review] drift_budget, whose drift is judged from this checkout's comparable gate baseline (else the base commit's signal; `drift.reference` and a note say which), so the answer depends on that baseline: `exceeded` (and `drift`) list each limit the combined merge would exceed, with every branch's share and whether it alone would; `subjects` is the denominator; a branch that cannot be measured is named in `branches` with why and left out of the sum; `not_projected` names declared limits it does not judge. Report only; the CLI twin is `logos review --base <ref> --branches <b1> <b2>`. With `headroom: true` (FR-GV-29) it instead lists, before any branch exists, the room left under every budget `branches` projects, on the same base and from the same cached measurement: each subject's current value, allowance and headroom (negative when the base is already past it) and its kind (limit, or ratchet against its blessed value read at the base commit), under `rules` with each rule's `evaluated` denominator and `listed` count — the 10 tightest per rule, or only the ones `subjects` (project-relative file paths and symbol names; each resolves to its module, file and functions) and `near` (at most that much room) select; entries that resolve to nothing are under `unresolved` with why; `drift` gives the margin under a numeric drift_budget; `not_projected` names the budgets it does not list. The working tree is never measured; `base_commit` names the tree. Report only: measured:false (base unresolved) means nothing was listed; the CLI twin is `logos review --headroom [--base <ref>] [--subjects <p>…] [--near N]`."
     )]
     async fn review(&self, Parameters(p): Parameters<ReviewParams>) -> Result<CallToolResult, ErrorData> {
+        if p.headroom == Some(true) {
+            let (subjects, near) = (p.subjects.unwrap_or_default(), p.near);
+            if p.branches.as_ref().is_some_and(|b| !b.is_empty()) { return Err(ErrorData::invalid_params("`headroom` and `branches` are exclusive", None)); }
+            return self.run_result("review", p.repo, move |e| e.review_headroom(p.base.as_deref(), &subjects, near)).await;
+        }
+        if p.subjects.is_some() || p.near.is_some() { return Err(ErrorData::invalid_params("`subjects` and `near` need `headroom: true`", None)); }
         match p.branches.filter(|b| !b.is_empty()) {
             Some(branches) => self.run_result("review", p.repo, move |e| e.review_branches(p.base.as_deref(), &branches)).await,
             None => self.run_result("review", p.repo, move |e| e.review(p.base.as_deref())).await,
@@ -927,7 +967,7 @@ impl LogosMcp {
     //   the temporal tier never moves the gate (BR-26). —
 
     #[tool(
-        description = "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Each file carries a findings cell (unsuppressed fresh security findings: count, highest severity; stale ones counted apart) once a scan is stored, none before; `with_findings:true` ranks files with a fresh finding first, highest severity first (FR-SC-14). Non-git/shallow repos return n/a + a notice."
+        description = "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Each file carries a findings cell (unsuppressed fresh security findings in production code: count, highest severity; stale ones and those in test code counted apart as stale and test) once a scan is stored, none before; `with_findings:true` ranks files with a fresh finding first, highest severity first (FR-SC-14). Non-git/shallow repos return n/a + a notice."
     )]
     async fn hotspots(
         &self,
@@ -948,7 +988,7 @@ impl LogosMcp {
     //   moves the gate (BR-28). —
 
     #[tool(
-        description = "Ingest an LCOV/Cobertura coverage report into the evidence store (FR-CV-01): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary. Under a workspace it acts on the default member only: it takes no `repo`."
+        description = "Ingest an LCOV/Cobertura/JaCoCo/Go coverprofile coverage report into the evidence store (FR-CV-01, FR-CV-12): auto-detects the format (override with `format`), maps report paths to indexed files, and anchors each file by content hash. The NON-GATED coverage tier (BR-28). Fails loud on an unreadable/unrecognized/malformed report; per-file outcomes (unmatched, stale-rejected) ride inside the summary. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn coverage_ingest(
         &self,
@@ -962,30 +1002,49 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Coverage status (FR-CV-05/06): per-file freshness (fresh value / stale label / n-a, hash-based against the ingest anchor), the overall freshness fraction, snapshot provenance, and an artifact-vs-HEAD staleness prompt when the coverage lags the current commit (FR-CV-10). Raw numbers only, no grading (BR-28). With no coverage ingested, reports n/a + a notice."
+        description = "Coverage status (FR-CV-05/06): per-file freshness (fresh value / stale label / n-a, hash-based against the ingest anchor), the overall freshness fraction, snapshot provenance, and an artifact-vs-HEAD staleness prompt when the coverage lags the current commit (FR-CV-10). Raw numbers only, no grading (BR-28). With no coverage ingested, reports n/a + a notice. `runner` gives each coverage tool's one state (not_applicable, disabled, not_installed, never_run, ran, tests_failed, failed, timed_out, cancelled) with its last run, and the execution consent: what it names and what the next run would ask for. `job` is the coverage_run job, running or last run in this server: its id, state (running, completed, failed, cancelled), each tool's start and outcome as events, and once completed the run's outcomes as `result`."
     )]
     async fn coverage_status(
         &self,
         Parameters(p): Parameters<RepoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_result("coverage_status", p.repo, |e| e.coverage_status())
+        let jobs = Arc::clone(&self.jobs);
+        self.run_result("coverage_status", p.repo, move |e| {
+            let mut status = e.coverage_status()?;
+            status.job = jobs.snapshot(JobKind::CoverageRun, e.root());
+            Ok(status)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Coverage refresh (FR-CV-10): the `custom` tool of a coverage run, alone — run the configured [coverage_ingest].refresh_cmd through `sh -c` in the project root (never on the serve/watcher path, ADR-87), then ingest the artifact it wrote. Errors if no refresh_cmd is configured; the command's failure, or no fresh artifact, is its `failed` outcome. It runs only under the project's coverage execution consent (FR-CV-13), which pins the command's exact text and only the user can record, with `logos coverage refresh --consent` in a terminal: without it, or after the text changed, it spawns nothing and returns that instruction. It is synchronous and outside the `coverage_run` job: it runs in this request and returns the outcome, is never listed as a job (`coverage_status`'s `job` does not show it), is not stopped by the Coverage page's Cancel, and can run at the same time as a page run of the same command; `coverage_run` is the job-tracked, cancellable way. The NON-GATED coverage tier (BR-28). Under a workspace it acts on the default member only: it takes no `repo`."
+    )]
+    async fn coverage_refresh(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("coverage_refresh", p.repo)?;
+        self.run_result("coverage_refresh", None, |e| e.coverage_refresh(false))
             .await
     }
 
     #[tool(
-        description = "Coverage refresh (FR-CV-10): explicitly run the configured [coverage_ingest].refresh_cmd as a subprocess (the ONLY place Logos ever spawns a coverage command, never on the serve/watcher path, ADR-38), then ingest the artifact it produced. Errors loud if no refresh_cmd is configured, the command fails, or it produced no recognizable artifact. The NON-GATED coverage tier (BR-28). Under a workspace it acts on the default member only: it takes no `repo`."
+        description = "Coverage run (FR-CV-14): start a job that runs every enabled, installed coverage tool of the project (cargo-llvm-cov, vitest, jest, pytest-cov, maven, gradle, go) in sequence, then the custom refresh_cmd when one is configured — or only `tool` — and ingests each report into one snapshot at HEAD. Returns at once with the job (`job.id`, `job.state`); while a run is going, a call joins it (`joined: true`, the same id). Follow it with coverage_status, whose `job` carries its state, each tool's start and outcome, and once completed the run's outcomes: ran, tests_failed (the suite failed but wrote a report, which is ingested), failed (a masked stderr excerpt; the whole output in a log under .logos/coverage/), timed_out, cancelled, or not_applicable / disabled / not_installed. A run builds the project and runs its tests, so it executes the project's own code: it runs only under the project's coverage execution consent (FR-CV-13), which only the user can record, with `logos coverage run --consent` in a terminal; without it, it starts no job and returns that instruction. A vitest without its coverage provider, or the project's pytest without pytest-cov, is listed in the result's `dependencies` (FR-CV-18): the package, the manager the lockfile names, the exact command and the files it changes, and `added`, `pending` (with the consent statement), `refused` (no lockfile, an unknown manager or vitest major: the reason and the command to run by hand) or `failed`. The dependency consent, under which the project's own package manager adds it as an uncommitted dev dependency and may run lifecycle scripts, only the user can record, with `logos coverage run --consent --dependency-consent` in a terminal. The NON-GATED coverage tier (BR-28). Under a workspace it acts on the default member only: it takes no `repo`."
     )]
-    async fn coverage_refresh(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
-        default_member_only("coverage_refresh", p.repo)?;
-        self.run_result("coverage_refresh", None, |e| e.coverage_refresh())
-            .await
+    async fn coverage_run(&self, Parameters(p): Parameters<CoverageRunParams>) -> Result<CallToolResult, ErrorData> {
+        default_member_only("coverage_run", p.repo)?;
+        let (backing, jobs) = (Arc::clone(&self.backing), Arc::clone(&self.jobs));
+        self.run_blocking("coverage_run", move || {
+            let selected = backing.engine_for(None)?;
+            let surface = logos_core::observability::Surface::Mcp;
+            Ok(selected.answer(logos_core::coverage::job::start(&selected.engine, &jobs, p.tool.as_deref(), None, surface)?))
+        })
+        .await
     }
 
     // — Security evidence tier (4): CR-217, FR-SC-01/06/07/08. Each behind the
     //   SAME `api` method as its CLI twin (NFR-CC-01). —
 
     #[tool(
-        description = "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, not_selected, requires_build, not_applicable (nothing it reads is in the project, so it is not started), or failed (exit code, a log path, a masked excerpt and a one-line masked `cause` from the log). One failure never stops the others. Each scanner that ran over the whole project states `ignored_paths` (FR-SC-26): `excluded`, or `scanned` with a one-line `coverage_note` saying why it read the project's ignored directories. `scanners` and `paths` make it a re-scan that takes seconds (FR-SC-17): Semgrep, Gitleaks, Bandit, gosec and Checkov run on the paths only and replace only their findings there (Gitleaks keeps its history findings there); Trivy, OSV-Scanner and Dependency-Check report whole-manifest only, CodeQL whole-project only, and each runs unscoped when named. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`."
+        description = "Security scan (FR-SC-06): run every installed, enabled scanner (Semgrep, Trivy, Gitleaks, OSV-Scanner, Bandit, gosec, Checkov, CodeQL, Dependency-Check) with fixed commands, write each SARIF report under .logos/security/ and ingest it. One outcome per scanner: ran (finding count), not_installed, disabled, not_selected, requires_build, not_applicable (nothing it reads is in the project, so it is not started), or failed (exit code, a log path, a masked excerpt and a one-line masked `cause` from the log). One failure never stops the others. Each scanner that ran over the whole project states `ignored_paths` (FR-SC-26): `excluded`, or `scanned` with a one-line `coverage_note` saying why it read the project's ignored directories and a `coverage_kind` (unproven, history, whole_project or partial) naming how. `scanners` and `paths` make it a re-scan that takes seconds (FR-SC-17): Semgrep, Gitleaks, Bandit, gosec and Checkov run on the paths only and replace only their findings there (Gitleaks keeps its history findings there); Trivy, OSV-Scanner and Dependency-Check report whole-manifest only, CodeQL whole-project only, and each runs unscoped when named. Network consent is the user's to give (FR-SC-07): until they run `logos security scan --consent` in a terminal, the call fails naming the scanners awaiting it, and this tool never records it. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn security_scan(&self, Parameters(p): Parameters<SecurityScanParams>) -> Result<CallToolResult, ErrorData> {
         default_member_only("security_scan", p.repo)?;
@@ -1007,14 +1066,14 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, not_applicable (installed, but nothing it reads is in the project: no scan is missing), stale (HEAD moved or a file changed) or fresh with its unsuppressed finding count; never_run and fresh with 0 findings are different states. A scanner whose last scan failed names its `last_failure` log and `last_failure_cause`. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Each installed scanner a scan would start states `ignored_paths` for a whole-project scan of the tree now: `excluded`, or `scanned` with a `coverage_note` (FR-SC-26). Also the consent state: the scanners consented to, and the ones the next scan will ask for; and `suppressions`, every entry of .logos/security-ignore.toml (a fingerprint, or a path glob narrowed by rule and scanner) with `suppressed`, the findings it suppresses now, expired or orphaned flagged."
+        description = "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, not_applicable (installed, but nothing it reads is in the project: no scan is missing), stale (HEAD moved or a file changed) or fresh with its count of fresh, unsuppressed findings in production code, the rest stated apart as suppressed, not_fresh and test (in test code); never_run and fresh with 0 findings are different states. A scanner whose last scan failed names its `last_failure` log and `last_failure_cause`. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Each installed scanner a scan would start states `ignored_paths` for a whole-project scan of the tree now: `excluded`, or `scanned` with a `coverage_note` and its `coverage_kind` (unproven, history, whole_project or partial) (FR-SC-26). Also the consent state: the scanners consented to, and the ones the next scan will ask for; and `suppressions`, every entry of .logos/security-ignore.toml (a fingerprint, or a path glob narrowed by rule and scanner) with `suppressed`, the findings it suppresses now, expired or orphaned flagged. Dependency-Check's row alone carries `nvd_api_key`: set when NVD_API_KEY is set where Logos runs (for MCP, in the environment `logos serve` was started with) or the user's own extra_args supply a key, else not_set — never the key (FR-SC-27)."
     )]
     async fn security_status(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
         self.run_result("security_status", p.repo, |e| e.security_status()).await
     }
 
     #[tool(
-        description = "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path and suppression — filters intersect. Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0. Each finding carries its graph context (FR-SC-13): the enclosing symbol, whether a route reaches it over call edges (reachable, unreachable or unknown, naming the nearest route) and its blast radius (the sizes of impact on that symbol), each labelled resolved, unresolved or unbound from the language's resolution denominator — an unresolved claim is never unreachable, and a lockfile finding is unbound at its manifest line."
+        description = "Security findings (FR-SC-08): the stored findings, each with its OWASP Top 10 categories (2025 by default, 2021 on request) and its suppression from .logos/security-ignore.toml, narrowed by severity, scanner, category, path, suppression and code scope — filters intersect. Each finding carries its code_scope (test or production) and code_scope_reason (test_symbol: its enclosing symbol is test code; test_path: its path is a test or fixture path; null for production); the scope lists production by default (\"test\" or \"all\" on request) and the payload states hidden_by_scope, the findings it hid (FR-SC-28). Lists the stored reports and the scanners never run, so an empty list is never read as clean; a category no enabled scanner can detect is not_covered, never 0, and a covered one states `findings` over every code scope and `production_findings`, the production-code part of it (suppressed findings in both): the count the Security page's OWASP list shows under its default scope (FR-SC-28). Each finding carries its graph context (FR-SC-13): the enclosing symbol, whether a route reaches it over call edges (reachable, unreachable or unknown, naming the nearest route) and its blast radius (the sizes of impact on that symbol), each labelled resolved, unresolved or unbound from the language's resolution denominator — an unresolved claim is never unreachable, and a lockfile finding is unbound at its manifest line."
     )]
     async fn security_findings(&self, Parameters(p): Parameters<SecurityFindingsParams>) -> Result<CallToolResult, ErrorData> {
         let filter = FindingsFilter::parse(
@@ -1024,6 +1083,7 @@ impl LogosMcp {
             p.path.as_deref(),
             p.suppression.as_deref(),
             p.edition.as_deref(),
+            p.scope.as_deref(),
         )
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
         self.run_result("security_findings", p.repo, move |e| e.security_findings(&filter)).await

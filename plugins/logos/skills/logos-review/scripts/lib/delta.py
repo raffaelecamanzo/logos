@@ -13,6 +13,9 @@ and the re-measurement do not care which mode produced them:
     id, key, kind, dimension, rule, status, symbol, name, file, line, measure,
     before, after, threshold, detail, trust
 
+A debt entry also carries `identity` (`node_id`, `group` or `name`, how the unit is
+known), and a group unit its `group` id and its own `group_reason`.
+
 Standard library only. Exit codes: 0 good answer, 1 the other answer, 2 usage,
 3 environment or unreadable input. Each subcommand ends with one `denominator:`
 line on stderr.
@@ -39,6 +42,13 @@ STRUCTURAL = ("acyclicity", "depth")
 # `.logos/` is the store, written by every logos call, except the files that are
 # the quality contract: an edit to one of those is never invisible.
 CONTRACT_FILES = ("rules.toml", "rules-baseline.json", "security-ignore.toml")
+# How a debt unit is known (`identity` of a debt entry). Logos 1.20.3 and newer
+# give a function or class its `node_id` as a string, and a group its own
+# `<kind>:<digest>` id; 1.20.0-1.20.2 give an integer or null, so such a unit is
+# known by name, file and dimension, and every count says how many were.
+BY_ID, GROUP, FALLBACK = "node_id", "group", "name"
+# The unit kinds that are a group of symbols, never one symbol.
+GROUP_KINDS = ("duplicate_group", "clone_group")
 
 
 def eprint(*parts):
@@ -114,7 +124,7 @@ def make_entry(kind, **fields):
 def entry_key(e):
     """The identity an entry keeps across two reviews: what it is, what it
     counts, and the symbol (or the name at its file, where there is none)."""
-    who = e["symbol"] or f"{e['name']}@{e['file']}"
+    who = e["symbol"] or (f"group:{e['group']}" if e.get("group") else f"{e['name']}@{e['file']}")
     return "|".join([e["kind"], e["dimension"] or e["rule"] or "", e["measure"] or "", who])
 
 
@@ -237,6 +247,19 @@ def cmd_summary(args):
     return 0
 
 
+def identities(entries):
+    """The sentence a denominator adds for a debt list: how many units are known by
+    id, by group and by name only (the fallback). Empty for a branch delta, whose
+    entries carry no `identity`."""
+    tally = Counter(e.get("identity") for e in entries if e.get("identity"))
+    if not tally:
+        return ""
+    return (
+        f"; by node_id {tally[BY_ID]}, groups naming no single symbol {tally[GROUP]}, "
+        f"fell back to name, file and dimension {tally[FALLBACK]} (an integer or null id)"
+    )
+
+
 # ── coverage lookup ──────────────────────────────────────────────────────────
 
 
@@ -258,6 +281,12 @@ def classify_reach(e, reach, imp):
     resolved = (imp or {}).get("resolved")
     if not resolved:
         return "unknown", "the symbol does not resolve in the graph", []
+    if e.get("identity") == FALLBACK:
+        # An entry known by its bare name only: a second node of that name in the
+        # same file may be the one that was resolved, so no answer is credited.
+        same_file = [n for n in [resolved] + list(imp.get("alternatives") or []) if n and n.get("file") == e["file"]]
+        if len(same_file) > 1:
+            return "unknown", f"{len(same_file)} symbols named '{e['name']}' in {e['file']} and the entry carries no id to tell them apart", []
     if resolved.get("file") != e["file"]:
         # A bare name met a different node: never credit its tests.
         return "unknown", f"the name resolves to {resolved.get('file')}, not {e['file']}", []
@@ -291,14 +320,16 @@ def own_node(imp, symbol):
 def lookup_coverage(e, tests_for, impact_of):
     """(coverage, note, tests) of one entry; the two graph reads are passed in.
 
-    The entry's symbol is the id without its repository coordinate (`node_id`),
-    which `logos impact` does not resolve. So the id is asked first, and when it
-    does not resolve, the bare name it ends in. A name meets the first symbol of
+    The entry's symbol is the id without its repository coordinate (`node_id`; a
+    debt unit's too), which `logos impact` does not resolve. So the id is asked
+    first, and when it does not resolve, the bare name it ends in. A debt unit whose
+    id is an integer or null (Logos 1.20.0-1.20.2) has its bare name as its symbol,
+    so only the name is asked. A name meets the first symbol of
     that name, which can be a sibling in the same file (`A::new` for `B::new`), so
     its answer is credited only for the entry's own node: the resolved one, or an
     alternative asked again by its full symbol. Any other answer reads `unknown`."""
     if not e["symbol"]:
-        return "no-symbol", "the entry names no single symbol", []
+        return "no-symbol", e.get("group_reason") or "the entry names no single symbol", []
     if not e["file"]:
         return "unknown", "the entry names no file", []
     reach = tests_for(e["file"])
@@ -350,8 +381,8 @@ def cmd_coverage(args):
     parts = ", ".join(f"{k} {v}" for k, v in sorted(tally.items())) or "none"
     eprint(
         f"denominator: {len(entries)} entries, {sum(1 for e in entries if e['symbol'])} with a symbol, "
-        f"{calls} logos call(s); coverage: {parts}. Reach is by test-marked FILES: a unit test inside "
-        f"the offender's own file is not seen."
+        f"{calls} logos call(s); coverage: {parts}{identities(entries)}. Reach is by test-marked FILES: a unit "
+        f"test inside the offender's own file is not seen."
     )
     return 0
 
@@ -372,7 +403,7 @@ def gate(e, cov):
         return (
             "no-action-warranted",
             True,
-            "names no single symbol (a chain, a cycle or a file-level rule): nothing to edit as one unit",
+            e.get("group_reason") or "names no single symbol (a chain, a cycle or a file-level rule): nothing to edit as one unit",
         )
     if cov != "covered":
         return "test-first", True, f"no test reach ({cov}): a characterisation test comes before any edit"
@@ -403,7 +434,7 @@ def cmd_triage(args):
             f"{e['dimension'] or e['rule'] or '-'}\t{e['name']}\t{where(e)}\t{e['coverage']}\t{e['trust'] or '-'}\t{e['reason']}"
         )
     parts = ", ".join(f"{v} {k}" for k, v in sorted(tally.items())) or "none"
-    eprint(f"denominator: {len(out)} entries gated: {parts}")
+    eprint(f"denominator: {len(out)} entries gated: {parts}{identities(out)}")
     return 0
 
 
@@ -417,16 +448,21 @@ def shown(value):
 
 def same_unit(a, b):
     """Whether two entries are one offender: by key, or, for a debt unit (never
-    keyed like a review entry), by name, file and dimension against an offender."""
+    keyed like a review entry), against an offender of the same dimension: by
+    `node_id` when the unit has one, so a same-named symbol of another id (a renamed
+    near miss, a second one in the same file) is never the unit. A unit known by
+    name only (an integer or null id) falls back to name and file; a group names no
+    single symbol and is no offender."""
     if "debt" not in (a["kind"], b["kind"]):
         return a["key"] == b["key"]
-    other = b if a["kind"] == "debt" else a
-    return (
-        other["kind"] == "offender"
-        and a["name"] == b["name"]
-        and a["file"] == b["file"]
-        and (a["dimension"] is None or b["dimension"] is None or a["dimension"] == b["dimension"])
-    )
+    debt, other = (a, b) if a["kind"] == "debt" else (b, a)
+    if other["kind"] != "offender" or debt.get("identity") == GROUP:
+        return False
+    if not (debt["dimension"] is None or other["dimension"] is None or debt["dimension"] == other["dimension"]):
+        return False
+    if debt.get("identity") == BY_ID:
+        return other["symbol"] == debt["symbol"]
+    return debt["name"] == other["name"] and debt["file"] == other["file"]
 
 
 def find_after(b, after):
@@ -449,6 +485,8 @@ def remeasured(b, a, stale):
     """(proven?, line) for the entry `b` of the triage, given its match `a` in the
     re-run (or None) and the re-run's stale files."""
     label = f"{b['id']} {b['name']} ({where(b)})"
+    if b.get("identity") == GROUP:
+        return False, f"not proven: {label}: {b['group_reason']}, so no offender of the re-run is it"
     if a is not None and a["trust"] != TRUSTED:
         return False, f"not proven: {label}: the re-run labels it '{a['trust']}', so it was not measured as edited; sync the file and re-run"
     if a is not None and a["status"] in PROVEN:
@@ -470,7 +508,16 @@ def remeasured(b, a, stale):
 def judged(b, after, stale):
     """(proven?, line) for one asked entry, including the check that a cleared
     entry did not simply move to another measure."""
+    if b.get("identity") == FALLBACK:
+        hits = [e for e in after if e["kind"] != "debt" and same_unit(b, e)]
+        if len(hits) > 1:
+            return False, (
+                f"not proven: {b['id']} {b['name']} ({where(b)}): {len(hits)} entries of the re-run share its name, file and "
+                f"dimension and the unit carries no id to tell them apart"
+            )
     ok, line = remeasured(b, find_after(b, after), stale)
+    if b.get("identity") == FALLBACK:
+        line += " [matched by name, file and dimension: the unit has no string id]"
     again = moved_elsewhere(b, after) if line.startswith("cleared") else []
     if again:
         return False, f"not proven: {b['id']} {b['name']}: the symbol is still listed under another measure ({again[0]['measure']})"
@@ -514,7 +561,10 @@ def cmd_remeasure(args):
     extra = [] if any(b["kind"] == "debt" for b in before) else unexplained(before, after, asked)
     for a in extra:
         print(f"not proven: the re-run lists an offender the triage did not have: {subject_of(a)} ({a['status']}); the edit may have moved the offence")
-    eprint(f"denominator: {plural(len(asked))} re-measured against {len(after)} listed in the re-run; {len(extra)} unexplained")
+    eprint(
+        f"denominator: {plural(len(asked))} re-measured against {len(after)} listed in the re-run; "
+        f"{len(extra)} unexplained{identities(asked)}"
+    )
     return 1 if bad or extra else 0
 
 
@@ -751,6 +801,52 @@ def debt_trust(file, dirty, ext_lang, thin):
     return thin.get(ext_lang.get(ext), TRUSTED)
 
 
+def string_id(value):
+    """The `node_id` of a unit when it is a non-empty string: the stable identity
+    Logos 1.20.3 and newer record. An integer (a storage id) or null (not recorded)
+    is no identity."""
+    return value if isinstance(value, str) and value else None
+
+
+def debt_entry(u, dirty, ext_lang, thin):
+    """The entry of one where-to-start unit. A function or class is known by its
+    string `node_id` (`symbol`, with its bare `name` beside it); a duplicate or
+    near-clone group names no single symbol and carries its own `group_reason`; a unit
+    whose id is an integer or null falls back to name, file and dimension."""
+    file = u.get("file") or ""
+    dims = u.get("dimensions") or []
+    kind = u.get("kind")
+    node_id = string_id(u.get("node_id"))
+    fields = {}
+    if kind in GROUP_KINDS or (node_id or "").startswith(tuple(f"{k}:" for k in GROUP_KINDS)):
+        identity, symbol = GROUP, None
+        fields["group"] = node_id
+        # Its own key: triage overwrites `reason` with the gate's, and an untrusted
+        # group's gate reason is the trust label, not why it is no symbol.
+        fields["group_reason"] = (
+            f"a {kind.replace('_', ' ') if kind in GROUP_KINDS else 'group'} names no single symbol "
+            f"({u.get('detail') or ''}): nothing to edit as one unit"
+        )
+    elif node_id:
+        identity, symbol = BY_ID, node_id
+    else:
+        identity, symbol = FALLBACK, u.get("name")
+    return make_entry(
+        "debt",
+        dimension=dims[0] if dims else None,
+        status="debt",
+        symbol=symbol,
+        name=u.get("name", ""),
+        file=file,
+        line=u.get("line"),
+        measure=kind,
+        detail=f"{u.get('detail', '')}; est. {u.get('points')} point(s)",
+        trust=debt_trust(file, dirty, ext_lang, thin),
+        identity=identity,
+        **fields,
+    )
+
+
 def cmd_debt(args):
     answer = logos_json(args.logos, args.project, ["improvements", "--json"])
     if answer is None:
@@ -762,30 +858,18 @@ def cmd_debt(args):
         return 1
     ext_lang, thin = language_maps(args.logos, args.project)
     dirty = set(dirty_paths(args.project) or [])
-    entries = []
-    for u in answer.get("units") or []:
-        file = u.get("file") or ""
-        dims = u.get("dimensions") or []
-        entries.append(
-            make_entry(
-                "debt",
-                dimension=dims[0] if dims else None,
-                status="debt",
-                symbol=u.get("name"),
-                name=u.get("name", ""),
-                file=file,
-                line=u.get("line"),
-                measure=u.get("kind"),
-                detail=f"{u.get('detail', '')}; est. {u.get('points')} point(s)",
-                trust=debt_trust(file, dirty, ext_lang, thin),
-            )
-        )
+    entries = [debt_entry(u, dirty, ext_lang, thin) for u in answer.get("units") or []]
     dump({"mode": "debt", "basis": answer.get("basis"), "entries": entries}, args.out)
-    print(f"debt list: {len(entries)} unit(s), ranked by estimated points recovered")
+    fell_back = sum(1 for e in entries if e["identity"] == FALLBACK)
+    print(
+        f"debt list: {len(entries)} unit(s), ranked by estimated points recovered"
+        + (f"; {fell_back} known by name only (no string id)" if fell_back else "")
+    )
     eprint(
         f"denominator: {len(entries)} unit(s) of the recorded where-to-start list (at most 10); "
-        f"{sum(1 for e in entries if e['trust'] != TRUSTED)} untrusted. Debt entries are named by bare name; "
-        f"coverage rejects a name that resolves to another file."
+        f"{sum(1 for e in entries if e['trust'] != TRUSTED)} untrusted{identities(entries)}. "
+        f"A unit is named by its node_id, its bare name beside it; coverage and re-measurement match by that id, "
+        f"and a unit that fell back is matched by name, file and dimension, which rejects a name that resolves to another file."
     )
     return 0
 

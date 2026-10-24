@@ -3,10 +3,11 @@
  * `app`-scoped view answering *"how coupled is this application, and how much of
  * that do we actually know?"*
  *
- * Two reads, both of them the unscoped fan-out: `workspace/status` (coverage and
- * the member table) and `workspace/reachability` (the app-wide union view S-427
- * put on the HTTP surface). Neither carries the shell's member scope — the view
- * answers for the WHOLE workspace, which is what `scope: "app"` declares in
+ * Three reads, all of them the unscoped fan-out: `workspace/security/summary`
+ * (the Security widget the view leads with, S-790), `workspace/status` (coverage
+ * and the member table) and `workspace/reachability` (the app-wide union view
+ * S-427 put on the HTTP surface). None carries the shell's member scope — the
+ * view answers for the WHOLE workspace, which is what `scope: "app"` declares in
  * `nav.ts` and what keeps the shell from remounting it on a member switch.
  *
  * It computes nothing. Every figure is the server's, displayed (ADR-01,
@@ -36,12 +37,16 @@
 import { AsyncResource, useApiResource } from "../../api/index.ts";
 import {
   fetchWorkspaceReachability,
+  fetchWorkspaceSecuritySummary,
   fetchWorkspaceStatus,
 } from "../../api/workspaceClient.ts";
 import type {
   MemberReachability,
+  MemberResult,
+  MemberSecurityState,
   MemberStatus,
   WorkspaceReachabilityAnswer,
+  WorkspaceSecurityStateAnswer,
   WorkspaceStatus,
 } from "../../api/types.ts";
 import {
@@ -62,13 +67,17 @@ import {
   DASHBOARD_TEXT,
   members,
   reachability,
+  workspaceSecurityWidget,
 } from "../../copy/workspaceDashboard.copy.ts";
+import { WORKSPACE_SECURITY_TEXT } from "../../copy/workspaceSecurity.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { resolutionStatement } from "../dashboard/dashboardModel.ts";
 import { EdgeRow } from "../graph/Legend.tsx";
 import { buildCoverageDashboard } from "./coverageModel.ts";
 import { CoveragePanel } from "./CoverageBoards.tsx";
+import { SeverityRow } from "../security/SeverityRow.tsx";
 import { ASSERTED_EDGE_TYPE } from "./serviceMapModel.ts";
+import { absentFigure, memberColumn } from "./memberSecurityRow.tsx";
 import graphStyles from "../graph/GraphView.module.css";
 import styles from "./Workspace.module.css";
 
@@ -83,6 +92,10 @@ export function WorkspaceDashboardView() {
   const status = useApiResource<WorkspaceStatus>(() => fetchWorkspaceStatus(), []);
   const reachability = useApiResource<WorkspaceReachabilityAnswer>(
     () => fetchWorkspaceReachability(),
+    [],
+  );
+  const security = useApiResource<WorkspaceSecurityStateAnswer>(
+    () => fetchWorkspaceSecuritySummary(),
     [],
   );
 
@@ -127,6 +140,13 @@ export function WorkspaceDashboardView() {
         </span>
       </Callout>
 
+      {/* The Security widget leads (S-790, FR-UI-36): stored state only, in its
+          own frame, so a failed security read hides no coverage and a failed
+          coverage read hides no security. */}
+      <AsyncResource resource={security} loadingLabel="Loading each member's security…">
+        {(answer) => <SecurityWidget answer={answer} />}
+      </AsyncResource>
+
       <AsyncResource resource={status} loadingLabel="Loading cross-service coverage…">
         {(model) => (
           <AsyncResource resource={reachability} loadingLabel="Loading cross-service reachability…">
@@ -158,6 +178,80 @@ function DashboardContent({
       <ReachabilityCard answer={answer} />
       <MemberRoster status={status} answer={answer} />
     </>
+  );
+}
+
+// ── Security per member (S-790, FR-UI-36, BR-56) ─────────────────────────────
+
+/** The scan state's badge: the word always rides with the tone (a11y). A fresh
+ *  scan is green, a stale one orange, and one that never ran is muted — `never
+ *  run` is the absence of a result, not a bad one. */
+const SCAN_TONE = { fresh: "green", stale: "orange", never_run: "muted" } as const;
+
+const SECURITY_COLUMNS: Column<MemberResult<MemberSecurityState>>[] = [
+  memberColumn<MemberSecurityState>(),
+  {
+    key: "scan",
+    header: "Scan",
+    cell: (row) =>
+      row.result ? (
+        <Badge tone={SCAN_TONE[row.result.scan]}>{DASHBOARD_TEXT.securityScan(row.result.scan)}</Badge>
+      ) : (
+        <Badge tone="red">{WORKSPACE_SECURITY_TEXT.notRead}</Badge>
+      ),
+    sortValue: (row) => row.result?.scan ?? "",
+  },
+  {
+    key: "findings",
+    header: "Findings",
+    // The S-789 severity row, so a severity is spelled one way wherever it is counted.
+    cell: (row) =>
+      row.result?.findings ? (
+        <SeverityRow counts={row.result.findings} />
+      ) : (
+        <span className="muted">{absentFigure(row)}</span>
+      ),
+    // A member with nothing to count sorts below every member that counted 0.
+    sortValue: (row) => row.result?.findings?.total ?? -1,
+  },
+];
+
+/** *Security* — one row per member, each its own (S-790). The figure row states
+ *  how many members have a fresh scan out of all of them, a count of members:
+ *  there is no sum, mean or weighted figure of findings across members (BR-56),
+ *  which a test over the read-model pins. A member that could not be opened is a
+ *  row, named, with its reason, and hides no other. Every number is the
+ *  server's, read from stored state with no scanner started. */
+function SecurityWidget({ answer }: { answer: WorkspaceSecurityStateAnswer }) {
+  const s = answer.security;
+  const unread = s.members.filter((m) => !m.result).map((m) => m.member);
+  return (
+    <Widget
+      title="Security"
+      copy={workspaceSecurityWidget}
+      figure={
+        <div className={styles.figure}>
+          <p>{DASHBOARD_TEXT.securityFresh(s.members_fresh, s.members_total)}</p>
+          {unread.length > 0 && (
+            <FigureNote block>
+              {DASHBOARD_TEXT.securityUnread(unread.length)} <span className="mono">{unread.join(", ")}</span>.
+            </FigureNote>
+          )}
+        </div>
+      }
+    >
+      <DataTable
+        caption="Each member's own scan state and fresh, unsuppressed production findings"
+        columns={SECURITY_COLUMNS}
+        rows={s.members}
+        rowKey={(row) => row.member}
+        pageSize={DEFAULT_TABLE_PAGE_SIZE}
+      />
+      {s.members.some((m) => m.result?.scan === "never_run") && (
+        <p className="muted">{DASHBOARD_TEXT.securityNeverRunNote}</p>
+      )}
+      <p className="muted">{DASHBOARD_TEXT.securityPerMember}</p>
+    </Widget>
   );
 }
 

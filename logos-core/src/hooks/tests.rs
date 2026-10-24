@@ -183,12 +183,77 @@ fn uninstall_leaves_foreign_scripts_and_foreign_hooks_path() {
 /// branch switch moves enough to justify a sync.
 #[test]
 fn post_checkout_script_guards_on_branch_flag() {
-    let (_, changed_cmd) = HOOKS
+    let (_, list_cmd) = HOOKS
         .iter()
         .find(|(name, _)| *name == "post-checkout")
         .unwrap();
-    let body = script_body("post-checkout", changed_cmd);
-    assert!(body.contains("[ \"$3\" = \"1\" ] || exit 0"), "{body}");
+    let body = script_body("post-checkout", list_cmd);
+    assert!(body.contains("[ \"$3\" = \"1\" ] && git diff"), "{body}");
+}
+
+/// Every freshness hook lists its paths NUL-separated and rename-free, and
+/// pipes them on without a shell variable (which cannot hold a NUL) or a
+/// newline round-trip — so a path reaches `logos sync` exactly as git records
+/// it, a rename as both of its sides ([FR-SY-05], CR-242).
+#[test]
+fn freshness_scripts_list_paths_nul_separated_and_without_renames() {
+    for (name, list_cmd) in HOOKS {
+        let body = script_body(name, list_cmd);
+        assert!(list_cmd.contains(" -z "), "{name}: {list_cmd}");
+        assert!(list_cmd.contains("--no-renames"), "{name}: {list_cmd}");
+        assert!(body.contains("xargs -0"), "{name}: {body}");
+        for stale in ["changed=", "$changed", "tr '\\n'"] {
+            assert!(!body.contains(stale), "{name} still carries {stale:?}: {body}");
+        }
+    }
+}
+
+/// The empty-set guard is the script's own shell test, and neither `xargs`
+/// flavour's behaviour on empty input is relied on: no GNU-only `-r`, which BSD
+/// `xargs` rejects.
+#[test]
+fn the_empty_set_guard_is_in_the_shell_not_in_xargs() {
+    for (name, list_cmd) in HOOKS {
+        let body = script_body(name, list_cmd);
+        assert!(body.contains("[ \"$#\" -gt 0 ] || exit 0"), "{name}: {body}");
+        assert!(body.contains("exec logos sync --quiet -- \"$@\""), "{name}: {body}");
+        for borrowed in ["xargs -r", "xargs -0r", "--no-run-if-empty"] {
+            assert!(!body.contains(borrowed), "{name}: {body}");
+        }
+    }
+}
+
+/// The scripts still end in an unconditional success: a freshness hook never
+/// blocks or fails the git operation that fired it, whatever the sync does.
+#[test]
+fn freshness_scripts_end_in_unconditional_success() {
+    for (name, list_cmd) in HOOKS {
+        let body = script_body(name, list_cmd);
+        assert!(body.contains(">/dev/null 2>&1 || true"), "{name}: {body}");
+        assert!(body.trim_end().ends_with("exit 0"), "{name}: {body}");
+    }
+}
+
+/// `install` rewrites a managed script left by an older release, so a re-run
+/// is the whole upgrade ([CR-242]): the stale body is replaced by the current
+/// one, not skipped as "already ours".
+#[test]
+fn install_rewrites_a_managed_script_from_an_older_release() {
+    let tmp = git_repo();
+    install(tmp.path()).expect("install");
+    let script = tmp.path().join(HOOKS_RELDIR).join("post-merge");
+    let stale = format!(
+        "#!/bin/sh\n{MANAGED_MARKER}: post-merge (S-022, FR-SY-05)\n\
+         changed=$(git diff --name-only ORIG_HEAD HEAD)\n"
+    );
+    std::fs::write(&script, &stale).expect("plant the old body");
+
+    let result = install(tmp.path()).expect("re-install");
+
+    assert!(result.installed.contains(&"post-merge".to_string()), "{result:?}");
+    let current = std::fs::read_to_string(&script).expect("read");
+    assert_ne!(current, stale);
+    assert!(current.contains("--no-renames"), "{current}");
 }
 
 /// The pre-push gate is the mirror image of the freshness scripts: it bails

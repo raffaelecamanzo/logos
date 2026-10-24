@@ -1,12 +1,17 @@
-# Dependabot proposes bumps for the actions .github/workflows/ci.yml pins to a
-# commit (NFR-MA-10). github-actions is the only ecosystem configured. A bump
-# rewrites the commit and the trailing `# vX.Y.Z` comment together; the pin check
-# in scripts/tests/test-ci-pins.sh confirms both are still there and well formed.
-# Dependabot also reads .github/workflows/release.yml, which cargo-dist owns: see
-# "CI actions are pinned" in docs/howto/contributing.md before merging such a bump.
+# Dependabot proposes bumps for the actions .github/workflows/ci.yml and
+# .github/workflows/release.yml pin to a commit (NFR-MA-10). github-actions is the
+# only ecosystem configured. A bump rewrites the commit and the trailing `# vX.Y.Z`
+# comment together; the pin check in scripts/tests/test-ci-pins.sh confirms both
+# are still there and well formed in both workflows. The cooldown holds a release
+# back for a week before a pull request is opened, so a hijacked release that is
+# pulled quickly is never proposed. release.yml is customised on top of cargo-dist's
+# output: see "CI actions are pinned" in docs/howto/contributing.md before merging a
+# bump to it.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

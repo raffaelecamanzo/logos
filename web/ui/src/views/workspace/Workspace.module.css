@@ -85,3 +85,12 @@
   display: grid;
   grid-template-rows: subgrid;
 }
+
+/* A score bar in a table cell with its raw value printed beside it (S-740):
+   the bar takes the room, the figure its own width. */
+.scoreCell {
+  display: grid;
+  grid-template-columns: minmax(4rem, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+}

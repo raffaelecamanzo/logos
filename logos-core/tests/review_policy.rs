@@ -35,6 +35,13 @@
 //! - `trend_window = 3` needs three; the warning moves no verdict or exit
 //!   code, and without the table nothing warns.
 //!
+//! The trend on the gate result (S-785, [CR-243]):
+//! - `gate`, `session_end` and the read-only verdict Health reads carry one
+//!   structured `trend` and its warning; reading the verdict records nothing;
+//! - a flat scan between two declines keeps it, a rise removes it;
+//! - an unreadable contract or table leaves the read-only verdict
+//!   byte-identical on every arm.
+//!
 //! An invalid table's exit 2 is a CLI contract: `cli/tests/review_policy_cli.rs`,
 //! which also pins the re-bless exit 2 through the binary.
 //!
@@ -49,6 +56,7 @@
 //! [UAT-GV-16]: ../../docs/specs/requirements/UAT-GV-16.md
 //! [FR-GV-27]: ../../docs/specs/requirements/FR-GV-27.md
 //! [UAT-GV-17]: ../../docs/specs/requirements/UAT-GV-17.md
+//! [CR-243]: ../../docs/requests/CR-243-governance-signals-reach-every-surface.md
 
 #![cfg(feature = "lang-rust")]
 
@@ -814,6 +822,11 @@ fn two_equality_declines_warn_on_scan_gate_and_review_and_move_no_exit_code() {
     let saved = engine.gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed, "{saved:#?}");
     assert_eq!(trend(&saved.warnings), [expected]);
+    assert_eq!(
+        trend_json(&saved),
+        serde_json::json!([{"dimension": "equality", "values": [start, first, second], "window": 2}]),
+        "a save carries the structured trend too: {saved:#?}"
+    );
 }
 
 /// [FR-GV-27] acceptance 3: under `trend_window = 3` two declines do not warn
@@ -891,4 +904,143 @@ fn the_read_only_verdict_judges_the_drift_budget_as_the_gate_does() {
     let web = engine.latest_gate().expect("the read-only verdict");
     assert!(!persisting.passed, "{persisting:#?}");
     assert_eq!((web.passed, web.message.as_str()), (false, persisting.message.as_str()), "{web:#?}");
+}
+
+// ── S-785, CR-243: the trend on the gate result and on the read-only verdict ──
+
+/// How many metric snapshots the store holds, read over a connection of its own.
+fn snapshot_count(root: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(root.join(".logos/logos.db")).unwrap();
+    conn.query_row("SELECT count(*) FROM metric_snapshots", [], |r| r.get(0)).unwrap()
+}
+
+/// The serialised `trend` of a gate result; `Null` when it is elided.
+fn trend_json(result: &GateResult) -> serde_json::Value {
+    serde_json::to_value(result).unwrap().get("trend").cloned().unwrap_or(serde_json::Value::Null)
+}
+
+/// Three scans under `[review]`, each lowering Equality: the run of two
+/// declines `start → first → second` is recorded.
+fn two_declines(root: &Path, engine: &Engine) -> [f64; 3] {
+    rules(root, "[review]\n");
+    let (_, start) = scan_with(root, engine, 0, None);
+    let (_, first) = scan_with(root, engine, 1, Some(start));
+    let (two, second) = scan_with(root, engine, 2, Some(first));
+    assert_eq!(two.len(), 1, "two declines warn: {two:?}");
+    [start, first, second]
+}
+
+/// [CR-243] acceptance 1: `gate`, `session_end` and the read-only verdict the
+/// Health page reads carry the same structured `trend` — the dimension, its
+/// values oldest first and the window — and the same warning, spelled from
+/// it. Reading the verdict records no snapshot ([ADR-28]).
+///
+/// [CR-243]: ../../docs/requests/CR-243-governance-signals-reach-every-surface.md
+/// [ADR-28]: ../../docs/specs/architecture/decisions/ADR-28.md
+#[test]
+fn gate_session_end_and_the_read_only_verdict_carry_one_structured_trend() {
+    let (tmp, engine) = repo();
+    let root = tmp.path();
+    let [start, first, second] = two_declines(root, &engine);
+    let expected_trend = serde_json::json!([{"dimension": "equality", "values": [start, first, second], "window": 2}]);
+    let expected_warning = format!(
+        "equality declined at each of the last 2 recorded snapshots that moved it: {start} → {first} → {second} \
+         (review.trend_window = 2); a trend warning, never a failure"
+    );
+
+    let persisting = gate(&engine);
+    let ended = engine.session_end().expect("session_end runs");
+    let recorded = snapshot_count(root);
+    let health = engine.latest_health().expect("the Health bundle").gate;
+    let web = engine.latest_gate().expect("the read-only verdict");
+    assert_eq!(snapshot_count(root), recorded, "the read-only verdict records nothing");
+
+    for result in [&persisting, &ended, &health, &web] {
+        assert_eq!(trend_json(result), expected_trend, "{result:#?}");
+        assert_eq!(trend(&result.warnings), std::slice::from_ref(&expected_warning), "{result:#?}");
+    }
+    assert_eq!(serde_json::to_string(&health).unwrap(), serde_json::to_string(&web).unwrap());
+}
+
+/// [UAT-GV-17] steps 3–4: a scan within the noise floor between two declines
+/// keeps the trend on `gate` and on the read-only verdict; a scan that raises
+/// Equality removes it from `scan`, `gate` and the read-only verdict, which
+/// then serialise no `trend` key at all.
+///
+/// [UAT-GV-17]: ../../docs/specs/requirements/UAT-GV-17.md
+#[test]
+fn a_flat_scan_keeps_the_trend_and_a_rise_removes_it_everywhere() {
+    let (tmp, engine) = repo();
+    let root = tmp.path();
+    rules(root, "[review]\n");
+    let (_, start) = scan_with(root, &engine, 0, None);
+    let (_, first) = scan_with(root, &engine, 1, Some(start));
+    // The same tree re-scanned: a flat step between the two declines.
+    let (flat, again) = scan_with(root, &engine, 1, None);
+    assert!(flat.is_empty() && again == first, "{flat:?} {first} {again}");
+    let (two, second) = scan_with(root, &engine, 2, Some(first));
+    assert_eq!(two.len(), 1, "the flat step neither breaks nor extends the run: {two:?}");
+    let expected_trend = serde_json::json!([{"dimension": "equality", "values": [start, first, second], "window": 2}]);
+    assert_eq!(trend_json(&engine.latest_gate().unwrap()), expected_trend);
+    assert_eq!(trend_json(&gate(&engine)), expected_trend);
+
+    // Back to the base tree: Equality rises.
+    let (risen, up) = scan_with(root, &engine, 0, None);
+    assert!(up > second && risen.is_empty(), "the rise ends the run: {second} → {up} {risen:?}");
+    for result in [engine.latest_gate().unwrap(), gate(&engine)] {
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(!keys(&json).contains(&"trend".to_string()), "{json}");
+        assert!(trend(&result.warnings).is_empty(), "{result:#?}");
+    }
+}
+
+/// [CR-243] acceptance 2: on every arm of the read-only verdict — no
+/// baseline, a baseline under other semantics or thresholds, a comparable one
+/// — an unreadable `rules.toml` or `[review]` table gives no trend and a
+/// verdict byte-identical to the one without a table. A readable table adds
+/// the trend and moves neither `passed` nor `message` on the arms it does not
+/// judge, whose payload is otherwise byte-identical too.
+///
+/// [CR-243]: ../../docs/requests/CR-243-governance-signals-reach-every-surface.md
+#[test]
+fn without_a_readable_table_the_read_only_verdict_is_byte_identical_on_every_arm() {
+    let (tmp, engine) = repo();
+    let root = tmp.path();
+    two_declines(root, &engine);
+    let rules_path = root.join(".logos/rules.toml");
+    let db = || rusqlite::Connection::open(root.join(".logos/logos.db")).unwrap();
+    let arms: [(&str, &str); 4] = [
+        ("comparable", ""),
+        ("thresholds", "UPDATE metric_snapshots SET thresholds_hash = 'tuned' WHERE id = (SELECT snapshot_id FROM baseline)"),
+        ("semantics", "UPDATE metric_snapshots SET metric_version = metric_version - 1 WHERE id = (SELECT snapshot_id FROM baseline)"),
+        ("no baseline", "DELETE FROM baseline"),
+    ];
+    for (arm, sql) in arms {
+        if !sql.is_empty() {
+            db().execute(sql, []).unwrap();
+        }
+        fs::remove_file(&rules_path).unwrap();
+        let without = serde_json::to_string(&engine.latest_gate().unwrap()).unwrap();
+        for unreadable in ["[review]\nnot_a_key = 1\n", "[review]\ntrend_window = 0\n", "[review\n"] {
+            rules(root, unreadable);
+            let read = serde_json::to_string(&engine.latest_gate().unwrap()).unwrap();
+            assert_eq!(read, without, "{arm} arm under {unreadable:?}");
+        }
+
+        rules(root, "[review]\n");
+        let under = engine.latest_gate().unwrap();
+        assert_eq!(trend_json(&under)[0]["dimension"], "equality", "{arm}: {under:#?}");
+        let mut stripped = serde_json::to_value(&under).unwrap();
+        let object = stripped.as_object_mut().unwrap();
+        object.remove("trend");
+        object.get_mut("warnings").unwrap().as_array_mut().unwrap().retain(|w| {
+            !w.as_str().unwrap_or_default().contains("review.trend_window")
+        });
+        // The comparable arm is the one the table judges, by `drift_budget`
+        // (FR-GV-25), as it did before the trend.
+        if arm != "comparable" {
+            let without: serde_json::Value = serde_json::from_str(&without).unwrap();
+            assert_eq!(stripped, without, "{arm}");
+        }
+    }
 }

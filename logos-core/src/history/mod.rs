@@ -45,8 +45,8 @@ use anyhow::{Context, Result};
 use crate::config::EffectiveHistory;
 
 pub use coverage::{
-    CoverageFileStatus, CoverageFormat, CoverageRefreshSummary, CoverageStatus, IngestSummary,
-    FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE,
+    CoverageConsentStatus, CoverageFileStatus, CoverageFormat, CoverageLastRun, CoverageRunnerStatus, CoverageStatus,
+    CoverageToolStatus, IngestSummary, FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE,
 };
 pub use hotspot::{
     aggregate_complexity, rank, rank_with_findings, test_only_files, CoverageCell, FileCoverage,

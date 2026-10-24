@@ -9,6 +9,8 @@
 #   logos_bin                    the logos binary on PATH, or exit 1
 #   logos_binary_version BIN     the X.Y.Z that `BIN --version` reports, or exit 1
 #   logos_version_ge A B         0 when version A >= version B
+#   logos_scope_args BIN         SCOPE_ARGS: `--scope all` when BIN has the
+#                                security scope filter (1.21.0+), else empty
 #   logos_min_binary_version     the plugin's declared minimum, or exit 1
 #   logos_hook_message EVENT SYSTEM CONTEXT
 #                                one hook JSON object: SYSTEM for the user,
@@ -72,6 +74,27 @@ logos_version_ge() {
         case "$a" in *.*) a="${a#*.}" ;; *) a="" ;; esac
         case "$b" in *.*) b="${b#*.}" ;; *) b="" ;; esac
     done
+    return 0
+}
+
+# The first logos whose `security findings` lists production code by default and
+# takes `--scope` (FR-SC-28). A 1.20.x binary rejects the flag and lists every
+# finding, so the hook asks for the full listing only where the flag exists.
+SCOPE_MIN_VERSION="1.21.0"
+
+# logos_scope_args BIN — SCOPE_ARGS: `--scope all` when BIN supports the scope
+# filter, else empty. The Stop hook judges every stored finding of a changed file,
+# test code included: a secret committed in a test is still a leak. A version that
+# cannot be read gets no flag, the safe spelling on an older binary.
+SCOPE_ARGS=()
+logos_scope_args() {
+    local v
+    SCOPE_ARGS=()
+    v="$(logos_binary_version "$1")" || return 0
+    # An ERR trap in the caller turns a failing substitution into success: an empty
+    # version is the judge of an unreadable one.
+    [ -n "$v" ] || return 0
+    logos_version_ge "$v" "$SCOPE_MIN_VERSION" && SCOPE_ARGS=(--scope all)
     return 0
 }
 

@@ -47,9 +47,22 @@
 //! CLI keeps its licence refusal. [`install_job`] is the
 //! `tool-install` job's work: the install, then the scan, cancellable.
 //!
+//! # The coverage install
+//! [`coverage_install`] is `logos coverage install` ([FR-CV-17], S-748): the
+//! managed [coverage tools](Manifest::coverage) — `cargo-llvm-cov` — by the
+//! same precedence, consent and verified route, and the `llvm-tools-preview`
+//! component added by the user's own `rustup`. The security surfaces above
+//! never list, install or remove a coverage tool. The Coverage page's
+//! **Install** ([FR-CV-17], S-750) asks for the same lines first:
+//! [`coverage_install_pending`] lists those the consent does not cover yet,
+//! starting no process, and [`record_coverage_install_lines`] records the ones
+//! its dialog accepted; the `coverage-run` job then installs through
+//! [`coverage_install_reporting`].
+//!
 //! No MCP tool calls into this module: an agent cannot grant itself consent
 //! to download and run a binary ([ADR-88] §6).
 //!
+//! [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
 //! [FR-SC-24]: ../../../docs/specs/requirements/FR-SC-24.md
 //! [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
 //! [FR-SC-23]: ../../../docs/specs/requirements/FR-SC-23.md
@@ -61,10 +74,14 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::{
-    InstallOutcome, InstallProgress, Installer, Manifest, Platform, Source, ToolEntry, ToolInstall,
-    ToolUninstall,
+    ComponentOutcome, InstallOutcome, InstallProgress, Installer, Manifest, Platform, Source, ToolEntry,
+    ToolInstall, ToolUninstall, LLVM_TOOLS, LLVM_TOOLS_ADD,
 };
-use crate::config::{load_install_consent, load_scan_consent, record_install_consent, ConfigError};
+use crate::config::{
+    load_install_consent, load_scan_consent, load_toolchain_consent, record_install_consent,
+    record_toolchain_consent, ConfigError,
+};
+use crate::coverage::{CoverageRunner, Detection, Origin, Probes};
 use crate::jobs::spawn::inside_root;
 use crate::security::{
     consent_pending, Availability, CopyKind, InstalledCopy, Orchestrator, Probe, ScanEnvironment,
@@ -893,7 +910,7 @@ fn plan(installer: &Installer, tools: &[String], source: &Source) -> Vec<Planned
     let mut lines: Vec<Planned> = tools
         .iter()
         .filter_map(|tool| {
-            let entry = manifest.tool(tool)?;
+            let entry = manifest.entry(tool)?;
             let host = match &entry.python {
                 Some(_) => manifest.python.index_host(),
                 None => entry.artifact(platform)?.host(),
@@ -995,6 +1012,364 @@ fn shell_word(word: &str) -> String {
     } else {
         format!("'{}'", word.replace('\'', "'\\''"))
     }
+}
+
+// ── The coverage install (S-748, FR-CV-17) ───────────────────────────────────
+
+/// The command that installs the managed coverage tools, which a refusal
+/// names with `--consent`.
+pub const COVERAGE_INSTALL_ENTRY: &str = "logos coverage install";
+
+/// What `logos coverage install` asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoverageInstallRequest {
+    /// Install from this directory of pre-downloaded artifacts instead of the
+    /// network.
+    pub from: Option<PathBuf>,
+    /// Record the install consent — and the toolchain consent for
+    /// `rustup component add llvm-tools-preview` — for what is about to run.
+    pub consent: bool,
+}
+
+/// What `logos coverage install` returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageInstall {
+    /// The lines this call added to the consent: `<tool> <version>`, and
+    /// [`LLVM_TOOLS_ADD`].
+    pub consent_recorded: Vec<String>,
+    /// The coverage tools left as they are: a usable copy is already there.
+    pub kept: Vec<KeptCoverageTool>,
+    /// One entry per coverage tool installed or attempted.
+    pub tools: Vec<ToolInstall>,
+    /// The `llvm-tools-preview` step.
+    pub llvm_tools: ComponentOutcome,
+}
+
+impl CoverageInstall {
+    /// `logos coverage install`'s exit code: 1 when a coverage tool it set
+    /// out to install is not in place, or when adding `llvm-tools-preview`
+    /// failed or was cancelled; else 0. A kept copy counts as in place
+    /// whether or not it can run: an override that cannot is the user's
+    /// choice, and `coverage status` reports it. Without `rustup` the step changes
+    /// nothing and names the command to run by hand, which is not a failure:
+    /// a toolchain `rustup` does not manage brings its LLVM tools its own way.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        let tool_missing = self.tools.iter().any(|t| {
+            !matches!(t.outcome, InstallOutcome::Installed { .. } | InstallOutcome::AlreadyPresent { .. })
+        });
+        let step_failed = matches!(self.llvm_tools, ComponentOutcome::Failed { .. } | ComponentOutcome::Cancelled);
+        i32::from(tool_missing || step_failed)
+    }
+}
+
+/// A coverage tool the install left in place, and the copy it found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeptCoverageTool {
+    pub tool: String,
+    /// `override`, `path` or `managed`.
+    pub origin: Origin,
+    pub binary: PathBuf,
+    /// The version its probe printed (a managed copy's, its directory's);
+    /// `None` when it could not be read.
+    pub version: Option<String>,
+}
+
+/// Install the managed coverage tools that are missing, and add
+/// `llvm-tools-preview` to the user's toolchain, under the consent the
+/// [module docs](self) describe ([FR-CV-17]).
+///
+/// A tool is installed only when no usable copy is there: the user-level
+/// `path` override (even one that cannot run: it is the user's choice), a
+/// `PATH` copy at or above the manifest's minimum, or a managed copy. Before
+/// anything is fetched or any `rustup` runs, every line must be consented to:
+/// each tool to install by its `<tool> <version>` in the install consent, and
+/// `rustup component add llvm-tools-preview` — while a `rustup` is on the
+/// search path — in the toolchain consent. Without them, and without
+/// `consent`, the call fails naming each line and the command that records it.
+/// Without `rustup` the component step runs nothing and reports the command to
+/// run by hand.
+///
+/// # Errors
+/// A [`ConfigError`] (exit 2), before anything is fetched or run: an invalid
+/// config; when a tool is to be installed, a platform without managed
+/// installs, no tools directory or one inside the project; or a consent that
+/// is required and not given.
+///
+/// [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
+pub fn coverage_install(
+    root: &Path,
+    env: &ScanEnvironment,
+    manifest: &Manifest,
+    request: &CoverageInstallRequest,
+) -> Result<CoverageInstall> {
+    coverage_install_reporting(root, env, manifest, request, &mut |_| {})
+}
+
+/// One step of a coverage install as it happens, for the `coverage-run` job
+/// that installs before it runs (S-750): a tool's install starting and
+/// settled, as the Security page's install reports them, then the
+/// `llvm-tools-preview` step. Serialised with a `phase` tag.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum CoverageInstallStep<'a> {
+    Install(&'a InstallProgress),
+    Component(ComponentStep<'a>),
+}
+
+/// The `llvm-tools-preview` step of a coverage install, as it happens.
+#[derive(Debug, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ComponentStep<'a> {
+    /// `rustup` is about to list, and add if missing, the component.
+    ComponentStarted { component: &'static str, command: &'static str },
+    /// How the step ended.
+    ComponentFinished {
+        component: &'static str,
+        #[serde(flatten)]
+        outcome: &'a ComponentOutcome,
+    },
+}
+
+/// [`coverage_install`], handing each step to `progress` as it happens; on a
+/// [job](crate::jobs)'s thread a cancel kills the download, unpack or `rustup`
+/// running, leaves no partial tool and starts nothing after it.
+///
+/// # Errors
+/// As [`coverage_install`].
+pub fn coverage_install_reporting(
+    root: &Path,
+    env: &ScanEnvironment,
+    manifest: &Manifest,
+    request: &CoverageInstallRequest,
+    progress: &mut dyn FnMut(&CoverageInstallStep<'_>),
+) -> Result<CoverageInstall> {
+    let runner = CoverageRunner::open_with(root, env.user_dir.as_deref(), env.search_path.clone())?
+        .with_tools_dir(env.tools_dir.clone());
+    let source = match &request.from {
+        Some(dir) => Source::Directory(dir.clone()),
+        None => Source::Network,
+    };
+    let mut kept = Vec::new();
+    let mut planned = Vec::new();
+    for entry in &manifest.coverage {
+        match kept_coverage_copy(&runner, manifest, &entry.tool, Probes::Every) {
+            Some(copy) => kept.push(copy),
+            None => planned.push(entry.tool.clone()),
+        }
+    }
+    // Built before the consent check, so a tools directory inside the project
+    // is refused before anything is recorded. Adding the component writes no
+    // tools directory, so it needs none.
+    let installer = if planned.is_empty() {
+        toolchain_installer(root, env, manifest)
+    } else {
+        installer(root, env, manifest)?
+    };
+    let lines = plan(&installer, &planned, &source);
+    let consented = load_install_consent(env.user_dir.as_deref())?;
+    let toolchain = load_toolchain_consent(env.user_dir.as_deref())?;
+    // Whether the component is there is asked of `rustup` only once its
+    // consent is recorded: before that, no `rustup` command runs at all.
+    let rustup = installer.has_rustup();
+    let missing: Vec<&Planned> = lines
+        .iter()
+        .filter(|p| !consented.covers(&p.tool, &p.version))
+        .collect();
+    let toolchain_missing = rustup && !toolchain.covers(LLVM_TOOLS);
+    if (!missing.is_empty() || toolchain_missing) && !request.consent {
+        let retry = match &request.from {
+            Some(dir) => format!("{COVERAGE_INSTALL_ENTRY} --from {} --consent", shell_word(&dir.to_string_lossy())),
+            None => format!("{COVERAGE_INSTALL_ENTRY} --consent"),
+        };
+        let named: Vec<String> = missing
+            .iter()
+            .map(|p| describe(p))
+            .chain(toolchain_missing.then(toolchain_line))
+            .collect();
+        return Err(ConfigError::InvalidValue {
+            key: "consent".to_string(),
+            message: format!(
+                "no install consent is recorded for {}. Nothing was downloaded and no rustup command \
+                 ran. Run `{retry}` in a terminal to record it (an MCP client cannot); it covers these \
+                 in every project",
+                named.join(", ")
+            ),
+        }
+        .into());
+    }
+    let pairs: Vec<(&str, &str)> = missing
+        .iter()
+        .map(|p| (p.tool.as_str(), p.version.as_str()))
+        .collect();
+    let mut consent_recorded: Vec<String> = pairs.iter().map(|(tool, version)| format!("{tool} {version}")).collect();
+    if !pairs.is_empty() {
+        record_install_consent(env.user_dir.as_deref(), &pairs, &[])?;
+    }
+    if toolchain_missing {
+        record_toolchain_consent(env.user_dir.as_deref(), &[LLVM_TOOLS])?;
+        consent_recorded.push(LLVM_TOOLS_ADD.to_string());
+    }
+
+    let tools = if planned.is_empty() {
+        Vec::new()
+    } else {
+        installer.install_with(&planned, &source, false, &mut |step| progress(&CoverageInstallStep::Install(step)))?.tools
+    };
+    let llvm_tools = if crate::jobs::cancelled() {
+        ComponentOutcome::Cancelled
+    } else if rustup {
+        progress(&CoverageInstallStep::Component(ComponentStep::ComponentStarted {
+            component: LLVM_TOOLS,
+            command: LLVM_TOOLS_ADD,
+        }));
+        installer.add_llvm_tools()
+    } else {
+        super::rustup::no_rustup()
+    };
+    progress(&CoverageInstallStep::Component(ComponentStep::ComponentFinished { component: LLVM_TOOLS, outcome: &llvm_tools }));
+    Ok(CoverageInstall {
+        consent_recorded,
+        kept,
+        tools,
+        llvm_tools,
+    })
+}
+
+/// How the consent names the `llvm-tools-preview` step.
+fn toolchain_line() -> String {
+    format!("`{LLVM_TOOLS_ADD}` on your active Rust toolchain, run only if the component is missing")
+}
+
+/// One line of the Coverage page's consent before **Install** (S-750): a
+/// managed coverage tool to download, or the `llvm-tools-preview` step — each
+/// as `logos coverage install` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "line", rename_all = "snake_case")]
+pub enum CoverageInstallLine {
+    /// A pinned tool to download: its version, source host and size.
+    Tool {
+        tool: String,
+        version: String,
+        source: String,
+        size: u64,
+        /// What the dialog shows: `cargo-llvm-cov 0.9.1 from github.com (1.5 MB)`.
+        text: String,
+    },
+    /// `rustup component add llvm-tools-preview` on the user's toolchain.
+    Toolchain { command: &'static str, text: String },
+}
+
+impl CoverageInstallLine {
+    /// What the dialog's answer echoes to accept this line: `<tool>
+    /// <version>`, or the `rustup` command.
+    #[must_use]
+    pub fn accept(&self) -> String {
+        match self {
+            CoverageInstallLine::Tool { tool, version, .. } => format!("{tool} {version}"),
+            CoverageInstallLine::Toolchain { command, .. } => (*command).to_string(),
+        }
+    }
+}
+
+/// The lines of a coverage install the consent does not cover yet, exactly
+/// those [`coverage_install`] refuses without them: each managed coverage
+/// tool with no usable copy whose version the install consent does not name,
+/// then — while a `rustup` is on the search path — the `llvm-tools-preview`
+/// step until the toolchain consent names it. Decides on recorded state only
+/// (S-766): no copy's version is probed, so a `PATH` copy counts as usable,
+/// as the page shows it installed; the probed install can then only keep
+/// more. Starts no process and writes nothing.
+///
+/// # Errors
+/// As [`coverage_install`], the consent aside.
+pub fn coverage_install_pending(
+    root: &Path,
+    env: &ScanEnvironment,
+    manifest: &Manifest,
+) -> Result<Vec<CoverageInstallLine>> {
+    let runner = CoverageRunner::open_with(root, env.user_dir.as_deref(), env.search_path.clone())?
+        .with_tools_dir(env.tools_dir.clone());
+    let planned: Vec<String> = manifest
+        .coverage
+        .iter()
+        .filter(|entry| kept_coverage_copy(&runner, manifest, &entry.tool, Probes::Never).is_none())
+        .map(|entry| entry.tool.clone())
+        .collect();
+    let installer = if planned.is_empty() {
+        toolchain_installer(root, env, manifest)
+    } else {
+        installer(root, env, manifest)?
+    };
+    let consented = load_install_consent(env.user_dir.as_deref())?;
+    let toolchain = load_toolchain_consent(env.user_dir.as_deref())?;
+    let mut lines: Vec<CoverageInstallLine> = plan(&installer, &planned, &Source::Network)
+        .into_iter()
+        .filter(|p| !consented.covers(&p.tool, &p.version))
+        .map(|p| CoverageInstallLine::Tool { text: describe(&p), tool: p.tool, version: p.version, source: p.source, size: p.size })
+        .collect();
+    if installer.has_rustup() && !toolchain.covers(LLVM_TOOLS) {
+        lines.push(CoverageInstallLine::Toolchain { command: LLVM_TOOLS_ADD, text: toolchain_line() });
+    }
+    Ok(lines)
+}
+
+/// Record the consent for `lines`, as `logos coverage install --consent`
+/// records it: each tool's `<tool> <version>` in the install consent, the
+/// `llvm-tools-preview` step in the toolchain consent. User-level, never in
+/// the repository.
+///
+/// # Errors
+/// An I/O or format error writing either record.
+pub fn record_coverage_install_lines(user_dir: Option<&Path>, lines: &[CoverageInstallLine]) -> Result<()> {
+    let pairs: Vec<(&str, &str)> = lines
+        .iter()
+        .filter_map(|line| match line {
+            CoverageInstallLine::Tool { tool, version, .. } => Some((tool.as_str(), version.as_str())),
+            CoverageInstallLine::Toolchain { .. } => None,
+        })
+        .collect();
+    if !pairs.is_empty() {
+        record_install_consent(user_dir, &pairs, &[])?;
+    }
+    if lines.iter().any(|line| matches!(line, CoverageInstallLine::Toolchain { .. })) {
+        record_toolchain_consent(user_dir, &[LLVM_TOOLS])?;
+    }
+    Ok(())
+}
+
+/// The copy of coverage tool `tool` an install leaves as it is, by the
+/// precedence detection uses: any override, a `PATH` copy at or above the
+/// minimum — or, under [`Probes::Never`], any `PATH` copy, its version
+/// unread — or a managed copy.
+fn kept_coverage_copy(runner: &CoverageRunner, manifest: &Manifest, tool: &str, probes: Probes) -> Option<KeptCoverageTool> {
+    let kept = |origin, binary: &Path, version: Option<String>| KeptCoverageTool {
+        tool: tool.to_string(),
+        origin,
+        binary: binary.to_path_buf(),
+        version,
+    };
+    match runner.copy_in_use(tool, probes)? {
+        Detection::Installed { binary, version, origin } => {
+            let usable = origin != Origin::Path
+                || probes == Probes::Never
+                || manifest.meets_minimum(tool, version.as_deref());
+            usable.then(|| kept(origin, &binary, version))
+        }
+        // A set override is the user's choice even when it cannot run: a
+        // managed copy installed beside it would never be used.
+        _ => runner.override_of(tool).map(|path| kept(Origin::Override, path, None)),
+    }
+}
+
+/// The installer for the `llvm-tools-preview` step alone: it looks `rustup`
+/// up on the search path outside the project and writes nothing, so it needs
+/// neither a tools directory nor a platform with managed installs.
+fn toolchain_installer(root: &Path, env: &ScanEnvironment, manifest: &Manifest) -> Installer {
+    Installer::new(env.tools_dir.clone().unwrap_or_default())
+        .with_manifest(manifest.clone())
+        .with_search_path(env.search_path.clone())
+        .for_project(root)
 }
 
 #[cfg(test)]

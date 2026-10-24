@@ -36,3 +36,6 @@ axum       = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

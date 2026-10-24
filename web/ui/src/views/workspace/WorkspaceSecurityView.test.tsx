@@ -30,7 +30,8 @@ import { expectOneWidgetStack, widgetTitled } from "../../test/widgetStack.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import real from "./fixtures/workspaceSecurity.real.json";
-import { memberSecurityHref, WorkspaceSecurityView } from "./WorkspaceSecurityView.tsx";
+import { memberSecurityHref } from "./memberSecurityRow.tsx";
+import { WorkspaceSecurityView } from "./WorkspaceSecurityView.tsx";
 
 const REAL = real as unknown as WorkspaceSecurityAnswer;
 
@@ -173,8 +174,21 @@ describe("the member roll-up (FR-SC-16)", () => {
     expect(within(widget).getByText(WORKSPACE_SECURITY_TEXT.reportsFresh(0, 1))).toBeInTheDocument();
   });
 
+  it("states the test-code remainder on the figure row, the payload's own sum, left out of every total (S-796)", async () => {
+    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1, test: 7 } }));
+    const members = widgetTitled(document.body, "Members");
+    expect(within(members).getByText("· 7 in test code, left out of every total above.")).toBeInTheDocument();
+    // The totals line itself is unchanged: the remainder is its own line.
+    expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.totals(0, 1, 1, 0, 0, 0))).toBeInTheDocument();
+  });
+
+  it("states a remainder of none as none, never as nothing said (S-796)", async () => {
+    await mount(withSecurity({ excluded: { not_fresh: 0, suppressed: 0, test: 0 } }));
+    expect(within(widgetTitled(document.body, "Members")).getByText("· 0 in test code, left out of every total above.")).toBeInTheDocument();
+  });
+
   it("puts each left-out figure in its own place, in the spelling the manual gives (S-760)", async () => {
-    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1 } }));
+    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1, test: 0 } }));
     const members = widgetTitled(document.body, "Members");
     expect(within(members).getByText("Left out: 3 findings in files changed since the scan, and 1 suppressed.")).toBeInTheDocument();
   });

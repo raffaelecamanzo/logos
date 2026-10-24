@@ -1,29 +1,32 @@
-// ScanJobPanel over a mocked scan job (S-673, FR-SC-15, FR-SC-07): consent is
-// asked before the first scan and sent with the accepted start, a second click
-// while running joins the same job, the job is followed to its end and the page
-// reloaded once, cancel posts the cancel, a running job is picked up on mount,
-// and a refused request states the server's reason. Pinned to the real completed
-// job `web/tests/security_job.rs` produced.
-import { cleanup, render, screen, within } from "@testing-library/react";
+// The scan job on the Scanners widget over a mocked scan job (S-673, S-792,
+// FR-SC-15, FR-SC-07): consent is asked before the first scan and sent with the
+// accepted start, a second click while running joins the same job, the job is
+// followed to its end and the page reloaded once, cancel posts the cancel, a
+// running job is picked up on mount, and a refused request states the server's
+// reason. While a job runs, the row of each scanner running reads `running` and
+// the row of each tool installing reads `installing`, and one `aria-live` line
+// counts what finished. Pinned to the real completed jobs
+// `web/tests/security_job.rs` and `web/tests/security_install_job.rs` produced.
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { InstallJob, ScanJob, SecurityInstallPlan, SecurityScannerStatus } from "../../api/types.ts";
+import type { InstallJob, ScanJob, SecurityInstallPlan, SecurityScannerStatus, SecurityStatus } from "../../api/types.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
 import {
   CONSENT_TEXT,
   INSTALL_CONSENT_TEXT,
   INSTALL_JOB_TEXT,
   INSTALL_OUTCOME_TEXT,
+  LIVE_STATE_TEXT,
   SCAN_JOB_TEXT,
-  SCAN_OUTCOME_TEXT,
-  scanJob,
+  scannerMatrix,
 } from "../../copy/security.copy.ts";
 import { widgetTitled } from "../../test/widgetStack.ts";
 import installReal from "./fixtures/install-job.real.json";
 import planReal from "./fixtures/install-plan.real.json";
 import real from "./fixtures/scan-job.real.json";
-import { ScanJobPanel, type InstallRequest } from "./ScanJobPanel.tsx";
+import { ScannersWidget } from "./ScannersWidget.tsx";
 
 const COMPLETED = real as unknown as ScanJob;
 
@@ -60,6 +63,12 @@ const INSTALL_CANCELLED: InstallJob = {
 function row(scanner: string, state: "not_installed" | "never_run", extra: Partial<SecurityScannerStatus> = {}): SecurityScannerStatus {
   return { scanner, driver: scanner, state, installed: null, install: `logos security install ${scanner}`, last_failure: null, ...extra } as SecurityScannerStatus;
 }
+
+/** Bandit installed on the PATH, never run: the scanner the real jobs run. */
+const BANDIT = row("bandit", "never_run", {
+  installed: { copy: "path", binary: "/usr/bin/bandit", version: "1.7.10", update_available: null },
+  install: null,
+});
 
 interface Call {
   method: string;
@@ -112,17 +121,44 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function mount(pending: readonly string[] = [], onFinished = vi.fn(), scanners: SecurityScannerStatus[] = []) {
-  const view = render(<ScanJobPanel pending={pending} onFinished={onFinished} pollMs={5} scanners={scanners} />);
+function mount(
+  pending: readonly string[] = [],
+  onFinished = vi.fn(),
+  scanners: SecurityScannerStatus[] = [BANDIT],
+  others: SecurityScannerStatus[] = [],
+) {
+  const status = { head_sha: null, consent: { consented: [], pending }, scanners, other_reports: others, suppressions: [] } as unknown as SecurityStatus;
+  const view = render(<ScannersWidget status={status} onFinished={onFinished} pollMs={5} />);
   return { onFinished, root: view.container };
 }
 
-describe("ScanJobPanel", () => {
-  it("states that no scan ran yet, through its catalogue entry", async () => {
+/** The State cell of the row of `name` in the Scanners table. */
+function stateOf(name: string): string {
+  const table = screen.getByRole("table", { name: "Scanners" });
+  const row = within(table).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
+  const header = within(table).getAllByRole("columnheader").findIndex((h) => h.textContent?.startsWith("State"));
+  return (row.querySelectorAll("td")[header] as HTMLElement).textContent ?? "";
+}
+
+/** The one polite summary line. */
+const summary = () => document.querySelector("p[aria-live='polite']") as HTMLElement;
+
+describe("Scan controls on the Scanners widget", () => {
+  it("states that no scan ran yet, through the widget's catalogue entry", async () => {
     stub(() => ({ body: { job: null } }));
     const { root } = mount();
     expect(await screen.findByText(SCAN_JOB_TEXT.idle)).toBeInTheDocument();
-    expectWidgetCopy(widgetTitled(root, "Run a scan"), scanJob);
+    expectWidgetCopy(widgetTitled(root, "Scanners"), scannerMatrix);
+  });
+
+  it("puts Run scan on the widget's title row, with no separate widget", async () => {
+    stub(() => ({ body: { job: null } }));
+    const { root } = mount();
+    const widget = widgetTitled(root, "Scanners");
+    const title = widget.querySelector('[data-widget-part="title"]') as HTMLElement;
+    expect(within(title).getByRole("button", { name: SCAN_JOB_TEXT.run })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Run a scan" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Scanner progress" }), "the progress list is gone").toBeNull();
   });
 
   it("asks consent naming the scanners before the first scan, and sends it with the accepted start", async () => {
@@ -187,33 +223,58 @@ describe("ScanJobPanel", () => {
     // The first click asks; the accepted start runs.
     await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
     await userEvent.click(await screen.findByRole("button", { name: CONSENT_TEXT.accept }));
-    await screen.findByText(/Scanning/);
+    await screen.findByText(/Scan running/);
     // The second click, while running, posts again and joins.
     await userEvent.click(screen.getByRole("button", { name: SCAN_JOB_TEXT.run }));
-    expect(await screen.findByText(SCAN_JOB_TEXT.joined)).toBeInTheDocument();
+    expect(await screen.findByText(SCAN_JOB_TEXT.joined, { exact: false })).toBeInTheDocument();
     expect(screen.queryByRole("dialog"), "consent is not asked while a scan runs").toBeNull();
     expect(posts(calls).map((c) => JSON.parse(c.body!))).toEqual([{ consent: ["bandit"] }, { consent: [] }]);
   });
 
-  it("follows the job to its end, shows each scanner's outcome and reloads the page once", async () => {
-    let polls = 0;
+  it("shows the scanner running as `running`, counts the finished ones in one live line, and reloads the page once at the end", async () => {
+    // The scan stays at Bandit until the test lets it end.
+    let [started, ends] = [false, false];
     stub((c) => {
-      if (c.method === "POST") return { body: { joined: false, job: RUNNING } };
-      polls += 1;
-      return { body: { job: polls > 2 ? COMPLETED : polls > 1 ? RUNNING : null } };
+      if (c.method === "POST") {
+        started = true;
+        return { body: { joined: false, job: RUNNING } };
+      }
+      return { body: { job: ends ? COMPLETED : started ? RUNNING : null } };
     });
     const { onFinished } = mount([]);
+    expect(stateOf("bandit")).toBe("never run" + "Installed but never run; run logos security scan.");
     await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
-    const progress = await screen.findByRole("list", { name: "Scanner progress" });
-    expect(within(progress).getByText(/bandit/).parentElement!.textContent).toContain(SCAN_JOB_TEXT.scannerRunning);
+    // Four scanners had finished and Bandit had started: its row reads running.
+    expect(await screen.findByText(SCAN_JOB_TEXT.running(4, ["bandit"]))).toBeInTheDocument();
+    expect(stateOf("bandit")).toBe(LIVE_STATE_TEXT.running);
+    expect(summary().textContent).toContain(SCAN_JOB_TEXT.running(4, ["bandit"]));
+    expect(onFinished, "nothing reloads while it runs").not.toHaveBeenCalled();
+    ends = true;
 
     expect(await screen.findByText(SCAN_JOB_TEXT.completed(0, 1))).toBeInTheDocument();
-    const done = screen.getByRole("list", { name: "Scanner progress" });
-    expect(done.textContent).toContain(`bandit — ${SCAN_OUTCOME_TEXT.ran(0)}`);
-    // Only what started is listed: the scanners not installed here are not rows.
-    expect(within(done).getAllByRole("listitem")).toHaveLength(1);
+    expect(stateOf("bandit"), "the job ended: the row reads its stored state").not.toBe(LIVE_STATE_TEXT.running);
     expect(onFinished).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: SCAN_JOB_TEXT.cancel }), "no cancel once it ended").toBeNull();
+  });
+
+  it("shows the job ended only once the reload its end asked for has landed (HF-2)", async () => {
+    let ends = false;
+    stub((c) => (c.method === "POST" ? { body: { joined: false, job: RUNNING } } : { body: { job: ends ? COMPLETED : RUNNING } }));
+    let land: () => void = () => {};
+    const onFinished = vi.fn(() => new Promise<void>((done) => (land = done)));
+    mount([], onFinished);
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
+    expect(await screen.findByText(SCAN_JOB_TEXT.running(4, ["bandit"]))).toBeInTheDocument();
+    ends = true;
+
+    await vi.waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+    expect(stateOf("bandit"), "the row's stored state is the page read before the scan").toBe(LIVE_STATE_TEXT.running);
+    expect(summary().textContent).toContain(SCAN_JOB_TEXT.running(4, ["bandit"]));
+
+    act(() => land());
+    expect(await screen.findByText(SCAN_JOB_TEXT.completed(0, 1))).toBeInTheDocument();
+    expect(stateOf("bandit")).not.toBe(LIVE_STATE_TEXT.running);
+    expect(onFinished).toHaveBeenCalledTimes(1);
   });
 
   it("keeps following the job after a failed read, and reloads once when it ends", async () => {
@@ -246,14 +307,19 @@ describe("ScanJobPanel", () => {
     const { onFinished } = mount([]);
     await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
     await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.cancel }));
-    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled)).toBeInTheDocument();
-    // Bandit started and was killed: it did not finish, and is never shown running.
-    const progress = screen.getByRole("list", { name: "Scanner progress" });
-    expect(progress.textContent).toContain(`bandit — ${SCAN_JOB_TEXT.scannerUnfinished}`);
-    expect(progress.textContent).not.toContain(SCAN_JOB_TEXT.scannerRunning);
+    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled([]))).toBeInTheDocument();
+    // Bandit started and was killed: it is never shown running once the job ended.
+    expect(stateOf("bandit")).not.toBe(LIVE_STATE_TEXT.running);
     const cancel = posts(calls).find((c) => c.url === "/api/v1/security/scan/cancel");
     expect(cancel?.intent).toBe("test-intent-token");
     expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the scanners that finished before a cancel", async () => {
+    const afterBandit: ScanJob = { ...COMPLETED, state: "cancelled", result: null, events: COMPLETED.events.slice(0, 6) };
+    stub(() => ({ body: { job: afterBandit } }));
+    mount([]);
+    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled(["bandit"]))).toBeInTheDocument();
   });
 
   it("never rolls an ended job back to running when the cancel's answer arrives late", async () => {
@@ -270,10 +336,119 @@ describe("ScanJobPanel", () => {
     const { onFinished } = mount([]);
     await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
     await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.cancel }));
-    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled)).toBeInTheDocument();
+    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled([]))).toBeInTheDocument();
     await new Promise((done) => setTimeout(done, 200));
-    expect(screen.getByText(SCAN_JOB_TEXT.cancelled)).toBeInTheDocument();
+    expect(screen.getByText(SCAN_JOB_TEXT.cancelled([]))).toBeInTheDocument();
     expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+
+  /** An `onFinished` whose reload lands only when the test calls `land`. */
+  function heldReload() {
+    const held = { land: () => {} };
+    const onFinished = vi.fn(() => new Promise<void>((done) => (held.land = done)));
+    return { onFinished, land: () => act(() => held.land()) };
+  }
+
+  /** Lets `ms` pass in short steps, so each late answer commits as it lands. */
+  async function pass(ms: number) {
+    for (let t = 0; t < ms; t += 10) await act(() => new Promise((tick) => setTimeout(tick, 10)));
+  }
+
+  it("shows an end the cancel is first to see only once the reload landed, and reloads once (HF-2 review)", async () => {
+    let cancelled = false;
+    stub((c) => {
+      if (c.url.endsWith("/cancel")) {
+        cancelled = true;
+        // The job ended between two polls: the cancel's answer is the first to see it.
+        return { body: { job: CANCELLED } };
+      }
+      if (c.method === "POST") return { body: { joined: false, job: RUNNING } };
+      return { body: { job: cancelled ? CANCELLED : RUNNING } };
+    });
+    const { onFinished, land } = heldReload();
+    mount([], onFinished);
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.cancel }));
+    await vi.waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+    await pass(60);
+    expect(summary().textContent, "a poll after the cancel does not show the end first").toContain(SCAN_JOB_TEXT.running(4, ["bandit"]));
+
+    land();
+    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled([]))).toBeInTheDocument();
+    await pass(60);
+    expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads once when a poll sent before the cancel answers `running` after it (HF-2 review)", async () => {
+    let cancelled = false;
+    stub((c) => {
+      if (c.url.endsWith("/cancel")) {
+        cancelled = true;
+        return { body: { job: CANCELLED } };
+      }
+      if (c.method === "POST") return { body: { joined: false, job: RUNNING } };
+      // Each read is answered as the job stood when it was sent, and late: the
+      // read in flight when the cancel lands answers `running` after the end is shown.
+      return { body: { job: cancelled ? CANCELLED : RUNNING }, delayMs: 100 };
+    });
+    const onFinished = vi.fn(() => Promise.resolve());
+    mount([], onFinished);
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
+    await screen.findByRole("button", { name: SCAN_JOB_TEXT.cancel });
+    await pass(20);
+    await userEvent.click(screen.getByRole("button", { name: SCAN_JOB_TEXT.cancel }));
+    await pass(500);
+    expect(screen.getByText(SCAN_JOB_TEXT.cancelled([]))).toBeInTheDocument();
+    expect(onFinished, "an ended job is never followed again").toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads once when the cancel's `running` answer lands while the end's reload is on its way (HF-2 review)", async () => {
+    let cancelled = false;
+    stub((c) => {
+      if (c.url.endsWith("/cancel")) {
+        cancelled = true;
+        return { body: { job: RUNNING }, delayMs: 150 };
+      }
+      if (c.method === "POST") return { body: { joined: false, job: RUNNING } };
+      return { body: { job: cancelled ? CANCELLED : RUNNING } };
+    });
+    const { onFinished, land } = heldReload();
+    mount([], onFinished);
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.cancel }));
+    await vi.waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+    await pass(400);
+    land();
+    expect(await screen.findByText(SCAN_JOB_TEXT.cancelled([]))).toBeInTheDocument();
+    await pass(60);
+    expect(onFinished, "one reload for one end").toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps following a scan started while the previous end's reload is on its way (HF-2 review)", async () => {
+    const NEXT: ScanJob = { ...RUNNING, id: RUNNING.id + 1 };
+    let [starts, ended] = [0, false];
+    stub((c) => {
+      if (c.method === "POST") {
+        starts += 1;
+        return { body: { joined: false, job: starts === 1 ? RUNNING : NEXT } };
+      }
+      // The newer scan's reads do not answer within the test: only the hook decides what is shown.
+      if (starts >= 2) return { body: { job: NEXT }, delayMs: 10_000 };
+      return { body: { job: ended ? COMPLETED : RUNNING } };
+    });
+    const { onFinished, land } = heldReload();
+    mount([], onFinished);
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
+    await screen.findByText(SCAN_JOB_TEXT.running(4, ["bandit"]));
+    ended = true;
+    await vi.waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole("button", { name: SCAN_JOB_TEXT.run }));
+    await vi.waitFor(() => expect(starts).toBe(2));
+    await pass(30);
+    land();
+    await pass(60);
+    expect(summary().textContent, "the earlier end never replaces the newer scan").toContain(SCAN_JOB_TEXT.running(4, ["bandit"]));
+    expect(screen.getByRole("button", { name: SCAN_JOB_TEXT.cancel })).toBeInTheDocument();
   });
 
   it("picks up a scan that was already running when the page opened", async () => {
@@ -285,6 +460,26 @@ describe("ScanJobPanel", () => {
     const { onFinished } = mount([]);
     expect(await screen.findByText(SCAN_JOB_TEXT.completed(0, 1))).toBeInTheDocument();
     expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads only the registered scanner as running, never a report stored under the same name", async () => {
+    stub(() => ({ body: { job: RUNNING } }));
+    const report = { scanner: "bandit", driver: "bandit", state: "never_run", installed: null, install: null, last_failure: null } as unknown as SecurityScannerStatus;
+    mount([], vi.fn(), [BANDIT], [report]);
+    await screen.findByText(SCAN_JOB_TEXT.running(4, ["bandit"]));
+    const table = screen.getByRole("table", { name: "Scanners" });
+    const states = within(table)
+      .getAllByText("bandit", { selector: "td" })
+      .map((td) => (td.closest("tr")!.querySelectorAll("td")[1] as HTMLElement).textContent);
+    expect(states.filter((s) => s === LIVE_STATE_TEXT.running)).toHaveLength(1);
+    expect(states.filter((s) => s?.startsWith("never run"))).toHaveLength(1);
+  });
+
+  it("re-attaches to a running scan: its scanner reads running at once", async () => {
+    stub(() => ({ body: { job: RUNNING } }));
+    mount([]);
+    expect(await screen.findByText(SCAN_JOB_TEXT.running(4, ["bandit"]))).toBeInTheDocument();
+    expect(stateOf("bandit")).toBe(LIVE_STATE_TEXT.running);
   });
 
   it("does not reload for a scan that had already ended before the page opened", async () => {
@@ -306,43 +501,12 @@ describe("ScanJobPanel", () => {
     expect(await screen.findByText(SCAN_JOB_TEXT.failed("the job panicked"))).toBeInTheDocument();
   });
 
-  it("shows a failed scanner's one-line cause in its progress row (S-769)", async () => {
-    const at = COMPLETED.events.length;
-    const failed: ScanJob = {
-      ...COMPLETED,
-      events: [
-        ...COMPLETED.events,
-        { seq: at, at_ms: 500, event: { phase: "started", scanner: "dependency-check" } },
-        {
-          seq: at + 1,
-          at_ms: 900,
-          event: {
-            phase: "finished",
-            scanner: "dependency-check",
-            driver: "dependency-check",
-            version: "13.0.0",
-            outcome: "failed",
-            exit_code: 1,
-            log: ".logos/security/dependency-check.failed.log",
-            stderr: "[ERROR] Unable to continue dependency-check analysis.",
-            cause: "[ERROR] Error updating the NVD Data",
-          },
-        },
-      ],
-    } as ScanJob;
-    stub(() => ({ body: { job: failed } }));
+  it("reads the summary line as one polite live region, which a running scan keeps updating", async () => {
+    stub(() => ({ body: { job: RUNNING } }));
     mount([]);
-    const progress = await screen.findByRole("list", { name: "Scanner progress" });
-    expect(within(progress).getByText("dependency-check", { selector: "span" }).parentElement!.textContent).toContain(
-      "failed (exit 1): [ERROR] Error updating the NVD Data; its output is in .logos/security/dependency-check.failed.log",
-    );
-  });
-
-  it("states a failed scanner with its exit code, its cause and its log", () => {
-    expect(SCAN_OUTCOME_TEXT.failed(3, ".logos/security/bandit.failed.log", "ERROR: no rules")).toBe(
-      "failed (exit 3): ERROR: no rules; its output is in .logos/security/bandit.failed.log",
-    );
-    expect(SCAN_OUTCOME_TEXT.failed(null, null, "could not start bandit")).toBe("failed: could not start bandit");
+    await screen.findByText(SCAN_JOB_TEXT.running(4, ["bandit"]));
+    expect(document.querySelectorAll("[aria-live]")).toHaveLength(1);
+    expect(summary().getAttribute("aria-live")).toBe("polite");
   });
 
   describe("Install & scan (S-747)", () => {
@@ -361,7 +525,8 @@ describe("ScanJobPanel", () => {
 
     it("asks once with the server's plan, sends the dialog's answers, follows the install and its scan, and reloads once", async () => {
       let started = false;
-      let polls = 0;
+      // The install stays at Gitleaks' download until the test lets it end.
+      let ends = false;
       const calls = stub(
         () => ({ body: { job: null } }),
         (c) => {
@@ -371,11 +536,10 @@ describe("ScanJobPanel", () => {
             return { body: { joined: false, job: INSTALLING } };
           }
           if (!started) return { body: { job: null } };
-          polls += 1;
-          return { body: { job: polls > 1 ? INSTALLED : INSTALLING } };
+          return { body: { job: ends ? INSTALLED : INSTALLING } };
         },
       );
-      const { onFinished } = mount([], vi.fn(), [row("trivy", "not_installed")]);
+      const { onFinished } = mount([], vi.fn(), [row("trivy", "not_installed"), row("gitleaks", "not_installed")]);
       await userEvent.click(await screen.findByRole("button", { name: INSTALL_JOB_TEXT.installAndScan }));
       const dialog = await screen.findByRole("dialog", { name: INSTALL_CONSENT_TEXT.title });
       expect(within(dialog).getByRole("checkbox", { name: /^codeql/ })).not.toBeChecked();
@@ -395,11 +559,40 @@ describe("ScanJobPanel", () => {
         ],
       ]);
       expect(posts(calls).every((c) => c.intent === "test-intent-token")).toBe(true);
+      // Trivy had landed and Gitleaks was downloading: its row reads installing.
+      expect(await screen.findByText(INSTALL_JOB_TEXT.running(1))).toBeInTheDocument();
+      expect(stateOf("gitleaks")).toBe(LIVE_STATE_TEXT.installing);
+      expect(stateOf("trivy")).not.toBe(LIVE_STATE_TEXT.installing);
+      ends = true;
       expect(await screen.findByText(INSTALL_JOB_TEXT.completed(4, { findings: 0, ran: 4 }))).toBeInTheDocument();
-      const progress = screen.getByRole("list", { name: "Scanner progress" });
-      expect(progress.textContent).toContain(`gosec — ${INSTALL_OUTCOME_TEXT.installed}`);
-      expect(progress.textContent).toContain(`gosec — ${SCAN_OUTCOME_TEXT.ran(0)}`);
+      expect(stateOf("gitleaks")).not.toBe(LIVE_STATE_TEXT.installing);
       expect(onFinished).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads each scanner of the scan after an install as running in turn, and counts the finished ones", async () => {
+      const midScan: InstallJob = { ...INSTALLED, state: "running", result: null, events: INSTALLED.events.slice(0, 12) };
+      stub(() => ({ body: { job: null } }), () => ({ body: { job: midScan } }));
+      mount([], vi.fn(), [row("trivy", "never_run"), row("gitleaks", "never_run")]);
+      // Gitleaks started its scan; the installs, Semgrep's skip and Trivy's run finished.
+      expect(await screen.findByText(INSTALL_JOB_TEXT.scanning(2))).toBeInTheDocument();
+      expect(stateOf("gitleaks")).toBe(LIVE_STATE_TEXT.running);
+      expect(stateOf("trivy")).not.toBe(LIVE_STATE_TEXT.running);
+    });
+
+    it("says an install was joined in the install's words, and only while it runs", async () => {
+      let ends = false;
+      stub(
+        () => ({ body: { job: null } }),
+        (c) => (c.method === "POST" ? { body: { joined: true, job: INSTALLING } } : { body: { job: ends ? INSTALLED : INSTALLING } }),
+      );
+      mount([], vi.fn(), [row("trivy", "not_installed")]);
+      // The server answers the row's Install with the install already running.
+      await userEvent.click(await screen.findByRole("button", { name: "Install trivy" }));
+      expect(await screen.findByText(INSTALL_JOB_TEXT.joined, { exact: false })).toBeInTheDocument();
+      expect(summary().textContent).not.toContain(SCAN_JOB_TEXT.joined);
+      ends = true;
+      await screen.findByText(INSTALL_JOB_TEXT.completed(4, { findings: 0, ran: 4 }));
+      expect(summary().textContent).not.toContain(INSTALL_JOB_TEXT.joined);
     });
 
     it("cancels the running install and names the tools it installed", async () => {
@@ -414,14 +607,14 @@ describe("ScanJobPanel", () => {
           return { body: { job: cancelled ? INSTALL_CANCELLED : INSTALLING } };
         },
       );
-      const { onFinished } = mount();
-      expect(await screen.findByText(INSTALL_JOB_TEXT.running(Math.floor(INSTALLING.elapsed_ms / 1000)))).toBeInTheDocument();
+      const { onFinished } = mount([], vi.fn(), [row("gitleaks", "not_installed")]);
+      expect(await screen.findByText(INSTALL_JOB_TEXT.running(1))).toBeInTheDocument();
       // A second install is not offered while this one runs.
       expect(screen.getByRole("button", { name: INSTALL_JOB_TEXT.installAndScan })).toBeDisabled();
       await userEvent.click(screen.getByRole("button", { name: INSTALL_JOB_TEXT.cancel }));
       expect(await screen.findByText(INSTALL_JOB_TEXT.cancelled(["trivy 0.74.0"]))).toBeInTheDocument();
-      const progress = screen.getByRole("list", { name: "Scanner progress" });
-      expect(progress.textContent).toContain(`gitleaks — ${INSTALL_OUTCOME_TEXT.cancelled}`);
+      // Gitleaks' download was stopped and left nothing: it is no longer installing.
+      expect(stateOf("gitleaks")).not.toBe(LIVE_STATE_TEXT.installing);
       expect(posts(calls).map((c) => [c.url, c.intent])).toEqual([["/api/v1/security/install/cancel", "test-intent-token"]]);
       expect(onFinished).toHaveBeenCalledTimes(1);
     });
@@ -445,17 +638,19 @@ describe("ScanJobPanel", () => {
       expect(await screen.findByText(SCAN_JOB_TEXT.completed(0, 1))).toBeInTheDocument();
     });
 
-    it("runs a row's Install or Update request once, through the same dialog", async () => {
+    it("runs a row's Install or Update once, through the same dialog", async () => {
       const calls = stub(
         () => ({ body: { job: null } }),
         (c) => (c.method === "POST" ? { status: 409, body: { error: "consent first", plan: { lines: [PLAN.lines[0]], kept: [], scan_consent: [] } } } : { body: { job: null } }),
       );
-      const onRequested = vi.fn();
-      const request: InstallRequest = { tool: "trivy", update: true };
-      render(<ScanJobPanel pending={[]} onFinished={vi.fn()} pollMs={5} request={request} onRequested={onRequested} />);
+      const managed = row("trivy", "never_run", {
+        installed: { copy: "managed", binary: "/home/user/.local/share/tools/trivy/0.74.0/trivy", version: "0.74.0", update_available: "0.75.0" },
+        install: null,
+      });
+      mount([], vi.fn(), [managed]);
+      await userEvent.click(await screen.findByRole("button", { name: "Update trivy" }));
       const dialog = await screen.findByRole("dialog", { name: INSTALL_CONSENT_TEXT.title });
       expect(within(dialog).queryByRole("list", { name: "Scanners that may reach the network" })).toBeNull();
-      expect(onRequested).toHaveBeenCalledTimes(1);
       await userEvent.click(within(dialog).getByRole("button", { name: INSTALL_CONSENT_TEXT.accept }));
       expect(posts(calls).map((c) => JSON.parse(c.body!))).toEqual([
         { tools: ["trivy"], update: true },
@@ -472,12 +667,19 @@ describe("ScanJobPanel", () => {
       const tools = INSTALLED.result!.install.tools.map((t, i) =>
         i === 0 ? { tool: t.tool, version: t.version, outcome: "failed" as const, stage: "checksum" as const, reason: "sha256 mismatch" } : t,
       );
-      const failed: InstallJob = { ...INSTALLED, result: { ...INSTALLED.result!, install: { ...INSTALLED.result!.install, tools } } };
+      const events = INSTALLED.events.map((e) =>
+        e.event.phase === "install_finished" && e.event.tool === "trivy"
+          ? { ...e, event: { phase: "install_finished" as const, tool: "trivy", version: "0.74.0", outcome: "failed" as const, stage: "checksum" as const, reason: "sha256 mismatch" } }
+          : e,
+      );
+      const failed: InstallJob = { ...INSTALLED, events, result: { ...INSTALLED.result!, install: { ...INSTALLED.result!.install, tools } } };
       stub(() => ({ body: { job: null } }), () => ({ body: { job: failed } }));
       mount([]);
       const badge = await screen.findByText("completed");
       expect(badge.className).toMatch(/orange/);
       expect(badge.className).not.toMatch(/green/);
+      // The tool left out, and why, stays in the line the list used to hold.
+      expect(summary().textContent).toContain(INSTALL_OUTCOME_TEXT.failed("trivy", "checksum", "sha256 mismatch"));
     });
 
     it("states a refused install, such as one while a scan runs", async () => {
@@ -490,7 +692,7 @@ describe("ScanJobPanel", () => {
       expect((await screen.findByRole("alert")).textContent).toBe(INSTALL_JOB_TEXT.requestFailed("a scan is running on this project"));
     });
 
-    it("states each settled tool's outcome with its own reason and stage", async () => {
+    it("states each tool an install left out with its own reason and stage", async () => {
       const settled: InstallJob = {
         ...INSTALL_CANCELLED,
         events: [
@@ -508,11 +710,11 @@ describe("ScanJobPanel", () => {
         () => ({ body: { job: settled } }),
       );
       mount([]);
-      expect(await screen.findByText(INSTALL_JOB_TEXT.cancelled([]))).toBeInTheDocument();
-      const progress = screen.getByRole("list", { name: "Scanner progress" });
-      expect(progress.textContent).toContain(`trivy — ${INSTALL_OUTCOME_TEXT.unavailable("no build for this platform")}`);
-      expect(progress.textContent).toContain(`gitleaks — ${INSTALL_OUTCOME_TEXT.failed("checksum", "sha256 mismatch")}`);
-      expect(progress.textContent).toContain(`gosec — ${INSTALL_OUTCOME_TEXT.already_present}`);
+      expect(await screen.findByText(INSTALL_JOB_TEXT.cancelled([]), { exact: false })).toBeInTheDocument();
+      const line = summary().textContent ?? "";
+      expect(line).toContain(INSTALL_OUTCOME_TEXT.unavailable("trivy", "no build for this platform"));
+      expect(line).toContain(INSTALL_OUTCOME_TEXT.failed("gitleaks", "checksum", "sha256 mismatch"));
+      expect(line, "an install that landed is not listed as left out").not.toContain("gosec");
     });
   });
 });

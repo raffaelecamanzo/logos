@@ -141,8 +141,10 @@ impl SecurityGateEvidence<'_> {
         let mut summary = self.findings_over(status)?;
         match read_checked_in(root)? {
             Some(entries) => {
-                summary.baseline_locations =
-                    entries.iter().filter_map(|e| Some((e.rule_id.clone(), e.path.clone()?))).collect();
+                if stopgap_on() {
+                    summary.baseline_locations =
+                        entries.iter().filter_map(|e| Some((e.rule_id.clone(), e.path.clone()?))).collect();
+                }
                 summary.baseline = Some(entries.into_iter().map(|e| e.fingerprint).collect());
                 summary.baseline_source = BaselineSource::CheckedIn;
             }
@@ -176,6 +178,28 @@ impl SecurityGateEvidence<'_> {
             notes: verdict.notes,
         }))
     }
+}
+
+/// The sprint 107 review's D3 stopgap: a checked-in baseline also knows a
+/// finding that binds to no indexed file by its rule id and project-relative
+/// path ([`SummaryFinding::unbound_location`]). Since history.db migration 10
+/// such a finding's fingerprint is root-independent, so the key alone holds it
+/// in any clone; the stopgap keeps green a file blessed before migration 10,
+/// whose fingerprints carry the blessing checkout's directory. It is kept for
+/// one release after migration 10 ships, then removed (CR-241, owner decision
+/// 4). A test switches it off to prove the key alone ([`STOPGAP_OFF`]).
+fn stopgap_on() -> bool {
+    #[cfg(test)]
+    if STOPGAP_OFF.with(std::cell::Cell::get) {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test, on its own thread, to switch [`stopgap_on`] off.
+    pub(crate) static STOPGAP_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The project-relative path of a finding that binds to no indexed file and is
@@ -213,7 +237,11 @@ pub(super) fn freshness_of(state: &ScanState) -> ScanFreshness {
 
 impl SecurityGateEvidence<'_> {
     /// Each scanner's state as the gate reads it: never its version, since
-    /// `check` runs on the Dashboard's reads as well as the CLI's.
+    /// `check` runs on the Dashboard's reads as well as the CLI's, and never
+    /// its counts, so no finding's code scope is asked of the graph: the gate
+    /// keeps test code as any other finding ([BR-98]).
+    ///
+    /// [BR-98]: ../../../docs/specs/software-spec.md#328-security-findings
     fn gate_status(&self) -> Result<SecurityStatus> {
         super::status(
             self.0.root(),
@@ -222,6 +250,7 @@ impl SecurityGateEvidence<'_> {
             today_utc(),
             super::VersionProbes::Never,
             false,
+            super::scope::no_test_symbols,
         )
     }
 

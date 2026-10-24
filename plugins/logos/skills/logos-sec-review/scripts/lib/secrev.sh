@@ -43,6 +43,25 @@ sr_die() { # code message
     exit "$code"
 }
 
+# The first logos whose `security findings` lists production code by default and
+# takes `--scope` (FR-SC-28). A 1.20.x binary lists every finding and rejects the flag.
+SR_SCOPE_MIN_LOGOS="1.21.0"
+
+# sr_scope_args — SR_SCOPE_ARGS: `--scope all` when this logos has the scope filter,
+# else empty. Every `security findings` read of this skill wants the full listing,
+# test code included: a fix proof must not read a finding hidden as test code as
+# gone, and the report's counts are of every stored finding. Needs rv_need_logos
+# first; a version that cannot be read gets no flag.
+SR_SCOPE_ARGS=()
+sr_scope_args() {
+    local out
+    SR_SCOPE_ARGS=()
+    out="$("$LOGOS_BIN" --version 2>/dev/null)" || out=""
+    [[ $out =~ ^logos[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+) ]] || return 0
+    rv_version_ge "${BASH_REMATCH[1]}" "$SR_SCOPE_MIN_LOGOS" && SR_SCOPE_ARGS=(--scope all)
+    return 0
+}
+
 # python3 in isolated mode running this skill's one helper.
 sr_py() {
     python3 -I "$SR_LIB/secrev.py" "$@"

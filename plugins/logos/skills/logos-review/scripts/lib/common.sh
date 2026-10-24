@@ -18,7 +18,9 @@
 # Host-neutral: the project is the --project argument, else LOGOS_PROJECT_DIR,
 # else the working directory.
 
-# `logos review` and `logos improvements` arrived in this version.
+# `logos review` and `logos improvements` arrived in this version. It stays the
+# floor although 1.20.0-1.20.2 record a unit's `node_id` as an integer or null:
+# debt mode falls back to name, file and dimension for such a unit and counts it.
 RV_MIN_LOGOS="1.20.0"
 
 # Every logos call a script of this skill makes is stamped with its invoker

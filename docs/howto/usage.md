@@ -535,7 +535,8 @@ logos hotspots --limit 20            # top 20 ranked files (lazily mines git his
 logos hotspots --untested            # only files with no fresh positive coverage
 
 # Coverage tier — fold in an external coverage report, then read freshness
-logos coverage ingest target/coverage/lcov.info     # LCOV or Cobertura (auto-detected)
+logos coverage ingest target/coverage/lcov.info     # LCOV, Cobertura, JaCoCo or Go coverprofile (auto-detected)
+logos coverage run --consent                         # run every installed coverage tool, ingest one merged snapshot
 logos coverage refresh                               # run [coverage_ingest].refresh_cmd, then ingest its artifact
 logos coverage status --json                         # per-file freshness + overall fraction
 ```
@@ -555,17 +556,103 @@ changes on disk (matched by the built-in conventions ∪ a configured
 manual `coverage ingest`. Auto-ingest is **non-load-bearing**: any failure
 degrades to a warning, it is a local read+parse only, and it **never spawns a
 subprocess** (the watcher path stays side-effect-free, [ADR-38](../specs/architecture/decisions/ADR-38.md)).
-`logos coverage refresh` is the one place Logos ever *runs* a coverage command:
-it executes the author-configured `[coverage_ingest].refresh_cmd` as a subprocess
-(only on explicit invocation, never on the serve/watcher path), then discovers
-and ingests the artifact it produced — erroring loudly if no `refresh_cmd` is
-configured, the command fails, or it produces no recognizable artifact. The
+`logos coverage run` and `logos coverage refresh` are the places Logos *runs* a coverage command,
+and only on explicit invocation, never on the serve/watcher path. `coverage run` starts the
+project's own coverage tools (`cargo-llvm-cov`, `vitest`, `jest`, `pytest-cov`, Maven, Gradle and
+`go test`, each from a fixed command line) and then the `refresh_cmd`, and ingests each report
+into one merged snapshot. **A run executes the project's own code**: it builds the project and
+runs its tests, so it starts only under a per-project execution consent (`--consent` the first
+time, and again for a tool or a `refresh_cmd` text the consent does not name). `coverage refresh`
+is `coverage run --tool custom`: it executes the author-configured
+`[coverage_ingest].refresh_cmd` as a subprocess, then discovers and ingests the artifact it produced,
+erroring loudly if no `refresh_cmd` is configured, the command fails, or it produces no recognizable
+artifact. Everything about runs, the consent, the registry and the Coverage page is in
+[coverage.md](coverage.md). The
 `[coverage_ingest]` table changes *when* ingest happens, never which sources are
 admitted, so it is excluded from the admission fingerprint and leaves every
-metric/cycle/DSM scope byte-identical. `coverage_refresh` has an MCP twin. See
+metric/cycle/DSM scope byte-identical. `coverage_run` and `coverage_refresh` have MCP twins. See
 [commands.md](commands.md#evidence-tiers-history--coverage) for full flags and the
 `[history]`/`[coverage]` tuning tables in
 [configuration.md](configuration.md#history--coverage--the-evidence-tiers).
+
+### Setting up a coverage tool from the Coverage page
+
+The **Coverage tools** widget on the Coverage page lists each coverage tool that applies to the
+project. A tool that is `not installed` offers a button when Logos can set it up for you:
+
+- **Install** appears on `cargo-llvm-cov`. It is the managed install that
+  [`logos coverage install`](installation.md#coverage-runs-on-a-rust-project) performs. Logos
+  downloads the release pinned in this Logos version and checks its SHA-256 before anything from it
+  runs. It then adds `llvm-tools-preview` to your active toolchain with your own `rustup`.
+- **Add dependency** appears on a vitest that has no coverage provider. It also appears on the
+  project's own `.venv` pytest when pytest-cov is missing. Logos adds `@vitest/coverage-v8` at the
+  vitest major the project uses, or `pytest-cov`, as a dev dependency. It uses the project's own
+  package manager, read from the lockfile: npm, pnpm, yarn or bun; uv, poetry or pip.
+
+Either button first asks for whatever consent is not recorded yet, in **one** dialog: the same consent
+the CLI asks for. Nothing is downloaded, run or changed until you accept it. When every consent is
+already recorded, for example after `logos coverage install --consent`, the job starts at once. The
+dialog shows:
+
+- **For Install:** each download with its version, source and size, and the
+  `rustup component add llvm-tools-preview` step. Your answer is recorded once for your user and
+  covers those versions in every project.
+- **For Add dependency (the dependency consent):** the **exact command**, such as
+  `pnpm add -D @vitest/coverage-v8@3`, and the **files it changes**, such as `package.json` and
+  `pnpm-lock.yaml`. It also warns that the package manager may run dependency lifecycle scripts
+  (install scripts) and may reach the network. Your answer is recorded for this project and this
+  exact command; a different command, for example after a vitest major upgrade, is asked about again.
+- **The execution consent** for the tools the run will start, the one being set up included, as
+  **Run coverage** asks for it.
+
+Every answer is kept in your user-level Logos config, never in the repository.
+
+Once you accept, the page runs a coverage job. The install or the dependency addition goes first,
+then every installed tool runs and its report is ingested. The progress list shows each step as it
+happens. Logos never commits: the dependency change stays in your working tree for you to review.
+
+**Cancel** stops whichever step is running:
+
+- A cancelled install leaves no partial tool behind.
+- A cancelled, failed or timed-out addition puts back the manifest and the lockfile
+  (`package.json`, `pyproject.toml`, `pnpm-lock.yaml`, `uv.lock` and so on) exactly as they were.
+  It also removes what the package manager had just installed of the added package itself: the
+  `node_modules/@vitest/coverage-v8` package, or pytest-cov's package, dist-info and `.pth` hook in
+  the project's `.venv`. The progress list names everything that was put back. Packages the manager
+  pulled in alongside it, such as `coverage`, stay; on their own they measure nothing.
+- No coverage tool runs after a cancel.
+
+Logos refuses to add a dependency, and changes nothing, when the project has no lockfile, has the
+lockfile of a package manager Logos does not run, or has lockfiles of two managers. It also refuses
+when it cannot read the installed vitest's version. The page shows the reason and the command to
+run by hand. An MCP client cannot give either consent: they come only from you, on the page or in a
+terminal (`logos coverage install --consent`, `logos coverage run --consent --dependency-consent`).
+
+### Running coverage from the Coverage page
+
+The **Coverage tools** widget leads the Coverage page: one row per tool whose marker is at the project
+root, plus the custom command, each with its state in words (*not installed*, *disabled*,
+*never run*, *ran*, *ran — tests failed*, *failed*, *timed out*, *cancelled*), its last run and the
+files its report matched. A missing tool or a failing suite never reads as 0 %.
+
+**Run coverage** on the widget's title row asks the execution consent the first time, in a dialog that
+says the run builds the project and runs its tests, which executes the project's own code. It names
+each tool and shows the custom command verbatim. Nothing starts until you allow it. The run is a job
+that a second click joins, with a per-tool progress list that follows it live, and **Cancel** kills
+each tool's whole process group. A coverage run and a security scan can run side by side. The
+[command line](coverage.md#running-coverage-coverage-run-and-coverage-refresh) does the same with
+`logos coverage run`.
+
+### The Workspace Coverage page
+
+In a workspace the **Workspace Coverage** page (`/workspace-coverage`, in the sidebar's Workspace
+section) lists every member: its line coverage over the files unchanged since its last report, how many
+of its covered files that is, how many of its tools ran and failed, and when one last ran, each row
+linked to that member's Coverage page. A member never measured reads **never run**, never 0 %, and the
+figure row states its denominator (coverage from *m* of *N* members). No percentage is summed or averaged
+across members. A member that cannot be opened is one row that says so, and hides no other. The page
+starts no tool and has no Run button: a run starts on a member's own Coverage page, under that member's
+consent.
 
 ### Security findings
 
@@ -610,12 +697,12 @@ instead and `init -i` writes no `.mcp.json` entry. For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **33 `logos:*` tools**, all live (42 when the server starts in a
+The host then sees **34 `logos:*` tools**, all live (43 when the server starts in a
 workspace: the nine `xservice_*`/`workspace_*` tools join them):
 
-| Navigation (11) | Quality & Governance (14) | Evidence tiers (8) |
+| Navigation (11) | Quality & Governance (14) | Evidence tiers (9) |
 |---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `bless_rules`, `offenders`, `review`, `improvements`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh`, `security_scan`, `security_ingest`, `security_status`, `security_findings` |
+| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `bless_rules`, `offenders`, `review`, `improvements`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh`, `coverage_run`, `security_scan`, `security_ingest`, `security_status`, `security_findings` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
 byte-identical payload — `check_rules` is spelled `logos check` and `bless_rules`
@@ -624,8 +711,8 @@ the one deliberate MCP-only tool (it replays the last scan's parameters *within 
 server process*, which a one-shot CLI invocation has no equivalent of; use
 `logos scan`). The session gate is reachable from either surface:
 `logos session-start` / `logos session-end`, with a failing `session-end`
-exiting 1. The eight evidence-tier tools never move the `session_end` gate
-signal, like their CLI counterparts. The four `hotspots` and `coverage_*` tools
+exiting 1. The nine evidence-tier tools never move the `session_end` gate
+signal, like their CLI counterparts. The five `hotspots` and `coverage_*` tools
 are **non-gated**; the four `security_*` tools reach the gate only through a
 [`[security]` table](configuration.md#security--the-security-gate) in `rules.toml`.
 
@@ -661,7 +748,7 @@ answered; in a single-root server the payload has no `member` and is exactly wha
 
 | Takes `repo` (and the CLI twin takes `--repo`) | Cannot target another member |
 |---|---|
-| `search`, `context`, `explore`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `status`, `health`, `hotspots`, `dsm`, `evolution`, `coverage_status` | `scan`, `rescan`, `check_rules`, `verify`, `doctor`, `session_start`, `session_end`, `coverage_ingest`, `coverage_refresh` — they write or gate, act on the default member, say so in their description, and refuse a `repo` |
+| `search`, `context`, `explore`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `status`, `health`, `hotspots`, `dsm`, `evolution`, `coverage_status` | `scan`, `rescan`, `check_rules`, `verify`, `doctor`, `session_start`, `session_end`, `coverage_ingest`, `coverage_run`, `coverage_refresh` — they write or gate, act on the default member, say so in their description, and refuse a `repo` |
 
 The `xservice_*` tools keep their own `repo`: for `xservice_callers`/`xservice_impact` it
 names which member's symbol is meant, for the others it scopes the fan-out; a name that is no
@@ -805,14 +892,20 @@ shell chrome, so they never enter the tool-usage figures.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
-- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`. The Architecture view is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
-- **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`, Security `/security` (the scanners, the findings in the graph, the OWASP Top 10 view, Run scan and triage: [security.md](security.md#the-security-page)).
+The sidebar leads with what Logos is for — is the code healthy, secure and covered — and
+reads in three groups: **assess**, **explore**, **configure**.
+
+- **Group A — assess:** Dashboard `/`, Health `/health`, Security `/security` (the scanners, the findings in the graph, the OWASP Top 10 view, Run scan and triage: [security.md](security.md#the-security-page)), Coverage `/coverage`.
+- **Group B — explore:** Graph `/graph`, Rule findings `/gaps`, Files & Risk `/files`. The Architecture view is filed here, directly after Graph, but it is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
-  Workspace Health `/workspace-health`, Workspace `/workspace`, Workspace Statistics
-  `/workspace-statistics`, Security `/workspace-security` (every member's scanners and
-  fresh findings, rolled up), Config `/workspace-config`. These answer for the **whole
-  workspace**, not for the selected member, and the member selector does not govern them.
+  Workspace `/workspace`, Workspace Health `/workspace-health`, Security
+  `/workspace-security` (every member's scanners and fresh findings, rolled up), Coverage
+  `/workspace-coverage`, Workspace Statistics `/workspace-statistics`, Config
+  `/workspace-config`, in that order. These answer for the **whole workspace**, not for the
+  selected member, and the member selector does not govern them. The sidebar lists an
+  entry only when a view is registered for its route, so Coverage appears once its roll-up
+  view is available and a route with no view is never offered.
 
 ### Reading a widget
 
@@ -852,7 +945,8 @@ inside the boundary it governs and nothing outside that section is scoped by it.
 Service header is a column — the section label on its own row, the selector at full
 width beneath it — so the label stays readable however long the member name is. The
 Workspace section reads as one list (no divider between its groups), so the workspace
-Statistics entry sits visibly with the other workspace views.
+entries read in one order: Dashboard, Workspace, Health, Security, Coverage, Statistics,
+Config. The Service section keeps the three groups above, assess, explore, configure.
 Scope is a declared field on each navigation entry, not a path-prefix guess, so a
 view cannot silently fall into the wrong scope by being named differently.
 
@@ -867,7 +961,7 @@ member's figures** while it is displayed — the failure being prevented is a
 blank `?repo=` is unscoped. In a plain single repo the parameter is inert.
 
 The three workspace-scoped views answer questions the per-member views cannot:
-**Workspace Dashboard** renders the server's own composed cross-service
+**Workspace Dashboard** leads with a **Security** widget (below), then renders the server's own composed cross-service
 edge-count/egress-rate line (never the count without the rate beside it) with
 coverage by intake (the per-arm board is hidden — see [Hidden widgets](#hidden-widgets)); **Workspace Health** renders the degraded roll-up in
 words with a per-member table, the advisory governance findings and the topic
@@ -895,6 +989,22 @@ the resident-engine count unchanged — which is why it omits `artifact_bindings
 latency percentiles: both are `Engine`-bound, and the ceiling is the point.
 No workspace-level quality score is rendered anywhere, and no per-member signal is
 aggregated into one.
+
+The Workspace Dashboard's **Security** widget rolls security up per member. It has
+one row per member: the member's own fresh, unsuppressed production findings by
+severity (critical, high, medium, unrated, low, info — the severity row the member
+Dashboard's Security widget uses), its scan state — **fresh**, **stale** or **never
+run** — and a link to that member's Security page, where a scan is started. The
+figure row states how many members have a fresh scan out of all members ("1 of 3
+members have a fresh scan"). It is read from **stored state only**: loading the
+Dashboard starts no scanner process and no version probe, consented or not, and
+writes nothing; the Workspace Security page (`/workspace-security`) keeps its
+probes of consented scanners. Its counts and states are the ones
+`GET /api/v1/workspace/security` states for the same stores, from
+`GET /api/v1/workspace/security/summary`. A member never scanned reads *never run*,
+never a row of zeros, and a note names `logos security scan` as the command that resolves it; a member that could not be opened is a row with its name and
+reason, and hides no other member. No finding count is summed, averaged or weighted
+across members — the one workspace figure is a count of members.
 
 The workspace **Config** view (`/workspace-config`, labelled *Config* in the Workspace
 section, beside Statistics) edits the workspace manifest, `logos.workspace.toml`, in the
@@ -1090,7 +1200,11 @@ the command that fills it in its own sentence — `logos index` when nothing is
 indexed, `logos scan` when no scan has run — and so does a reading that is not
 current (`logos index` after a de-index, `logos scan` once the graph has moved
 past the snapshot); every dimension widget then says it is not current and points
-to the Gate. The Quality signal folds in what the Aggregate scope card used to show: the functions
+to the Gate. Under a `rules.toml [review]` table the Gate also states each
+distributional dimension in decline, in the words of the
+[trend warning](configuration.md#review--the-branch-delta-gate) `gate` prints,
+as a note beside the verdict that never changes it; on a snapshot that is not
+current it sits under the same label as the rest of the widget (S-785). The Quality signal folds in what the Aggregate scope card used to show: the functions
 scored and excluded, and the thresholds fingerprint with what a change to
 `[metric_thresholds]` does to the gate. Modularity carries no offender list in
 the payload: it scores the directory layout as a whole, and its widget says so,
@@ -1149,11 +1263,25 @@ module dependency matrix (DSM) — is hidden from the web UI (CR-208; see
 
 The root `/` view is the **Dashboard**: a roll-up that leads with the index's
 freshness, then one column of widgets (since S-617; the equal-size pairs of CR-037
-are gone, because every view stacks its widgets in one column): the banded
-**Quality index** (the 0–10000 signal) with the gate's `PASS`/`FAIL` badge;
-**Languages**, the per-project language composition; **Graph**; **Activity**;
-**Rule findings**; and **Code coverage** (the overall line-% aggregate) — each
-fed by a read-only accessor, never a fabricated number. **Rule findings** projects
+are gone, because every view stacks its widgets in one column). It leads with the
+three figures Logos is for, in this order: the banded **Quality index** (the
+0–10000 signal) with the gate's `PASS`/`FAIL` badge; **Security**; and **Code
+coverage** (the overall line-% aggregate). The cards a mounted extension adds
+follow, then **Languages**, the per-project language composition; **Graph**;
+**Activity**; and **Rule findings** — each fed by a read-only accessor, never a
+fabricated number. **Security** states the findings that count — fresh,
+unsuppressed and in production code, the same figure `logos security status` and
+`logos security findings` give for the same store — by severity with their total;
+the `[security]` gate's verdict from `.logos/rules.toml` as a `PASS`/`FAIL` badge
+(or, with no `[security]` table, that no verdict is reached); the newest stored
+scan as a relative age; *N of M* scanners whose last scan failed; and a link to
+the Security view (`/security`). It reads only what is stored, so loading the
+Dashboard starts no scanner, not even a scanner's version command, however it is
+loaded. A project never scanned names `logos security scan`, and one whose scan has
+not been consented to yet names `logos security scan --consent`; a security read
+that fails is stated with its cause and never shown as zero findings, while the
+other widgets still render. `GET /api/v1/overview` carries the same data as its
+`security` field (`summary`, or `error` when the read failed). **Rule findings** projects
 `check_rules` (FR-GV-02): it reads **PASS** when a contract was evaluated and there
 are zero rule violations, **FAIL** when there are findings, and states that
 nothing was checked — naming `.logos/rules.toml` as the place to declare rules —

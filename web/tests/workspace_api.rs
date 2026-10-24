@@ -199,6 +199,12 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // S-674 / [FR-SC-16]: the workspace security roll-up. A GET over the member
     // fan-out, walked by the same three loops; it must store no scan.
     "/api/v1/workspace/security",
+    // S-790 / [FR-UI-36]: the Dashboard's stored-only twin of the roll-up above,
+    // walked by the same three loops; it must store no scan either.
+    "/api/v1/workspace/security/summary",
+    // S-740 / [FR-CV-16]: the workspace coverage roll-up. A GET over the member
+    // fan-out, walked by the same three loops; it must store no coverage.
+    "/api/v1/workspace/coverage",
 ];
 
 /// The **mutating** workspace routes — S-450's two config-root writes
@@ -3508,7 +3514,9 @@ const ROLLUP_SEMGREP: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"n
 {"ruleId":"rust.lang.security.sql-concat","level":"error","message":{"text":"Concatenated SQL query."},
 "locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":2}}}]},
 {"ruleId":"generic.secrets.hardcoded-key","level":"warning","message":{"text":"A hard-coded key."},
-"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":3}}}]}]}]}"#;
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":3}}}]},
+{"ruleId":"generic.secrets.hardcoded-key","level":"warning","message":{"text":"A hard-coded key."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":9}}}]}]}]}"#;
 
 /// A report from a tool Logos does not register, over `src/other.rs`: one
 /// injection that goes stale when that file is edited after the ingest.
@@ -3542,7 +3550,12 @@ fn security_workspace() -> TempDir {
         std::fs::create_dir_all(&dir).unwrap();
         sh_git(&dir, &["init", "-q", "-b", "main"]);
         write(&dir, ".logos/config.toml", &semgrep_only_config());
-        write(&dir, "src/lib.rs", "pub fn find() {}\npub fn list() {}\npub fn key() {}\n");
+        // Line 9 sits in a `#[test]` fn: test code by the member's own graph (S-795).
+        write(
+            &dir,
+            "src/lib.rs",
+            "pub fn find() {}\npub fn list() {}\npub fn key() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn a_key() {\n        let _ = \"AKIAIOSFODNN7EXAMPLE\";\n    }\n}\n",
+        );
         write(&dir, "src/other.rs", "pub fn other() {}\n");
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-q", "-m", "init"]);
@@ -3638,7 +3651,8 @@ async fn workspace_security_rolls_up_fresh_unsuppressed_findings_per_member() {
     let scanned = &rollup_row(&v, "scanned")["result"];
     assert_eq!(scanned["scan"], "fresh", "{scanned}");
     assert_eq!(scanned["findings"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "unrated": 0, "total": 2}));
-    assert_eq!(scanned["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1}));
+    // The key in the `#[test]` fn is test code by this member's graph: apart.
+    assert_eq!(scanned["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1, "test": 1}));
     assert_eq!((scanned["scanners_fresh"].as_u64(), scanned["scanners_enabled"].as_u64()), (Some(1), Some(2)), "{scanned}");
     assert_eq!((scanned["reports_fresh"].as_u64(), scanned["reports_stored"].as_u64()), (Some(1), Some(2)), "{scanned}");
     let state_of = |name: &str| {
@@ -3670,7 +3684,7 @@ async fn workspace_security_rolls_up_fresh_unsuppressed_findings_per_member() {
 
     // Totals: only the scanned member's fresh, unsuppressed findings.
     assert_eq!(s["totals"], serde_json::json!({"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0, "unrated": 0, "total": 2}));
-    assert_eq!(s["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1}));
+    assert_eq!(s["excluded"], serde_json::json!({"not_fresh": 1, "suppressed": 1, "test": 1}));
 
     // OWASP: Injection holds the one counted injection — neither the suppressed
     // nor the stale one — in each edition under its own id; a category no fresh
@@ -3693,6 +3707,77 @@ async fn workspace_security_rolls_up_fresh_unsuppressed_findings_per_member() {
     assert_eq!(snapshots(), before, "a GET stores no scan");
 }
 
+/// **The Workspace Dashboard's Security widget read ([FR-UI-36], S-790).** On the
+/// same stores as the roll-up it narrows, every member's scan state and counts
+/// equal `/api/v1/workspace/security`'s; a never-scanned member has no count
+/// (never `0`); the unopenable member is a row with its error and hides no
+/// other; the one workspace figure is how many members have a fresh scan; and
+/// the answer carries no composite across members ([BR-56]) — its key set is
+/// pinned, so a total, mean or score would be named here.
+///
+/// [FR-UI-36]: ../../docs/specs/requirements/FR-UI-36.md
+/// [BR-56]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[tokio::test]
+async fn the_dashboard_security_read_equals_the_roll_up_per_member_and_has_no_composite() {
+    let tmp = security_workspace();
+    let router = ws_router(&tmp);
+    let rolled = json_body(&router, "/api/v1/workspace/security").await;
+    let v = json_body(&router, "/api/v1/workspace/security/summary").await;
+    let s = &v["security"];
+
+    let rows = s["members"].as_array().unwrap();
+    let order: Vec<&str> = rows.iter().map(|m| m["member"].as_str().unwrap()).collect();
+    assert_eq!(order, ["scanned", "idle", "broken"], "every member has a row, in roster order: {v}");
+    for member in ["scanned", "idle"] {
+        let row = rows.iter().find(|m| m["member"] == member).unwrap();
+        let full = rollup_row(&rolled, member);
+        assert_eq!(row["result"]["scan"], full["result"]["scan"], "{member}: the state is the roll-up's");
+        assert_eq!(row["result"]["findings"], full["result"]["findings"], "{member}: the counts are the roll-up's");
+    }
+    // The pinned values, so equality is not two empty reads agreeing.
+    assert_eq!(rows[0]["result"]["scan"], "fresh", "{v}");
+    assert_eq!(rows[0]["result"]["findings"]["total"], 2, "{v}");
+    assert_eq!(rows[1]["result"]["scan"], "never_run", "{v}");
+    assert!(rows[1]["result"]["findings"].is_null(), "a member never scanned has no count, not 0: {v}");
+
+    // The unopenable member: a named row with its reason, hiding no other.
+    assert!(rows[2].get("result").is_none(), "{v}");
+    assert!(rows[2]["error"].as_str().is_some_and(|e| !e.is_empty()), "{v}");
+    assert_eq!(
+        (s["members_total"].as_u64(), s["members_read"].as_u64(), s["members_fresh"].as_u64()),
+        (Some(3), Some(2), Some(1)),
+        "one of three members has a fresh scan: {s}"
+    );
+    assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
+
+    // No composite: the answer's own keys, and each row's, are exactly these.
+    let keys = |value: &serde_json::Value| {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(keys(s), ["members", "members_fresh", "members_read", "members_total"], "{s}");
+    assert_eq!(keys(&rows[0]["result"]), ["findings", "scan"], "{v}");
+    assert_eq!(keys(&rows[0]["result"]["findings"]), ["critical", "high", "info", "low", "medium", "total", "unrated"]);
+}
+
+/// The Dashboard read names the member that would not open **as the first read
+/// of a cold registry**: the open-state ledger the completeness rider reads is
+/// filled by the member fan-out, so a rider read before it would answer
+/// `complete: true` with no degraded member on exactly the first Dashboard load
+/// ([FR-WS-16]). The test above reads the roll-up first, which fills the ledger
+/// and so cannot see the ordering.
+///
+/// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
+#[tokio::test]
+async fn the_dashboard_security_read_names_an_unopenable_member_on_a_cold_registry() {
+    let tmp = security_workspace();
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/security/summary").await;
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
+}
+
 /// A member that opens and then fails its security read — here an ignore file
 /// that does not parse — is a row with its error and counts against
 /// `members_read`, and every other member still answers. The open-state
@@ -3712,4 +3797,181 @@ async fn a_member_whose_security_read_fails_is_a_row_and_hides_no_other() {
     assert_eq!(rollup_row(&v, "scanned")["result"]["scan"], "fresh", "the others still answer: {v}");
     assert_eq!((s["members_total"].as_u64(), s["members_read"].as_u64()), (Some(3), Some(1)), "{s}");
     assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
+}
+
+// ── The workspace coverage roll-up (S-740, [FR-CV-16]) ──────────────────────
+
+/// A member's `last-run.json` with the custom command's last run ending in
+/// `outcome` at `finished_at`.
+fn last_run_record(member: &Path, outcome: &str, finished_at: u64) {
+    write(
+        member,
+        ".logos/coverage/last-run.json",
+        &format!(
+            "{{\"custom\": {{\"outcome\": \"{outcome}\", \"exit_code\": 0, \"head_sha\": null, \"finished_at\": {finished_at}, \"log\": null}}}}"
+        ),
+    );
+}
+
+/// Three members, in roster order: `covered` — an LCOV snapshot over two
+/// files, one of which changed since, and a last custom run that ran; `idle`
+/// — nothing ingested, its last custom run failed; `broken` — a directory
+/// where its store must be, so nothing can open it. Every member configures a
+/// custom command and carries no ecosystem marker, so the tool figures are the
+/// custom entry's alone, whatever this machine has installed.
+fn coverage_workspace() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    for member in ["covered", "idle", "broken"] {
+        let dir = root.join(member);
+        std::fs::create_dir_all(&dir).unwrap();
+        sh_git(&dir, &["init", "-q", "-b", "main"]);
+        write(&dir, ".logos/config.toml", "[coverage_ingest]\nrefresh_cmd = \"make cov\"\n");
+        write(&dir, "src/a.rs", "pub fn a() -> i64 {\n    0\n}\n");
+        write(&dir, "src/b.rs", "pub fn b() -> i64 {\n    0\n}\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-q", "-m", "init"]);
+        Engine::start(&dir).expect("member engine").index();
+    }
+
+    let covered = root.join("covered");
+    let report = root.join("covered.info");
+    std::fs::write(&report, "TN:suite\nSF:src/a.rs\nDA:1,1\nDA:2,0\nend_of_record\nSF:src/b.rs\nDA:1,1\nDA:2,1\nend_of_record\n")
+        .unwrap();
+    Engine::start(&covered).expect("covered engine").coverage_ingest(&report, None).expect("the report ingests");
+    // `b.rs` changes after the ingest: stale, so only `a.rs` is counted.
+    write(&covered, "src/b.rs", "pub fn b() -> i64 {\n    1\n}\n");
+    last_run_record(&covered, "ran", 1_760_000_000);
+    last_run_record(&root.join("idle"), "failed", 1_760_000_100);
+
+    let db = root.join("broken").join(".logos").join("logos.db");
+    std::fs::remove_file(&db).expect("clear the store file");
+    std::fs::create_dir_all(&db).expect("a directory where the store must be");
+
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"measured\"\nmembers = [\"covered\", \"idle\", \"broken\"]\ndefault = \"covered\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// The coverage roll-up row for `member`.
+fn coverage_row<'a>(v: &'a serde_json::Value, member: &str) -> &'a serde_json::Value {
+    v["coverage"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["member"] == member)
+        .unwrap_or_else(|| panic!("a row for {member}: {v}"))
+}
+
+/// **The workspace coverage roll-up ([FR-CV-16], [UAT-CV-05] step 6).** Over a
+/// covered, a never-run and an unopenable member: the covered member states its
+/// overall line coverage over its fresh file alone, fresh files of total, its
+/// tool outcome and last run, each equal to its own Coverage page's figure; the
+/// never-run member reads `never_run` with no percentage — never 0 % — though
+/// its tool failed; the unopenable one is a row with its error, named by the
+/// open-state roll-up, and hides neither other; the one workspace figure is how
+/// many members have fresh coverage of all, with no composite beside it; and
+/// the read stores no snapshot.
+///
+/// [FR-CV-16]: ../../docs/specs/requirements/FR-CV-16.md
+/// [UAT-CV-05]: ../../docs/specs/requirements/UAT-CV-05.md
+#[tokio::test]
+async fn workspace_coverage_rolls_up_each_member_and_names_the_never_run_and_unopenable() {
+    let tmp = coverage_workspace();
+    let history = tmp.path().join("covered/.logos/history.db");
+    let snapshots = || {
+        let conn = Connection::open_with_flags(&history, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM coverage_snapshots", [], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    let before = snapshots();
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/coverage").await;
+    let c = &v["coverage"];
+
+    // Every member has a row, in roster order — the broken one included.
+    let order: Vec<&str> = c["members"].as_array().unwrap().iter().map(|m| m["member"].as_str().unwrap()).collect();
+    assert_eq!(order, ["covered", "idle", "broken"], "{v}");
+    // The figure row's denominator: one of three members has fresh coverage.
+    assert_eq!(
+        (c["members_total"].as_u64(), c["members_read"].as_u64(), c["members_fresh"].as_u64(), c["members_never_run"].as_u64()),
+        (Some(3), Some(2), Some(1), Some(1)),
+        "{c}"
+    );
+    let mut keys: Vec<&str> = c.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["members", "members_fresh", "members_never_run", "members_read", "members_total"], "no composite: {c}");
+
+    // Covered: one of its two files is fresh, and the percentage is that
+    // file's alone (1 of 2 lines); the custom command ran.
+    let covered = &coverage_row(&v, "covered")["result"];
+    assert_eq!(
+        *covered,
+        serde_json::json!({
+            "coverage": "fresh",
+            "overall_coverage_bp": 5000,
+            "fresh_files": 1,
+            "total_files": 2,
+            "tools_ran": 1,
+            "tools_failed": 0,
+            "tools_applicable": 1,
+            "last_run": 1_760_000_000u64,
+        }),
+        "{v}"
+    );
+    // The same figures its own Coverage page states.
+    let member = json_body(&router, "/api/v1/coverage?repo=covered").await;
+    assert_eq!(
+        (&member["coverage"]["overall_coverage_bp"], &member["coverage"]["fresh_files"], &member["coverage"]["total_files"]),
+        (&covered["overall_coverage_bp"], &covered["fresh_files"], &covered["total_files"]),
+        "{member}"
+    );
+
+    // Idle: never run, with no percentage — not 0 % — and its failed tool stated.
+    let idle = &coverage_row(&v, "idle")["result"];
+    assert_eq!(idle["coverage"], "never_run", "{idle}");
+    assert!(idle["overall_coverage_bp"].is_null(), "never run is not 0 %: {idle}");
+    assert_eq!((idle["tools_failed"].as_u64(), idle["last_run"].as_u64()), (Some(1), Some(1_760_000_100)), "{idle}");
+
+    // Broken: a row with its reason, no result, and named as not opened.
+    let broken = coverage_row(&v, "broken");
+    assert!(broken.get("result").is_none(), "{broken}");
+    assert!(broken["error"].as_str().is_some_and(|e| !e.is_empty()), "{broken}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
+
+    // Read-only: a second load stores no snapshot.
+    json_body(&router, "/api/v1/workspace/coverage").await;
+    assert_eq!(snapshots(), before, "a GET stores no coverage");
+}
+
+/// The roll-up names the member that would not open **as the first read of a
+/// cold registry**: the completeness rider is read after the fan-out that
+/// fills its ledger ([FR-WS-16]).
+///
+/// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
+#[tokio::test]
+async fn the_coverage_roll_up_names_an_unopenable_member_on_a_cold_registry() {
+    let tmp = coverage_workspace();
+    let v = json_body(&ws_router(&tmp), "/api/v1/workspace/coverage").await;
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["degraded_rollup"]["degraded_members"], serde_json::json!(["broken"]), "{v}");
+}
+
+/// A member that opens and then fails its coverage read — here a repository
+/// config that does not parse — is a row with its error and counts against
+/// `members_read`, and every other member still answers.
+#[tokio::test]
+async fn a_member_whose_coverage_read_fails_is_a_row_and_hides_no_other() {
+    let tmp = coverage_workspace();
+    write(&tmp.path().join("idle"), ".logos/config.toml", "[coverage_ingest\n");
+    let v = json_body(&ws_router(&tmp), "/api/v1/workspace/coverage").await;
+    let c = &v["coverage"];
+    let idle = coverage_row(&v, "idle");
+    assert!(idle.get("result").is_none(), "{idle}");
+    assert!(idle["error"].as_str().is_some_and(|e| !e.is_empty()), "{idle}");
+    assert_eq!(coverage_row(&v, "covered")["result"]["coverage"], "fresh", "the others still answer: {v}");
+    assert_eq!((c["members_total"].as_u64(), c["members_read"].as_u64()), (Some(3), Some(1)), "{c}");
 }

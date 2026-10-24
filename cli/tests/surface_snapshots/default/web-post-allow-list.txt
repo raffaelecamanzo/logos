@@ -1,3 +1,7 @@
+/api/v1/coverage/dependency
+/api/v1/coverage/install
+/api/v1/coverage/run
+/api/v1/coverage/run/cancel
 /api/v1/security/install
 /api/v1/security/install/cancel
 /api/v1/security/scan

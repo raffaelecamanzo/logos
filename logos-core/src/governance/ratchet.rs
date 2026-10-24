@@ -97,11 +97,19 @@ impl BlessedSet {
                 .into())
             }
         };
+        Self::parse(&text).map(Some)
+    }
+
+    /// The blessed set a file's `text` holds, refused as [`read`](Self::read)
+    /// refuses a file: malformed, of another format version, or naming one
+    /// offender twice. The text is a file read from the working tree, or one
+    /// read from a commit (`logos review --headroom`).
+    pub(crate) fn parse(text: &str) -> Result<Self> {
         let invalid = |message: String| ConfigError::InvalidValue {
             key: BLESSED_FILE_REL.to_string(),
             message,
         };
-        let file: BlessedFile = serde_json::from_str(&text)
+        let file: BlessedFile = serde_json::from_str(text)
             .map_err(|e| invalid(format!("{e} — re-run `{BLESS_COMMAND}` to rewrite it")))?;
         if file.version != FORMAT_VERSION {
             return Err(invalid(format!(
@@ -122,7 +130,12 @@ impl BlessedSet {
             }
             set.insert(key, entry.value);
         }
-        Ok(Some(Self(set)))
+        Ok(Self(set))
+    }
+
+    /// Every blessed entry as `(constraint, symbol id, blessed value)`, sorted.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&str, &str, u64)> {
+        self.0.iter().map(|((rule, symbol), value)| (rule.as_str(), symbol.as_str(), *value))
     }
 
     /// The set the current offenders bless: every marked violation of a rule in

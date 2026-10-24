@@ -1232,6 +1232,11 @@ fn no_evolution_delta_crosses_a_point_where_a_graph_dimension_dropped_out() {
 
 // ── FR-GV-27 (S-756): the trend warning ─────────────────────────────────────
 
+/// The trend warnings [`review::declining_dimensions`] finds over `rows`.
+fn declining(rows: &[MetricSnapshotRow], window: u32) -> Vec<String> {
+    review::declining_dimensions(rows, window).iter().map(crate::models::DimensionTrend::warning).collect()
+}
+
 /// The series of [`applicable_row`]s whose Equality takes `values` in turn.
 fn equality_series(values: &[f64]) -> Vec<MetricSnapshotRow> {
     (1..)
@@ -1251,32 +1256,32 @@ fn consecutive_declines_warn_only_once_they_fill_the_window() {
     let two = equality_series(&[0.9, 0.8, 0.7]);
     let three = equality_series(&[0.95, 0.9, 0.8, 0.7]);
 
-    assert!(review::declining_dimensions(&one, 2).is_empty(), "one decline is not a trend");
+    assert!(declining(&one, 2).is_empty(), "one decline is not a trend");
     assert_eq!(
-        review::declining_dimensions(&two, 2),
+        declining(&two, 2),
         ["equality declined at each of the last 2 recorded snapshots that moved it: 0.9 → 0.8 → 0.7 \
           (review.trend_window = 2); a trend warning, never a failure"]
     );
-    assert!(review::declining_dimensions(&two, 3).is_empty(), "trend_window = 3 needs three");
-    let warned = review::declining_dimensions(&three, 3);
+    assert!(declining(&two, 3).is_empty(), "trend_window = 3 needs three");
+    let warned = declining(&three, 3);
     assert_eq!(warned.len(), 1, "{warned:?}");
     assert!(warned[0].contains("0.95 → 0.9 → 0.8 → 0.7"), "{warned:?}");
     assert_eq!(
-        review::declining_dimensions(&three, 2),
-        review::declining_dimensions(&two, 2),
+        declining(&three, 2),
+        declining(&two, 2),
         "a longer run warns with the window's last declines"
     );
-    assert_eq!(review::declining_dimensions(&one, 1).len(), 1, "trend_window = 1 warns on one");
-    assert!(review::declining_dimensions(&[], 2).is_empty());
+    assert_eq!(declining(&one, 1).len(), 1, "trend_window = 1 warns on one");
+    assert!(declining(&[], 2).is_empty());
 
     // A decline just past the noise floor prints as one: each value reads
     // back as the value recorded, never rounded into its neighbour.
     let tiny = [0.9, 0.9 - 1e-8, 0.9 - 2e-8];
-    let warned = review::declining_dimensions(&equality_series(&tiny), 2);
+    let warned = declining(&equality_series(&tiny), 2);
     let chain = warned[0].split(": ").nth(1).and_then(|c| c.split(" (").next()).unwrap_or_default();
     let printed: Vec<f64> = chain.split(" → ").map(|v| v.parse().expect("a number")).collect();
     assert_eq!(printed, tiny, "{warned:?}");
-    assert!(review::declining_dimensions(&equality_series(&[0.9]), 1).is_empty());
+    assert!(declining(&equality_series(&[0.9]), 1).is_empty());
 }
 
 /// Only the latest run counts: a rise between two declines breaks it, and so
@@ -1286,40 +1291,40 @@ fn consecutive_declines_warn_only_once_they_fill_the_window() {
 /// extends it.
 #[test]
 fn a_rise_or_an_incomparable_step_breaks_the_run_and_a_flat_one_does_not() {
-    assert!(review::declining_dimensions(&equality_series(&[0.9, 0.8, 0.85, 0.7]), 2).is_empty(), "a rise");
+    assert!(declining(&equality_series(&[0.9, 0.8, 0.85, 0.7]), 2).is_empty(), "a rise");
     assert!(
-        review::declining_dimensions(&equality_series(&[0.9, 0.8, 0.7, 0.75]), 2).is_empty(),
+        declining(&equality_series(&[0.9, 0.8, 0.7, 0.75]), 2).is_empty(),
         "a rise at the end ends the run"
     );
-    let flat = review::declining_dimensions(&equality_series(&[0.9, 0.8, 0.8, 0.7, 0.7]), 2);
+    let flat = declining(&equality_series(&[0.9, 0.8, 0.8, 0.7, 0.7]), 2);
     assert_eq!(flat.len(), 1, "flat steps are re-measurements: {flat:?}");
     assert!(flat[0].contains("0.9 → 0.8 → 0.7"), "{flat:?}");
     // Float residue within METRIC_NOISE is flat too, either way.
     let jitter = equality_series(&[0.9, 0.8, 0.8 - 1e-12, 0.8 + 1e-12, 0.7]);
-    assert_eq!(review::declining_dimensions(&jitter, 2).len(), 1, "residue neither breaks the run");
-    assert!(review::declining_dimensions(&jitter, 3).is_empty(), "nor extends it");
+    assert_eq!(declining(&jitter, 2).len(), 1, "residue neither breaks the run");
+    assert!(declining(&jitter, 3).is_empty(), "nor extends it");
 
     let mut series = equality_series(&[0.9, 0.8, 0.7]);
     series[1].metric_version -= 1;
-    assert!(review::declining_dimensions(&series, 2).is_empty(), "across a semantics change");
+    assert!(declining(&series, 2).is_empty(), "across a semantics change");
     let mut series = equality_series(&[0.9, 0.8, 0.7]);
     series[2].thresholds_hash = Some("tuned".to_string());
-    assert!(review::declining_dimensions(&series, 2).is_empty(), "across a threshold change");
+    assert!(declining(&series, 2).is_empty(), "across a threshold change");
     let mut series = equality_series(&[0.9, 0.8, 0.7]);
     series[0].empty = true;
-    assert!(review::declining_dimensions(&series, 2).is_empty(), "from a snapshot that scored nothing");
+    assert!(declining(&series, 2).is_empty(), "from a snapshot that scored nothing");
     let mut series = equality_series(&[0.9, 0.8, 0.7]);
     series[2].empty = true;
-    assert!(review::declining_dimensions(&series, 2).is_empty(), "to a snapshot that scored nothing");
+    assert!(declining(&series, 2).is_empty(), "to a snapshot that scored nothing");
 
     let mut series: Vec<MetricSnapshotRow> = [0.9, 0.8, 0.7]
         .iter()
         .zip(1..)
         .map(|(depth, id)| MetricSnapshotRow { depth_normalized: *depth, ..applicable_row(id) })
         .collect();
-    assert_eq!(review::declining_dimensions(&series, 2).len(), 1, "Depth applies throughout");
+    assert_eq!(declining(&series, 2).len(), 1, "Depth applies throughout");
     series[0] = MetricSnapshotRow { depth_normalized: 0.9, ..thin_row(1) };
-    assert!(review::declining_dimensions(&series, 2).is_empty(), "Depth dropped out of the first");
+    assert!(declining(&series, 2).is_empty(), "Depth dropped out of the first");
 }
 
 /// Every distributional dimension is watched, in canonical order, and no
@@ -1340,11 +1345,41 @@ fn every_distributional_dimension_is_watched_and_nothing_else() {
             ..applicable_row(id)
         })
         .collect();
-    let named: Vec<String> = review::declining_dimensions(&series, 2)
+    let named: Vec<String> = declining(&series, 2)
         .iter()
         .map(|w| w.split_whitespace().next().unwrap_or_default().to_string())
         .collect();
     assert_eq!(named, ["modularity", "acyclicity", "depth", "equality"]);
+}
+
+/// [CR-243]: each declining dimension is one structured entry — its name,
+/// its values oldest first and the window — and its warning is spelled from
+/// those fields alone, so `trend` and `warnings` cannot disagree.
+///
+/// [CR-243]: ../../../docs/requests/CR-243-governance-signals-reach-every-surface.md
+#[test]
+fn a_declining_dimension_is_one_structured_entry_whose_warning_is_its_spelling() {
+    let flat_between = equality_series(&[0.95, 0.9, 0.8, 0.8, 0.7]);
+    let trend = review::declining_dimensions(&flat_between, 2);
+    assert_eq!(
+        trend,
+        [crate::models::DimensionTrend { dimension: "equality", values: vec![0.9, 0.8, 0.7], window: 2 }]
+    );
+    assert_eq!(
+        trend[0].warning(),
+        "equality declined at each of the last 2 recorded snapshots that moved it: 0.9 → 0.8 → 0.7 \
+         (review.trend_window = 2); a trend warning, never a failure"
+    );
+    let one = crate::models::DimensionTrend { dimension: "depth", values: vec![0.5, 0.25], window: 1 };
+    assert_eq!(
+        one.warning(),
+        "depth declined at each of the last 1 recorded snapshot that moved it: 0.5 → 0.25 \
+         (review.trend_window = 1); a trend warning, never a failure"
+    );
+    assert_eq!(
+        serde_json::to_value(&trend[0]).unwrap(),
+        serde_json::json!({"dimension": "equality", "values": [0.9, 0.8, 0.7], "window": 2})
+    );
 }
 
 // ── FR-GV-07: dsm granularity parsing ───────────────────────────────────────

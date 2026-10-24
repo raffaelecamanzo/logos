@@ -13,7 +13,7 @@
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
 #
-# ── This repository's customisations (never regenerate with `dist init`) ──────
+# ── This repository's customisations (never run `dist init` or `dist generate`) ─
 # dist-workspace.toml sets `allow-dirty = ["ci"]`, so dist accepts this file as
 # edited. Until the first release built outside this repository takes over the
 # release names, a release tag here publishes the binaries this repository builds
@@ -32,6 +32,14 @@
 #     (.release-pipeline) and runs scripts/release-dist-config.sh, which supplies
 #     the dist configuration a tag cut without it lacks and changes nothing on a
 #     tag that has it.
+#   * Every action is pinned to a commit with a trailing `# vX.Y.Z` comment, as
+#     ci.yml pins them (docs/howto/contributing.md, "CI actions are pinned";
+#     scripts/tests/test-ci-pins.sh checks both files). dist-workspace.toml sets
+#     `github-action-commits` nowhere, so a regenerate would put tags back.
+#   * scripts/install-dist.sh installs dist in `plan` and in `build-local-artifacts`:
+#     it downloads the installer to a file and runs it only if its sha256 is the
+#     one pinned there, where dist's own step pipes it into `sh`. The step that
+#     installed Rust for a container build is a refusal (no target has one).
 #   * scripts/check-release-text.sh runs the term gate (scripts/check-public-terms.sh)
 #     over the release title, the notes, the Homebrew formula, the shell installer
 #     and the published dist-manifest.json in `host`, before the GitHub Release is
@@ -98,14 +106,14 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           submodules: recursive
           # A dispatch builds the tag it names; a tag push and a pull request, their own ref.
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || '' }}
       - name: Check out the release pipeline beside the tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -120,12 +128,12 @@ jobs:
       - name: Supply the dist configuration a tag cut without it lacks
         run: bash .release-pipeline/scripts/release-dist-config.sh --from .release-pipeline
       - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+        # The installer is downloaded to a file and checked against a pinned
+        # sha256 before it runs, never piped into a shell (HF-4).
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
+        run: bash .release-pipeline/scripts/install-dist.sh
       - name: Cache dist
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
@@ -141,7 +149,7 @@ jobs:
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
@@ -162,7 +170,7 @@ jobs:
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     runs-on: "ubuntu-22.04"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           submodules: recursive
@@ -170,7 +178,7 @@ jobs:
           # the run cannot change what a job builds.
           ref: ${{ needs.plan.outputs.commit || '' }}
       - name: Install Node.js (build-time only)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
           cache: npm
@@ -181,7 +189,7 @@ jobs:
           npm ci
           npm run build
       - name: Upload the SPA bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-ui-dist
           path: web/ui/dist
@@ -217,7 +225,7 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           submodules: recursive
@@ -225,25 +233,31 @@ jobs:
           # the run cannot change what a job builds.
           ref: ${{ needs.plan.outputs.commit || '' }}
       - name: Check out the release pipeline beside the tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
           path: .release-pipeline
       - name: Supply the dist configuration a tag cut without it lacks
         run: bash .release-pipeline/scripts/release-dist-config.sh --from .release-pipeline
-      - name: Install Rust non-interactively if not already installed
+      # dist generated a step here that piped rustup's installer into a shell for a
+      # matrix entry that runs in a container. `dist plan` gives none of the four
+      # targets a container (dist-workspace.toml sets no custom runner), so the step
+      # never ran. It is a refusal instead: a container entry added later stops the run
+      # until a rustup-init download that is checked against a digest replaces this.
+      - name: Refuse a container build that nothing here prepares for
         if: ${{ matrix.container }}
         run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
+          echo "::error::a build runs in a container, which this workflow no longer prepares (see the note above this step)"
+          exit 1
+      # The same verified install as `plan`, in place of the matrix's own command,
+      # which pipes the installer into `sh`. All four targets are unix runners.
       - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+        shell: bash
+        run: bash .release-pipeline/scripts/install-dist.sh
       # Get the dist-manifest
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -255,7 +269,7 @@ jobs:
       # rust-embed into the `--features ui` binary `dist build` compiles below
       # (CR-049, FR-UI-22). Overwrites the committed placeholder web/ui/dist/.
       - name: Fetch the web UI SPA bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: web-ui-dist
           path: web/ui/dist
@@ -278,7 +292,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
@@ -295,7 +309,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           submodules: recursive
@@ -303,7 +317,7 @@ jobs:
           # the run cannot change what a job builds.
           ref: ${{ needs.plan.outputs.commit || '' }}
       - name: Check out the release pipeline beside the tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -311,14 +325,14 @@ jobs:
       - name: Supply the dist configuration a tag cut without it lacks
         run: bash .release-pipeline/scripts/release-dist-config.sh --from .release-pipeline
       - name: Install cached dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -336,7 +350,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-build-global
           path: |
@@ -356,13 +370,13 @@ jobs:
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           submodules: recursive
           ref: ${{ needs.plan.outputs.tag && format('refs/tags/{0}', needs.plan.outputs.tag) || '' }}
       - name: Check out the release pipeline beside the tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -370,14 +384,14 @@ jobs:
       - name: Supply the dist configuration a tag cut without it lacks
         run: bash .release-pipeline/scripts/release-dist-config.sh --from .release-pipeline
       - name: Install cached dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -390,14 +404,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: artifacts
@@ -453,14 +467,14 @@ jobs:
       GITHUB_EMAIL: "admin+bot@axo.dev"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: true
           repository: "raffaelecamanzo/homebrew-tap"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       # So we have access to the formula
       - name: Fetch homebrew formulae
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: Formula/
@@ -500,7 +514,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           submodules: recursive

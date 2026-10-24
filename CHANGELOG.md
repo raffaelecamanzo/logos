@@ -13,6 +13,453 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.21.2] — 2026-10-24
+
+### Fixed
+
+- **A failed tool's log keeps the end of its output, where it says why it failed.** The
+  bounded capture behind a failed coverage run's `.logos/coverage/<tool>.failed.log` and a
+  failed security scan's `.logos/security/<scanner>.failed.log` kept only the first 64 KiB
+  of stdout, so a test run's failing test, its panic message and cargo's `failures:`
+  summary, always at the end, were lost. Each stream now keeps its first quarter and the
+  rest from the end, with one line, `[… N bytes omitted …]`, between them, within the same
+  bound; output that fits is kept whole. The excerpt the Coverage page shows for a failed
+  tool is now the last lines of its stdout and of its stderr, not stderr's alone.
+
+## [1.21.1] — 2026-10-23
+
+### Added
+
+- **`security findings` states each category's production count.** A covered entry of
+  `categories[]` in `logos security findings --json` and the MCP `security_findings`
+  gains `production_findings`, the part of `state.findings` that sits in production
+  code (suppressed findings in both); `state.findings` is unchanged and still counts
+  every code scope. The Security page's OWASP list reads the two figures instead of
+  counting findings itself, so under Production it equals the CLI and MCP figure per
+  category, and a finding in a test symbol is placed by the same graph answer in
+  both OWASP editions.
+
+### Changed
+
+- **MCP `coverage_refresh` is synchronous and outside the `coverage-run` job.** Its tool
+  description and `docs/howto/coverage.md` now say that it runs in the request, is not
+  listed as a job, is not stopped by the Coverage page's Cancel, can run at the same
+  time as a page run of the same command, and still requires the recorded consent.
+
+### Fixed
+
+- **A finished Run scan no longer shows its scanners `stale` on the Security page.**
+  When the scan ended, the Scanners rows went back to the states the page had read
+  before it ran — `stale` for every scanner the scan had just refreshed — until the
+  page's reload answered, which takes seconds on a large project. The page now shows
+  the scan ended only once that reload has landed, so each row goes from `running`
+  straight to what the scan stored. The server's freshness was never wrong: the first
+  read after the scan reports every scanner it refreshed `fresh`, as
+  `logos security status` and MCP `security_status` do.
+
+- **A finished Run coverage no longer reads as finished over the figures from before it.**
+  When a run the Coverage page followed ended, the page said "Coverage run finished"
+  and "The figures below are refreshed" over the figures it had read before the run —
+  a tool row reading `never run`, the callout `n/a — no data ingested` — until its
+  reload answered, which takes seconds on a large project. The page now shows the run
+  ended only once that reload has settled, so each tool goes from `running` straight to
+  what the run ingested; a reload that fails still ends the run.
+- **The Workspace Security OWASP table says what it counts.** Its explanation now names
+  production code and says a member's figure there can be below its own page's OWASP
+  list under Production, which also counts suppressed findings and findings in changed
+  files.
+
+## [1.21.0] — 2026-10-23
+
+### Added
+
+- **The Security page tells test code apart and explains a redacted message.** The
+  Findings table has a code scope control, Production, Test code or All, which starts
+  on Production and is kept in the address (`?scope=`). A finding in test code carries
+  a muted `TEST` tag whose hover gives its reason, and the figure rows state
+  `· N in test code` beside every count: the Findings and OWASP figures on the page,
+  `+N test` beside a file's count on Files & Risk, and the Workspace Security figure
+  row. The OWASP counts follow the scope. A redacted finding's detail reads *Redacted:
+  the scanner's message would contain the secret itself* and its location, in place of
+  the bare `[redacted]`. This repository's `.logos/security-ignore.toml` no longer
+  holds out `logos-core/tests/fixtures`: those findings read `test`, are hidden by
+  default and still reach the gate.
+
+- **`coverage ingest` reads JaCoCo XML and Go coverprofile reports.** The two parsers
+  sit behind the same parser trait as LCOV and Cobertura, and content auto-detection
+  recognises both (a JaCoCo `<report>` root with a JaCoCo marker; a Go `mode:`
+  header), with LCOV and Cobertura detection unchanged. `--format` (and
+  `[coverage_ingest] format`) accepts `jacoco` and `gocover`. A JaCoCo
+  `<package>/<sourcefile>` is a source-root-relative path whose hit count is the
+  line's covered-instruction count, so a Maven multi-module aggregate ingests with no
+  module names; a Go block is expanded to one hit per line it spans (the maximum
+  count where blocks overlap, a zero-statement block skipped) and the report's import
+  path is rewritten against the tree's `go.mod` module path. A path the report names
+  that binds to no indexed file, or to more than one, is counted `unmatched` in the
+  summary, never guessed; a malformed report of either format is rejected before
+  anything is written.
+
+- **A built-in registry of seven coverage tools, and the config that governs it.**
+  `cargo-llvm-cov`, `vitest`, `jest`, `pytest-cov`, Maven with JaCoCo, Gradle with
+  JaCoCo and `go test` each have a marker file that selects them, a version probe
+  that reaches no network and a fixed command line. A wrapper (`./mvnw`,
+  `./gradlew`) is preferred over `PATH`, and vitest and jest are used only from
+  `node_modules/.bin`. Gradle gets JaCoCo from an init script Logos writes under
+  `.logos/coverage/`, so no build file is edited. Finding a tool and its version
+  never starts a copy the project supplies. The repository's
+  `[coverage_ingest].tools` may only switch a tool on or off: a path, a command or
+  a flag there fails the load with exit 2. A tool's binary path, extra arguments
+  and timeout (default 30 minutes) are set in the user-level
+  `[coverage_ingest.tools.<tool>]`. Each tool runs from an argument list, never a
+  shell, in a process group of its own, and the whole group is killed when its
+  timeout passes. No command starts these tools yet.
+- **`review --headroom` lists the room left under every shared budget before any
+  branch exists.** `logos review --headroom [--base <ref>] [--subjects <path-or-name>…]
+  [--near N]` (MCP `review` with `headroom: true`, `subjects`, `near`) reads the base
+  `review --branches` reads, from the same cached measurement, and lists for each
+  projectable `[constraints]` budget each subject's `current` value, `allowance` and
+  `headroom`, plus the margin under a numeric `[review] drift_budget` (`drift.headroom`,
+  naming its reference). A ratchet budget's subject blessed above `max` has its blessed
+  value as allowance, read as checked in at the base commit; an unblessed one past `max`
+  has no room and says why. Without a filter each rule lists its 10 tightest subjects and
+  its `evaluated` denominator; `--subjects` resolves project-relative paths and symbol
+  names to the module, file and functions containing them and lists the entries that
+  resolve to nothing under `unresolved` with why; `--near N` keeps the subjects at most
+  N from their limit. Report only: exit 0 whenever it answers, 1 with `measured: false`
+  when the base cannot be measured. The working tree is never measured, and the MCP
+  answer is the CLI's `--json` bytes. A new `HeadroomReport` read model; no schema or
+  cache-format change (S-798).
+
+- **`logos coverage run [--tool <id>] [--consent]` and MCP `coverage_run` run the
+  project's coverage tools and ingest one merged snapshot.** Every enabled, installed
+  registry tool runs in sequence, then the configured `refresh_cmd` as the `custom`
+  entry, and each report is ingested into the snapshot at HEAD as its tool ends. Each
+  tool reports one outcome: `ran`, `tests_failed` (a failing suite that still wrote a
+  report, which is ingested), `failed`, `timed_out`, `cancelled`, or why it did not
+  run (`not_applicable`, `disabled`, `not_installed`). One tool's failure never stops
+  the others. A failed tool's whole bounded output goes to
+  `.logos/coverage/<tool>.failed.log`; the payload carries a masked excerpt only. The
+  run checks the project's execution consent for exactly what it will start before
+  anything is spawned; MCP cannot give it. Exit 0 when every tool it started ran
+  cleanly, 1 otherwise. `coverage refresh` is now `coverage run --tool custom`, with
+  the run's payload. `coverage status` and its MCP twin gain `runner`: each tool's
+  state (detected, else its last run, else `never_run`), its last run, and the consent
+  with what the next run would ask for. The Dashboard reads the evidence alone and
+  probes no tool. Runs start only on request: the watcher never starts one, and a run
+  never moves the gate (S-737).
+- **Dependency-Check takes its NVD API key from `NVD_API_KEY`, and the key is never
+  shown.** Logos reads the variable from the environment of the process that runs the
+  scan (the CLI, or `serve` for MCP and the web; export it before starting `serve`)
+  and from nowhere else: no repository file, `.env` or config key can supply it. It
+  hands the key to Dependency-Check in `.logos/security/nvd-api-key.properties`,
+  created new with mode 0600 and passed as `--propertyfile`, never on the command
+  line; the file is deleted when the run ends, whatever ended it, and one a crash left
+  is deleted at the next scan's start. The key appears in no log, cause, job event,
+  payload or stored row: a Dependency-Check that prints it has it masked before the
+  failure log is written. A user's own `extra_args` carrying `--nvdApiKey` or
+  `--propertyfile` still win, and Logos then adds no file. `security status` carries
+  `nvd_api_key: set | not_set` on the Dependency-Check row only, identically on the
+  CLI, MCP and web, and the Security page's Scanners row reads "NVD key: set" or "NVD
+  key: not set". The missing-key failure cause now names `NVD_API_KEY` first and the
+  `extra_args` route second (S-794).
+- **A coverage run is a job, beside the security scan, on one shared job runner.** The
+  runner that ran the Security page's scan now runs every long analysis, one job per
+  kind per project at a time: `security-scan`, `tool-install` and the new
+  `coverage-run`. A coverage run and a security scan run side by side. The web API
+  gains `GET /api/v1/coverage/run`, which answers the project's coverage job with
+  every per-tool event so far, or streams the events as Server-Sent Events to a client
+  that accepts `text/event-stream`, ending with the job as it ended. It also gains the
+  intent-guarded `POST /api/v1/coverage/run` (start, or join the running run) and
+  `POST /api/v1/coverage/run/cancel`. A start answers `409` with what the execution
+  consent lacks (the tools, and the custom command verbatim, with a copy whose control
+  and bidi characters are escaped for display) until the request accepts all of it,
+  and only then records it. A start right after a cancel starts a new run once the
+  cancelled one has ended. Cancel kills each tool's whole process group,
+  so a forked test JVM or a build daemon left in it dies too, and a `serve` that stops
+  or whose MCP host disconnects leaves no tool running. MCP `coverage_run` now starts
+  the run as that job, or joins the running one, and returns at once with the job's
+  id; MCP `coverage_status` carries the job as `job`, with each tool's events and,
+  once it completed, the run's outcomes. The CLI's `coverage run` is unchanged (S-738).
+- **The Health page shows the trend warning beside the gate verdict.** Under a
+  `rules.toml [review]` table the gate result carries a structured `trend` list —
+  one entry per distributional dimension in decline, with `dimension`, `values`
+  (oldest first) and `window` — and `warnings` keeps the same string, spelled from
+  it. `gate --json`, the MCP `session_end` and `GET /api/v1/health` agree on both.
+  The Health page's read-only verdict reads the snapshots up to the one it displays
+  and records nothing; a snapshot recorded after it never enters. Without the table
+  there is no `trend` key anywhere; on the Health page, a `rules.toml` that does not
+  load also gives none, and the page's verdict is byte-identical (`gate` itself still
+  exits 2 on it) (S-785).
+- **The Coverage page runs, follows and cancels a coverage run.** A **Coverage tools**
+  widget leads the page: one row per tool whose ecosystem is at the project root, plus
+  the custom command, with its version, its state in words (*not installed*,
+  *disabled*, *never run*, *ran*, *ran — tests failed*, *failed*, *timed out*,
+  *cancelled*), its last run with the commit's short hash, and the files its report
+  matched; a missing tool or a failing suite never reads as 0 %. **Run coverage** on
+  the widget's title row asks the execution consent the first time, in a dialog that
+  says the run builds the project and runs its tests, names each tool and shows the
+  custom command as the terminal consent shows it; Allow sends back exactly what it
+  showed. While the run goes the button is **Cancel**, and a per-tool progress list
+  (queued, running with its elapsed time, then each outcome, a failed tool's error
+  output in a disclosure) follows the job over Server-Sent Events, with one polite
+  live line announcing each tool's end and the run's. A click from a tab that had not
+  seen the run, or a page opened while it goes, joins it. When a followed run ends the
+  page reloads its figures. With nothing ingested the page offers Run coverage beside
+  the ingest command, or names the tools that would apply when none is installed
+  (S-739).
+- **`logos coverage install` installs `cargo-llvm-cov` and adds `llvm-tools-preview`.**
+  `cargo-llvm-cov` 0.9.1 is pinned in the release with each platform's SHA-256; it is
+  downloaded with the system `curl`, verified before it is unpacked or run, and moved
+  into the user-level tools directory, as a managed scanner is (`--from <dir>` installs
+  offline). With the same consent, the user's own `rustup` runs `rustup component add
+  llvm-tools-preview` from the filesystem root, so no project's `rust-toolchain.toml`
+  picks the toolchain. Without `--consent` the call exits 2 naming each line, and
+  nothing is downloaded and no `rustup` command runs; the consent covers every project
+  (`security-install-consent.toml`, and `toolchain-consent.toml` for the component).
+  Without `rustup` the component is reported `no_rustup` with the command to run by
+  hand, and the toolchain is left alone. `cargo-llvm-cov` now resolves as a scanner
+  does: the user-level override, then a `PATH` copy at 0.6.0 or later, then the
+  managed copy (a `PATH` copy below 0.6.0 runs only while there is none, and
+  `coverage install` installs one beside it), so a user's own copy is used and never
+  downloaded; `coverage status`
+  names the copy in use (`origin: "managed"` is new) and, with none, a `not_installed`
+  hint naming `logos coverage install --consent`. The security surfaces never list,
+  install or remove it. MCP has no install tool (S-748).
+- **A coverage run adds a missing coverage dev dependency through the project's own
+  package manager, on a per-project dependency consent.** When vitest is installed
+  without a coverage provider, or the project `.venv`'s pytest without `pytest-cov`,
+  `coverage run` reports it under `dependencies`: the package
+  (`@vitest/coverage-v8@<installed vitest major>` or `pytest-cov`), the manager the
+  lockfile names (npm, pnpm, yarn or bun; uv or poetry; pip in the `.venv` when the
+  only Python lock is `requirements.txt`), the exact command and the files it changes.
+  `logos coverage run --consent --dependency-consent` records the consent for that command —
+  user-level, never in the repository — and runs it before the tools, so the tool
+  runs in the same run; Logos never commits, and the change stays in the working tree.
+  Without the consent nothing is installed and the entry carries the consent
+  statement, which says the package manager may run dependency lifecycle scripts. No
+  lockfile, a lockfile of a manager Logos does not run, lockfiles of two managers, a
+  vitest major that cannot be read, or a manager missing from `PATH` is refused with
+  the command to run by hand — that lockfile's own manager's command — and nothing
+  changes. The execution consent counts a tool whose dependency is missing only when its
+  addition will run. jest, Maven/Gradle JaCoCo and `go test` never trigger a change, and
+  neither does a pytest on `PATH`. MCP `coverage_run` carries the same entries in the job's result
+  and cannot give the consent (S-749).
+- **The Coverage page installs a missing coverage tool before a run.** In the Coverage tools
+  widget, a not-installed `cargo-llvm-cov` row offers **Install**. A vitest without its coverage
+  provider, or the project's pytest without pytest-cov, offers **Add dependency**.
+  - **One consent dialog first.** It shows each download with its version, source and size, the
+    `rustup component add llvm-tools-preview` step, the exact package-manager command and the
+    files it changes, the lifecycle-scripts warning, and the execution consent for the tools the
+    run starts. Nothing is downloaded, run or changed until every line is accepted.
+  - **Then one coverage job.** The install or the addition runs first, then the run, followed and
+    cancelled like Run coverage. `POST /api/v1/coverage/install` and
+    `POST /api/v1/coverage/dependency` are new intent-guarded routes.
+  - **Cancel leaves nothing half applied.** A cancelled install leaves no partial tool. An addition
+    that is cancelled, fails or times out puts back the manifest and the lockfile byte for byte. It
+    also removes the added package's own entries that it had just installed: vitest's
+    `@vitest/coverage-v8`, or pytest-cov's package, dist-info and `.pth` hook in the project's
+    `.venv`. Each is named in a new `restored` field. `logos coverage run --dependency-consent` does
+    the same.
+  - **Refusals.** A dependency Logos will not add is refused with the command to run by hand.
+  - **Status rows.** `coverage status` carries a new `offer` field (`install` or `add_dependency`)
+    on a row Logos can set up (S-750).
+
+- **The manual documents coverage runs.** A new page, `docs/howto/coverage.md`, lists the
+  seven registry tools with each one's marker file, invocation, report and tested version,
+  and the JaCoCo plugin version Maven pins (0.8.13). It states plainly that a coverage run
+  executes the project's own code, what the execution consent covers, when it asks again
+  and what it does not protect against. It also covers `coverage run` and `coverage refresh`
+  (outcomes, exit codes, the failure log), the managed `cargo-llvm-cov` install and the
+  dependency consent, the Coverage page, the Workspace Coverage page and the user-level
+  overrides. `commands.md`, `configuration.md`, `usage.md`, `security.md` and the manual's
+  index point to it, and `commands.md` gains the `coverage run` and `coverage install`
+  entries (S-741).
+
+### Changed
+- **A coverage run never adds a toolchain component on its own.** `cargo-llvm-cov`
+  runs with `CARGO_LLVM_COV_SETUP=no`. Without it, a missing `llvm-tools-preview` made
+  `cargo-llvm-cov` read its closed stdin as *yes* to its own prompt and run
+  `rustup component add` with no consent; now it fails the tool, naming the command
+  (S-748).
+
+- **The Security page's Scanners widget runs the scan and shows each scanner's live
+  state.** Run scan (Install & scan) and Cancel, with the consent and install
+  dialogs, moved to the widget's title row and the "Run a scan" widget is gone. While
+  a job runs, the row of the scanner running reads `running`, the row of a tool
+  installing reads `installing`, and one polite `aria-live` line above the table
+  counts the scanners and tools finished; when the job ends the page reloads to the
+  stored states. The job, its events and the API routes are unchanged. The columns are
+  Scanner · State · Version · Findings · Ignored dirs · Action: each absent state
+  names its fixing command under its badge, the copy in use is in the Version cell,
+  and a failed last scan reads `LAST SCAN FAILED`, expanding to its cause and log
+  path. The Ignored dirs cell is a marker with a legend in plain words, chosen from
+  the new `coverage_kind` (`unproven`, `history`, `whole_project`, `partial`) that
+  `security scan` and `security status` carry beside `coverage_note` on the CLI,
+  MCP and web alike.
+- **The Dashboard leads with quality, security and coverage.** The widgets now read
+  Quality index, Security and Code coverage, then the cards a mounted extension adds,
+  then Languages, Graph, Activity and Rule findings. The new **Security** widget
+  states the findings that count (fresh, unsuppressed, in production code — the
+  figure `security status` and `security findings` give for the same store) by
+  severity with their total, the `[security]` gate verdict or that no table is
+  configured, the newest stored scan as a relative age, *N of M* scanners whose last
+  scan failed, and a link to `/security`. `GET /api/v1/overview` gains a core
+  `security` field (`summary`, or `error` when the read failed), read from stored
+  data alone: loading the Dashboard starts no scanner, not even a version probe, and
+  writes nothing. A project never scanned names `logos security scan`, one with no
+  consent yet names `logos security scan --consent`, and a read fault is stated, never
+  shown as zero findings (S-789).
+
+- **Findings in test code are labelled, listed apart and counted apart; the gate
+  still sees them.** Every security finding carries `code_scope` (`test` or
+  `production`) and `code_scope_reason` (`test_symbol` when its enclosing graph
+  symbol is test code, `test_path` when its path is a test path or lies in a
+  `fixtures/`, `testdata/` or `__fixtures__/` directory), computed when it is read;
+  no history.db migration. `security findings` and the MCP `security_findings` now
+  list **production code by default** and state `hidden_by_scope`; `--scope
+  test|all` (MCP `scope`) narrows and intersects with the other filters, and
+  **`--scope all` restores the earlier listing**. `security status` counts fresh,
+  unsuppressed findings in production code and states `suppressed`, `not_fresh`
+  and `test` apart; the Security page's counts and the workspace roll-up gain
+  `excluded.test`, and the Files & Risk / `hotspots` findings cell gains `test`.
+  `gate`, `check`, `gate --save`, `security bless` and `review --base` are
+  unchanged: their output is byte-identical (S-795).
+
+- **`review --branches` projects a ratchet budget's subject against its blessed value.**
+  Under `max_cc = { max = 15, ratchet = true }`, a function the blessed set holds at 22
+  and the base measures at 20 is no longer listed for a branch share of +1; a share of +3
+  is listed as exceeded against 22 (`limit: 22`). The blessed set is read **as checked in
+  at the base commit** (never the working tree or `HEAD`), by the rule `review --headroom`
+  applies, so a share equal to a subject's headroom is not listed and one more is. Every
+  other subject, and every budget not under ratchet, is projected against `max` with
+  byte-identical output. The projection's notes name the blessed values used (up to five,
+  then a count) in place of "the blessed set is not consulted". The set is read only when a
+  per-subject budget is under ratchet, and one the base commit holds unreadable is then a
+  `measured: false` answer naming why — in `review --headroom` too (S-799).
+- **The Stop hook and the `logos-sec-review` scripts still see findings in test code.**
+  Where the installed Logos has the `security findings` scope filter (1.21.0 or newer)
+  they pass `--scope all`; on 1.20.x they omit it. A secret added to a test file
+  blocks the Stop hook once, and a fix proof reads a test-file finding as present
+  until it is gone (S-797).
+- **The managed gosec is 2.29.0, the release built for Go 1.27.** gosec 2.21.4 could not
+  type a package that imports the standard library under Go 1.27, so every such project
+  scanned `failed`. A 2.21.4 managed install keeps running and `security status` shows
+  `update_available: 2.29.0`; `security install gosec --update` replaces it. The exclusion
+  harness's planted Go files now import the standard library, and its committed rows are
+  still the 2.21.4 run: re-run `scripts/verify-scanner-exclusions.sh` on 2.29.0 (S-782).
+- **The managed osv-scanner is 2.7.0.** Its command line uses the 2.x spelling of the
+  output option, so a 1.9.x copy, managed or on your `PATH`, reads `failed` with its own
+  error until it is replaced; a managed 1.9.2 install shows `update_available: 2.7.0`, and
+  `security install osv-scanner --update` replaces it. A 2.x finding that carries a score
+  reads that rating; a 1.9.2 report ingested from CI still reads `unrated`, gated as
+  `medium`. No stored finding, baseline entry or ignore entry reads as new across the
+  move. The exclusion harness probes with the 2.x flags, and its committed osv-scanner rows
+  are still the 1.9.2 run: re-run `scripts/verify-scanner-exclusions.sh` on 2.7.0 (S-779).
+- **`/logos:review` debt mode names a unit by its `node_id`.** A function or class unit's
+  `symbol` is its string `node_id` with the bare `name` beside it, the coverage lookup asks
+  for that id first, and a fix is proven only against the offender with the same id and
+  dimension, so a symbol of the same name and another id (a rename, a second one in the same
+  file) is never taken as the unit. A duplicate or near-clone group names no single symbol:
+  it carries its own reason and is matched to no offender. Against Logos 1.20.0-1.20.2,
+  whose unit ids are an integer or null, a unit falls back to name, file and dimension, two
+  matches of that name are not proven, and each script's denominator counts the units known
+  by id, the groups and the fallbacks. The minimum Logos stays 1.20.0 (S-786).
+- **A near-clone group driver's `node_id` now names the group, not a member.** In the
+  signal attribution of `review`, `gate`, `session_end` and the Health Signal change
+  widget, the driver that stands for a near-clone group carries the `clone_group:<digest>`
+  id its "where to start" unit carries (when that unit is ranked), and is named by the
+  same member (the first in identity order, not the first by file and line). Both depend
+  only on the member set, so a re-index or a reorder of the files leaves them as they
+  were; `members` still lists every member. Which groups survive the five-driver cap among
+  equal-size ones now follows the naming member's file and line. A group with a member
+  that has no identity carries a `null` `node_id`. A reader that looked a group driver up
+  as a symbol by its `node_id` now gets the group id, which resolves to no single symbol:
+  read the member from `members` (S-787).
+
+### Fixed
+
+- **An OSV-Scanner finding has one identity in any clone and at any scanner
+  version.** Its fingerprint is its rule and project-relative location (plus
+  region), never the report's `partialFingerprints`, which osv-scanner 2.x writes
+  and 1.x did not; and any finding reported by an absolute path under the project
+  root that binds to no indexed file is keyed by its project-relative path, so the
+  checkout's directory never enters a key. history.db migration 10 marks the
+  stored OSV-Scanner snapshots, and the next OSV-Scanner ingest re-keys their rows
+  in every snapshot and in the ratchet's baseline, each row listing its old key.
+  Every surface honours an old key: a fingerprint suppression written under one
+  still suppresses (no longer `orphaned`) and carries `should_name`, the key to
+  write; the ratchet, the checked-in baseline and the branch delta read a re-keyed
+  finding as the same finding. The checked-in baseline's `(rule id, path)` match
+  for an unbound finding stays for one release, for a file blessed before
+  migration 10. A path outside the project root keeps its report spelling.
+
+- **The git hooks sync every changed path exactly as git records it.** The
+  `post-commit`, `post-checkout` and `post-merge` hooks listed paths without
+  `-z`, so git C-quoted any name holding a non-ASCII byte, a quote or a tab
+  (`"caf\303\251.rs"`) and `logos sync` was handed a name that is no file; and
+  `post-checkout` and `post-merge` let `git diff` fold a rename into its new
+  path, so the old path's nodes stayed in the graph. The hooks now list
+  `-z --no-renames` and pass the NUL-separated paths straight to
+  `logos sync --quiet -- …`; an empty change set runs no sync, with that guard
+  in the hook's own shell rather than in GNU or BSD `xargs`.
+  **Existing installations keep the old scripts until re-installed: re-run
+  `logos init --hooks` (or `logos init -i`, answering yes to the hooks
+  question) once per repository.** Both
+  now rewrite a Logos-managed hook whose body differs from the current one
+  (`init` previously skipped any script already carrying the managed marker);
+  a script Logos did not write is still never touched.
+
+- **A secret found only in history is known by its own path, not by today's
+  files.** A history-mode Gitleaks finding's fingerprint is keyed by the path its
+  report gives at its commit, made relative to the project (in a workspace member
+  below the git root, the member's directory is taken off), never by the indexed
+  file that path binds to by suffix today. Adding or removing an unrelated file of
+  the same name (a root `client.py` beside a deleted `legacy/client.py`) no longer
+  re-keys the secret, orphans its suppression or makes the ratchet read it as new.
+  Whether the secret is still on its line is read at that same path, so a file
+  elsewhere holding identical text never binds it; a secret still present keys
+  alike in history and scoped scans. history.db migration 11 marks the stored
+  Gitleaks snapshots, and the next Gitleaks ingest re-keys their rows in every
+  snapshot and in the ratchet's baseline, each row listing its old key, which every
+  surface honours: a suppression, the `gate --save` baseline and a checked-in
+  baseline blessed before the migration stay green. A stored row is matched to
+  its finding by its place — rule, report path, commit and exact region — as
+  well as by the old key today's suffix binding gives, so the re-key holds
+  whatever files exist today. Only a clone with no stored rows (a fresh CI
+  checkout) relies on today's binding alone: there, a checked-in baseline or
+  ignore entry written while an unrelated same-named file was indexed, that file
+  since removed, no longer names the secret until it is re-blessed (`logos
+  security bless`) or the entry is rewritten with the finding's fingerprint.
+- **A gosec that cannot type the standard library says so.** Whatever its version, a
+  gosec run whose output holds `without types was imported` reads `failed`, never a
+  clean scan or `not_applicable`, and its cause names the gosec version, the local
+  `go version` and the remedy: a gosec release built for that Go, or a Go toolchain
+  gosec supports. `security status` reads the same cause from the failure log (S-782).
+- **The plugin guardrail reads a guarded word as the shell does.** A backslash-newline
+  inside a word was read as a blank, where the shell removes it and joins the word, so
+  `logos security bl\⏎ess`, `logos gate --sa\⏎ve` and `rm .logos/rules-base\⏎line.json`
+  ran without a question; they now ask. After `logos security …`, `logos gate` or
+  `logos check`, a variable, `${…}`, `$(…)` or backtick substitution where a subcommand
+  or option goes now asks (`S=bless; logos security $S`), an option's value included,
+  while one after a security subcommand (`logos security status $X`) passes. A writer
+  given a variable, or a redirection into one (`>`, `>|`, `>&`), asks when the same
+  command line assigns a value naming `.logos` (`F=.logos/rules.toml; rm $F`); a
+  reader given it passes (S-784).
+
+- **Security: `coverage refresh` asks for consent before it runs the committed
+  `refresh_cmd`.** `[coverage_ingest].refresh_cmd` is a shell command that lives in the
+  repository's `.logos/config.toml`, and `coverage refresh` (and MCP `coverage_refresh`) ran it
+  with no question, so a clone or a pull could change what ran. It now runs only under the
+  project's coverage execution consent, which states that a run builds the project and runs its
+  tests (the project's own code) and shows the command's exact text. **For existing users:** the
+  next `logos coverage refresh` exits 2 and starts nothing until you run `logos coverage refresh
+  --consent` (or `logos coverage run --consent`) in a terminal and accept the text it shows; the
+  MCP tool refuses with the same instruction and cannot record it. The consent pins the command by
+  the SHA-256 of its text, so it asks again, showing the new text, whenever the `refresh_cmd`
+  changes, and it is kept per project in the user-level `coverage-consent.toml`, never in the
+  repository. The Coverage page asks the same in a dialog. A coverage run no longer starts
+  without it on any surface (S-736, S-741).
+
 ## [1.20.5] — 2026-10-21
 
 ### Fixed

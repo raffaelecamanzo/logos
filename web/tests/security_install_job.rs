@@ -124,6 +124,7 @@ impl World {
                 user_dir: Some(self.user()),
                 search_path: Some(self.bin().into_os_string()),
                 tools_dir: Some(self.tools()),
+                nvd_api_key: None,
             })
             .with_tools_manifest(manifest.clone());
         let engine = Arc::new(engine);
@@ -311,7 +312,7 @@ fn scanner_script(tool: &str, version: &str) -> String {
         "#!/bin/sh\n\
          case \"$1\" in --version|version|-version) printf '%s\\n' '{tool} version {version}'; exit 0;; esac\n\
          out=''; prev=''\n\
-         for a in \"$@\"; do case \"$prev\" in --output|--report-path|-out) out=\"$a\";; esac; prev=\"$a\"; done\n\
+         for a in \"$@\"; do case \"$prev\" in --output|--output-file|--report-path|-out) out=\"$a\";; esac; prev=\"$a\"; done\n\
          if [ -n \"$out\" ]; then printf '%s' '{{\"version\":\"2.1.0\",\"runs\":[{{\"tool\":{{\"driver\":{{\"name\":\"{driver}\",\"rules\":[]}}}},\"results\":[]}}]}}' > \"$out\"; fi\n\
          exit 0\n"
     )
@@ -616,7 +617,7 @@ async fn beside_a_web_install_mcp_and_cli_scans_and_installs_are_refused_naming_
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let named = format!(
-            "a scanner install is already running on this project: job {job}, started from the web UI by Logos process {} ",
+            "a tool install is already running on this project: job {job}, started from the web UI by Logos process {} ",
             std::process::id()
         );
 

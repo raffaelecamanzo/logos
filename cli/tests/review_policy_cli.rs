@@ -4,8 +4,8 @@
 //! exit 1 and the gating entry, and `review --json` carries the bytes the Stop
 //! hook reads. A re-bless past `drift_budget` without `--reason` is exit 2
 //! too (S-755). A trend warning (S-756) moves no exit code of `scan`, `gate`
-//! or `review`. The verdicts themselves are
-//! `logos-core/tests/review_policy.rs`.
+//! or `review`, and `gate --json` carries it as a structured `trend` too
+//! (S-785). The verdicts themselves are `logos-core/tests/review_policy.rs`.
 //!
 //! [FR-GV-25]: ../../docs/specs/requirements/FR-GV-25.md
 //! [FR-GV-01]: ../../docs/specs/requirements/FR-GV-01.md
@@ -226,4 +226,45 @@ fn a_trend_warning_moves_no_exit_code() {
     assert_eq!(warned.map(|(_, n)| n), [1, 1], "{warned:?}");
     assert_eq!(quiet.map(|(_, n)| n), [0, 0], "{quiet:?}");
     assert_eq!(warned.map(|(code, _)| code), quiet.map(|(code, _)| code), "the same exit codes");
+}
+
+/// [CR-243] through the binary (S-785): `gate --json` carries the structured
+/// `trend` — the dimension, the Equality each `scan --json` reported, oldest
+/// first, and the window — beside the warning spelled from it; without the
+/// table the key is absent.
+///
+/// [CR-243]: ../../docs/requests/CR-243-governance-signals-reach-every-surface.md
+#[test]
+fn gate_json_carries_the_structured_trend_beside_its_warning() {
+    let w = World::new();
+    w.rules("[review]\n");
+    let base: String = (0..40).map(|i| branches(&format!("f{i}"), 2)).collect();
+    let mut values = Vec::new();
+    for extra in 0..3 {
+        let added: String = (0..extra).map(|i| branches(&format!("g{i}"), 6 + i)).collect();
+        fs::write(w.root.join("src/lib.rs"), format!("{base}{added}")).unwrap();
+        let out = w.logos(&["--json", "scan"]);
+        let scan: Value = serde_json::from_slice(&out.stdout).unwrap();
+        values.push(scan["metrics"]["equality"]["normalized"].clone());
+    }
+
+    let out = w.logos(&["--json", "gate"]);
+    let gate: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(gate["trend"], serde_json::json!([{"dimension": "equality", "values": values, "window": 2}]), "{gate}");
+    // The warning's values are the trend's, compared as printed: a parsed JSON
+    // float may read back one bit off, so the text is the evidence.
+    let warning = &trend(&gate)[0];
+    let chain = warning.split(": ").nth(1).and_then(|c| c.split(" (").next()).unwrap_or_default();
+    let printed: Vec<String> = chain
+        .split(" → ")
+        .map(|v| serde_json::to_string(&v.parse::<f64>().expect("a number")).unwrap())
+        .collect();
+    assert_eq!(printed.len(), 3, "{warning}");
+    let raw: String = String::from_utf8(out.stdout).unwrap().split_whitespace().collect();
+    assert!(raw.contains(&format!("\"values\":[{}],\"window\":2", printed.join(","))), "{warning} vs {raw}");
+
+    fs::remove_file(w.root.join(".logos/rules.toml")).unwrap();
+    let out = w.logos(&["--json", "gate"]);
+    let gate: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(gate.get("trend").is_none() && trend(&gate).is_empty(), "{gate}");
 }

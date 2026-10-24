@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
-import { NAV_GROUPS, NAV_ITEMS, navItemsFor, WORKSPACE_NAV_ITEMS } from "../nav.ts";
+import { NAV_GROUPS, navItemsFor, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import type { ExtensionNavEntry } from "../api/extensionsClient.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../extensions/registry.ts";
 import { extensionsInfo, STUB_ID, StubAppView, StubIcon, StubView, stubInfo } from "../test/extensions.tsx";
@@ -14,6 +14,15 @@ import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 // PARTIAL, not whole: the shell calls more of the router than this spec overrides
 // (S-426 added `currentUrl`/`replaceUrl`, which a member switch writes the URL
 // through). A whole-module mock silently under-supplies the module as it grows.
+/** Routes a test withdraws the view from, over the real route list: since S-740
+ *  registered the last built-in view, no built-in entry reaches S-788's "an entry
+ *  no view owns is not offered" filters, so a test makes one. Cleared after each. */
+const { UNREGISTERED } = vi.hoisted(() => ({ UNREGISTERED: new Set<string>() }));
+vi.mock("../views/routes.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../views/routes.ts")>();
+  return { ...real, hasViewFor: (pathname: string) => !UNREGISTERED.has(pathname) && real.hasViewFor(pathname) };
+});
+
 vi.mock("../router.tsx", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../router.tsx")>()),
   navigate: vi.fn(),
@@ -198,13 +207,69 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
         .getAllByRole("link")
         .map((a) => a.textContent);
 
-    // The app-scoped tabs, above the boundary the selector governs…
-    expect(names("Workspace")).toEqual(WORKSPACE_NAV_ITEMS.map((i) => i.label));
+    // The app-scoped tabs, above the boundary the selector governs. A literal roster
+    // (S-788): the Coverage entry is rendered since S-740 registered its view…
+    expect(names("Workspace")).toEqual([
+      "Dashboard",
+      "Workspace",
+      "Health",
+      "Security",
+      "Coverage",
+      "Statistics",
+      "Config",
+    ]);
     // …and every member-scoped tab below it. Same order as the single-root
     // sidebar: the CR-042 A/B/C groups survive INSIDE the section rather than
     // being re-ordered by it — less the Architecture view, which the
     // hidden-widget register hides (CR-208).
-    expect(names("Service")).toEqual(NAV_ITEMS.filter((i) => i.id !== "architecture").map((i) => i.label));
+    expect(names("Service")).toEqual([
+      "Dashboard",
+      "Health",
+      "Security",
+      "Coverage",
+      "Graph",
+      "Rule findings",
+      "Files & Risk",
+      "Statistics",
+      "Config",
+    ]);
+  });
+
+  it("renders the Workspace section's Coverage between Security and Statistics, its view registered (S-788, S-740)", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /^Workspace$/ });
+
+    const links = within(region("Workspace")).getAllByRole("link");
+    expect(links.map((a) => a.textContent)).toEqual([
+      "Dashboard",
+      "Workspace",
+      "Health",
+      "Security",
+      "Coverage",
+      "Statistics",
+      "Config",
+    ]);
+    expect(links[4]).toHaveAttribute("href", "/workspace-coverage");
+    // …with its icon, like every other entry of the section.
+    expect(links[4].querySelector("svg")).not.toBeNull();
+    // Filed Dashboard, Workspace, Health | Security, Coverage | Statistics, Config
+    // (FR-UI-55): three lists in the markup, whatever the stylesheet draws between them.
+    expect(
+      within(region("Workspace"))
+        .getAllByRole("list")
+        .map((ul) => within(ul).getAllByRole("listitem").length),
+    ).toEqual([3, 2, 2]);
+    // One Coverage per section, never a second beside it.
+    expect(within(region("Workspace")).getAllByRole("link", { name: /^Coverage$/ })).toHaveLength(1);
+  });
+
+  it("renders no workspace-coverage entry while no view owns its route (S-788)", async () => {
+    UNREGISTERED.add("/workspace-coverage");
+    onTestFinished(() => UNREGISTERED.clear());
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /^Workspace$/ });
+    expect(within(region("Workspace")).queryByRole("link", { name: /^Coverage$/ })).toBeNull();
+    expect(document.querySelector('a[href="/workspace-coverage"]')).toBeNull();
   });
 
   it("keeps each section's CR-042 groups as separate lists in the markup (S-454)", async () => {
@@ -223,7 +288,9 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     const groupSizes = (items: readonly { group: string }[]) =>
       NAV_GROUPS.map((g) => items.filter((i) => i.group === g).length).filter((n) => n > 0);
 
-    expect(lists("Workspace")).toEqual(groupSizes(WORKSPACE_NAV_ITEMS));
+    expect(lists("Workspace")).toEqual(
+      groupSizes(navItemsFor(true).filter((i) => i.scope === "app")),
+    );
     expect(lists("Service")).toEqual(
       groupSizes(navItemsFor(true).filter((i) => i.scope === "member")),
     );
@@ -480,7 +547,8 @@ describe("the app-scoped Statistics tab (S-429, FR-UI-37)", () => {
     await screen.findByRole("link", { name: /^Workspace$/ });
 
     for (const [scope, roster] of [
-      ["Workspace", WORKSPACE_NAV_ITEMS],
+      // What the Workspace section renders (an entry with no registered view is not).
+      ["Workspace", navItemsFor(true).filter((i) => i.scope === "app")],
       // What a workspace's Service section renders (less any replaced member entry).
       ["Service", navItemsFor(true).filter((i) => i.scope === "member")],
     ] as const) {

@@ -12,8 +12,16 @@
  * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
-import type { StatusInfo } from "../../api/types.ts";
+import type {
+  OverviewSecurity,
+  SecurityFindingTally,
+  SecurityGateBand,
+  SecuritySeverityCounts,
+  SecuritySummary,
+  StatusInfo,
+} from "../../api/types.ts";
 import type { ScoreBarTone } from "../../components/index.ts";
+import { plural } from "../../copy/types.ts";
 
 // ── BR-34 advisory quality bands (frontend-design §4.1) ──────────────────────
 
@@ -146,4 +154,60 @@ export function freshnessStatement(status: StatusInfo, nowUnix: number): string 
     phrase = "Index present";
   }
   return `${phrase} — ${caveat}`;
+}
+
+// ── The Security widget (S-789, FR-UI-09) ────────────────────────────────────
+
+/** What the Security widget states, decided from `overview.security` alone. */
+export type SecurityWidgetState =
+  /** The read failed: stated with its cause, never shown as zero findings. */
+  | { kind: "fault"; error: string }
+  /** Nothing ever scanned and no scanner is consented to: names the consent command. */
+  | { kind: "no_consent" }
+  /** Nothing ever scanned: names the scan command. */
+  | { kind: "never_scanned" }
+  /** A report is stored: its counts, current or not. */
+  | { kind: "scanned"; summary: SecuritySummary; counted: SecuritySeverityCounts };
+
+/** The state the widget renders. A fault outranks everything, and a project with
+ *  no stored report has no count at all — `tally` is `null` then (BR-66), which
+ *  is read as the absence it is, never as zero. */
+export function securityState(security: OverviewSecurity): SecurityWidgetState {
+  const { summary, error } = security;
+  if (error !== null) return { kind: "fault", error };
+  if (summary === null) return { kind: "fault", error: "the overview carried no security state" };
+  if (summary.tally === null || summary.scan === "never_run") {
+    return summary.consent.consented.length === 0 ? { kind: "no_consent" } : { kind: "never_scanned" };
+  }
+  return { kind: "scanned", summary, counted: summary.tally.counted };
+}
+
+/** *N of M scanners* whose last scan failed. */
+export function scannersFailedStatement(summary: SecuritySummary): string {
+  return `${summary.scanners_failed} of ${summary.scanners_total} ${plural(summary.scanners_total, "scanner", "scanners")}`;
+}
+
+/** The newest stored scan as a relative age, `unknown` phrases included. */
+export function newestScanStatement(summary: SecuritySummary, nowUnix: number): string {
+  return summary.newest_scan_at === null ? "none stored" : humanizeAge(nowUnix, summary.newest_scan_at);
+}
+
+/** The `[security]` gate verdict in words; `null` when no table is configured, so
+ *  the widget states that absence instead. */
+export function gateStatement(gate: SecurityGateBand | null): string | null {
+  if (gate === null) return null;
+  if (gate.passed) return `passes ${gate.checked_rules} ${plural(gate.checked_rules, "rule", "rules")}`;
+  const violations = gate.violations.length;
+  const missing = gate.missing_scans.length;
+  const reasons = [
+    ...(violations > 0 ? [`${violations} ${plural(violations, "finding", "findings")} fail a rule`] : []),
+    ...(missing > 0 ? [`${missing} required ${plural(missing, "scan", "scans")} missing`] : []),
+  ];
+  return reasons.length > 0 ? `fails: ${reasons.join(", ")}` : "fails";
+}
+
+/** How many more findings lie in test code, which the counts leave out
+ *  (FR-SC-28, S-795); `null` when none do. */
+export function testCodeStatement(tally: SecurityFindingTally): string | null {
+  return tally.excluded.test > 0 ? `${fmtInt(tally.excluded.test)} more in test code` : null;
 }

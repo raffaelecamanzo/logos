@@ -107,6 +107,15 @@ export function gateBaselineReason(reason: string): CopyText {
   return ["The ", gloss("baseline"), ` was saved with the reason: “${reason}”`];
 }
 
+/** One line under the Gate figure per dimension in decline (FR-GV-27, S-785):
+ *  the CLI's trend warning, word for word, built from the gate result's
+ *  structured `trend`. Every value arrives formatted. Advisory — it never
+ *  moves the verdict, and says so. */
+export function gateTrend(t: { dimension: string; values: string[]; window: number }): string {
+  const plural = t.window === 1 ? "" : "s";
+  return `${t.dimension} declined at each of the last ${t.window} recorded snapshot${plural} that moved it: ${t.values.join(" → ")} (review.trend_window = ${t.window}); a trend warning, never a failure`;
+}
+
 // ── Signal change (FR-GV-26, S-755) ──────────────────────────────────────────
 
 export const signalChange: CopyEntry = {
@@ -144,9 +153,10 @@ export function signalChangeDriversNotNamed(reason: string): string {
   return `No driving symbols named: ${reason}.`;
 }
 
-/** A near-clone group as a driver: its members, by name. */
-export function nearCloneGroupDriver(members: readonly string[]): CopyText {
-  return [gloss("nearClone", "Near-clone"), ` group of ${members.length}: ${members.join(", ")}`];
+/** A near-clone group as a driver: the member that names it (the one its
+ *  where-to-start unit is named by), then its members, by name. */
+export function nearCloneGroupDriver(name: string, members: readonly string[]): CopyText {
+  return [gloss("nearClone", "Near-clone"), ` group of ${members.length}, named by ${name}: ${members.join(", ")}`];
 }
 
 /** The tail of a capped driver list. */

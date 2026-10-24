@@ -5,7 +5,7 @@
 #   sec-proof.sh --triage FILE --delta FILE --rescan FILE --entry ID [--entry ID ...] [--project DIR]
 #
 # Reads the stored findings of the scanner and file of each fix entry
-# (`logos security findings --json --scanner --path`) after sec-rescan.sh stored
+# (`logos security findings --json [--scope all] --scanner --path`) after sec-rescan.sh stored
 # the re-scan, and holds three things for each:
 #
 #   - the re-scan covered the file, and the file has not changed since it
@@ -52,5 +52,6 @@ done
 
 rv_need_python
 rv_need_logos "$PROJECT"
+sr_scope_args
 
-sr_py proof --triage "$TRIAGE" --delta "$DELTA" --rescan "$RESCAN" "${ENTRY_ARGS[@]}" --logos "$LOGOS_BIN" --project "$PROJECT"
+sr_py proof --triage "$TRIAGE" --delta "$DELTA" --rescan "$RESCAN" "${ENTRY_ARGS[@]}" --logos "$LOGOS_BIN" --project "$PROJECT" ${SR_SCOPE_ARGS[@]+"${SR_SCOPE_ARGS[@]}"}

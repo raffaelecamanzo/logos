@@ -86,6 +86,8 @@ const { APP_ROUTES, pathname } = vi.hoisted(() => ({
     "/workspace-statistics",
     "/workspace-config",
     "/workspace-security",
+    // S-740: the Coverage roll-up, once its view is registered.
+    "/workspace-coverage",
     // The stub extension's app entry (S-485's replacement shape) — app-scoped, so a
     // member switch must not remount it.
     "/stub-app",

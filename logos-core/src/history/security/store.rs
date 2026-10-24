@@ -36,8 +36,17 @@
 //!   exactly as it was then, never a position match — onto the secret-keyed one, and
 //!   re-keys every stored row of the scanner and every baseline fingerprint
 //!   under an old key, so a store written before the migration reads, and
-//!   ratchets, under the new identity. The committed ignore file is never
-//!   rewritten: [`super::label`] names the fingerprint an entry should name.
+//!   ratchets, under the new identity. An OSV-Scanner ingest does the same
+//!   from the key each result had before migration 10 — its absolute path and
+//!   its report's identity — onto its location key, and so does any ingest
+//!   whose unbound absolute path under the root moved its key; a Gitleaks
+//!   ingest, too, from the key each history-mode result had before migration
+//!   11 — keyed by the file its report path bound to by suffix — onto the one
+//!   its own project-relative path gives; a row stored before migration 11
+//!   whose old binding today's index no longer gives is matched by its place
+//!   instead ([`pre11_places`]). The committed
+//!   ignore file is never rewritten: an entry under an old key still applies,
+//!   and [`super::label`] names the fingerprint it should name.
 //! - **A history-mode row** records the commit whose place it is
 //!   (`anchor_commit`, migration 8), and is bound to its file only where the
 //!   secret is still on its line; otherwise it is stored `historical`, with no
@@ -90,15 +99,30 @@ pub(crate) struct FindingRow {
     pub(crate) anchor_commit: Option<String>,
     /// The commits the secret was found in, newest first (migration 7).
     pub(crate) commits: Vec<String>,
-    /// The report keys its results had before migration 7, sorted; empty for a
-    /// row keyed by its report, as every row stored before migration 7 is.
+    /// The keys its results had before a re-key, sorted: the report keys of a
+    /// secret-keyed row (migration 7) and, for a history-mode one, its secret
+    /// key before migration 11 where it differs, or a report-keyed row's keys
+    /// before migrations 10 and 11 where they differ; empty for a row keyed as
+    /// it always was, as every row stored before migration 7 is.
     pub(crate) legacy_fingerprints: Vec<String>,
+    /// Every `(commit, region)` a history-mode finding's results report at its
+    /// report path, which is how a row stored before migration 11 is matched
+    /// to it ([`pre11_places`]); empty for any other row. Never stored.
+    pub(crate) places: Vec<(String, Region)>,
 }
 
 impl FindingRow {
-    /// Keyed by its report rather than by its secret: every row of a scanner
-    /// other than Gitleaks, and a Gitleaks row stored before migration 7 or
-    /// whose secret could not be read.
+    /// Keyed by its report rather than by its secret, and never re-keyed:
+    /// every row of a scanner other than Gitleaks, and a Gitleaks row stored
+    /// before migration 7 and not re-keyed since. Asked only of a Gitleaks
+    /// row, where a legacy key marks a row keyed under an identity Logos has
+    /// moved to — by its secret, or by its report where its secret could not
+    /// be read and its key still moved: an unbound absolute path (migration
+    /// 10), or any history-mode result, whose report key has a namespace of
+    /// its own since migration 11. Such a row is matched by its key alone,
+    /// never by position ([`matches_kept`]): a scoped finding of a secret its
+    /// full scan could not read (a commit missing from this clone) is stored
+    /// beside it, marked `scoped`, and reads as new.
     pub(crate) fn report_keyed(&self) -> bool {
         self.legacy_fingerprints.is_empty()
     }
@@ -187,6 +211,8 @@ pub(crate) fn persist_ingest(
     for (batch, prior) in batches.iter().zip(existing) {
         // Read before the delete below, which may drop that very snapshot.
         let carried = scope.map(|scope| carried_outside(&tx, &batch.name, scope)).transpose()?;
+        let placed = pre11_places(&tx, &batch.name, &batch.findings)?;
+        let known = latest_legacy(&tx, &batch.name)?;
         let replaced = prior.is_some();
         if let Some((id, _)) = prior {
             // Same HEAD, same scanner: replace. The cascade drops its files and
@@ -231,11 +257,12 @@ pub(crate) fn persist_ingest(
             .filter(|(i, f)| !matched.contains(i) && carried_findings.iter().all(|c| c.fingerprint != f.fingerprint))
             .map(|(_, f)| f)
             .collect();
-        let renamed: std::collections::BTreeMap<String, String> = batch
+        let mut renamed: std::collections::BTreeMap<String, String> = batch
             .findings
             .iter()
             .flat_map(|f| f.legacy_fingerprints.iter().map(|old| (old.clone(), f.fingerprint.clone())))
             .collect();
+        renamed.extend(placed.iter().map(|(old, new)| (old.clone(), new.clone())));
         let anchored: Vec<&str> = batch.files.iter().map(|(path, _)| path.as_str()).collect();
 
         {
@@ -263,7 +290,11 @@ pub(crate) fn persist_ingest(
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 )
                 .context("preparing the security finding insert")?;
+            let keys: std::collections::HashSet<&str> = batch.findings.iter().map(|f| f.fingerprint.as_str()).collect();
             for f in fresh.into_iter().chain(carried_findings) {
+                let mut legacy: std::collections::BTreeSet<&str> = f.legacy_fingerprints.iter().map(String::as_str).collect();
+                legacy.extend(placed.iter().filter(|(_, new)| **new == f.fingerprint).map(|(old, _)| old.as_str()));
+                legacy.extend(known.get(&f.fingerprint).into_iter().flatten().map(String::as_str).filter(|old| !keys.contains(old)));
                 finding_stmt
                     .execute(rusqlite::params![
                         snapshot_id,
@@ -282,7 +313,7 @@ pub(crate) fn persist_ingest(
                         f.region.end_column,
                         f.scoped,
                         f.commits.join(","),
-                        f.legacy_fingerprints.join(","),
+                        legacy.into_iter().collect::<Vec<_>>().join(","),
                         f.anchor_commit,
                     ])
                     .with_context(|| format!("inserting finding {} ({})", f.fingerprint, f.rule_id))?;
@@ -345,6 +376,7 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
                     anchor_commit: row.get(16)?,
                     commits: Vec::new(),
                     legacy_fingerprints: Vec::new(),
+                    places: Vec::new(),
                 },
             ))
         })
@@ -375,7 +407,7 @@ fn split_list(stored: &str) -> Vec<String> {
 }
 
 /// Re-key every stored row of `scanner`, in every snapshot, and every baseline
-/// fingerprint, whose key is an old one `renamed` maps (migration 7). A row
+/// fingerprint, whose key is an old one `renamed` maps (migrations 7, 10 and 11). A row
 /// re-keyed onto a key its snapshot already holds is merged into that row: the
 /// per-commit repeats of one secret stored before the migration become one.
 /// Each re-keyed row records the key it had as a legacy fingerprint.
@@ -447,6 +479,95 @@ fn rekey(tx: &rusqlite::Transaction<'_>, scanner: &str, renamed: &std::collectio
             .context("dropping a re-keyed baseline fingerprint")?;
     }
     Ok(())
+}
+
+/// The old keys each finding of `scanner`'s latest snapshot is also known by,
+/// by its key. An ingest keeps them on the same finding, so a key recovered
+/// once — by its place, from a row stored before migration 11 that no later
+/// report recomputes — still matches a suppression or a checked-in baseline
+/// at the next HEAD. One that is a key of the ingest itself is not kept.
+///
+/// # Errors
+/// A statement failure.
+fn latest_legacy(
+    tx: &rusqlite::Transaction<'_>,
+    scanner: &str,
+) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT fingerprint, legacy_fingerprints FROM security_findings
+              WHERE legacy_fingerprints != ''
+                AND snapshot_id = (SELECT MAX(id) FROM security_snapshots WHERE scanner_name = ?1)",
+        )
+        .context("preparing the latest snapshot's old-key read")?;
+    let rows = stmt
+        .query_map([scanner], |row| Ok((row.get::<_, String>(0)?, split_list(&row.get::<_, String>(1)?))))
+        .context("reading the latest snapshot's old keys")?
+        .collect::<rusqlite::Result<_>>()
+        .context("collecting the latest snapshot's old keys")?;
+    Ok(rows)
+}
+
+/// The rows of `scanner`'s snapshots stored before history.db migration 11
+/// (report hash marked `pre-11:`) that are history-mode findings of this
+/// ingest under another key, as `old key → new key`. Such a row was keyed by
+/// the file its report path bound to by suffix then, a binding never stored
+/// and not always given again by today's index; but its rule, report path,
+/// commit and exact region name one Gitleaks match in an immutable blob, so
+/// the finding with a result at that very place is the row's finding ([S-780],
+/// CR-241). A row already under a key of this ingest is left alone.
+///
+/// [S-780]: ../../../../docs/planning/journal.md#s-780-a-secret-found-only-in-history-is-known-by-its-own-path-not-by-todays-files
+///
+/// # Errors
+/// A statement failure.
+fn pre11_places(
+    tx: &rusqlite::Transaction<'_>,
+    scanner: &str,
+    findings: &[FindingRow],
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut placed = std::collections::BTreeMap::new();
+    if findings.iter().all(|f| f.places.is_empty()) {
+        return Ok(placed);
+    }
+    let current: std::collections::HashSet<&str> = findings.iter().map(|f| f.fingerprint.as_str()).collect();
+    let mut stmt = tx
+        .prepare(
+            "SELECT f.fingerprint, f.rule_id, f.report_path, f.anchor_commit,
+                    f.start_line, f.start_column, f.end_line, f.end_column
+               FROM security_findings f JOIN security_snapshots s ON s.id = f.snapshot_id
+              WHERE s.scanner_name = ?1 AND s.report_hash LIKE 'pre-11:%'
+                AND f.anchor_commit IS NOT NULL AND f.report_path IS NOT NULL",
+        )
+        .context("preparing the pre-migration-11 place read")?;
+    let rows = stmt
+        .query_map([scanner], |row| {
+            let region = Region {
+                start_line: row.get(4)?,
+                start_column: row.get(5)?,
+                end_line: row.get(6)?,
+                end_column: row.get(7)?,
+            };
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, region))
+        })
+        .context("reading the pre-migration-11 places")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collecting the pre-migration-11 places")?;
+    for (old, rule_id, report_path, commit, region) in rows {
+        if current.contains(old.as_str()) {
+            continue;
+        }
+        let report_path = super::normalise_report_path(&report_path);
+        let found = findings.iter().find(|f| {
+            f.rule_id == rule_id
+                && f.report_path.as_deref().map(super::normalise_report_path).as_deref() == Some(report_path.as_str())
+                && f.places.iter().any(|(c, r)| *c == commit && *r == region)
+        });
+        if let Some(f) = found {
+            placed.insert(old, f.fingerprint.clone());
+        }
+    }
+    Ok(placed)
 }
 
 /// What a scoped ingest copies from a scanner's latest snapshot: the rows
