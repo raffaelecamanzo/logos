@@ -129,6 +129,7 @@ fn project() -> Project {
         user_dir: Some(user),
         search_path: Some(bin.into_os_string()),
         tools_dir: None,
+        nvd_api_key: None,
     };
     Project { _tmp: tmp, root, reports, env }
 }

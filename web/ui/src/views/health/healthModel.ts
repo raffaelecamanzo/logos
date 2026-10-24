@@ -498,6 +498,9 @@ export function optDelta(value: number | null, fractionDigits?: number): string 
  *  group by its members' names. */
 export interface ChangeDriver {
   readonly name: string;
+  /** The driver's `node_id`: a symbol's, or a near-clone group's own
+   *  `clone_group:<digest>` (the id its where-to-start unit carries). */
+  readonly nodeId: string | null;
   readonly status: string;
   readonly location: string;
   /** A near-clone group's member names; `null` for a symbol. */
@@ -523,12 +526,53 @@ export function changeRows(attribution: SignalAttribution): ChangeRow[] {
       points: c.points,
       drivers: c.drivers.map((d) => ({
         name: d.name,
+        nodeId: d.node_id,
         status: d.status,
         location: unitLocation(d.file, d.line),
         members: d.members === undefined ? null : d.members.map((m) => m.name),
       })),
       more: c.driver_count - c.drivers.length,
     }));
+}
+
+/** One dimension in decline as the Gate states it (FR-GV-27, S-785): its name,
+ *  its values oldest first, each spelled exactly, and the window. */
+export interface TrendLine {
+  readonly dimension: string;
+  readonly values: string[];
+  readonly window: number;
+}
+
+/** The gate result's structured `trend`, in its own order; `[]` without a
+ *  `[review]` table. Read from the fields, never parsed out of `warnings`. */
+export function trendLines(gate: Pick<GateResult, "trend">): TrendLine[] {
+  return (gate.trend ?? []).map((t) => ({
+    dimension: t.dimension,
+    values: t.values.map(exactDecimal),
+    window: t.window,
+  }));
+}
+
+/**
+ * A number as its shortest exact decimal, never in exponent form — the spelling
+ * the CLI's trend warning prints (Rust's `f64` display), so a value just past the
+ * noise floor reads back as recorded rather than rounded into its neighbour.
+ * `String(n)` already is that spelling outside the exponent ranges; inside them
+ * its digits are moved across the decimal point.
+ *
+ * One case differs: a value exactly halfway between two shortest spellings — a
+ * dyadic `k/2^p` whose exact expansion is one digit longer than the shortest —
+ * ends in the even digit here and in the higher one in Rust (`0.5000076293945312`
+ * vs `…313`). A measured value with a full mantissa never lands on such a tie.
+ */
+export function exactDecimal(n: number): string {
+  const s = String(n);
+  const m = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(s);
+  if (m === null) return s;
+  const [, sign, lead, frac = "", exp] = m;
+  const e = Number(exp);
+  if (e < 0) return `${sign}0.${"0".repeat(-e - 1)}${lead}${frac}`;
+  return `${sign}${lead}${frac}${"0".repeat(e - frac.length)}`;
 }
 
 /** A signed figure to two decimals (`+0.41`, `-2.28`); `—` when absent. */

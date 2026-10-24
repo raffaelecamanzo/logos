@@ -15,6 +15,14 @@
  * figure rows and name the ingest command — no centred empty state, since the
  * view still has widgets.
  *
+ * S-739 (FR-CV-15, FR-CV-13, frontend-design §4.10): the Coverage tools widget
+ * leads the stack — each tool's state, Run coverage and Cancel, and the run's
+ * streamed progress (`ToolStatusWidget`, `CoverageRunPanel`). The empty state
+ * offers Run coverage beside the ingest command while a tool here can run, and
+ * says which tools would apply while none is installed. When a run this page
+ * followed ends, the page reloads, so every figure shows what it ingested, and the
+ * run is shown ended only once that reload has landed (HF-6).
+ *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
  * the closed sentinel vocabulary and the rules (R0-R5) every absence-
@@ -23,7 +31,7 @@
  */
 
 import { AsyncResource, fetchCoverage, useApiResource } from "../../api/index.ts";
-import type { CoverageFileStatus, CoverageModel, Hotspot } from "../../api/types.ts";
+import type { CoverageFileStatus, CoverageModel, CoverageToolStatus, Hotspot } from "../../api/types.ts";
 import {
   Badge,
   Callout,
@@ -34,11 +42,19 @@ import {
   WidgetStack,
   type Column,
 } from "../../components/index.ts";
-import { COVERAGE_VIEW_ABSENCE, perFileCoverage, untestedHotspots } from "../../copy/coverageView.copy.ts";
+import {
+  COVERAGE_RUN_TEXT,
+  COVERAGE_VIEW_ABSENCE,
+  perFileCoverage,
+  untestedHotspots,
+} from "../../copy/coverageView.copy.ts";
 import { withRankCommand } from "../../copy/files.copy.ts";
 import { plural } from "../../copy/types.ts";
 import { pctBp } from "./analyticsModel.ts";
 import { CoverageCellView, Na } from "./cells.tsx";
+import { RunButton, useCoverageRun, type CoverageRunHandle } from "./CoverageRunPanel.tsx";
+import { listedTools } from "./coverageRunModel.ts";
+import { ToolStatusWidget } from "./ToolStatusWidget.tsx";
 import styles from "./AnalyticsView.module.css";
 
 const UNTESTED_COLUMNS: Column<Hotspot>[] = [
@@ -91,13 +107,34 @@ export function CoverageView() {
   const coverage = useApiResource<CoverageModel>(() => fetchCoverage(), []);
   return (
     <AsyncResource resource={coverage} loadingLabel="Loading coverage…">
-      {(model) => <CoverageContent model={model} />}
+      {(model) => <CoverageContent model={model} reload={coverage.reload} />}
     </AsyncResource>
   );
 }
 
-function CoverageContent({ model }: { model: CoverageModel }) {
+/** The empty state's run offer: Run coverage while a tool here can run, else
+ *  the tools that would apply and are not installed (none: nothing to say), and
+ *  whether the widget offers to set any of them up (S-750). */
+function EmptyRunOffer({ tools, run }: { tools: readonly CoverageToolStatus[]; run: CoverageRunHandle }) {
+  if (run.canRun || run.running) {
+    return (
+      <p>
+        {COVERAGE_RUN_TEXT.emptyRun} <RunButton run={run} />
+      </p>
+    );
+  }
+  const missing = listedTools(tools).filter((t) => t.state === "not_installed");
+  const offered = missing.some((t) => t.offer !== undefined);
+  return missing.length > 0 ? <p>{COVERAGE_RUN_TEXT.noneInstalled(missing.map((t) => t.tool), offered)}</p> : null;
+}
+
+function CoverageContent({ model, reload }: { model: CoverageModel; reload: () => Promise<void> }) {
   const { coverage, untested } = model;
+  const tools = coverage.runner?.tools ?? [];
+  const run = useCoverageRun({ tools, consentedBefore: (coverage.runner?.consent.consented.length ?? 0) > 0, onFinished: reload });
+  // The page's read of the status carries the runner; a read without it has no
+  // tool to show, so the widget is left out rather than claiming none applies.
+  const toolWidget = coverage.runner ? <ToolStatusWidget tools={tools} run={run} /> : null;
 
   // No coverage ingested → the read-model's own `n/a` notice; each widget states
   // the absence and names the producing command ([FR-CV-06], NFR-CC-04).
@@ -106,7 +143,9 @@ function CoverageContent({ model }: { model: CoverageModel }) {
       <WidgetStack>
         <Callout label="Coverage" tone="muted">
           <Na /> — no data ingested
+          {coverage.runner && <EmptyRunOffer tools={tools} run={run} />}
         </Callout>
+        {toolWidget}
         <Widget
           title="Untested hotspots"
           copy={untestedHotspots}
@@ -134,6 +173,7 @@ function CoverageContent({ model }: { model: CoverageModel }) {
           {coverage.formats.join(", ")}] · <span className="mono">HEAD {head}</span>
         </span>
       </Callout>
+      {toolWidget}
 
       {untested.ranked_files === 0 ? (
         // Nothing was ranked (no git history, a shallow clone…): an empty board

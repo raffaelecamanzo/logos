@@ -49,7 +49,8 @@
 //! merge-base tree is never scanned:
 //!
 //! - a scanner whose report was **recorded at the merge-base** is compared by
-//!   fingerprint: absent there is `introduced`; present there and inside a
+//!   fingerprint, a key a finding had before a re-key included: absent there
+//!   is `introduced`; present there and inside a
 //!   hunk the branch changed is `touched`. A region-keyed fingerprint moves
 //!   with its line, so a new fingerprint outside every hunk that has a
 //!   vanished merge-base twin (same scanner, rule and file) is that finding,
@@ -86,7 +87,8 @@ use crate::history::{SecurityFinding, FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_S
 use crate::hydrate::{build_view, Granularity};
 use crate::metrics::SignalTerms;
 use crate::models::quality::{
-    BeforeStateCache, BranchReview, BranchShare, BranchesProjection, CloneGroupMember, DriftReference, DriverMember,
+    BeforeStateCache, BranchReview, BranchShare, BranchesProjection, CloneGroupMember, DimensionTrend, DriftReference,
+    DriverMember,
     ExceededLimit, GateResult, IntroducedCloneGroup, MetricSnapshot, Offender, ProjectedBranch,
     ProjectedDrift, ReviewPolicy, ReviewStatus, ReviewedOffender, ReviewedViolation, SecurityDelta,
     SecurityDeltaEntry, SecurityDeltaScanner, SecurityDeltaStatus, SignalAttribution, SignalDrift,
@@ -98,12 +100,15 @@ use crate::runtime::Runtime;
 use crate::security::context::FindingContext;
 
 use super::attribution::{attribute, Drivers};
+use super::ratchet::{BlessedSet, BLESSED_FILE_REL};
 use super::thin_graph::{absence_tag, ThinGraph};
 use super::{
     append_detail, effective_thresholds, evolution_point, load_rules_cached, member_access_extensions,
     metric_snapshot_from_row, quality_runtime, rematerialise, CompiledRules, SecurityEvidence, StoreFacts,
     METRIC_NAMES, METRIC_NOISE, SCOPE_PROJECT,
 };
+
+pub(super) mod headroom;
 
 /// The cache directory, relative to the project root. Ignored by the managed
 /// `.logos/.gitignore` block.
@@ -521,20 +526,32 @@ pub(super) fn drift_message(d: &SignalDrift) -> String {
     }
 }
 
-/// The trend warnings `scan`, `gate` and `review` carry under a `[review]`
-/// `policy` ([FR-GV-27]): [`declining_dimensions`] over every recorded
-/// snapshot. Advisory — no caller moves a verdict or an exit code by it.
+/// The trend warnings `scan` and `review` carry under a `[review]` `policy`
+/// ([FR-GV-27]): each [`trend`] entry's warning, over every recorded snapshot.
+/// Advisory — no caller moves a verdict or an exit code by it.
 ///
 /// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
 pub(super) fn trend_warnings(runtime: &Runtime, policy: &ReviewRules) -> Result<Vec<String>> {
-    let rows = runtime.submit_read(|store| store.metric_snapshots())?;
+    Ok(trend(runtime, policy, None)?.iter().map(DimensionTrend::warning).collect())
+}
+
+/// The dimensions in decline under a `[review]` `policy` ([FR-GV-27]):
+/// [`declining_dimensions`] over the recorded snapshots — every one, or, with
+/// `through`, only those up to that snapshot id, so a snapshot recorded after
+/// the one a verdict judged never enters its trend. A pure read.
+///
+/// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+pub(super) fn trend(runtime: &Runtime, policy: &ReviewRules, through: Option<i64>) -> Result<Vec<DimensionTrend>> {
+    let rows = runtime.submit_read(move |store| match through {
+        Some(id) => store.metric_snapshots_through(id),
+        None => store.metric_snapshots(),
+    })?;
     Ok(declining_dimensions(&rows, policy.trend_window))
 }
 
-/// One warning per distributional dimension ([BR-95]) that declined in each
-/// of the last `window` steps of the series that moved it, in canonical metric
-/// order, naming the dimension, its values oldest first (exact, not rounded)
-/// and the window.
+/// One entry per distributional dimension ([BR-95]) that declined in each of
+/// the last `window` steps of the series that moved it, in canonical metric
+/// order, with its values oldest first (exact, not rounded) and the window.
 ///
 /// A step is read off the series' own [`evolution_point`], so it is moved,
 /// flat or not applicable exactly as `evolution` reports it. A flat step — a
@@ -544,22 +561,14 @@ pub(super) fn trend_warnings(runtime: &Runtime, policy: &ReviewRules) -> Result<
 /// thresholds: across those the two values do not measure the same thing.
 ///
 /// [BR-95]: ../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
-pub(super) fn declining_dimensions(rows: &[MetricSnapshotRow], window: u32) -> Vec<String> {
+pub(super) fn declining_dimensions(rows: &[MetricSnapshotRow], window: u32) -> Vec<DimensionTrend> {
     METRIC_NAMES
         .iter()
         .enumerate()
         .filter(|(_, name)| ReviewRules::DISTRIBUTIONAL_DIMENSIONS.contains(name))
         .filter_map(|(metric, name)| {
             let values = decline_run(rows, metric, window as usize)?;
-            // Each value as its shortest exact spelling: a decline just past
-            // the noise floor still prints as one, and the value reads back.
-            let chain: Vec<String> = values.iter().map(f64::to_string).collect();
-            Some(format!(
-                "{name} declined at each of the last {window} recorded snapshot{} that moved it: {} \
-                 (review.trend_window = {window}); a trend warning, never a failure",
-                if window == 1 { "" } else { "s" },
-                chain.join(" → "),
-            ))
+            Some(DimensionTrend { dimension: name, values, window })
         })
         .collect()
 }
@@ -600,8 +609,11 @@ fn decline_run(rows: &[MetricSnapshotRow], metric: usize, window: usize) -> Opti
 /// contract, which records every subject's value instead of only those past a
 /// ceiling. A branch's share of a (limit, subject) is its tip's value minus
 /// its merge-base's, and the projection is the base's value plus every share
-/// ([`project`]). A limit is listed when the shares raise it past its ceiling;
-/// one the base already exceeds and no branch raises is `check`'s to report.
+/// ([`project`]). A limit is listed when the shares raise it past its ceiling —
+/// `max`, or, for a ratchet budget's subject the blessed set holds above `max`
+/// at the base commit, that blessed value ([`headroom::Allowances::ceiling`],
+/// the rule `--headroom` lists by); one the base already exceeds and no branch
+/// raises is `check`'s to report.
 /// A branch that does not resolve, shares no history with the base, repeats a
 /// summed branch's commit or cannot be indexed is named and left out of the
 /// sum. Neither `HEAD` nor the live graph is measured; the live store is read
@@ -631,18 +643,8 @@ pub(crate) fn branches_review(engine: &Engine, base: Option<&str>, branches: &[S
     let declared = load_rules_cached(engine, None)?;
     let (limits, not_projected_limits) = projected_limits(&declared.rules);
     out.not_projected = not_projected_limits;
-    let drift_budget = declared.rules.review.as_ref().map(|policy| policy.drift_budget);
-    let drift_points = match drift_budget {
-        Some(DriftBudget::Points(points)) => Some(points),
-        Some(DriftBudget::Report(_)) => {
-            out.not_projected.push(UnprojectedLimit {
-                rule: "drift_budget".to_string(),
-                reason: "drift_budget = \"report\" reports the drift and never fails".to_string(),
-            });
-            None
-        }
-        None => None,
-    };
+    let (drift_points, unprojected_drift) = declared_drift_points(&declared.rules);
+    out.not_projected.extend(unprojected_drift);
     if limits.is_empty() && drift_points.is_none() {
         return Ok(not_projected(
             out,
@@ -650,14 +652,13 @@ pub(crate) fn branches_review(engine: &Engine, base: Option<&str>, branches: &[S
              there is no limit to project",
         ));
     }
-    let ratchet = !declared.rules.constraints.ratchet_rules().is_empty();
-    let contract = Contract {
-        marked: CompiledRules::compile(projected(&declared.rules), declared.hash.clone())?,
-        thresholds: effective_thresholds(&declared.rules),
-        member_access: member_access_extensions(engine),
-        declared,
-        projection: true,
+    let ratchet_rules = declared.rules.constraints.ratchet_rules();
+    let blessed = match headroom::blessed_for(root, &base_commit, &limits, &ratchet_rules) {
+        Ok(set) => set,
+        Err(why) => return Ok(not_projected(out, &why)),
     };
+    let allowances = headroom::Allowances::new(blessed.as_ref());
+    let contract = projection_contract(engine, declared)?;
     let base_side = match shadow_before(engine, &base_commit, &contract) {
         Ok((side, _)) => side,
         Err(err) => {
@@ -689,7 +690,7 @@ pub(crate) fn branches_review(engine: &Engine, base: Option<&str>, branches: &[S
         .iter()
         .map(|(name, (before, after))| (name.clone(), tally(before, &limits), tally(after, &limits)))
         .collect();
-    let (mut exceeded, subjects) = project(&limits, &tally(&base_side, &limits), &tallies);
+    let (mut exceeded, subjects) = project(&limits, &allowances, &ratchet_rules, &tally(&base_side, &limits), &tallies);
     let files: BTreeSet<String> = exceeded.iter().map(|e| e.file.clone()).filter(|f| !f.is_empty()).collect();
     let labels = Trust::labels(engine, quality_runtime(engine)?, files, &BTreeSet::new())?;
     for entry in &mut exceeded {
@@ -722,12 +723,45 @@ pub(crate) fn branches_review(engine: &Engine, base: Option<&str>, branches: &[S
     out.exceeded = exceeded;
     out.subjects = subjects;
     out.measured = true;
-    out.notes.extend(projection_notes(ratchet));
+    out.notes.extend(projection_notes(blessed.as_ref(), &ratchet_rules, &limits));
     Ok(out)
 }
 
-/// How every measured projection was produced.
-fn projection_notes(ratchet: bool) -> Vec<String> {
+/// The numeric `[review] drift_budget` a projection judges, and — for
+/// `"report"` — the `not_projected` entry that says it is not judged. Shared by
+/// `--branches` and `--headroom`, so both list the same budgets.
+fn declared_drift_points(rules: &Rules) -> (Option<f64>, Option<UnprojectedLimit>) {
+    match rules.review.as_ref().map(|policy| policy.drift_budget) {
+        Some(DriftBudget::Points(points)) => (Some(points), None),
+        Some(DriftBudget::Report(_)) => (
+            None,
+            Some(UnprojectedLimit {
+                rule: "drift_budget".to_string(),
+                reason: "drift_budget = \"report\" reports the drift and never fails".to_string(),
+            }),
+        ),
+        None => (None, None),
+    }
+}
+
+/// The [`projected`] contract over the declared one: what `--branches` and
+/// `--headroom` both measure a commit under, so they share one cache entry.
+fn projection_contract(engine: &Engine, declared: std::sync::Arc<CompiledRules>) -> Result<Contract> {
+    Ok(Contract {
+        marked: CompiledRules::compile(projected(&declared.rules), declared.hash.clone())?,
+        thresholds: effective_thresholds(&declared.rules),
+        member_access: member_access_extensions(engine),
+        declared,
+        projection: true,
+    })
+}
+
+/// How many blessed values the ratchet note spells out before it counts the rest.
+const BLESSED_NAMED: usize = 5;
+
+/// How every measured projection was produced. Under a ratchet budget it names
+/// the blessed values the projection used.
+fn projection_notes(blessed: Option<&BlessedSet>, ratchet_rules: &[&'static str], limits: &[Limit]) -> Vec<String> {
     let mut notes = vec![
         "each side is a full index of a committed tree — the base commit, each branch's merge-base and its \
          tip: uncommitted work is not in the answer"
@@ -738,10 +772,36 @@ fn projection_notes(ratchet: bool) -> Vec<String> {
         "a limit the base already exceeds is listed only when the shares raise it; check reports the rest"
             .to_string(),
     ];
-    if ratchet {
-        notes.push("a ratchet budget is projected against its max: the blessed set is not consulted".to_string());
+    if let Some(set) = blessed {
+        notes.push(blessed_note(set, ratchet_rules, limits));
     }
     notes
+}
+
+/// The note that names the blessed values a ratchet projection used: each
+/// per-subject ratchet budget's subject the set holds above `max`, with its
+/// value, or that the set holds none.
+fn blessed_note(set: &BlessedSet, ratchet_rules: &[&'static str], limits: &[Limit]) -> String {
+    let above: Vec<String> = set
+        .entries()
+        .filter_map(|(rule, symbol, value)| {
+            let limit = limits.iter().find(|l| l.rule == rule && l.per_subject && ratchet_rules.contains(&l.rule))?;
+            (value > limit.ceiling).then(|| format!("{rule} {} = {value}", coordinate_less(symbol)))
+        })
+        .collect();
+    if above.is_empty() {
+        return format!(
+            "{BLESSED_FILE_REL} at the base commit blesses nothing above max: a ratchet budget's subjects are \
+             projected against max"
+        );
+    }
+    let named = above.iter().take(BLESSED_NAMED).cloned().collect::<Vec<_>>().join(", ");
+    let rest = above.len().saturating_sub(BLESSED_NAMED);
+    format!(
+        "a ratchet budget's subject blessed above its max is projected against its blessed value, read from \
+         {BLESSED_FILE_REL} at the base commit: {named}{}; any other subject is projected against its max",
+        if rest > 0 { format!(" and {rest} more") } else { String::new() },
+    )
 }
 
 /// The `measured: false` projection: the stated refs, the reason, nothing projected.
@@ -968,12 +1028,19 @@ fn coordinate_less(subject: &str) -> String {
 }
 
 /// Sum each branch's shares onto the `base` tally ([FR-GV-28]): every limit
-/// the shares raise past its ceiling, in `limits` order then by subject, and
+/// the shares raise past its ceiling (`allowances`', for the subjects of the
+/// `ratchet_rules` budgets), in `limits` order then by subject, and
 /// how many (limit, subject) pairs any side measured. A subject a side does
 /// not measure is `0` there. A share of `0` is not listed.
 ///
 /// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
-fn project(limits: &[Limit], base: &Tally, branches: &[(String, Tally, Tally)]) -> (Vec<ExceededLimit>, u64) {
+fn project(
+    limits: &[Limit],
+    allowances: &headroom::Allowances,
+    ratchet_rules: &[&'static str],
+    base: &Tally,
+    branches: &[(String, Tally, Tally)],
+) -> (Vec<ExceededLimit>, u64) {
     let keys: BTreeSet<&(&'static str, String)> = base
         .keys()
         .chain(branches.iter().flat_map(|(_, before, after)| before.keys().chain(after.keys())))
@@ -985,7 +1052,8 @@ fn project(limits: &[Limit], base: &Tally, branches: &[(String, Tally, Tally)]) 
             continue;
         };
         let at_base = value(base, key);
-        let room = i64::try_from(limit.ceiling).unwrap_or(i64::MAX) - i64::try_from(at_base).unwrap_or(i64::MAX);
+        let ceiling = allowances.ceiling(limit, ratchet_rules.contains(&limit.rule), &key.1);
+        let room = i64::try_from(ceiling).unwrap_or(i64::MAX) - i64::try_from(at_base).unwrap_or(i64::MAX);
         let shares: Vec<BranchShare> = branches
             .iter()
             .map(|(name, before, after)| (name, value(after, key) as i64 - value(before, key) as i64))
@@ -1012,7 +1080,7 @@ fn project(limits: &[Limit], base: &Tally, branches: &[(String, Tally, Tally)]) 
             subject: key.1.clone(),
             file,
             trust: String::new(),
-            limit: limit.ceiling,
+            limit: ceiling,
             base: at_base,
             projected: at_base as i64 + total,
             shares,
@@ -1080,22 +1148,11 @@ fn project_drift(
     Ok((judge_drift(points, at_base, &drops, reference), note))
 }
 
-/// Judge the summed `drops` against `points` from `reference` ([FR-GV-28]):
-/// the merge is projected to measure `at_base` less every drop, and its drift
-/// is measured from the baseline's signal, or from `at_base` when `reference`
-/// says why there is none. Listed only when the drops are a net fall that
-/// takes the drift past the budget — a base already past it that no branch
-/// lowers is the gate's to report. A share exceeds alone when, with the base's
-/// own distance from the reference, it would by itself.
-///
-/// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
-fn judge_drift(
-    points: f64,
-    at_base: u32,
-    drops: &[(String, i64)],
-    reference: std::result::Result<(u32, i64), String>,
-) -> Option<ProjectedDrift> {
-    let (from, reference) = match reference {
+/// The signal a drift is measured from and the reference that names it: the
+/// gate baseline's when `reference` holds one, else the base commit's own
+/// (`at_base`) with the reason there is no baseline.
+fn drift_origin(reference: std::result::Result<(u32, i64), String>, at_base: u32) -> (u32, DriftReference) {
+    match reference {
         Ok((signal, id)) => (
             signal,
             DriftReference {
@@ -1112,7 +1169,25 @@ fn judge_drift(
                 reason: Some(why),
             },
         ),
-    };
+    }
+}
+
+/// Judge the summed `drops` against `points` from `reference` ([FR-GV-28]):
+/// the merge is projected to measure `at_base` less every drop, and its drift
+/// is measured from the baseline's signal, or from `at_base` when `reference`
+/// says why there is none. Listed only when the drops are a net fall that
+/// takes the drift past the budget — a base already past it that no branch
+/// lowers is the gate's to report. A share exceeds alone when, with the base's
+/// own distance from the reference, it would by itself.
+///
+/// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
+fn judge_drift(
+    points: f64,
+    at_base: u32,
+    drops: &[(String, i64)],
+    reference: std::result::Result<(u32, i64), String>,
+) -> Option<ProjectedDrift> {
+    let (from, reference) = drift_origin(reference, at_base);
     let offset = i64::from(from) - i64::from(at_base);
     let shares: Vec<BranchShare> = drops
         .iter()
@@ -1964,6 +2039,20 @@ fn security_section(
     delta
 }
 
+/// Every key `f` is known by: its fingerprint and the ones it had before a
+/// re-key (history.db migrations 7, 10 and 11), so a finding re-keyed on one side
+/// of the merge-base is the same finding on the other ([FR-SC-18]).
+///
+/// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
+fn finding_keys(f: &SecurityFinding) -> impl Iterator<Item = &str> {
+    std::iter::once(f.fingerprint.as_str()).chain(f.legacy_fingerprints.iter().map(String::as_str))
+}
+
+/// Whether `keys` — one side's [`finding_keys`] — knows `f` by any of its own.
+fn known(keys: &HashSet<&str>, f: &SecurityFinding) -> bool {
+    finding_keys(f).any(|key| keys.contains(key))
+}
+
 /// A file's last modification, in whole Unix seconds; `None` when it is gone
 /// or its time cannot be read.
 fn modified_secs(path: &Path) -> Option<i64> {
@@ -2006,7 +2095,7 @@ fn security_delta(
         .map(|s| (s.scanner_name.as_str(), HashSet::new()))
         .collect();
     for f in evidence.base.findings.iter().filter(|f| recorded(f)) {
-        before.entry(f.scanner_name.as_str()).or_default().insert(f.fingerprint.as_str());
+        before.entry(f.scanner_name.as_str()).or_default().extend(finding_keys(f));
     }
     let method = |scanner: &str| {
         if before.contains_key(scanner) {
@@ -2039,7 +2128,7 @@ fn security_delta(
     let mut now: HashMap<&str, HashSet<&str>> = HashMap::new();
     let mut freshness_now: HashMap<(&str, &str), &str> = HashMap::new();
     for f in current.findings.iter().map(|listed| &listed.finding) {
-        now.entry(f.scanner_name.as_str()).or_default().insert(f.fingerprint.as_str());
+        now.entry(f.scanner_name.as_str()).or_default().extend(finding_keys(f));
         if let Some(path) = f.path.as_deref() {
             freshness_now.insert((f.scanner_name.as_str(), path), f.freshness);
         }
@@ -2052,7 +2141,7 @@ fn security_delta(
     // introduced and another resolved.
     let mut vanished: HashMap<(&str, &str, Option<&str>), std::collections::VecDeque<&str>> = HashMap::new();
     for f in evidence.base.findings.iter().filter(|f| recorded(f)) {
-        if !now.get(f.scanner_name.as_str()).is_some_and(|fps| fps.contains(f.fingerprint.as_str())) {
+        if !now.get(f.scanner_name.as_str()).is_some_and(|fps| known(fps, f)) {
             vanished
                 .entry((f.scanner_name.as_str(), f.rule_id.as_str(), f.path.as_deref()))
                 .or_default()
@@ -2068,7 +2157,7 @@ fn security_delta(
         // introduces nothing.
         let gone = f.location().is_some_and(|p| modified(&p).is_none());
         let status = match before.get(f.scanner_name.as_str()) {
-            Some(fingerprints) if !fingerprints.contains(f.fingerprint.as_str()) => SecurityDeltaStatus::Introduced,
+            Some(fingerprints) if !known(fingerprints, f) => SecurityDeltaStatus::Introduced,
             Some(_) if changed => SecurityDeltaStatus::Touched,
             None if changed && !gone => SecurityDeltaStatus::Introduced,
             _ => SecurityDeltaStatus::PreExisting,
@@ -2107,7 +2196,7 @@ fn security_delta(
     {
         let scanner = f.scanner_name.as_str();
         if !recorded(f)
-            || now.get(scanner).is_some_and(|fps| fps.contains(f.fingerprint.as_str()))
+            || now.get(scanner).is_some_and(|fps| known(fps, f))
             || moved.contains(&(scanner, f.fingerprint.as_str()))
         {
             continue;
@@ -2619,6 +2708,7 @@ mod tests {
                 owasp: Vec::new(),
                 unclassified: None,
                 suppression: None,
+                scope: crate::security::ScopeLabel::default(),
             })
             .collect::<Vec<_>>();
         let n = base.len();
@@ -2635,6 +2725,8 @@ mod tests {
                 never_run: Vec::new(),
                 notice: None,
                 total: listed.len(),
+                scope: crate::security::ScopeFilter::All,
+                hidden_by_scope: 0,
                 findings: listed,
                 categories: Vec::new(),
                 suppressions: Vec::new(),
@@ -2646,6 +2738,46 @@ mod tests {
                 .map(|_| FindingContext::unbound(None, crate::security::context::UnboundBecause::NoSymbol))
                 .collect(),
         }
+    }
+
+    /// S-778: a finding the latest report re-keyed (history.db migration 10)
+    /// is known at the merge-base by the key it had there, whichever side
+    /// holds the old one: unchanged, and never resolved. So it never takes the
+    /// merge-base twin a genuinely new finding of the same rule needs — an
+    /// unbound lockfile finding has no bound path, so every such advisory
+    /// shares one twin queue — and the new one reads as introduced, in any
+    /// report order.
+    #[test]
+    fn a_rekeyed_finding_is_unchanged_across_the_merge_base() {
+        let lockfile = |fingerprint: &str, report: &str, legacy: &[&str]| SecurityFinding {
+            rule_id: "CVE-2026-63127".to_string(),
+            binding: crate::history::FindingBinding::Unmatched,
+            report_path: Some(report.to_string()),
+            path: None,
+            legacy_fingerprints: legacy.iter().map(|k| k.to_string()).collect(),
+            freshness: FRESHNESS_NA,
+            ..finding("s", fingerprint, None, (None, None))
+        };
+        let status = |current: Vec<SecurityFinding>, base: Vec<SecurityFinding>| {
+            let delta = security_delta(&evidence(current, base), Path::new("/repo"), &FileRanges::default(), |_| Some(1));
+            delta.findings.iter().map(|e| (e.fingerprint.clone(), e.status)).collect::<BTreeMap<_, _>>()
+        };
+        let got = status(
+            vec![lockfile("added", "/repo/sub2/Cargo.lock", &[]), lockfile("rekeyed", "/repo/Cargo.lock", &["old"])],
+            vec![lockfile("old", "/repo/Cargo.lock", &[])],
+        );
+        let want = [
+            ("added".to_string(), SecurityDeltaStatus::Introduced),
+            ("rekeyed".to_string(), SecurityDeltaStatus::PreExisting),
+        ];
+        assert_eq!(got, want.into_iter().collect(), "the old key is the merge-base finding; nothing is resolved");
+        let reverse = status(
+            vec![lockfile("added", "/repo/sub2/Cargo.lock", &[]), lockfile("old", "/repo/Cargo.lock", &[])],
+            vec![lockfile("rekeyed", "/repo/Cargo.lock", &["old"])],
+        );
+        assert_eq!(reverse.get("old"), Some(&SecurityDeltaStatus::PreExisting), "the merge-base side may hold it: {reverse:?}");
+        assert_eq!(reverse.get("added"), Some(&SecurityDeltaStatus::Introduced));
+        assert!(!reverse.contains_key("rekeyed"), "never resolved: {reverse:?}");
     }
 
     #[test]
@@ -3098,11 +3230,11 @@ mod tests {
         let b1 = ("b1".to_string(), base.clone(), tally_of(&[("max_fan_out", "m", 3), ("max_fan_out", "n", 1)]));
         let b2 = ("b2".to_string(), base.clone(), tally_of(&[("max_fan_out", "m", 3), ("max_fan_out", "n", 2)]));
 
-        let (alone, subjects) = project(&limits, &base, std::slice::from_ref(&b1));
+        let (alone, subjects) = project(&limits, &headroom::Allowances::new(None), &[], &base, std::slice::from_ref(&b1));
         assert!(alone.is_empty(), "{alone:?}");
         assert_eq!(subjects, 2);
 
-        let (together, _) = project(&limits, &base, &[b1, b2]);
+        let (together, _) = project(&limits, &headroom::Allowances::new(None), &[], &base, &[b1, b2]);
         assert_eq!(together.len(), 1, "{together:?}");
         let m = &together[0];
         assert_eq!((m.rule.as_str(), m.subject.as_str(), m.file.as_str()), ("max_fan_out", "m", "m.rs"));
@@ -3120,9 +3252,9 @@ mod tests {
         let flat = ("flat".to_string(), base.clone(), base.clone());
         let down = |to| ("down".to_string(), base.clone(), tally_of(&[("max_cc", "m", to)]));
 
-        let (offset, _) = project(&limits, &base, &[up.clone(), down(0)]);
+        let (offset, _) = project(&limits, &headroom::Allowances::new(None), &[], &base, &[up.clone(), down(0)]);
         assert!(offset.is_empty(), "3 − 2 leaves m at 3: {offset:?}");
-        let (raised, _) = project(&limits, &base, &[up, flat, down(1)]);
+        let (raised, _) = project(&limits, &headroom::Allowances::new(None), &[], &base, &[up, flat, down(1)]);
         assert_eq!(raised.len(), 1, "{raised:?}");
         assert_eq!(raised[0].projected, 4);
         assert_eq!(shares(&raised[0]), [("up", 3, true), ("down", -1, false)]);
@@ -3135,12 +3267,12 @@ mod tests {
         let limits = [limit("max_fan_out", 3)];
         let base = tally_of(&[("max_fan_out", "m", 5)]);
         let other = ("b1".to_string(), base.clone(), tally_of(&[("max_fan_out", "m", 5), ("max_fan_out", "new", 2)]));
-        let (untouched, subjects) = project(&limits, &base, std::slice::from_ref(&other));
+        let (untouched, subjects) = project(&limits, &headroom::Allowances::new(None), &[], &base, std::slice::from_ref(&other));
         assert!(untouched.is_empty(), "{untouched:?}");
         assert_eq!(subjects, 2);
 
         let raises = ("b2".to_string(), base.clone(), tally_of(&[("max_fan_out", "m", 6)]));
-        let (listed, _) = project(&limits, &base, &[other, raises]);
+        let (listed, _) = project(&limits, &headroom::Allowances::new(None), &[], &base, &[other, raises]);
         let subjects: Vec<&str> = listed.iter().map(|e| e.subject.as_str()).collect();
         assert_eq!(subjects, ["m"], "`new` at 2 fits the ceiling");
         assert_eq!((listed[0].base, listed[0].projected), (5, 6));
@@ -3154,7 +3286,7 @@ mod tests {
         let limits = [limit("no_god_files", 1), limit("max_fan_out", 1)];
         let base = Tally::new();
         let after = tally_of(&[("max_fan_out", "a", 2), ("no_god_files", "z", 2), ("no_god_files", "b", 2)]);
-        let (exceeded, _) = project(&limits, &base, &[("b1".to_string(), Tally::new(), after)]);
+        let (exceeded, _) = project(&limits, &headroom::Allowances::new(None), &[], &base, &[("b1".to_string(), Tally::new(), after)]);
         let keys: Vec<(&str, &str)> = exceeded.iter().map(|e| (e.rule.as_str(), e.subject.as_str())).collect();
         assert_eq!(keys, [("no_god_files", "b"), ("no_god_files", "z"), ("max_fan_out", "a")]);
     }
@@ -3371,5 +3503,35 @@ mod tests {
         assert!(result.message.starts_with("7 gating branch-delta entries"), "{}", result.message);
         assert!(result.message.ends_with("; and 2 more"), "{}", result.message);
         assert_eq!(result.message.matches("[new, trust resolved]").count(), 5);
+    }
+
+    fn blessed_json(values: &[u64]) -> BlessedSet {
+        let entries: Vec<String> = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("{{\"rule\":\"max_cc\",\"symbol\":\"f{i}\",\"value\":{v}}}"))
+            .collect();
+        BlessedSet::parse(&format!("{{\"version\":1,\"entries\":[{}]}}", entries.join(","))).expect("a valid set")
+    }
+
+    /// Without a ratchet budget the notes are the three every projection carries.
+    #[test]
+    fn a_projection_without_a_ratchet_budget_carries_only_the_common_notes() {
+        assert_eq!(projection_notes(None, &[], &[limit("max_fan_out", 3)]).len(), 3);
+    }
+
+    /// The note names five blessed values and counts the rest; a value at or
+    /// below `max`, and one under a budget that is not a per-subject ratchet,
+    /// is not used and not named.
+    #[test]
+    fn the_blessed_note_names_five_values_above_max_and_counts_the_rest() {
+        let set = blessed_json(&[20, 21, 22, 23, 24, 25, 26, 15, 3]);
+        let note = blessed_note(&set, &["max_cc"], &[limit("max_cc", 15)]);
+        assert!(note.contains("max_cc f0 = 20") && note.contains("max_cc f4 = 24"), "{note}");
+        assert!(!note.contains("f5 =") && !note.contains("f7 =") && !note.contains("f8 ="), "{note}");
+        assert!(note.contains("and 2 more"), "{note}");
+
+        let none = blessed_note(&set, &[], &[limit("max_cc", 15)]);
+        assert!(none.contains("blesses nothing above max"), "a budget not under ratchet uses no blessed value: {none}");
     }
 }

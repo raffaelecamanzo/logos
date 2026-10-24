@@ -72,6 +72,7 @@ mod page;
 mod probes;
 pub mod registry;
 mod rollup;
+pub mod scope;
 mod surface;
 
 #[cfg(all(test, unix))]
@@ -93,19 +94,23 @@ use crate::config::{
 };
 use crate::tools::Manifest;
 use registry::{Fill, Ignores, Output, Scanner, ScopedPath, Targets, CODEQL_LANGUAGES, REGISTRY};
-use crate::jobs::spawn::{self, inside_root, is_executable, usable_path_entries, Launch};
+use crate::jobs::spawn::{self, inside_root, is_executable, usable_path_entries, Launch, PrivateFile};
 
 pub use gate::{SecurityBless, SecurityGateBand};
 pub(crate) use gate::SecurityGateEvidence;
-pub(crate) use page::{editions, listings};
-pub use page::{EditionClassification, SecurityPage};
+#[cfg(test)]
+pub(crate) use gate::STOPGAP_OFF;
+pub(crate) use page::{editions, listings, summary};
+pub use page::{EditionClassification, SecurityPage, SecuritySummary};
 pub use registry::{scanner, WHOLE_MANIFEST_ONLY, WHOLE_PROJECT_ONLY};
+pub use scope::{ScopeFilter, ScopeLabel, ScopeReason};
+pub(crate) use scope::no_test_symbols;
 pub use rollup::{
     Excluded, FindingTally, MemberCategory, MemberEdition, MemberScan, MemberSecurity, SeverityCounts,
 };
 pub use surface::{
     consent_pending, findings, scan, status, ConsentState, FindingsFilter, LicenceAcceptance, ListedFinding,
-    RunOutcome, RunScope, ScanProgress, ScanState, ScannedReport, ScannerRun,
+    NvdKeyState, RunOutcome, RunScope, ScanProgress, ScanState, ScannedReport, ScannerRun,
     ScannerStatus, SecurityFindings, SecurityScanSummary, SecurityStatus, StaleBecause,
     SuppressionFilter, VersionProbes, FAILURE_LOG_SUFFIX,
 };
@@ -126,6 +131,26 @@ pub const SCOPED_DIR: &str = "scoped";
 /// The empty config file pinned on scanners that would otherwise auto-load one
 /// from the repository, inside [`OUTPUT_DIR`].
 const PINNED_CONFIG: &str = "empty-config.yaml";
+
+/// The variable Dependency-Check's NVD API key is read from, in the
+/// environment of the process that runs the scan — the CLI, or `serve` for
+/// MCP and the web — and nowhere else: no repository file, `.env` or config
+/// key can supply it ([FR-SC-27], [NFR-SE-08]).
+///
+/// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
+/// [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
+pub const NVD_API_KEY_ENV: &str = "NVD_API_KEY";
+
+/// The private properties file that hands Dependency-Check the key, inside
+/// [`OUTPUT_DIR`] ([`spawn::PrivateFile`]): it exists only while
+/// Dependency-Check runs, and one a crashed run left is removed at the next
+/// scan's start.
+pub const NVD_KEY_FILE: &str = "nvd-api-key.properties";
+
+/// The shortest piece of a cut key [`NvdApiKey::redact`] masks at the edge of
+/// a scanner's kept output: shorter, a match is as likely to be the scanner's
+/// own text.
+const KEY_FRAGMENT: usize = 4;
 
 /// The project's scan-or-install lock file, inside [`OUTPUT_DIR`]: every scan
 /// and every scanner install of the project holds it (S-758,
@@ -172,13 +197,23 @@ pub(crate) fn unlocked<T>(f: impl FnOnce() -> T) -> T {
 /// # Errors
 /// Either directory is a symlink, or [`OUTPUT_DIR`] cannot be created.
 pub(crate) fn output_dir(root: &Path) -> anyhow::Result<PathBuf> {
-    let out_dir = root.join(OUTPUT_DIR);
+    Ok(real_output_dir(root, OUTPUT_DIR)?)
+}
+
+/// `rel` under `root` — a directory below `.logos` that Logos writes tool
+/// output to — created, when neither `.logos` nor it is a symbolic link:
+/// [`output_dir`] for a scan, the coverage runner's for a coverage run.
+///
+/// # Errors
+/// Either directory is a symlink, or `rel` cannot be created.
+pub(crate) fn real_output_dir(root: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    let out_dir = root.join(rel);
     for dir in [root.join(".logos"), out_dir.clone()] {
         if is_symlink(&dir) {
-            anyhow::bail!(
-                "{} is a symbolic link; refusing to write scan output through it",
+            return Err(std::io::Error::other(format!(
+                "{} is a symbolic link; refusing to write tool output through it",
                 dir.display()
-            );
+            )));
         }
     }
     fs::create_dir_all(&out_dir)?;
@@ -253,16 +288,105 @@ pub struct ScanEnvironment {
     /// The user-level tools directory, if there is one. One inside the
     /// project root is ignored.
     pub tools_dir: Option<PathBuf>,
+    /// Dependency-Check's NVD API key ([`NVD_API_KEY_ENV`]), if one is set.
+    pub nvd_api_key: Option<NvdApiKey>,
 }
 
 impl ScanEnvironment {
-    /// [`user_config_dir`], the process `PATH` and [`user_tools_dir`].
+    /// [`user_config_dir`], the process `PATH`, [`user_tools_dir`] and the
+    /// process [`NVD_API_KEY_ENV`].
     pub fn from_process() -> Self {
         Self {
             user_dir: user_config_dir(),
             search_path: std::env::var_os("PATH"),
             tools_dir: user_tools_dir(),
+            nvd_api_key: std::env::var(NVD_API_KEY_ENV).ok().and_then(NvdApiKey::new),
         }
+    }
+}
+
+/// An NVD API key, as the user set it in [`NVD_API_KEY_ENV`]. It is never
+/// shown: its `Debug` reads `NvdApiKey([masked])`, it is not serialisable, and
+/// it reaches Dependency-Check only through a private file ([`NVD_KEY_FILE`]).
+#[derive(Clone, PartialEq, Eq)]
+pub struct NvdApiKey(String);
+
+impl NvdApiKey {
+    /// `value` as a key; `None` when it is empty, which sets none.
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    /// The properties file that hands the key over: `nvd.api.key`, the
+    /// setting Dependency-Check 13 reads it from, with the value escaped as
+    /// `java.util.Properties` reads it back, so that no character of a key
+    /// can end its line or set another property.
+    fn properties(&self) -> String {
+        let mut value = String::with_capacity(self.0.len() + 16);
+        for (i, c) in self.0.chars().enumerate() {
+            match c {
+                '\\' | '=' | ':' | '#' | '!' => {
+                    value.push('\\');
+                    value.push(c);
+                }
+                ' ' if i == 0 => value.push_str("\\ "),
+                '\t' => value.push_str("\\t"),
+                '\n' => value.push_str("\\n"),
+                '\r' => value.push_str("\\r"),
+                '\u{c}' => value.push_str("\\f"),
+                ' '..='~' => value.push(c),
+                _ => {
+                    let mut units = [0u16; 2];
+                    for unit in c.encode_utf16(&mut units) {
+                        value.push_str(&format!("\\u{unit:04X}"));
+                    }
+                }
+            }
+        }
+        format!("nvd.api.key={value}\n")
+    }
+
+    /// `text` with every occurrence of the key masked: what a scanner printed
+    /// never carries it into a log, a cause or a payload. A scanner's output is
+    /// kept to a bound before it reaches here — each stream's head and tail
+    /// ([`spawn::STDERR_CAP`], [`spawn::STDOUT_CAP`]) with an omission note
+    /// between — so a cut can split an echoed key: wherever one lies, at the
+    /// ends of `text` or at a note, the key's tail starting a piece and its head
+    /// ending one are masked too, from [`KEY_FRAGMENT`] characters up.
+    fn redact(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0;
+        for note in spawn::omission_notes(text) {
+            out.push_str(&self.redact_piece(&text[at..note.start]));
+            out.push_str(&text[note.clone()]);
+            at = note.end;
+        }
+        out.push_str(&self.redact_piece(&text[at..]));
+        out
+    }
+
+    /// [`redact`](Self::redact) for a piece of text that is cut at both ends.
+    /// The newline the capture sets before a note is not part of what was
+    /// printed, nor is it a reason to leave the key's head before it.
+    fn redact_piece(&self, piece: &str) -> String {
+        let key = self.0.as_str();
+        let mut text = piece.replace(key, mask::MASK);
+        let fragments = || (KEY_FRAGMENT..key.len()).rev();
+        if let Some(n) = fragments().find(|&n| key.is_char_boundary(key.len() - n) && text.starts_with(&key[key.len() - n..])) {
+            text.replace_range(..n, mask::MASK);
+        }
+        let body = text.trim_end_matches('\n').len();
+        if let Some(n) = fragments().find(|&n| key.is_char_boundary(n) && text[..body].ends_with(&key[..n])) {
+            text.replace_range(body - n..body, mask::MASK);
+        }
+        text
+    }
+}
+
+impl std::fmt::Debug for NvdApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NvdApiKey({})", mask::MASK)
     }
 }
 
@@ -367,15 +491,37 @@ pub struct ScannerOutcome {
 
 /// What a whole-project run did with the project's ignored directories
 /// ([FR-SC-26]): the coverage fact every scan surface carries, as
-/// `ignored_paths` and, when it read them, `coverage_note`.
+/// `ignored_paths` and, when it read them, `coverage_kind` and `coverage_note`.
 ///
 /// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Coverage {
     pub ignored_paths: IgnoredPaths,
+    /// Which way it read them, for a reader that must not parse the note: a
+    /// page maps this to a marker. Present exactly when `coverage_note` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_kind: Option<CoverageKind>,
     /// Why it read them, in one line; absent when `excluded`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_note: Option<String>,
+}
+
+/// The way a `scanned` run read the project's ignored directories — the
+/// stable name of what `coverage_note` says in words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageKind {
+    /// No exclusion is proven for it: its flag or mechanism has no harness
+    /// evidence on the pinned version.
+    Unproven,
+    /// It reads the committed history, which holds any file once committed
+    /// inside an ignored directory.
+    History,
+    /// It was given the whole project, because its target list could not be
+    /// passed.
+    WholeProject,
+    /// It was given the ignored directories except some it could not take.
+    Partial,
 }
 
 /// Whether a whole-project run kept out of the project's ignored directories.
@@ -391,10 +537,10 @@ pub enum IgnoredPaths {
 }
 
 impl Coverage {
-    pub(crate) const EXCLUDED: Coverage = Coverage { ignored_paths: IgnoredPaths::Excluded, coverage_note: None };
+    pub(crate) const EXCLUDED: Coverage = Coverage { ignored_paths: IgnoredPaths::Excluded, coverage_kind: None, coverage_note: None };
 
-    pub(crate) fn scanned(note: String) -> Self {
-        Self { ignored_paths: IgnoredPaths::Scanned, coverage_note: Some(note) }
+    pub(crate) fn scanned(kind: CoverageKind, note: String) -> Self {
+        Self { ignored_paths: IgnoredPaths::Scanned, coverage_kind: Some(kind), coverage_note: Some(note) }
     }
 }
 
@@ -426,8 +572,8 @@ pub enum Outcome {
     /// accept, wrote no SARIF, could not be started, or was not started because
     /// the repository holds a config that could make it run code. `exit_code` is
     /// the scanner's own exit code, `None` when it did not exit by itself or was
-    /// never started. `stderr` is the captured tail of its stderr (the head of
-    /// its stdout when stderr was empty), or Logos's own explanation when no
+    /// never started. `stderr` is its captured stderr, head and tail (its
+    /// stdout when stderr was empty), or Logos's own explanation when no
     /// scanner output applies.
     Failed {
         exit_code: Option<i32>,
@@ -453,6 +599,8 @@ pub struct Orchestrator {
     /// unless an embedder or a test passes another
     /// ([`with_manifest`](Self::with_manifest)).
     manifest: Manifest,
+    /// The NVD API key the [`ScanEnvironment`] carries, for Dependency-Check.
+    nvd_api_key: Option<NvdApiKey>,
 }
 
 /// The copy of a scanner that is used, as the precedence chose it
@@ -533,11 +681,13 @@ impl Orchestrator {
             .tools_dir
             .clone()
             .filter(|dir| !inside_root(root, canonical_root.as_deref(), dir));
+        orchestrator.nvd_api_key = env.nvd_api_key.clone();
         Ok(orchestrator)
     }
 
     /// [`open`](Self::open) with the user-level config directory and the
-    /// executable search path given explicitly, and no managed copies.
+    /// executable search path given explicitly, no managed copies and no NVD
+    /// API key.
     ///
     /// # Errors
     /// As [`open`](Self::open).
@@ -560,6 +710,7 @@ impl Orchestrator {
             child_path,
             tools_dir: None,
             manifest: Manifest::builtin().clone(),
+            nvd_api_key: None,
         })
     }
 
@@ -569,6 +720,24 @@ impl Orchestrator {
     pub fn with_manifest(mut self, manifest: Manifest) -> Self {
         self.manifest = manifest;
         self
+    }
+
+    /// Hand Dependency-Check `key` instead of the [`ScanEnvironment`]'s
+    /// (tests that open with [`open_with`](Self::open_with)).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_nvd_api_key(mut self, key: Option<NvdApiKey>) -> Self {
+        self.nvd_api_key = key;
+        self
+    }
+
+    /// Whether `s` has an NVD API key: for the scanner that takes one
+    /// ([`Scanner::takes_nvd_key`]), `Some` — `true` when [`NVD_API_KEY_ENV`]
+    /// set one or the user's own `extra_args` hand it one; `None` for every
+    /// other scanner.
+    pub(crate) fn nvd_api_key_set(&self, s: &Scanner) -> Option<bool> {
+        s.takes_nvd_key()
+            .then(|| self.nvd_api_key.is_some() || registry::supplies_nvd_key(self.extra_args(s)))
     }
 
     /// Detect every registered scanner, in registry order. A disabled scanner
@@ -632,6 +801,7 @@ impl Orchestrator {
             }
         };
         let out_dir = output_dir(&self.root)?;
+        sweep_stale_key_file(&out_dir);
         // Walked once per call, and only when some scanner will run over the
         // whole project: a run on named paths reads exactly those.
         let whole = |s: &Scanner| scope.is_none() || s.path_slot.is_none();
@@ -879,6 +1049,21 @@ impl Orchestrator {
             .map_or(&[], |o| o.extra_args.as_slice())
     }
 
+    /// The private file that hands `s` the NVD API key ([FR-SC-27]): written
+    /// for the scanner that takes one, when a key is set and the user's own
+    /// `extra_args` do not already hand it one; `None` otherwise.
+    ///
+    /// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
+    fn nvd_key_file(&self, s: &Scanner, out_dir: &Path) -> std::io::Result<Option<PrivateFile>> {
+        let Some(key) = self.nvd_api_key.as_ref() else {
+            return Ok(None);
+        };
+        if !s.takes_nvd_key() || registry::supplies_nvd_key(self.extra_args(s)) {
+            return Ok(None);
+        }
+        PrivateFile::create(&out_dir.join(NVD_KEY_FILE), key.properties().as_bytes()).map(Some)
+    }
+
     /// Run a scanner that writes one report. Scoped, a path-capable scanner
     /// makes the runs its [slot](registry::PathSlot::runs) needs, in
     /// [`SCOPED_DIR`], and several runs' reports are merged into one. A
@@ -916,6 +1101,12 @@ impl Orchestrator {
                 return failed_io("could not write the pinned config", &pinned_config, &e);
             }
         }
+        // Held until this function returns, whatever ends the run, and then
+        // removed.
+        let key_file = match self.nvd_key_file(s, out_dir) {
+            Ok(file) => file,
+            Err(e) => return failed_io("could not write the NVD API key file", &out_dir.join(NVD_KEY_FILE), &e),
+        };
         let mut reports = Vec::with_capacity(runs.len());
         let mut code = 0;
         for (i, run) in runs.iter().enumerate() {
@@ -950,6 +1141,7 @@ impl Orchestrator {
                 ignored: &ignores.dirs,
                 targets: &ignores.targets,
                 root,
+                nvd_key_file: key_file.as_ref().map(PrivateFile::path),
             };
             code = match self.step(s, binary, s.run, &fill, started) {
                 Ok(code) => code,
@@ -1028,6 +1220,7 @@ impl Orchestrator {
                 ignored: &[],
                 targets: &Targets::Root,
                 root: None,
+                nvd_key_file: None,
             };
             // The creation template has no extra-flags position: extras go to
             // the analysis only.
@@ -1081,10 +1274,48 @@ impl Orchestrator {
         } else {
             finished.stderr
         };
+        // A scanner that echoes the key it was handed must not carry it into
+        // the failure log, its cause or a payload.
+        let stderr = match &self.nvd_api_key {
+            Some(key) => key.redact(&stderr),
+            None => stderr,
+        };
+        let stderr = self.name_untyped_stdlib(s, binary, stderr);
         Err(Outcome::Failed {
             exit_code: code,
             stderr: stderr.trim().to_string(),
         })
+    }
+
+    /// `output` of a failed gosec run, with the line [`surface::failure_cause`]
+    /// reads added when gosec could not type a standard-library import
+    /// (S-782): the gosec version and the local Go, which its own line omits.
+    /// Any other output is returned as it came. Both versions are read by a
+    /// version command run once, on this failure alone.
+    fn name_untyped_stdlib(&self, s: &Scanner, binary: &Path, output: String) -> String {
+        if s.name != "gosec" || !output.contains(surface::UNTYPED_STDLIB) {
+            return output;
+        }
+        let gosec = self.probe(s, binary);
+        let go = self.local_go_version(s);
+        format!("{output}\n{}", surface::untyped_stdlib_cause(gosec.as_deref(), go.as_deref()))
+    }
+
+    /// The Go toolchain a gosec run finds, as `go version` names it (`go1.27.2`):
+    /// the first `go` on the usable `PATH`, run with `s`'s environment
+    /// (`GOTOOLCHAIN=local`, so no toolchain is fetched). `None` when there is
+    /// none, it does not run, or its output has no such token.
+    fn local_go_version(&self, s: &Scanner) -> Option<String> {
+        let go = self.search_dirs.iter().map(|dir| dir.join("go")).find(|c| is_executable(c))?;
+        let args = [OsString::from("version")];
+        let finished = spawn::run(&go, &args, &self.launch(s, Some(PROBE_DEADLINE))).ok()?;
+        finished.status.filter(|st| st.success())?;
+        finished
+            .stdout
+            .split_whitespace()
+            .find(|t| t.len() <= 32 && t.strip_prefix("go").is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit())))
+            .filter(|t| t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+            .map(str::to_string)
     }
 }
 
@@ -1158,11 +1389,22 @@ fn is_symlink(path: &Path) -> bool {
 
 /// Make `path` a real directory: a symlink in its place is removed, never
 /// followed, then the directory is created if absent.
-fn real_dir(path: &Path) -> std::io::Result<()> {
+pub(crate) fn real_dir(path: &Path) -> std::io::Result<()> {
     if is_symlink(path) {
         fs::remove_file(path)?;
     }
     fs::create_dir_all(path)
+}
+
+/// Remove a key file ([`NVD_KEY_FILE`]) a crashed run left in `out_dir`: no
+/// scanner is running in this project now (a scan holds its lock), so none of
+/// them reads it. A failure is a warning: the run that writes the file removes
+/// whatever is at its path first, and fails if it cannot.
+pub(crate) fn sweep_stale_key_file(out_dir: &Path) {
+    let stale = out_dir.join(NVD_KEY_FILE);
+    if let Err(e) = remove_file_if_present(&stale) {
+        tracing::warn!(target: "logos::security", file = %stale.display(), "could not remove a stale NVD API key file: {e}");
+    }
 }
 
 /// Write `path` as a new empty file. Whatever was there — a file, or a
@@ -1173,7 +1415,7 @@ fn write_empty(path: &Path) -> std::io::Result<()> {
 
 /// Write `path` as a new file holding `bytes`, removing whatever was there
 /// first, so a symlink in its place is replaced rather than written through.
-fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     remove_file_if_present(path)?;
     fs::OpenOptions::new()
@@ -1183,12 +1425,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .write_all(bytes)
 }
 
-fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
-    match fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
-    }
-}
+pub(crate) use crate::jobs::spawn::remove_file_if_present;
 
 /// Confine a scoped scan's `paths` to the project `root` ([FR-SC-17],
 /// [NFR-SE-04]) — before any process starts. Each resolves against the root

@@ -769,8 +769,9 @@ pub struct Watcher {
 /// the [BR-27] provenance pattern reapplied ([FR-CV-09]).
 ///
 /// It configures **automatic** ingest only — the watcher watches the
-/// discovered/configured artifact path(s) and re-ingests on change, and the
-/// opt-in `coverage refresh` runs `refresh_cmd`. Like `[coverage]` it tunes the
+/// discovered/configured artifact path(s) and re-ingests on change — and the
+/// coverage runner: `refresh_cmd` is its custom entry, and `tools` switches its
+/// registered tools on or off. Like `[coverage]` it tunes the
 /// **non-gated advisory tier** exclusively ([BR-28]); changing it never moves the
 /// gate, and it is deliberately excluded from the admission fingerprint (it
 /// admits the same source files, so it must not trigger a re-baseline).
@@ -793,18 +794,92 @@ pub struct CoverageIngest {
     pub artifact_glob: Vec<String>,
 
     /// Report format for auto-ingest: `"auto"` (default, content-detected),
-    /// `"lcov"`, or `"cobertura"`. Only the automatic/refresh path consults this;
-    /// the manual `coverage ingest --format` flag is unaffected ([FR-CV-01]).
+    /// `"lcov"`, `"cobertura"`, `"jacoco"`, or `"gocover"`. Only the
+    /// automatic/refresh path consults this; the manual `coverage ingest --format` flag is unaffected ([FR-CV-01]).
     pub format: Option<String>,
 
-    /// Optional command the opt-in `coverage refresh` runs (via `sh -c`, cwd =
-    /// project root) to regenerate the artifact before ingesting it. This is the
-    /// **only** place Logos ever spawns a coverage subprocess, and only on
-    /// explicit invocation — never on the serve/watcher path ([ADR-38],
+    /// Optional command the coverage runner's custom entry runs — `coverage
+    /// run`, after the registered tools, or `coverage refresh` alone — via
+    /// `sh -c`, cwd = project root, to regenerate the artifact before ingesting
+    /// it. It runs only on explicit invocation, under the execution consent
+    /// that pins its exact text — never on the serve/watcher path ([ADR-38],
     /// [NFR-SE-01]).
     ///
     /// [NFR-SE-01]: ../../../../docs/specs/requirements/NFR-SE-01.md
     pub refresh_cmd: Option<String>,
+
+    /// Which of the [coverage runner](crate::coverage)'s registered tools may
+    /// run: `tools = { go = false }` ([FR-CV-11], [NFR-SE-08]). Every tool is
+    /// enabled unless it is switched off here. The value is `true` or `false`
+    /// and nothing else: a binary path, extra arguments or a timeout fail the
+    /// load, because a cloned repository must never choose what Logos runs.
+    /// Those overrides live in the user-level config
+    /// ([`UserCoverageIngest`](super::UserCoverageIngest)). Not part of the
+    /// ingest [hash](EffectiveCoverageIngest::hash): it selects what runs, not
+    /// how a report is read.
+    ///
+    /// [FR-CV-11]: ../../../../docs/specs/requirements/FR-CV-11.md
+    /// [NFR-SE-08]: ../../../../docs/specs/requirements/NFR-SE-08.md
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, ToolSwitch>,
+}
+
+/// One `[coverage_ingest].tools` entry in the repository config: on or off,
+/// and nothing a repository could use to choose what runs ([NFR-SE-08]).
+///
+/// [NFR-SE-08]: ../../../../docs/specs/requirements/NFR-SE-08.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ToolSwitch(pub bool);
+
+impl<'de> Deserialize<'de> for ToolSwitch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match toml::Value::deserialize(deserializer)? {
+            toml::Value::Boolean(on) => Ok(ToolSwitch(on)),
+            other => Err(serde::de::Error::custom(format!(
+                "expected true or false, found a {}: the repository config may only enable or \
+                 disable a coverage tool; set its binary path, extra arguments or timeout under \
+                 [coverage_ingest.tools.<tool>] in the user-level config instead",
+                other.type_str()
+            ))),
+        }
+    }
+}
+
+/// The coverage runner's registered tools, in registry order ([FR-CV-11]):
+/// the only names `[coverage_ingest].tools` accepts, at repository and at user
+/// level. The [registry](crate::coverage::registry) holds one entry per name,
+/// in this order (a test pins the two together).
+///
+/// [FR-CV-11]: ../../../../docs/specs/requirements/FR-CV-11.md
+pub const COVERAGE_TOOLS: [&str; 7] = ["cargo-llvm-cov", "vitest", "jest", "pytest-cov", "maven", "gradle", "go"];
+
+/// Reject a `[coverage_ingest].tools` entry naming no registered tool. Shared
+/// by the repository and the user-level tables, so both name the same set.
+pub(super) fn validate_coverage_tool_names<'a>(
+    names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), super::error::ConfigError> {
+    validate_registered("coverage_ingest.tools", "coverage tool", &COVERAGE_TOOLS, names)
+}
+
+/// Reject the first of `names` that is not one of `registered`, keyed under
+/// `table`: the one check behind the scanner and the coverage tool tables.
+fn validate_registered<'a>(
+    table: &str,
+    noun: &str,
+    registered: &[&str],
+    names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), super::error::ConfigError> {
+    match names.into_iter().find(|name| !registered.contains(&name.as_str())) {
+        Some(name) => Err(super::error::ConfigError::InvalidValue {
+            key: format!("{table}.{name}"),
+            message: format!(
+                "{name:?} is not a registered {noun} (expected one of: {})",
+                registered.join(", ")
+            ),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// The **effective** coverage-ingest configuration: [`CoverageIngest`] with every
@@ -815,7 +890,7 @@ pub struct CoverageIngest {
 pub struct EffectiveCoverageIngest {
     /// Extra artifact globs, in declared order.
     pub artifact_glob: Vec<String>,
-    /// The resolved format token: `"auto"` (default), `"lcov"`, or `"cobertura"`.
+    /// The resolved format token: `"auto"` (default), `"lcov"`, `"cobertura"`, `"jacoco"`, or `"gocover"`.
     pub format: String,
     /// The configured refresh command, if any.
     pub refresh_cmd: Option<String>,
@@ -837,6 +912,12 @@ impl CoverageIngest {
                 .unwrap_or_else(|| DEFAULT_COVERAGE_INGEST_FORMAT.to_string()),
             refresh_cmd: self.refresh_cmd.clone(),
         }
+    }
+
+    /// Whether the registered coverage tool `tool` may run: enabled unless
+    /// [`tools`](Self::tools) switches it off.
+    pub fn is_enabled(&self, tool: &str) -> bool {
+        self.tools.get(tool).is_none_or(|on| on.0)
     }
 }
 
@@ -893,19 +974,7 @@ pub(super) fn validate_scanner_names<'a>(
     table: &str,
     names: impl IntoIterator<Item = &'a String>,
 ) -> Result<(), super::error::ConfigError> {
-    match names
-        .into_iter()
-        .find(|name| !SECURITY_SCANNERS.contains(&name.as_str()))
-    {
-        Some(name) => Err(super::error::ConfigError::InvalidValue {
-            key: format!("{table}.{name}"),
-            message: format!(
-                "{name:?} is not a registered scanner (expected one of: {})",
-                SECURITY_SCANNERS.join(", ")
-            ),
-        }),
-        None => Ok(()),
-    }
+    validate_registered(table, "scanner", &SECURITY_SCANNERS, names)
 }
 
 /// The repository's `[security_scan]` table: one `[security_scan.<scanner>]`
@@ -1138,11 +1207,11 @@ impl Config {
         // The format token, if set, must be a recognized parser name — a typo
         // fails loud at load rather than silently disabling auto-ingest.
         if let Some(format) = &self.coverage_ingest.format {
-            if !matches!(format.as_str(), "auto" | "lcov" | "cobertura") {
+            if !matches!(format.as_str(), "auto" | "lcov" | "cobertura" | "jacoco" | "gocover") {
                 return Err(super::error::ConfigError::InvalidValue {
                     key: "coverage_ingest.format".to_string(),
                     message: format!(
-                        "{format:?} is not a recognized coverage format (expected auto, lcov, or cobertura)"
+                        "{format:?} is not a recognized coverage format (expected auto, lcov, cobertura, jacoco, or gocover)"
                     ),
                 });
             }
@@ -1157,6 +1226,8 @@ impl Config {
                 });
             }
         }
+        // [NFR-SE-08]: `[coverage_ingest].tools` names a registered tool.
+        validate_coverage_tool_names(self.coverage_ingest.tools.keys())?;
         // `[chat]`'s bounds ([FR-CF-06]) are checked where it is read since S-643:
         // by the `chat` extension when it claims the table ([FR-CF-09]), else by
         // the core's own parse (`ChatConfig::from_document`) — never here.
@@ -1475,6 +1546,8 @@ mod tests {
         cov_format.coverage_ingest.format = Some("lcov".to_string());
         let mut cov_cmd = base.clone();
         cov_cmd.coverage_ingest.refresh_cmd = Some("make coverage".to_string());
+        let mut cov_tools = base.clone();
+        cov_tools.coverage_ingest.tools.insert("go".to_string(), ToolSwitch(false));
 
         // S-702: the identity coordinate names the repository, never which of
         // its files are admitted — a change to it must not purge the graph.
@@ -1492,6 +1565,7 @@ mod tests {
             ("coverage_ingest.artifact_glob", cov_glob),
             ("coverage_ingest.format", cov_format),
             ("coverage_ingest.refresh_cmd", cov_cmd),
+            ("coverage_ingest.tools", cov_tools),
         ] {
             assert_eq!(
                 base_fp,
@@ -1544,6 +1618,23 @@ mod tests {
         assert_eq!(format.format_override(), Some("cobertura"));
     }
 
+    /// FR-CV-12: every parser the ingest ships is a valid `[coverage_ingest] format`
+    /// token — a typo in the validator's list would hard-fail a project that
+    /// configures `jacoco` or `gocover` for the automatic/refresh path.
+    #[test]
+    fn validate_accepts_every_shipped_coverage_format_token() {
+        for token in ["auto", "lcov", "cobertura", "jacoco", "gocover"] {
+            let cfg = Config {
+                coverage_ingest: CoverageIngest {
+                    format: Some(token.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert!(cfg.validate().is_ok(), "{token} is a recognized format");
+        }
+    }
+
     /// FR-CV-10: a misconfigured `[coverage_ingest]` fails loud at load (exit 2)
     /// — an unknown format token, a blank refresh command, or an escaping glob.
     #[test]
@@ -1593,9 +1684,44 @@ mod tests {
                 artifact_glob: vec!["build/cov/cobertura.xml".to_string()],
                 format: Some("cobertura".to_string()),
                 refresh_cmd: Some("cargo llvm-cov --cobertura".to_string()),
+                tools: BTreeMap::from([("go".to_string(), ToolSwitch(false))]),
             },
             ..Default::default()
         };
         assert!(ok.validate().is_ok(), "a valid [coverage_ingest] validates");
+    }
+
+    /// FR-CV-11 / NFR-SE-08: the repository may only switch a registered tool
+    /// on or off. A command, a path or a flag key fails the load (exit 2), and
+    /// so does a name the registry does not hold.
+    #[test]
+    fn coverage_tools_only_switch_registered_tools_on_or_off() {
+        use crate::config::parse_config;
+        let path = std::path::Path::new("config.toml");
+        let cfg = parse_config("[coverage_ingest]\ntools = { go = false, vitest = true }\n", path).unwrap();
+        assert!(!cfg.coverage_ingest.is_enabled("go"));
+        assert!(cfg.coverage_ingest.is_enabled("vitest"));
+        assert!(cfg.coverage_ingest.is_enabled("maven"), "a tool not mentioned is enabled");
+
+        for (label, toml) in [
+            ("a binary path", "[coverage_ingest.tools.go]\npath = \"/opt/go/bin/go\"\n"),
+            ("extra arguments", "[coverage_ingest.tools]\njest = [\"--runInBand\"]\n"),
+            ("a command string", "[coverage_ingest.tools]\ngo = \"go test ./...\"\n"),
+            ("a timeout", "[coverage_ingest.tools]\nmaven = 60\n"),
+            ("a command key", "[coverage_ingest]\ncommand = \"make cov\"\n"),
+            ("a flag key", "[coverage_ingest]\nextra_args = [\"--all\"]\n"),
+        ] {
+            let err = parse_config(toml, path).expect_err(label);
+            assert!(matches!(err, crate::config::ConfigError::Parse { .. }), "{label}: {err}");
+            assert_eq!(err.exit_code(), 2, "{label}");
+        }
+        let err = parse_config("[coverage_ingest.tools.go]\npath = \"/opt/go\"\n", path).unwrap_err();
+        assert!(err.to_string().contains("user-level config"), "the refusal says where it goes: {err}");
+
+        let err = parse_config("[coverage_ingest]\ntools = { custom = false }\n", path).unwrap_err();
+        assert!(
+            matches!(err, crate::config::ConfigError::InvalidValue { ref key, .. } if key == "coverage_ingest.tools.custom"),
+            "{err}"
+        );
     }
 }

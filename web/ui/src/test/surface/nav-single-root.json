@@ -14,16 +14,23 @@
     "scope": "member"
   },
   {
-    "id": "graph",
-    "label": "Graph",
-    "path": "/graph",
+    "id": "security",
+    "label": "Security",
+    "path": "/security",
     "group": "A",
     "scope": "member"
   },
   {
-    "id": "files",
-    "label": "Files & Risk",
-    "path": "/files",
+    "id": "coverage",
+    "label": "Coverage",
+    "path": "/coverage",
+    "group": "A",
+    "scope": "member"
+  },
+  {
+    "id": "graph",
+    "label": "Graph",
+    "path": "/graph",
     "group": "B",
     "scope": "member"
   },
@@ -35,16 +42,9 @@
     "scope": "member"
   },
   {
-    "id": "coverage",
-    "label": "Coverage",
-    "path": "/coverage",
-    "group": "B",
-    "scope": "member"
-  },
-  {
-    "id": "security",
-    "label": "Security",
-    "path": "/security",
+    "id": "files",
+    "label": "Files & Risk",
+    "path": "/files",
     "group": "B",
     "scope": "member"
   },

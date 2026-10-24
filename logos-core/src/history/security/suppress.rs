@@ -730,24 +730,70 @@ impl LabelledFinding {
         matches!(self.suppression, Some(Suppression::Suppressed { .. }))
     }
 
-    /// Whether it counts ([`counts`]).
-    pub fn is_counted(&self) -> bool {
-        counts(&self.finding, self.suppression.as_ref())
+    /// Why it is left out of every count in code of `scope` ([`left_out`]).
+    pub fn left_out(&self, scope: CodeScope) -> Option<LeftOut> {
+        left_out(&self.finding, self.suppression.as_ref(), scope)
     }
 }
 
+/// Whether a finding sits in test code or in production code ([FR-SC-28]):
+/// computed when it is read, from the graph and its path, and never stored.
+/// The classifier is [`crate::security::scope`].
+///
+/// [FR-SC-28]: ../../../../docs/specs/requirements/FR-SC-28.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeScope {
+    #[default]
+    Production,
+    Test,
+}
+
+/// Why a finding is left out of every count: the first reason that holds,
+/// in this order — so each surface's excluded buckets partition the findings
+/// left out, each in exactly one ([`left_out`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftOut {
+    /// An unexpired entry suppresses it, whatever its file's state.
+    Suppressed,
+    /// Its own file changed since the scan.
+    NotFresh,
+    /// It sits in test code ([FR-SC-28]).
+    ///
+    /// [FR-SC-28]: ../../../../docs/specs/requirements/FR-SC-28.md
+    Test,
+}
+
 /// **The one definition of a counted finding**, used by every security
-/// surface — the Security page's counts, Files & Risk, and the workspace
-/// roll-up ([S-760], [FR-SC-08]): a finding counts unless an unexpired entry
-/// suppresses it or its own file changed since the scan ([`FRESHNESS_STALE`]).
-/// Freshness is the finding's, never its report's: a `--path` scan's report is
-/// not fresh at HEAD, yet a finding in a file nothing has touched is current.
-/// A finding bound to no file (`n/a`) has none to compare and counts.
+/// surface — `security status`, the Security page's counts, Files & Risk, and
+/// the workspace roll-up ([S-760], [FR-SC-08]): a finding counts unless an
+/// unexpired entry suppresses it, its own file changed since the scan
+/// ([`FRESHNESS_STALE`]), or it sits in test code ([FR-SC-28]); this returns
+/// the first of those that holds, `None` for a counted finding. Freshness is
+/// the finding's, never its report's: a `--path` scan's report is not fresh at
+/// HEAD, yet a finding in a file nothing has touched is current. A finding
+/// bound to no file (`n/a`) has none to compare and counts. The gate never
+/// asks: it reads every finding, whatever its scope ([BR-98]).
 ///
 /// [FR-SC-08]: ../../../../docs/specs/requirements/FR-SC-08.md
+/// [FR-SC-28]: ../../../../docs/specs/requirements/FR-SC-28.md
+/// [BR-98]: ../../../../docs/specs/software-spec.md#328-security-findings
 /// [S-760]: ../../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
-pub fn counts(finding: &SecurityFinding, suppression: Option<&Suppression>) -> bool {
-    finding.freshness != crate::history::FRESHNESS_STALE && !matches!(suppression, Some(Suppression::Suppressed { .. }))
+pub fn left_out(finding: &SecurityFinding, suppression: Option<&Suppression>, scope: CodeScope) -> Option<LeftOut> {
+    if matches!(suppression, Some(Suppression::Suppressed { .. })) {
+        Some(LeftOut::Suppressed)
+    } else if finding.freshness == crate::history::FRESHNESS_STALE {
+        Some(LeftOut::NotFresh)
+    } else if scope == CodeScope::Test {
+        Some(LeftOut::Test)
+    } else {
+        None
+    }
+}
+
+/// Whether a finding counts: [`left_out`] finds no reason to leave it out.
+pub fn counts(finding: &SecurityFinding, suppression: Option<&Suppression>, scope: CodeScope) -> bool {
+    left_out(finding, suppression, scope).is_none()
 }
 
 /// One ignore entry with what the findings say about it.
@@ -763,10 +809,11 @@ pub struct EntryStatus {
     /// How many findings it suppresses: `0` when expired or orphaned. A
     /// finding two entries name counts once, for the one that labels it.
     pub suppressed: usize,
-    /// For an orphaned entry written under a Gitleaks finding's identity
-    /// before history.db migration 7: the fingerprint its finding has now,
-    /// which the entry should name. The file is never rewritten to it; `None`
-    /// otherwise.
+    /// For an entry written under a key a finding had before a re-key
+    /// (history.db migrations 7, 10 and 11): the fingerprint that finding has now,
+    /// which the entry should name. The entry still applies to the finding
+    /// through its old key; the file is never rewritten to the new one.
+    /// `None` otherwise.
     pub should_name: Option<String>,
 }
 
@@ -807,7 +854,8 @@ impl<'e> EntryMatcher<'e> {
 
     /// The entries that name `finding`, as `(position, entry)` in the order
     /// the matcher was given them. A fingerprint entry names the finding with
-    /// its fingerprint; a path entry names a finding whose project-relative
+    /// its fingerprint, or with a key it had before a re-key (its legacy
+    /// fingerprints), so a re-key never un-suppresses a finding; a path entry names a finding whose project-relative
     /// location, or a directory holding it, the glob matches, and whose rule
     /// and scanner are the ones it narrows to. A finding with no location, or
     /// one reported outside the project, is named by no path entry.
@@ -815,7 +863,9 @@ impl<'e> EntryMatcher<'e> {
         let location = self.project_path(finding);
         self.entries.iter().enumerate().filter_map(move |(at, (entry, glob))| {
             let names = match &entry.selector {
-                Selector::Fingerprint { fingerprint } => *fingerprint == finding.fingerprint,
+                Selector::Fingerprint { fingerprint } => {
+                    *fingerprint == finding.fingerprint || finding.legacy_fingerprints.contains(fingerprint)
+                }
                 Selector::Path { rule, scanner, .. } => {
                     glob.as_ref().zip(location.as_deref()).is_some_and(|(glob, path)| at_or_under(glob, path))
                         && rule.as_ref().is_none_or(|rule| *rule == finding.rule_id)
@@ -878,10 +928,10 @@ fn at_or_under(glob: &GlobSet, path: &str) -> bool {
 /// [`Suppression::Expired`] by the first. Each entry counts the findings it
 /// suppresses. An entry is orphaned when it names no finding in `findings`, so
 /// pass every finding that could match — an entry for a scanner that has never
-/// run reads as orphaned until it does. An orphaned entry naming a key a
-/// finding had before it was keyed by its secret names that finding's
-/// fingerprint as the one it should name: it is still orphaned, and suppresses
-/// nothing until edited.
+/// run reads as orphaned until it does. An entry naming a key a finding had
+/// before a re-key (history.db migrations 7, 10 and 11) still names, and so
+/// suppresses, that finding, and names the finding's fingerprint as the one it
+/// should name, unless some finding has the entry's key as its own.
 ///
 /// [FR-SC-11]: ../../../../docs/specs/requirements/FR-SC-11.md
 pub fn label(findings: &[SecurityFinding], ignore: &IgnoreFile, root: &Path, today: NaiveDate) -> Labelled {
@@ -915,10 +965,11 @@ pub fn label(findings: &[SecurityFinding], ignore: &IgnoreFile, root: &Path, tod
         .collect();
 
     // The lowest current fingerprint per old key, so the answer is the same in
-    // any finding order.
+    // any finding order. A key some finding has now is no old key.
+    let current: std::collections::HashSet<&str> = findings.iter().map(|f| f.fingerprint.as_str()).collect();
     let mut renamed: BTreeMap<&str, &str> = BTreeMap::new();
     for finding in findings {
-        for old in &finding.legacy_fingerprints {
+        for old in finding.legacy_fingerprints.iter().filter(|old| !current.contains(old.as_str())) {
             let now = renamed.entry(old.as_str()).or_insert(finding.fingerprint.as_str());
             *now = (*now).min(finding.fingerprint.as_str());
         }
@@ -937,7 +988,6 @@ pub fn label(findings: &[SecurityFinding], ignore: &IgnoreFile, root: &Path, tod
                 should_name: entry
                     .selector
                     .fingerprint()
-                    .filter(|_| orphaned)
                     .and_then(|fingerprint| renamed.get(fingerprint))
                     .map(|now| now.to_string()),
             }

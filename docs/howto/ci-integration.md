@@ -280,16 +280,18 @@ finding's rule, its path and its position (or the scanner's own identity for
 it), so a clone that scans the same code computes the one you blessed. A Gitleaks secret's fingerprint is keyed by the repository's first
 commit, which every full clone shares; a shallow clone (`fetch-depth: 1`) keys
 it differently, so check out full history in a job that gates on Gitleaks. A
-finding a scanner reports at an **absolute** path it could not match to an
-indexed file — OSV-Scanner on a lockfile is the usual case — carries the
-checkout's directory in its fingerprint, which therefore differs in a clone at
-another path. The checked-in file also records each finding's rule id and
-project-relative path, and the ratchet matches such a finding by those two, so
-it holds in any clone; the same advisory at another path is still new. Only
-these findings are matched that way: every other one is known by its
-fingerprint alone. Re-keying them to a checkout-independent fingerprint waits
-for the osv-scanner 2.x identity change. To keep one out of every report
-instead, use a [path entry in the ignore file](security.md#one-entry-for-a-whole-path).
+finding a scanner reports at an **absolute** path under the project root that it
+could not match to an indexed file — OSV-Scanner on a lockfile is the usual case —
+is keyed by its project-relative path, so it holds in a clone at any path; the
+same advisory in another lockfile is still new. An OSV-Scanner fingerprint also
+ignores the report's `partialFingerprints`, so an osv-scanner upgrade keeps it. A
+file blessed before history.db migration 10 recorded such a finding under a key
+that carried the blessing checkout's directory: the ratchet still matches it by
+the rule id and project-relative path the file records, for one release, so
+re-bless to record the new keys. A path **outside** the project root keeps its
+report spelling, so a report written in another checkout keys it by that
+checkout's directory. To keep one out of every report instead, use a
+[path entry in the ignore file](security.md#one-entry-for-a-whole-path).
 
 **Without the file**, the ratchet reads the set `gate --save` recorded in
 `history.db`, as before: persist `.logos/history.db` between runs with your CI's
@@ -579,13 +581,13 @@ a comment in the installer template `dist` ships, unrelated to this project.
 |---|---|---|
 | Trigger | `on.push.tags: '**[0-9]+.[0-9]+.[0-9]+*'`, or `workflow_dispatch` with the `tag` input | the pushed `vX.Y.Z`, or the named one, starts the run |
 | `plan` | the guard's `tag` output → `dist host --steps=create --tag=vX.Y.Z` | the release named by the tag; `dist` refuses a tag the workspace version does not match, which is why `publish-public.sh` checks `Cargo.toml` first |
-| Every job that builds | `actions/checkout@v6` with `ref:` the commit `plan` validated (`plan` and `host` check out `refs/tags/vX.Y.Z`; `publish-homebrew-formula` checks out the tap repository and only commits the formula built from the tag's artifacts) | the tag's tree, never the dispatching branch |
+| Every job that builds | `actions/checkout` (pinned to a commit) with `ref:` the commit `plan` validated (`plan` and `host` check out `refs/tags/vX.Y.Z`; `publish-homebrew-formula` checks out the tap repository and only commits the formula built from the tag's artifacts) | the tag's tree, never the dispatching branch |
 | `build-*` | `dist build --tag=vX.Y.Z` | the artifacts from that tree, with the SPA `build-spa` built from it |
 | `host` | `gh release create vX.Y.Z --verify-tag --target "$RELEASE_COMMIT"`, where `RELEASE_COMMIT` is the guard's `commit` output | a GitHub Release on the existing tag, pointing at its commit |
 
 Nothing in the workflow reads history behind the tagged commit, so a release
 built from the one squash commit is the same release the local tree would build.
-Never regenerate the workflow with `dist init`: it is hand-customised (the
+Never run `dist init` or `dist generate` on the workflow: it is hand-customised (the
 `build-spa` job, the dispatch, the guard, the term gate), and `dist-workspace.toml`
 sets `allow-dirty = ["ci"]` so `dist` accepts it as edited. The tests are
 `bash scripts/tests/test-release-tag-guard.sh` (against a stubbed release
@@ -593,6 +595,11 @@ listing), `bash scripts/tests/test-release-dist-config.sh`,
 `bash scripts/tests/test-release-workflow.sh` (the workflow's structure, parsed:
 step order, checkouts, refusal steps that cannot be bypassed), and the
 release-text cases of `bash scripts/tests/test-check-public-terms.sh`.
+
+The workflow's actions are pinned to commits and dist is installed by
+`scripts/install-dist.sh`, which checks the installer's sha256 before running it
+(`bash scripts/tests/test-install-dist.sh`, and `bash scripts/tests/test-ci-pins.sh` for
+the pins); see "CI actions are pinned" in `docs/howto/contributing.md`.
 
 ## See also
 

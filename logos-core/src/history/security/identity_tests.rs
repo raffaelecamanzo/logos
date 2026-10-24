@@ -26,7 +26,7 @@ use tempfile::TempDir;
 use super::{ingest, ingest_scoped, label, read_latest, FindingBinding, IgnoreFile, IngestScope, SecurityFinding};
 
 pub(super) const SECRET: &str = "lgs_pl4nted_S3cr3t_q7Vx9Rz2Kw";
-const LEGACY_SECRET: &str = "lgs_l3gacy_R8wY2pQ5nM4kT7";
+pub(super) const LEGACY_SECRET: &str = "lgs_l3gacy_R8wY2pQ5nM4kT7";
 pub(super) const SETTINGS: &str = "tests/fixtures/settings.py";
 pub(super) const C1: &str = "05ea98774379a22652c0c3b1b69faf9506c34b2d";
 pub(super) const C2: &str = "f8ee3bea8cc926e1c055faa25e1d17974e12016f";
@@ -168,7 +168,7 @@ fn one_secret_in_three_commits_is_one_finding_listing_them() {
     assert_eq!(settings.commits, [C3, C2, C1]);
     assert_eq!((settings.binding, settings.path.as_deref()), (FindingBinding::Bound, Some(SETTINGS)));
     assert_eq!((settings.start_line, settings.start_column, settings.end_column), (Some(13), Some(1), Some(41)), "C3's place");
-    assert_eq!(settings.legacy_fingerprints.len(), 3, "one report key per commit");
+    assert_eq!(settings.legacy_fingerprints.len(), 6, "one report key per commit, as keyed now and before migration 11");
 
     let legacy: Vec<SecurityFinding> =
         gitleaks_findings(&root).into_iter().filter(|f| f.report_path.as_deref() == Some("legacy/client.py")).collect();
@@ -234,37 +234,15 @@ fn a_suppressed_secret_first_recorded_by_a_scoped_run_stays_suppressed_after_its
 }
 
 /// [FR-SC-03]: after every ingest, no `history.db` column holds either secret,
-/// the text Gitleaks matched, an unkeyed hash of either, the keyed digest or
-/// the key — every cell of every table is read.
+/// the text Gitleaks matched, an unkeyed hash of either, a keyed digest or
+/// the key — every cell of every table and every byte of the file is read.
 #[test]
 fn no_secret_and_no_unkeyed_hash_of_one_is_stored() {
     let (_t, root) = gitleaks_repo(3);
     ingest_history(&root);
     ingest_scoped_run(&root, "scoped-c3.sarif");
-
-    let matched = format!("API_KEY = \"{SECRET}");
-    let mut digests = super::secret::SecretDigests::open(&root).expect("a repository key");
-    let region = super::Region { start_line: Some(13), start_column: Some(1), end_line: Some(13), end_column: Some(41) };
-    let keyed = digests.digest(Some(C3), SETTINGS, &region).expect("the secret is read");
-    let mut forbidden: Vec<String> = vec![SECRET.into(), LEGACY_SECRET.into(), matched.clone(), blake3::Hash::from(keyed).to_hex().to_string()];
-    for value in [SECRET, LEGACY_SECRET, matched.as_str(), key().as_str()] {
-        forbidden.push(blake3::hash(value.as_bytes()).to_hex().to_string());
-    }
-    let root_commit = git(&root, None, &["rev-list", "--max-parents=0", "HEAD"]);
-    forbidden.push(blake3::Hash::from(blake3::derive_key(super::secret::KEY_CONTEXT, root_commit.trim().as_bytes())).to_hex().to_string());
-
-    // Every row of every table, one line each — the full-store view the
-    // planted-secret check in tests.rs reads too.
-    let rows = super::tests::dump(&root);
-    assert!(!rows.is_empty(), "the store was read");
-    for row in &rows {
-        for value in &forbidden {
-            assert!(!row.contains(value.as_str()), "{row} holds {value:?}");
-        }
-    }
-    let bytes = std::fs::read(crate::history::db_path(&root)).unwrap();
-    let raw = String::from_utf8_lossy(&bytes);
-    assert!(!raw.contains(SECRET) && !raw.contains(LEGACY_SECRET), "no byte of the store file holds a secret");
+    let reads = [(C3, SETTINGS, region(13, 1, 41)), (C1, "legacy/client.py", region(1, 1, 42))];
+    assert_holds_none(&root, &secret_material(&root, &reads), &[]);
 }
 
 /// The keys the old identity gave the history report's results, as a store
@@ -287,7 +265,7 @@ fn old_keys() -> Vec<(String, String)> {
 #[test]
 fn migration_7_rekeys_stored_gitleaks_rows_and_the_baseline_on_the_next_ingest() {
     let old = old_keys();
-    assert_eq!(old.len(), 4, "four results, four old keys");
+    assert_eq!(old.len(), 8, "four results, each with its report key now and before migration 11");
     let (_t, root) = gitleaks_repo(3);
     let path = crate::history::db_path(&root);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -345,7 +323,7 @@ fn migration_7_rekeys_stored_gitleaks_rows_and_the_baseline_on_the_next_ingest()
     let empty: i64 = migrated
         .query_row("SELECT count(*) FROM security_findings WHERE commits = '' AND legacy_fingerprints = ''", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(empty, 8, "every stored row arrives with both columns empty");
+    assert_eq!(empty, 16, "every stored row — two snapshots of eight — arrives with both columns empty");
     drop(migrated);
 
     let summary = ingest_history(&root);
@@ -377,14 +355,15 @@ fn migration_7_rekeys_stored_gitleaks_rows_and_the_baseline_on_the_next_ingest()
     let mut new_keys: Vec<String> = old.iter().map(|(_, new)| new.clone()).collect();
     new_keys.sort();
     new_keys.dedup();
-    assert_eq!(new_keys.len(), 2, "four old keys, two secrets");
+    assert_eq!(new_keys.len(), 2, "eight old keys, two secrets");
     assert_eq!(baseline, new_keys, "the baseline names each new key once, and no old one");
 }
 
 /// The committed ignore file is never rewritten: an entry naming a key from
-/// before migration 7 is orphaned, and names the fingerprint it should name.
+/// before migration 7 still suppresses its secret's finding (CR-241: every
+/// surface honours an old key), and names the fingerprint it should name.
 #[test]
-fn an_ignore_entry_under_the_old_identity_is_orphaned_and_names_the_new_fingerprint() {
+fn an_ignore_entry_under_the_old_identity_still_suppresses_and_names_the_new_fingerprint() {
     let today = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
     let old = old_keys();
     let (_t, root) = gitleaks_repo(3);
@@ -393,9 +372,11 @@ fn an_ignore_entry_under_the_old_identity_is_orphaned_and_names_the_new_fingerpr
     ingest_history(&root);
     let labelled = label(&gitleaks_findings(&root), &IgnoreFile::load(&root).unwrap(), &root, today);
     let entry = &labelled.entries[0];
-    assert!(entry.orphaned, "the old key suppresses nothing");
+    assert!(!entry.orphaned && entry.suppressed == 1, "the old key still names its finding: {entry:?}");
     assert_eq!(entry.should_name.as_deref(), Some(old[0].1.as_str()));
-    assert!(labelled.findings.iter().all(|f| !f.is_suppressed()));
+    let suppressed: Vec<&str> =
+        labelled.findings.iter().filter(|f| f.is_suppressed()).map(|f| f.finding.fingerprint.as_str()).collect();
+    assert_eq!(suppressed, [old[0].1.as_str()], "exactly the secret its old key named");
     assert_eq!(std::fs::read_to_string(root.join(super::IGNORE_FILE)).unwrap(), text, "the file is untouched");
 }
 
@@ -564,7 +545,7 @@ fn one_secret_twice_in_one_commit_lists_the_commit_once() {
     let found = gitleaks_findings(&root);
     assert_eq!(found.len(), 1, "one secret, one finding: {found:#?}");
     assert_eq!(found[0].commits, [head], "the commit once");
-    assert_eq!(found[0].legacy_fingerprints.len(), 2, "both results' report keys");
+    assert_eq!(found[0].legacy_fingerprints.len(), 4, "both results' report keys, now and before migration 11");
 }
 
 /// A scoped report that names its file otherwise than the index does — here by
@@ -592,7 +573,7 @@ fn a_scoped_report_naming_its_file_by_an_absolute_path_keys_it_as_history_does()
 
 /// The `[security]` ratchet's violations over `root`, through the engine with
 /// no scanner on its search path — what `check` reports.
-fn ratchet_violations(root: &Path) -> Vec<String> {
+pub(super) fn ratchet_violations(root: &Path) -> Vec<String> {
     use crate::security::{ScanEnvironment, SecurityGateEvidence, VersionProbes};
     let user = root.parent().unwrap().join("user-config");
     std::fs::create_dir_all(&user).unwrap();
@@ -600,6 +581,7 @@ fn ratchet_violations(root: &Path) -> Vec<String> {
         user_dir: Some(user),
         search_path: Some(std::ffi::OsString::new()),
         tools_dir: None,
+        nvd_api_key: None,
     });
     let status = crate::security::status(
         engine.root(),
@@ -608,6 +590,7 @@ fn ratchet_violations(root: &Path) -> Vec<String> {
         crate::engine::today_utc(),
         VersionProbes::Never,
         false,
+        crate::security::scope::no_test_symbols,
     )
     .unwrap();
     let band = SecurityGateEvidence(&engine).band(&status).unwrap().expect("a [security] table");
@@ -660,6 +643,7 @@ fn a_checked_in_baseline_blessed_before_the_rekey_still_knows_each_secret() {
             user_dir: Some(user),
             search_path: Some(std::ffi::OsString::new()),
             tools_dir: None,
+            nvd_api_key: None,
         })
         .security_bless()
         .unwrap();
@@ -685,17 +669,27 @@ fn lockfile_project(dir: &Path, name: &str) -> PathBuf {
     root
 }
 
-/// An osv-scanner 1.9.2 report naming CVE-2026-63127 against each of `paths`
+/// The advisory every OSV-Scanner fixture below reports.
+const ADVISORY: &str = "CVE-2026-63127";
+
+/// An osv-scanner 1.9.2 report naming [`ADVISORY`] against each of `paths`
 /// under `root`, by absolute `file://` URI as osv-scanner writes it.
 fn osv_lockfile_report(dir: &Path, root: &Path, paths: &[&str]) -> PathBuf {
-    let results: Vec<serde_json::Value> = paths
+    let uris: Vec<String> = paths.iter().map(|p| format!("file://{}/{p}", root.display())).collect();
+    osv_report(dir, &format!("osv-{}.sarif", root.file_name().unwrap().to_string_lossy()), &uris)
+}
+
+/// An osv-scanner 1.9.2 report at `dir/name` naming [`ADVISORY`] against each
+/// of `uris`, as written.
+fn osv_report(dir: &Path, name: &str, uris: &[String]) -> PathBuf {
+    let results: Vec<serde_json::Value> = uris
         .iter()
-        .map(|p| {
+        .map(|uri| {
             serde_json::json!({
-                "ruleId": "CVE-2026-63127",
+                "ruleId": ADVISORY,
                 "level": "warning",
-                "message": {"text": "Package 'rmcp@1.7.0' is vulnerable to 'CVE-2026-63127'."},
-                "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/{p}", root.display())}}}]
+                "message": {"text": format!("Package 'rmcp@1.7.0' is vulnerable to '{ADVISORY}'.")},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}}}]
             })
         })
         .collect();
@@ -703,43 +697,1187 @@ fn osv_lockfile_report(dir: &Path, root: &Path, paths: &[&str]) -> PathBuf {
         "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
         "results": results
     }]});
-    let report = dir.join(format!("osv-{}.sarif", root.file_name().unwrap().to_string_lossy()));
+    let report = dir.join(name);
     std::fs::write(&report, sarif.to_string()).unwrap();
     report
 }
 
-/// S-764 × S-770 (sprint 107 review D3): an OSV-Scanner lockfile finding binds
-/// to no indexed file and is reported by an absolute path, so its fingerprint
-/// differs per checkout. A checked-in baseline blessed in one checkout still
-/// holds it in a clone at another path — by the rule id and project-relative
-/// path the file records — while the same advisory at another path stays new.
-#[test]
-fn a_checked_in_baseline_holds_an_unbound_lockfile_finding_in_a_clone() {
-    let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().canonicalize().unwrap();
-    let a = lockfile_project(&dir, "checkout-a");
-    ingest(&a, &osv_lockfile_report(&dir, &a, &["Cargo.lock"]), &["src/main.rs".to_string()]).unwrap();
+/// The key of a result with no region and no report identity keyed at
+/// `path` — what Logos 1.20 gave an OSV-Scanner 1.x lockfile result at its
+/// absolute path, and what migration 10 gives it at its project-relative one —
+/// spelled out here apart from the code under test.
+fn location_key(rule: &str, path: &str) -> String {
+    blake3::hash(format!("logos-finding-v1\u{1f}location\u{1f}{rule}\u{1f}{path}\u{1f}:::").as_bytes()).to_hex().to_string()
+}
+
+/// The D3 stopgap switched off on this test's thread until dropped
+/// ([`crate::security::STOPGAP_OFF`]), so a checked-in baseline knows a
+/// finding by its key alone.
+struct StopgapOff;
+
+impl StopgapOff {
+    fn new() -> Self {
+        crate::security::STOPGAP_OFF.with(|off| off.set(true));
+        Self
+    }
+}
+
+impl Drop for StopgapOff {
+    fn drop(&mut self) {
+        crate::security::STOPGAP_OFF.with(|off| off.set(false));
+    }
+}
+
+/// The OSV-Scanner findings stored under `root`, as `(report path, fingerprint)`.
+fn osv_keys(root: &Path) -> Vec<(String, String)> {
+    read_latest(root)
+        .unwrap()
+        .findings
+        .into_iter()
+        .filter(|f| f.scanner_name == "osv-scanner")
+        .map(|f| (f.report_path.unwrap_or_default(), f.fingerprint))
+        .collect()
+}
+
+/// `checkout`'s `.logos/security-baseline.json` written by `logos security
+/// bless`, which must record `findings`.
+fn bless(dir: &Path, checkout: &Path, findings: usize) {
     let user = dir.join("user-config");
     std::fs::create_dir_all(&user).unwrap();
-    let blessed = crate::engine::Engine::open(&a)
+    let blessed = crate::engine::Engine::open(checkout)
         .with_scan_environment(crate::security::ScanEnvironment {
             user_dir: Some(user),
             search_path: Some(std::ffi::OsString::new()),
             tools_dir: None,
+            nvd_api_key: None,
         })
         .security_bless()
         .unwrap();
-    assert!(blessed.recorded && blessed.findings == 1, "{blessed:?}");
+    assert!(blessed.recorded && blessed.findings == findings, "{blessed:?}");
+}
+
+/// S-778 (sprint 107 review D3, CR-241): an OSV-Scanner lockfile finding binds
+/// to no indexed file and is reported by an absolute path, yet its key is its
+/// rule and project-relative path. A baseline blessed in one checkout — the
+/// set `gate --save` recorded in `history.db`, and the checked-in file — holds
+/// it in a clone at another path by that key alone, with the stopgap's
+/// `(rule id, path)` match switched off; the same advisory in `sub/Cargo.lock`
+/// keeps a key of its own and reads as new from either.
+#[test]
+fn a_baseline_blessed_in_one_checkout_holds_in_a_clone_by_its_key_alone() {
+    let _off = StopgapOff::new();
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let a = lockfile_project(&dir, "checkout-a");
+    ingest(&a, &osv_lockfile_report(&dir, &a, &["Cargo.lock"]), &["src/main.rs".to_string()]).unwrap();
+    let blessed: Vec<(String, String)> =
+        read_latest(&a).unwrap().findings.into_iter().map(|f| (f.scanner_name, f.fingerprint)).collect();
+    assert_eq!(blessed.len(), 1);
+    assert_eq!(blessed[0].1, location_key(ADVISORY, "Cargo.lock"), "keyed by the project-relative path");
+    super::save_baseline(&a, None, "config", &blessed).unwrap();
+    bless(&dir, &a, 1);
     assert_eq!(ratchet_violations(&a), Vec::<String>::new());
     git(&a, None, &["add", "-f", ".logos/security-baseline.json"]);
     git(&a, Some("2026-10-02T09:00:00+00:00"), &["commit", "-q", "-m", "bless"]);
 
     let b = dir.join("checkout-b");
     git(&dir, None, &["clone", "-q", a.to_str().unwrap(), b.to_str().unwrap()]);
+    // The store `gate --save` wrote in A, carried to B as a moved checkout
+    // carries it.
+    for suffix in ["", "-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{suffix}", crate::history::db_path(&a).display()));
+        if from.exists() {
+            std::fs::copy(&from, format!("{}{suffix}", crate::history::db_path(&b).display())).unwrap();
+        }
+    }
     ingest(&b, &osv_lockfile_report(&dir, &b, &["Cargo.lock", "sub/Cargo.lock"]), &["src/main.rs".to_string()]).unwrap();
-    let keys = |root: &Path| -> Vec<String> { read_latest(root).unwrap().findings.into_iter().map(|f| f.fingerprint).collect() };
-    assert!(!keys(&b).contains(&keys(&a)[0]), "the fingerprint carries the checkout's directory");
-    let new = ratchet_violations(&b);
-    assert_eq!(new.len(), 1, "only the advisory at another path is new: {new:?}");
-    assert!(new[0].contains("sub/Cargo.lock"), "{new:?}");
+    let keys = osv_keys(&b);
+    assert_eq!(keys.len(), 2);
+    assert!(keys.iter().any(|(_, key)| *key == blessed[0].1), "one key in both checkouts: {keys:?}");
+    assert!(keys.iter().all(|(report, _)| report.starts_with(b.to_str().unwrap())), "both reported under B: {keys:?}");
+    assert_ne!(keys[0].1, keys[1].1, "sub/Cargo.lock keeps a key of its own");
+
+    let checked_in = b.join(".logos/security-baseline.json");
+    let aside = b.join(".logos/security-baseline.aside");
+    std::fs::rename(&checked_in, &aside).unwrap();
+    let from_store = ratchet_violations(&b);
+    assert_eq!(from_store.len(), 1, "only sub/Cargo.lock is new to history.db's baseline: {from_store:?}");
+    assert!(from_store[0].contains("sub/Cargo.lock") && from_store[0].contains("gate --save"), "{from_store:?}");
+    std::fs::rename(&aside, &checked_in).unwrap();
+    let from_file = ratchet_violations(&b);
+    assert_eq!(from_file.len(), 1, "only sub/Cargo.lock is new to the checked-in file: {from_file:?}");
+    assert!(from_file[0].contains("sub/Cargo.lock") && from_file[0].contains("security-baseline.json"), "{from_file:?}");
+}
+
+/// A checked-in file blessed before migration 10 records the key the finding
+/// had then, which carries the blessing checkout's directory: in another
+/// checkout the finding is known only through the stopgap's `(rule id,
+/// path)` match, which is kept for one release.
+#[test]
+fn a_checked_in_baseline_blessed_before_migration_10_stays_green_through_the_stopgap() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = lockfile_project(&dir, "checkout-b");
+    let old = location_key(ADVISORY, "/home/dev/checkout-a/Cargo.lock");
+    let file = serde_json::json!({"version": 1, "findings": [{"fingerprint": old, "rule_id": ADVISORY, "path": "Cargo.lock"}]});
+    write(&b, ".logos/security-baseline.json", &format!("{file:#}\n"));
+    ingest(&b, &osv_lockfile_report(&dir, &b, &["Cargo.lock"]), &["src/main.rs".to_string()]).unwrap();
+    assert_eq!(ratchet_violations(&b), Vec::<String>::new(), "held by the stopgap");
+    let _off = StopgapOff::new();
+    assert_eq!(ratchet_violations(&b).len(), 1, "and by nothing else");
+}
+
+/// One fixture of `name` with each location URI pointing at `target`, as the
+/// scanner would have reported a lockfile there; nothing else is changed.
+fn fixture_at(dir: &Path, name: &str, target: &str) -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif").join(name);
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut sarif: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for result in sarif["runs"][0]["results"].as_array_mut().unwrap() {
+        result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] = serde_json::json!(target);
+    }
+    let out = dir.join(format!("at-{name}"));
+    std::fs::write(&out, sarif.to_string()).unwrap();
+    out
+}
+
+/// What a report's OSV-Scanner findings are stored as under `root`:
+/// `(rule, report path, fingerprint, legacy fingerprints)`, sorted.
+fn osv_rows(root: &Path, report: &Path) -> Vec<(String, String, String, Vec<String>)> {
+    ingest(root, report, &["src/main.rs".to_string()]).unwrap();
+    let mut rows: Vec<_> = read_latest(root)
+        .unwrap()
+        .findings
+        .into_iter()
+        .map(|f| (f.rule_id, f.report_path.unwrap_or_default(), f.fingerprint, f.legacy_fingerprints))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// CR-241 Decision 35: osv-scanner 2.x writes
+/// `partialFingerprints.primaryLocationLineHash` where 1.9.2 wrote none. The
+/// upstream reports of one scan at each version — two advisories, one of them
+/// twice, every result pointed at one lockfile under the root — give one key
+/// per finding: the version never re-keys it, though it did before migration
+/// 10, whose keys each row lists as its legacy fingerprints.
+#[test]
+fn osv_scanner_1_9_2_and_2_7_0_reports_of_one_lockfile_give_one_key() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let target = format!("file://{}/Cargo.lock", root.display());
+    let v1 = osv_rows(&root, &fixture_at(&dir, "osv-scanner-1.9.2.sarif", &target));
+    let v2 = osv_rows(&root, &fixture_at(&dir, "osv-scanner-2.7.0.sarif", &target));
+    let keys = |rows: &[(String, String, String, Vec<String>)]| rows.iter().map(|r| (r.0.clone(), r.2.clone())).collect::<Vec<_>>();
+    assert_eq!(keys(&v1), keys(&v2), "one key per finding at either version");
+    let distinct: std::collections::BTreeSet<&str> = v1.iter().map(|r| r.2.as_str()).collect();
+    assert_eq!((v1.len(), distinct.len()), (3, 3), "two advisories, one twice: three findings, three keys");
+    assert!(v1.iter().any(|r| r.2 == location_key("CVE-2021-3121", "Cargo.lock")), "{v1:?}");
+    let legacy = |rows: &[(String, String, String, Vec<String>)]| rows.iter().map(|r| r.3.clone()).collect::<Vec<_>>();
+    assert_ne!(legacy(&v1), legacy(&v2), "before migration 10 the version re-keyed them");
+    assert!(v1.iter().all(|r| r.3.len() == 1 && r.3[0] != r.2), "a 1.x row lists the one key it had");
+    for (one, two) in v1.iter().zip(&v2) {
+        assert_eq!(two.3.len(), 2, "a 2.x row lists both keys it could have had: {two:?}");
+        assert!(two.3.contains(&one.3[0]), "one of them the key its 1.x report gave it: {one:?} {two:?}");
+    }
+}
+
+/// CR-241 §3.2 item 2, the upgrade path: a store whose OSV-Scanner rows,
+/// baseline and suppression were keyed under osv-scanner 1.9.2 before
+/// migration 10, whose first ingest after it is a 2.7.0 report — whose
+/// results carry `partialFingerprints`, so the key their own report gave them
+/// before migration 10 is not the stored one. The rows of every snapshot and
+/// the baseline are re-keyed all the same, and nothing reads as new.
+#[test]
+fn the_first_ingest_after_migration_10_from_osv_scanner_2_x_rekeys_a_1_x_store() {
+    let _off = StopgapOff::new();
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let lockfile = format!("{}/Cargo.lock", root.display());
+    let rules = ["CVE-2021-3121", "CVE-2022-24713"];
+    let old: Vec<String> = rules.iter().map(|rule| location_key(rule, &lockfile)).collect();
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 9).unwrap();
+        conn.execute(
+            "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+             VALUES (1, ?1, 'osv-scanner', '1.9.2', 'older', 'sarif', 1, ?1)",
+            ["1".repeat(40)],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for (key, rule) in old.iter().zip(rules) {
+            conn.execute(
+                "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding, report_path)
+                 VALUES (1, ?1, ?2, 'unrated', '', 'm', 0, 'unmatched', ?3)",
+                rusqlite::params![key, rule, lockfile],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, 'osv-scanner')", [key]).unwrap();
+        }
+    }
+    write(&root, super::IGNORE_FILE, &format!("[[ignore]]\nfingerprint = \"{}\"\nreason = \"unreachable\"\n", old[0]));
+
+    ingest(&root, &fixture_at(&dir, "osv-scanner-2.7.0.sarif", &format!("file://{lockfile}")), &["src/main.rs".to_string()]).unwrap();
+    let new: Vec<String> = rules.iter().map(|rule| location_key(rule, "Cargo.lock")).collect();
+    let conn = Connection::open(&path).unwrap();
+    let older: Vec<String> = conn
+        .prepare("SELECT fingerprint FROM security_findings WHERE snapshot_id = 1 ORDER BY rule_id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(older, new, "the 1.x rows of an older snapshot are re-keyed by a 2.x report");
+    let mut baseline: Vec<String> = conn
+        .prepare("SELECT fingerprint FROM security_baseline_findings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    baseline.sort();
+    assert_eq!(baseline, new, "and so is the baseline");
+    drop(conn);
+    // The baseline does not record the 2.x report's second CVE-2022-24713
+    // result, so it is the one new finding — and the old-key suppression
+    // keeps CVE-2021-3121 out of the ratchet.
+    let violations = ratchet_violations(&root);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+    let labelled = label(&read_latest(&root).unwrap().findings, &IgnoreFile::load(&root).unwrap(), &root, today);
+    let entry = &labelled.entries[0];
+    assert_eq!((entry.orphaned, entry.suppressed, entry.should_name.as_deref()), (false, 1, Some(new[0].as_str())));
+}
+
+/// Where the baseline of [`nothing_stored_from_an_osv_scanner_1_9_2_scan_reads_as_new_after_the_2_7_0_upgrade`]
+/// is kept: the set `gate --save` records in `history.db`, or the checked-in
+/// file `security bless` writes, which the ratchet reads in its place when it
+/// exists. Each is tried on its own, so neither can stand in for the other.
+#[derive(Clone, Copy, Debug)]
+enum BaselineAt {
+    Store,
+    CheckedIn,
+}
+
+/// S-779, the upgrade itself: a store, a baseline (in `history.db`, or checked
+/// in) and a fingerprint suppression built from a 1.9.2 scan under today's
+/// keys, then the 2.7.0 report of the same lockfile ingested into it. Each
+/// finding keeps its key, the baseline and the suppression still know it, and
+/// nothing reads as new — while the finding the 2.7.0 report gives a score now
+/// reads that rating, where it read `unrated` before.
+fn upgrade_reads_nothing_as_new(at: BaselineAt) {
+    let _off = StopgapOff::new();
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let target = format!("file://{}/Cargo.lock", root.display());
+    let paths = ["src/main.rs".to_string()];
+    ingest(&root, &fixture_at(&dir, "osv-scanner-1.9.2.sarif", &target), &paths).unwrap();
+    let before = read_latest(&root).unwrap().findings;
+    assert_eq!(before.len(), 3, "{at:?}: two advisories, one of them twice: {before:#?}");
+    assert!(before.iter().all(|f| f.severity.as_str() == "unrated"), "{at:?}: 1.9.2 gives no rating: {before:#?}");
+    assert!(before.iter().all(|f| f.severity.gated_as().as_str() == "medium"), "{at:?}: and is gated as medium: {before:#?}");
+    let keys = |findings: &[SecurityFinding]| {
+        let mut keys: Vec<(String, String)> = findings.iter().map(|f| (f.rule_id.clone(), f.fingerprint.clone())).collect();
+        keys.sort();
+        keys
+    };
+    let blessed: Vec<(String, String)> = before.iter().map(|f| (f.scanner_name.clone(), f.fingerprint.clone())).collect();
+    super::save_baseline(&root, None, "config", &blessed).unwrap();
+    if matches!(at, BaselineAt::CheckedIn) {
+        bless(&dir, &root, 3);
+    }
+    let suppressed = location_key("CVE-2021-3121", "Cargo.lock");
+    write(&root, super::IGNORE_FILE, &format!("[[ignore]]\nfingerprint = \"{suppressed}\"\nreason = \"unreachable\"\n"));
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "{at:?}: green before the upgrade");
+
+    ingest(&root, &fixture_at(&dir, "osv-scanner-2.7.0.sarif", &target), &paths).unwrap();
+    let after = read_latest(&root).unwrap().findings;
+    assert_eq!(keys(&after), keys(&before), "{at:?}: every finding keeps its key");
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "{at:?}: no entry of the baseline reads new");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+    let labelled = label(&after, &IgnoreFile::load(&root).unwrap(), &root, today);
+    assert_eq!(labelled.entries.len(), 1);
+    let entry = &labelled.entries[0];
+    assert_eq!(
+        (entry.orphaned, entry.suppressed, entry.should_name.as_deref()),
+        (false, 1, None),
+        "{at:?}: the suppression still covers it, by its own key: {entry:?}"
+    );
+    let rated: Vec<(String, String)> = after.iter().map(|f| (f.rule_id.clone(), f.severity.as_str().to_string())).collect();
+    assert!(rated.contains(&("CVE-2022-24713".to_string(), "high".to_string())), "{at:?}: the scored advisory reads its rating: {rated:?}");
+    assert!(rated.contains(&("CVE-2021-3121".to_string(), "unrated".to_string())), "{at:?}: the unscored one still reads unrated: {rated:?}");
+}
+
+#[test]
+fn nothing_stored_from_an_osv_scanner_1_9_2_scan_reads_as_new_after_the_2_7_0_upgrade() {
+    upgrade_reads_nothing_as_new(BaselineAt::Store);
+    upgrade_reads_nothing_as_new(BaselineAt::CheckedIn);
+}
+
+/// A report naming one unindexed file both by its absolute path and by its
+/// relative one gives the second result, keyed apart by its occurrence suffix,
+/// the first's new key as its pre-migration-10 one. That key is no old one:
+/// recorded as one, the re-key would merge the first finding into the second.
+/// Both findings are stored, in either report order.
+#[test]
+fn a_report_naming_one_file_two_ways_keeps_both_findings() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    for (n, order) in [[true, false], [false, true]].into_iter().enumerate() {
+        let root = lockfile_project(&dir, &format!("project-{n}"));
+        let uri = |absolute: bool| if absolute { format!("file://{}/notes.txt", root.display()) } else { "notes.txt".to_string() };
+        let results: Vec<serde_json::Value> = order
+            .iter()
+            .map(|&absolute| {
+                serde_json::json!({
+                    "ruleId": "R1", "level": "warning", "message": {"text": "m"},
+                    "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri(absolute)}, "region": {"startLine": 3}}}]
+                })
+            })
+            .collect();
+        let sarif = serde_json::json!({"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "acme", "version": "1", "rules": []}}, "results": results}]});
+        let report = dir.join(format!("two-ways-{n}.sarif"));
+        std::fs::write(&report, sarif.to_string()).unwrap();
+        let summary = ingest(&root, &report, &["src/main.rs".to_string()]).unwrap();
+        let stored = read_latest(&root).unwrap().findings;
+        assert_eq!((summary.findings, stored.len()), (2, 2), "order {order:?}: {stored:#?}");
+        let keys: Vec<&str> = stored.iter().map(|f| f.fingerprint.as_str()).collect();
+        assert!(stored.iter().all(|f| f.legacy_fingerprints.iter().all(|old| !keys.contains(&old.as_str()))), "{stored:#?}");
+    }
+}
+
+/// A path outside the project root keeps its report spelling in the key —
+/// the upstream fixtures name `/path/to/…` — so such a key, from a CI report
+/// ingested locally, stays root-dependent; the version still never re-keys it.
+#[test]
+fn a_path_outside_the_root_keeps_its_report_spelling() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let fixture = |name: &str| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif").join(name);
+    let v1 = osv_rows(&root, &fixture("osv-scanner-1.9.2.sarif"));
+    let v2 = osv_rows(&root, &fixture("osv-scanner-2.7.0.sarif"));
+    assert_eq!(v1.iter().map(|r| &r.2).collect::<Vec<_>>(), v2.iter().map(|r| &r.2).collect::<Vec<_>>());
+    let go = v1.iter().find(|r| r.0 == "CVE-2021-3121").unwrap();
+    assert_eq!(go.2, location_key("CVE-2021-3121", "/path/to/go.mod"), "the report's own spelling");
+    assert!(v1.iter().all(|r| r.3.is_empty()), "1.9.2's key is unchanged by migration 10: {v1:?}");
+}
+
+/// Any scanner: a result at an absolute path under the root that binds to no
+/// indexed file is keyed as its project-relative path is, while one outside
+/// the root keeps its spelling. Only OSV-Scanner's report identity is left
+/// out of its key, by its driver name in any case — not a near miss's — and
+/// its region stays in it.
+#[test]
+fn an_unbound_absolute_path_under_the_root_is_keyed_project_relative() {
+    let root = Path::new("/work/project");
+    let at = |path: &str, identity: &[&str]| super::ParsedFinding {
+        rule_id: "python.lang.security.audit.eval".to_string(),
+        severity: super::Severity::High,
+        cwes: Vec::new(),
+        message: "m".to_string(),
+        redacted: false,
+        report_path: Some(path.to_string()),
+        region: super::Region { start_line: Some(3), start_column: Some(1), end_line: Some(3), end_column: Some(9) },
+        identity: identity.iter().map(|s| s.to_string()).collect(),
+        commit: None,
+        committed_at: None,
+    };
+    let key = |f: &super::ParsedFinding, scanner: &str| super::fingerprint(f, scanner, root, None);
+    let relative = key(&at("scripts/gen.py", &[]), "Semgrep OSS");
+    assert_eq!(key(&at("/work/project/scripts/gen.py", &[]), "Semgrep OSS"), relative);
+    assert_ne!(key(&at("/work/project-b/scripts/gen.py", &[]), "Semgrep OSS"), relative, "a sibling directory is outside the root");
+    assert_ne!(key(&at("/elsewhere/scripts/gen.py", &[]), "Semgrep OSS"), relative, "outside the root, as reported");
+    assert_eq!(super::fingerprint(&at("/work/project/scripts/gen.py", &[]), "Semgrep OSS", root, Some("scripts/gen.py")), relative, "and as the path it binds to");
+    let hashed = at("Cargo.lock", &["primaryLocationLineHash=abc"]);
+    let plain = at("Cargo.lock", &[]);
+    assert_eq!(key(&hashed, " OSV-Scanner "), key(&plain, "osv-scanner"), "OSV-Scanner's identity is never hashed");
+    assert_ne!(key(&hashed, "osv-scanner-wrapper"), key(&plain, "osv-scanner-wrapper"), "a near miss keeps its identity");
+    assert_ne!(key(&hashed, "Semgrep OSS"), key(&plain, "Semgrep OSS"), "every other scanner keeps its identity");
+    // OSV-Scanner's key is its rule and location plus its region, when the
+    // report gives one.
+    let mut elsewhere = plain.clone();
+    elsewhere.region.start_line = Some(4);
+    assert_ne!(key(&elsewhere, "osv-scanner"), key(&plain, "osv-scanner"), "the region is in the key");
+    let spelled = blake3::hash(format!("logos-finding-v1\u{1f}location\u{1f}{}\u{1f}Cargo.lock\u{1f}3:1:3:9", plain.rule_id).as_bytes());
+    assert_eq!(key(&hashed, "osv-scanner"), spelled.to_hex().to_string());
+}
+
+/// Every security table of the store at `path`, as text, every column but the
+/// ones `exclude` names: what two states of one store must agree on.
+fn dump(path: &Path, exclude: &[&str]) -> Vec<String> {
+    let conn = Connection::open(path).unwrap();
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let mut out = vec![format!("user_version {version}")];
+    for table in ["security_snapshots", "security_findings", "security_files", "security_baseline", "security_baseline_findings"] {
+        let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY 1, 2")).unwrap();
+        let kept: Vec<usize> =
+            stmt.column_names().iter().enumerate().filter(|(_, name)| !exclude.contains(name)).map(|(i, _)| i).collect();
+        let rows = stmt
+            .query_map([], |r| {
+                kept.iter()
+                    .map(|&i| r.get::<_, rusqlite::types::Value>(i).map(|v| format!("{v:?}")))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .map(|row| format!("{table}: {}", row.unwrap().join("|")))
+            .collect::<Vec<_>>();
+        out.extend(rows);
+    }
+    out
+}
+
+/// history.db 9 → 10: every OSV-Scanner snapshot's report hash is marked
+/// `pre-10:` and nothing else changes. The next OSV-Scanner ingest — of the
+/// very report the current snapshot came from — is no no-op: it re-keys the
+/// rows of every snapshot and the ratchet's baseline, each row listing its old
+/// key, so the ratchet reads nothing as new; a fingerprint suppression written
+/// under the old key still suppresses, and `security status` names the key to
+/// write; a path suppression is unaffected, and a checked-in file blessed
+/// before the migration still knows each finding by its old key, the stopgap
+/// switched off. The re-keyed rows are the ones a fresh store's ingest of the
+/// same report writes; migrated step by step or at once, the store is the same.
+#[test]
+fn migration_10_marks_osv_snapshots_and_the_next_ingest_rekeys_every_surface() {
+    let _off = StopgapOff::new();
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let report = osv_lockfile_report(&dir, &root, &["Cargo.lock", "sub/Cargo.lock"]);
+    let bytes = std::fs::read(&report).unwrap();
+    let head = git(&root, None, &["rev-parse", "HEAD"]).trim().to_string();
+    let abs = |p: &str| format!("{}/{p}", root.display());
+    let old = [location_key(ADVISORY, &abs("Cargo.lock")), location_key(ADVISORY, &abs("sub/Cargo.lock"))];
+    let new = [location_key(ADVISORY, "Cargo.lock"), location_key(ADVISORY, "sub/Cargo.lock")];
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 9).unwrap();
+        let older = "1".repeat(40);
+        for (id, head, hash) in [(1, older.as_str(), "older".to_string()), (2, head.as_str(), blake3::hash(&bytes).to_hex().to_string())] {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, 'osv-scanner', '1.9.2', ?3, 'sarif', 1, ?2)",
+                rusqlite::params![id, head, hash],
+            )
+            .unwrap();
+            for (key, lockfile) in old.iter().zip(["Cargo.lock", "sub/Cargo.lock"]) {
+                conn.execute(
+                    "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding, report_path)
+                     VALUES (?1, ?2, ?3, 'unrated', '', 'm', 0, 'unmatched', ?4)",
+                    rusqlite::params![id, key, ADVISORY, abs(lockfile)],
+                )
+                .unwrap();
+            }
+        }
+        // Another scanner's snapshot is left as it is; an OSV-Scanner one is
+        // told by its driver name, ASCII case and surrounding space ignored.
+        for (id, name) in [(3, "Semgrep OSS"), (4, " OSV-Scanner ")] {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, ?3, '1', 'other', 'sarif', 1, ?2)",
+                rusqlite::params![id, "2".repeat(40), name],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for (key, scanner) in [(&old[0], "osv-scanner"), (&old[1], "osv-scanner"), (&"f".repeat(64), "Semgrep OSS")] {
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, ?2)", [key, scanner]).unwrap();
+        }
+    }
+    let v9 = dir.join("v9.db");
+    std::fs::copy(&path, &v9).unwrap();
+
+    // Step by step: migration 10 alone, then each later one in turn.
+    let before = dump(&path, &["report_hash"]);
+    let migrated = crate::history::db::open_at_version(&path, 10).unwrap();
+    let marked: Vec<String> = migrated
+        .prepare("SELECT report_hash FROM security_snapshots ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        marked,
+        ["pre-10:older".to_string(), format!("pre-10:{}", blake3::hash(&bytes).to_hex()), "other".to_string(), "pre-10:other".to_string()],
+        "every OSV-Scanner snapshot is marked, and only OSV-Scanner ones"
+    );
+    drop(migrated);
+    assert_eq!(dump(&path, &["report_hash"])[1..], before[1..], "nothing else changes");
+    for version in 11..=crate::history::latest_schema_version() {
+        drop(crate::history::db::open_at_version(&path, version).unwrap());
+    }
+
+    assert!(!ingest(&root, &report, &["src/main.rs".to_string()]).unwrap().already_ingested, "the marked snapshot's own report re-ingests");
+    let conn = Connection::open(&path).unwrap();
+    let older: Vec<(String, String)> = conn
+        .prepare("SELECT fingerprint, legacy_fingerprints FROM security_findings WHERE snapshot_id = 1 ORDER BY report_path")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let want: Vec<(String, String)> = new.iter().cloned().zip(old.iter().cloned()).collect();
+    assert_eq!(older, want, "an older snapshot's rows are re-keyed, each listing its old key");
+    let mut current: Vec<(String, Vec<String>)> =
+        read_latest(&root).unwrap().findings.into_iter().map(|f| (f.fingerprint, f.legacy_fingerprints)).collect();
+    current.sort();
+    let mut want: Vec<(String, Vec<String>)> = new.iter().cloned().zip(old.iter().map(|k| vec![k.clone()])).collect();
+    want.sort();
+    assert_eq!(current, want);
+    let mut baseline: Vec<String> = conn
+        .prepare("SELECT fingerprint FROM security_baseline_findings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    baseline.sort();
+    let mut want = vec![new[0].clone(), new[1].clone(), "f".repeat(64)];
+    want.sort();
+    assert_eq!(baseline, want, "the baseline names each new key, and another scanner's key as it was");
+    drop(conn);
+    let stepwise = dump(&path, &["created_at"]);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "nothing reads as new");
+    // A checked-in file blessed before migration 10 holds this checkout's old
+    // keys; with no other match it still knows each finding by them.
+    let checked_in = |keys: &[String]| {
+        let findings: Vec<serde_json::Value> =
+            keys.iter().map(|key| serde_json::json!({"fingerprint": key, "rule_id": ADVISORY, "path": null})).collect();
+        write(&root, ".logos/security-baseline.json", &format!("{:#}\n", serde_json::json!({"version": 1, "findings": findings})));
+    };
+    checked_in(&old);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "known by the old keys the file records");
+    checked_in(&["e".repeat(64)]);
+    assert_eq!(ratchet_violations(&root).len(), 2, "and by nothing else");
+    std::fs::remove_file(root.join(".logos/security-baseline.json")).unwrap();
+
+    // At once: the same v9 store opened at the latest version, then ingested.
+    // (Today migration 10 is the latest, so the two paths differ only once a
+    // later migration exists; the fresh store below is what bites now.)
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    std::fs::copy(&v9, &path).unwrap();
+    ingest(&root, &report, &["src/main.rs".to_string()]).unwrap();
+    assert_eq!(dump(&path, &["created_at"]), stepwise, "v9 migrated at once equals the stepwise result");
+    // Everything but the report's own path spelling, which names its checkout.
+    let rows = |root: &Path| -> Vec<(String, String, String, String)> {
+        read_latest(root)
+            .unwrap()
+            .findings
+            .into_iter()
+            .map(|f| (f.fingerprint, f.rule_id, f.binding.as_str().to_string(), f.severity.as_str().to_string()))
+            .collect()
+    };
+    let fresh = lockfile_project(&dir, "fresh");
+    ingest(&fresh, &osv_lockfile_report(&dir, &fresh, &["Cargo.lock", "sub/Cargo.lock"]), &["src/main.rs".to_string()]).unwrap();
+    assert_eq!(rows(&root), rows(&fresh), "the re-keyed rows are the ones a fresh store's ingest writes");
+
+    let today = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+    let text = format!(
+        "[[ignore]]\nfingerprint = \"{}\"\nreason = \"unreachable\"\n\n[[ignore]]\npath = \"sub\"\nscanner = \"osv-scanner\"\nreason = \"vendored\"\n",
+        old[0]
+    );
+    write(&root, super::IGNORE_FILE, &text);
+    let labelled = label(&read_latest(&root).unwrap().findings, &IgnoreFile::load(&root).unwrap(), &root, today);
+    let states: Vec<(bool, usize, Option<&str>)> =
+        labelled.entries.iter().map(|e| (e.orphaned, e.suppressed, e.should_name.as_deref())).collect();
+    assert_eq!(states, [(false, 1, Some(new[0].as_str())), (false, 1, None)], "the old key suppresses and names the new one");
+    assert!(labelled.findings.iter().all(|f| f.is_suppressed()));
+    let user = dir.join("user-config");
+    let status = crate::security::status(
+        &root,
+        &crate::security::ScanEnvironment { user_dir: Some(user), search_path: Some(std::ffi::OsString::new()), tools_dir: None, nvd_api_key: None },
+        crate::engine::Engine::open(&root).tools_manifest(),
+        today,
+        crate::security::VersionProbes::Never,
+        false,
+        crate::security::scope::no_test_symbols,
+    )
+    .unwrap();
+    let named: Vec<Option<&str>> = status.suppressions.iter().map(|e| e.should_name.as_deref()).collect();
+    assert_eq!(named, [Some(new[0].as_str()), None], "security status names the key to write");
+}
+
+/// What [`f`] logged at any level, captured: the returned text holds a control
+/// event, so an empty capture can never pass for a clean one.
+fn logged<T>(f: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        tracing::trace!("capture control");
+        f()
+    });
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("capture control"), "the capture works: {log}");
+    (out, log)
+}
+
+/// Every value that would give a planted secret away, for the secrets read at
+/// `reads` — `(commit, git-root path, region)` each: the secrets, the text
+/// matched around them and the settings line whole, their plain hashes, their
+/// keyed digests and the repository key itself.
+fn secret_material(root: &Path, reads: &[(&str, &str, super::Region)]) -> Vec<String> {
+    let mut digests = super::secret::SecretDigests::open(root).expect("a repository key");
+    let mut forbidden: Vec<String> = Vec::new();
+    for value in [SECRET.to_string(), LEGACY_SECRET.to_string(), format!("API_KEY = \"{SECRET}"), format!("CLIENT_TOKEN = \"{LEGACY_SECRET}"), key()] {
+        forbidden.push(blake3::hash(value.as_bytes()).to_hex().to_string());
+        forbidden.push(value);
+    }
+    for (commit, path, region) in reads {
+        let keyed = digests.digest(Some(commit), path, region).expect("the planted secret is read");
+        forbidden.push(blake3::Hash::from(keyed).to_hex().to_string());
+    }
+    // From a member too: the fixture git's ceiling stops at a project's parent.
+    let out = crate::history::miner::git(root, &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
+    let root_commit = String::from_utf8(out.stdout).unwrap();
+    assert!(!root_commit.trim().is_empty(), "the root commit is read");
+    forbidden.push(
+        blake3::Hash::from(blake3::derive_key(super::secret::KEY_CONTEXT, root_commit.trim().as_bytes())).to_hex().to_string(),
+    );
+    forbidden
+}
+
+/// No column of any table, no byte of the store file, no payload and no log
+/// line under `root` holds any of `forbidden`.
+fn assert_holds_none(root: &Path, forbidden: &[String], payloads: &[String]) {
+    let rows = super::tests::dump(root);
+    assert!(rows.iter().any(|r| r.contains("security_findings")), "the store holds findings: {rows:?}");
+    let bytes = std::fs::read(crate::history::db_path(root)).unwrap();
+    let raw = String::from_utf8_lossy(&bytes);
+    for value in forbidden {
+        for row in &rows {
+            assert!(!row.contains(value.as_str()), "{row} holds {value:?}");
+        }
+        assert!(!raw.contains(value.as_str()), "a byte of the store file holds {value:?}");
+        for payload in payloads {
+            assert!(!payload.contains(value.as_str()), "{payload} holds {value:?}");
+        }
+    }
+}
+
+fn region(line: i64, start: i64, end: i64) -> super::Region {
+    super::Region { start_line: Some(line), start_column: Some(start), end_line: Some(line), end_column: Some(end) }
+}
+
+/// The project's spelling of a history-mode path: the prefix below the git
+/// root off, by whole segments, and a path outside the project led by one `..`
+/// per prefix segment — never a project path it is not; an absolute path under
+/// the root relative to it.
+#[test]
+fn a_history_path_is_made_relative_to_the_project() {
+    let root = Path::new("/work/repo/services/api");
+    let project_relative = |prefix: &str, report: &str| super::project_relative(root, prefix, report);
+    assert_eq!(project_relative("", "./legacy\\client.py"), "legacy/client.py");
+    assert_eq!(project_relative("services/api/", "services/api/legacy/client.py"), "legacy/client.py");
+    assert_eq!(project_relative("services/api/", "services/web/client.py"), "../../services/web/client.py");
+    assert_eq!(project_relative("svc/", "svc2/client.py"), "../svc2/client.py", "a prefix strips whole segments only");
+    assert_eq!(project_relative("svc/", "client.py"), "../client.py", "a git-root file is outside the member");
+    assert_eq!(
+        project_relative("services/api/", "/work/repo/services/api/legacy/client.py"),
+        "legacy/client.py",
+        "an absolute path under the root names no checkout"
+    );
+    assert_eq!(project_relative("services/api/", "/elsewhere/client.py"), "/elsewhere/client.py", "outside it, its spelling");
+}
+
+/// A git repository whose project is `member/`, one directory below the git
+/// root, as a workspace member is: one commit adds `member/app/settings.py`
+/// and `other/creds.py`, each holding a secret on line 1. Returns the git
+/// root, the project root and the commit. Built alike every time, so two
+/// copies share their commits and their repository key.
+fn member_repo(tmp: &Path, name: &str) -> (PathBuf, PathBuf, String) {
+    let top = tmp.join(name);
+    std::fs::create_dir_all(&top).unwrap();
+    git(&top, None, &["init", "-q", "-b", "main"]);
+    std::fs::write(top.join(".git/info/exclude"), ".logos/\n").unwrap();
+    write(&top, "member/app/settings.py", &format!("{}\n", key()));
+    write(&top, "other/creds.py", &format!("CLIENT_TOKEN = \"{LEGACY_SECRET}\"\n"));
+    git(&top, None, &["add", "-A"]);
+    git(&top, Some("2026-10-01T09:00:00+00:00"), &["commit", "-q", "-m", "M1: a member and a neighbour"]);
+    let commit = git(&top, None, &["rev-parse", "HEAD"]).trim().to_string();
+    (top.clone(), top.join("member"), commit)
+}
+
+/// S-780 AC 3 (CR-241 CRA-03): in a project below the git root, Gitleaks'
+/// history mode names a file relative to the git root. The history-mode key
+/// takes the project's prefix off, so it equals the content-mode key of a
+/// secret still present (S-765's rule holds), and the secret is bound to its
+/// own file. A history path outside the project is historical, never bound to
+/// the member's same-named file holding its text. No secret value or digest
+/// key reaches a column, a payload or a log.
+#[test]
+fn in_a_workspace_member_the_history_key_equals_the_content_key() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let (_, member, commit) = member_repo(&dir, "history");
+    // The member's own, untracked copy of the neighbour's line.
+    write(&member, "creds.py", &format!("CLIENT_TOKEN = \"{LEGACY_SECRET}\"\n"));
+    let date = "2026-10-01T09:00:00Z";
+    let history = report(
+        &dir,
+        "member-history.sarif",
+        &[(&commit, date, "member/app/settings.py", 1, 1, 41), (&commit, date, "other/creds.py", 1, 1, 42)],
+    );
+    let indexed = ["app/settings.py".to_string(), "creds.py".to_string()];
+    let (summary, log) = logged(|| ingest(&member, &history, &indexed).unwrap());
+    let found = gitleaks_findings(&member);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    let settings = found.iter().find(|f| f.report_path.as_deref() == Some("member/app/settings.py")).unwrap();
+    assert_eq!((settings.binding, settings.path.as_deref()), (FindingBinding::Bound, Some("app/settings.py")), "on its line in its own file");
+    let outside = found.iter().find(|f| f.report_path.as_deref() == Some("other/creds.py")).unwrap();
+    assert_eq!((outside.binding, outside.path.as_deref()), (FindingBinding::Historical, None), "outside the project: never creds.py");
+
+    let (_, content, _) = member_repo(&dir, "content");
+    write(&content, "creds.py", &format!("CLIENT_TOKEN = \"{LEGACY_SECRET}\"\n"));
+    let scoped = report(&dir, "member-scoped.sarif", &[("", "", "app/settings.py", 1, 1, 41)]);
+    let paths = vec!["app".to_string()];
+    ingest_scoped(&content, &scoped, &indexed, Some(IngestScope { paths: &paths, keeps_full_findings: true })).unwrap();
+    let present = gitleaks_findings(&content);
+    assert_eq!(present.len(), 1, "{present:#?}");
+    assert_eq!(present[0].fingerprint, settings.fingerprint, "one key in either mode");
+
+    let forbidden = secret_material(
+        &member,
+        &[(commit.as_str(), "member/app/settings.py", region(1, 1, 41)), (commit.as_str(), "other/creds.py", region(1, 1, 42))],
+    );
+    let payloads =
+        [serde_json::to_string(&summary).unwrap(), serde_json::to_string(&read_latest(&member).unwrap()).unwrap(), format!("{found:?}"), log];
+    assert_holds_none(&member, &forbidden, &payloads);
+}
+
+/// The v2 secret key of the deleted `legacy/client.py` secret folded with
+/// `path` — its own path gives migration 11's key, the file it bound to by
+/// suffix the key it had before — spelled here from the identity's
+/// definition, not by the ingest.
+fn legacy_secret_key(root: &Path, path: &str) -> String {
+    let mut digests = super::secret::SecretDigests::open(root).unwrap();
+    let digest = digests.digest(Some(C1), "legacy/client.py", &region(1, 1, 42)).unwrap();
+    let canonical =
+        format!("logos-finding-v2\u{1f}secret\u{1f}generic-api-key\u{1f}{path}\u{1f}{}", blake3::Hash::from(digest).to_hex());
+    blake3::hash(canonical.as_bytes()).to_hex().to_string()
+}
+
+/// history.db 10 → 11: every Gitleaks snapshot's report hash is marked
+/// `pre-11:` and nothing else changes. The next Gitleaks ingest — of the very
+/// report the current snapshot came from — is no no-op: it re-keys the
+/// deleted `legacy/client.py` secret, stored under the key its suffix binding
+/// to a root `client.py` gave it, onto its own path's key in every snapshot
+/// and in the ratchet's baseline, each row listing its old key in
+/// `legacy_fingerprints`. A suppression and a checked-in baseline written
+/// under the old key stay green; no secret value or digest key is stored.
+#[test]
+fn migration_11_marks_gitleaks_snapshots_and_the_next_ingest_rekeys_a_history_only_secret() {
+    let (_t, root) = gitleaks_repo(3);
+    write(&root, ".logos/rules.toml", "[security]\nratchet_min_severity = \"info\"\n");
+    // The root client.py the old identity bound the deleted file to.
+    write(&root, "client.py", "import os\n");
+    let (old, new) = (legacy_secret_key(&root, "client.py"), legacy_secret_key(&root, "legacy/client.py"));
+    assert_ne!(old, new);
+    let settings_key = {
+        let (_t2, scratch) = gitleaks_repo(3);
+        ingest_history(&scratch);
+        settings_finding(&scratch).fingerprint
+    };
+    let bytes = std::fs::read(fixture("history.sarif")).unwrap();
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 10).unwrap();
+        for (id, head, hash) in [(1, C2.to_string(), "older".to_string()), (2, C3.to_string(), blake3::hash(&bytes).to_hex().to_string())] {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, 'gitleaks', 'v8.18.4', ?3, 'sarif', 1, ?2)",
+                rusqlite::params![id, head, hash],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+                     report_path, start_line, start_column, end_line, end_column, commits, anchor_commit)
+                 VALUES (?1, ?2, 'generic-api-key', 'unrated', '', 'redacted', 1, 'historical', 'legacy/client.py', 1, 1, 1, 42, ?3, ?3)",
+                rusqlite::params![id, old, C1],
+            )
+            .unwrap();
+        }
+        for (id, name) in [(3, "Semgrep OSS"), (4, " Gitleaks ")] {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, ?3, '1', 'other', 'sarif', 1, ?2)",
+                rusqlite::params![id, C1, name],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for (key, scanner) in [(old.as_str(), "gitleaks"), (settings_key.as_str(), "gitleaks"), (&"f".repeat(64), "Semgrep OSS")] {
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, ?2)", [key, scanner]).unwrap();
+        }
+    }
+
+    let before = dump(&path, &["report_hash"]);
+    let migrated = crate::history::db::open_at_version(&path, 11).unwrap();
+    let marked: Vec<String> = migrated
+        .prepare("SELECT report_hash FROM security_snapshots ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        marked,
+        ["pre-11:older".to_string(), format!("pre-11:{}", blake3::hash(&bytes).to_hex()), "other".to_string(), "pre-11:other".to_string()],
+        "every Gitleaks snapshot is marked, and only Gitleaks ones"
+    );
+    drop(migrated);
+    assert_eq!(dump(&path, &["report_hash"])[1..], before[1..], "nothing else changes");
+
+    let mut indexed = indexed(&root);
+    indexed.push("client.py".to_string());
+    let (summary, log) = logged(|| ingest(&root, &fixture("history.sarif"), &indexed).unwrap());
+    assert!(!summary.already_ingested, "the marked snapshot's own report re-ingests");
+    assert_eq!(
+        (summary.historical, summary.unmatched.len()),
+        (1, 0),
+        "a historical result is no unmatched path, whatever the deleted file would bind to: {:?}",
+        summary.unmatched
+    );
+    let conn = Connection::open(&path).unwrap();
+    let older: Vec<(String, String)> = conn
+        .prepare("SELECT fingerprint, legacy_fingerprints FROM security_findings WHERE snapshot_id = 1")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(older, [(new.clone(), old.clone())], "an older snapshot's row is re-keyed, listing its old key");
+    let legacy: Vec<SecurityFinding> =
+        gitleaks_findings(&root).into_iter().filter(|f| f.report_path.as_deref() == Some("legacy/client.py")).collect();
+    assert_eq!(legacy.len(), 1, "{legacy:#?}");
+    assert_eq!(legacy[0].fingerprint, new, "keyed by its own path");
+    assert!(legacy[0].legacy_fingerprints.contains(&old), "the re-key lists its old secret key: {:?}", legacy[0].legacy_fingerprints);
+    let mut baseline: Vec<String> = conn
+        .prepare("SELECT fingerprint FROM security_baseline_findings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    baseline.sort();
+    let mut want = vec![new.clone(), settings_key.clone(), "f".repeat(64)];
+    want.sort();
+    assert_eq!(baseline, want, "the history.db baseline names the new key, another scanner's as it was");
+    drop(conn);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "the history.db baseline stays green");
+
+    // A checked-in baseline blessed before the migration records the old key.
+    let checked_in = |keys: &[&str]| {
+        let findings: Vec<serde_json::Value> =
+            keys.iter().map(|key| serde_json::json!({"fingerprint": key, "rule_id": "generic-api-key", "path": null})).collect();
+        write(&root, ".logos/security-baseline.json", &format!("{:#}\n", serde_json::json!({"version": 1, "findings": findings})));
+    };
+    checked_in(&[&old, &settings_key]);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "a pre-migration checked-in baseline stays green");
+    checked_in(&[&settings_key]);
+    assert_eq!(ratchet_violations(&root).len(), 1, "and knows the secret by nothing else");
+    std::fs::remove_file(root.join(".logos/security-baseline.json")).unwrap();
+
+    let today = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    let text = format!("[[ignore]]\nfingerprint = \"{old}\"\nreason = \"rotated\"\n");
+    let labelled = label(&gitleaks_findings(&root), &IgnoreFile::parse(&text).unwrap(), &root, today);
+    let entry = &labelled.entries[0];
+    assert_eq!((entry.orphaned, entry.suppressed, entry.should_name.as_deref()), (false, 1, Some(new.as_str())), "the old key suppresses");
+
+    let forbidden = secret_material(&root, &[(C1, "legacy/client.py", region(1, 1, 42)), (C3, SETTINGS, region(13, 1, 41))]);
+    let payloads = [serde_json::to_string(&summary).unwrap(), serde_json::to_string(&read_latest(&root).unwrap()).unwrap(), log];
+    assert_holds_none(&root, &forbidden, &payloads);
+}
+
+/// Two history results of one commit and rule whose report keys differed only
+/// by their occurrence suffix before migration 11: a deleted
+/// `old/src/client.py`, listed first, and today's `src/client.py`, which it
+/// bound to by suffix. Their secrets cannot be read — the commit is not in
+/// this clone — so each is keyed by its report. Before migration 11 the first
+/// had the plain key and the second its `#2` suffix; now each is keyed by its
+/// own path, in a namespace of its own, so no new key is an old one: the
+/// re-key maps each old key onto its own finding, in every snapshot and in
+/// the ratchet's baseline, and an ignore entry written for the deleted file's
+/// secret still names that finding and no other.
+#[test]
+fn report_keyed_history_results_sharing_an_old_key_by_occurrence_re_key_one_to_one() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, None, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join(".git/info/exclude"), ".logos/\n").unwrap();
+    write(&root, "src/client.py", "import os\n");
+    write(&root, ".logos/rules.toml", "[security]\nratchet_min_severity = \"info\"\n");
+    git(&root, None, &["add", "-A"]);
+    git(&root, Some("2026-10-01T09:00:00+00:00"), &["commit", "-q", "-m", "client"]);
+    let head = git(&root, None, &["rev-parse", "HEAD"]).trim().to_string();
+    let absent = "dead".repeat(10);
+    let date = "2026-09-01T09:00:00Z";
+    let sarif = report(tmp.path(), "twins.sarif", &[(&absent, date, "old/src/client.py", 1, 1, 30), (&absent, date, "src/client.py", 1, 1, 30)]);
+    let indexed = ["src/client.py".to_string()];
+
+    // The keys the identity before migration 11 gave them: both bound to
+    // src/client.py, so the second took the occurrence suffix.
+    let text = std::fs::read_to_string(&sarif).unwrap();
+    let (_, runs) = super::parse_report(&text).unwrap();
+    let mut seen = std::collections::HashMap::new();
+    let old: Vec<String> = runs[0]
+        .findings
+        .iter()
+        .map(|f| super::occurrence(&mut seen, super::fingerprint(f, "gitleaks", &root, Some("src/client.py"))))
+        .collect();
+    assert_ne!(old[0], old[1]);
+
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 10).unwrap();
+        let hash = blake3::hash(text.as_bytes()).to_hex().to_string();
+        for (id, at, hash) in [(1, "1".repeat(40), "older".to_string()), (2, head.clone(), hash)] {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, 'gitleaks', 'v8.18.4', ?3, 'sarif', 1, ?2)",
+                rusqlite::params![id, at, hash],
+            )
+            .unwrap();
+            for (key, report_path) in old.iter().zip(["old/src/client.py", "src/client.py"]) {
+                conn.execute(
+                    "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+                         report_path, start_line, start_column, end_line, end_column, commits, anchor_commit)
+                     VALUES (?1, ?2, 'generic-api-key', 'unrated', '', 'redacted', 1, 'historical', ?3, 1, 1, 1, 30, ?4, ?4)",
+                    rusqlite::params![id, key, report_path, absent],
+                )
+                .unwrap();
+            }
+        }
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for key in &old {
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, 'gitleaks')", [key]).unwrap();
+        }
+    }
+
+    assert!(!ingest(&root, &sarif, &indexed).unwrap().already_ingested);
+    let found = gitleaks_findings(&root);
+    let by_path = |p: &str| found.iter().find(|f| f.report_path.as_deref() == Some(p)).unwrap().clone();
+    let (deleted, today) = (by_path("old/src/client.py"), by_path("src/client.py"));
+    assert!(!old.contains(&deleted.fingerprint) && !old.contains(&today.fingerprint), "no new key is an old one");
+    assert!(deleted.legacy_fingerprints.contains(&old[0]), "{:?}", deleted.legacy_fingerprints);
+    assert!(today.legacy_fingerprints.contains(&old[1]), "{:?}", today.legacy_fingerprints);
+
+    let conn = Connection::open(&path).unwrap();
+    let mut older: Vec<(String, String)> = conn
+        .prepare("SELECT report_path, fingerprint FROM security_findings WHERE snapshot_id = 1")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    older.sort();
+    assert_eq!(
+        older,
+        [("old/src/client.py".to_string(), deleted.fingerprint.clone()), ("src/client.py".to_string(), today.fingerprint.clone())],
+        "each older row re-keyed onto its own finding, none merged away"
+    );
+    let mut baseline: Vec<String> = conn
+        .prepare("SELECT fingerprint FROM security_baseline_findings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    baseline.sort();
+    let mut want = vec![deleted.fingerprint.clone(), today.fingerprint.clone()];
+    want.sort();
+    assert_eq!(baseline, want);
+    drop(conn);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "nothing reads as new");
+
+    let today_date = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    let entry = format!("[[ignore]]\nfingerprint = \"{}\"\nreason = \"rotated\"\n", old[0]);
+    let labelled = label(&found, &IgnoreFile::parse(&entry).unwrap(), &root, today_date);
+    let suppressed: Vec<Option<&str>> =
+        labelled.findings.iter().filter(|f| f.is_suppressed()).map(|f| f.finding.report_path.as_deref()).collect();
+    assert_eq!(suppressed, [Some("old/src/client.py")], "the deleted file's entry names its finding alone");
+}
+
+/// A history-mode row stored before migration 11 is re-keyed by its place,
+/// not only by the key today's index would recompute: here the deleted
+/// `legacy/client.py` secret was keyed while a root `client.py` was indexed,
+/// and that file is gone before the first scan after the migration, so no
+/// suffix binding gives its old key any more. Its rule, report path, commit
+/// and exact region name one match in an immutable blob, and the ingest's
+/// result at that place takes the row — in every snapshot and in the ratchet's
+/// baseline, listing the old key — so its suppression and a checked-in
+/// baseline written under the old key stay green.
+#[test]
+fn a_pre_migration_11_row_is_re_keyed_by_its_place_once_its_old_binding_is_gone() {
+    let (_t, root) = gitleaks_repo(3);
+    write(&root, ".logos/rules.toml", "[security]\nratchet_min_severity = \"info\"\n");
+    let (old, new) = (legacy_secret_key(&root, "client.py"), legacy_secret_key(&root, "legacy/client.py"));
+    let settings_key = {
+        let (_t2, scratch) = gitleaks_repo(3);
+        ingest_history(&scratch);
+        settings_finding(&scratch).fingerprint
+    };
+    let bytes = std::fs::read(fixture("history.sarif")).unwrap();
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 10).unwrap();
+        for (id, head, hash) in [(1, C2.to_string(), "older".to_string()), (2, C3.to_string(), blake3::hash(&bytes).to_hex().to_string())] {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, 'gitleaks', 'v8.18.4', ?3, 'sarif', 1, ?2)",
+                rusqlite::params![id, head, hash],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+                     report_path, start_line, start_column, end_line, end_column, commits, anchor_commit)
+                 VALUES (?1, ?2, 'generic-api-key', 'unrated', '', 'redacted', 1, 'historical', 'legacy/client.py', 1, 1, 1, 42, ?3, ?3)",
+                rusqlite::params![id, old, C1],
+            )
+            .unwrap();
+        }
+        // Near misses of its place in the older snapshot: one column off, and
+        // another rule. Neither is this secret's row.
+        for (key, rule, end) in [("near-miss-column", "generic-api-key", 41), ("near-miss-rule", "aws-access-token", 42)] {
+            conn.execute(
+                "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+                     report_path, start_line, start_column, end_line, end_column, commits, anchor_commit)
+                 VALUES (1, ?1, ?2, 'unrated', '', 'redacted', 1, 'historical', 'legacy/client.py', 1, 1, 1, ?3, ?4, ?4)",
+                rusqlite::params![key, rule, end, C1],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for key in [&old, &settings_key] {
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, 'gitleaks')", [key]).unwrap();
+        }
+    }
+
+    // No client.py in the tree or the index: nothing recomputes the old key.
+    assert!(!ingest_history(&root).already_ingested);
+    let legacy: Vec<SecurityFinding> =
+        gitleaks_findings(&root).into_iter().filter(|f| f.report_path.as_deref() == Some("legacy/client.py")).collect();
+    assert_eq!(legacy[0].fingerprint, new);
+    assert!(legacy[0].legacy_fingerprints.contains(&old), "its place gives its old key: {:?}", legacy[0].legacy_fingerprints);
+    let conn = Connection::open(&path).unwrap();
+    let mut older: Vec<(String, String)> = conn
+        .prepare("SELECT fingerprint, legacy_fingerprints FROM security_findings WHERE snapshot_id = 1")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    older.sort();
+    let mut want = vec![(new.clone(), old.clone()), ("near-miss-column".to_string(), String::new()), ("near-miss-rule".to_string(), String::new())];
+    want.sort();
+    assert_eq!(older, want, "the older snapshot's row is re-keyed by its place, and only it");
+    let mut baseline: Vec<String> =
+        conn.prepare("SELECT fingerprint FROM security_baseline_findings").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    baseline.sort();
+    let mut want = vec![new.clone(), settings_key.clone()];
+    want.sort();
+    assert_eq!(baseline, want);
+    drop(conn);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "nothing reads as new");
+
+    let today = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    let text = format!("[[ignore]]\nfingerprint = \"{old}\"\nreason = \"rotated\"\n");
+    let labelled = label(&gitleaks_findings(&root), &IgnoreFile::parse(&text).unwrap(), &root, today);
+    let entry = &labelled.entries[0];
+    assert_eq!((entry.orphaned, entry.suppressed, entry.should_name.as_deref()), (false, 1, Some(new.as_str())));
+}
+
+/// Sprint 108 review: the place re-key above holds when the only snapshot
+/// stored before migration 11 is the one at HEAD — an upgrade rescanned
+/// before the next commit. The ingest replaces that snapshot, so its places
+/// are read before it goes; and the next ingest, at a new HEAD, keeps the
+/// old key the place gave.
+#[test]
+fn a_pre_migration_11_row_at_head_alone_is_re_keyed_by_its_place() {
+    let (_t, root) = gitleaks_repo(3);
+    write(&root, ".logos/rules.toml", "[security]\nratchet_min_severity = \"info\"\n");
+    let (old, new) = (legacy_secret_key(&root, "client.py"), legacy_secret_key(&root, "legacy/client.py"));
+    let settings_key = {
+        let (_t2, scratch) = gitleaks_repo(3);
+        ingest_history(&scratch);
+        settings_finding(&scratch).fingerprint
+    };
+    let bytes = std::fs::read(fixture("history.sarif")).unwrap();
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 10).unwrap();
+        conn.execute(
+            "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+             VALUES (1, ?1, 'gitleaks', 'v8.18.4', ?2, 'sarif', 1, ?1)",
+            rusqlite::params![C3, blake3::hash(&bytes).to_hex().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding,
+                 report_path, start_line, start_column, end_line, end_column, commits, anchor_commit)
+             VALUES (1, ?1, 'generic-api-key', 'unrated', '', 'redacted', 1, 'historical', 'legacy/client.py', 1, 1, 1, 42, ?2, ?2)",
+            rusqlite::params![old, C1],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for key in [&old, &settings_key] {
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, 'gitleaks')", [key]).unwrap();
+        }
+    }
+
+    assert!(!ingest_history(&root).already_ingested);
+    let legacy: Vec<SecurityFinding> =
+        gitleaks_findings(&root).into_iter().filter(|f| f.report_path.as_deref() == Some("legacy/client.py")).collect();
+    assert_eq!(legacy[0].fingerprint, new);
+    assert!(legacy[0].legacy_fingerprints.contains(&old), "its place gives its old key: {:?}", legacy[0].legacy_fingerprints);
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "nothing reads as new");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    let text = format!("[[ignore]]\nfingerprint = \"{old}\"\nreason = \"rotated\"\n");
+    let labelled = label(&gitleaks_findings(&root), &IgnoreFile::parse(&text).unwrap(), &root, today);
+    let entry = &labelled.entries[0];
+    assert_eq!((entry.orphaned, entry.suppressed, entry.should_name.as_deref()), (false, 1, Some(new.as_str())));
+
+    // The old key outlives its place: at the next HEAD, with no row stored
+    // before migration 11 left to recover it from, the finding still carries it.
+    write(&root, "app/main.py", "print(\"again\")\n");
+    git(&root, None, &["add", "-A"]);
+    git(&root, Some("2026-10-04T09:00:00+00:00"), &["commit", "-q", "-m", "C4"]);
+    assert!(!ingest_history(&root).already_ingested);
+    let legacy: Vec<SecurityFinding> =
+        gitleaks_findings(&root).into_iter().filter(|f| f.report_path.as_deref() == Some("legacy/client.py")).collect();
+    assert!(legacy[0].legacy_fingerprints.contains(&old), "C4: its old key is kept: {:?}", legacy[0].legacy_fingerprints);
+    let labelled = label(&gitleaks_findings(&root), &IgnoreFile::parse(&text).unwrap(), &root, today);
+    let entry = &labelled.entries[0];
+    assert_eq!((entry.orphaned, entry.suppressed, entry.should_name.as_deref()), (false, 1, Some(new.as_str())), "C4");
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "C4: nothing reads as new");
 }

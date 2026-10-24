@@ -597,6 +597,30 @@ fn hooks_install_sets_hooks_path_and_writes_sync_hooks() {
     assert_eq!(step(&again, ".logos/hooks").action, InitAction::Unchanged);
 }
 
+/// A managed hook written by an older release is rewritten by the next `init
+/// --hooks` / `-i` (CR-242): the old body listed paths without `-z` and named a
+/// rename by its new side alone, and skipping it as "already ours" would leave
+/// that body running for good. Only a marked script is rewritten — the foreign
+/// veto is `a_non_managed_hook_file_blocks_the_install`'s.
+#[test]
+fn init_rewrites_a_managed_hook_left_by_an_older_release() {
+    let tmp = TempDir::new().unwrap();
+    git_init(tmp.path());
+    Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+
+    let path = tmp.path().join(".logos/hooks/post-checkout");
+    let current = fs::read_to_string(&path).unwrap();
+    let stale = "#!/bin/sh\n# logos-managed-hook: post-checkout (S-022, FR-SY-05)\n\
+                 changed=$(git diff --name-only \"$1\" \"$2\")\n";
+    fs::write(&path, stale).unwrap();
+
+    let again = Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+
+    assert_eq!(step(&again, ".logos/hooks").action, InitAction::Updated);
+    assert_eq!(fs::read_to_string(&path).unwrap(), current);
+    assert!(current.contains("--no-renames"), "{current}");
+}
+
 #[test]
 fn a_foreign_hooks_path_is_never_overwritten() {
     let tmp = TempDir::new().unwrap();

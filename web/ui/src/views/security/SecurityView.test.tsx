@@ -1,31 +1,38 @@
 // SecurityView over a mocked `/api/v1/security` (S-670, FR-SC-09): the absent
 // states name their fixing commands, no snippet is rendered and a secret-class
-// message reads [redacted], the edition switch re-classifies without a refetch,
+// message is explained in words, the edition switch re-classifies without a refetch,
 // `?path=` narrows the table, and the detail states reachability honestly.
 // Pinned to the real payload `web/tests/api_v1.rs` produced.
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ImpactResult, SecurityEntryStatus, SecurityFinding, SecurityGateBand, SecurityModel, SecurityPage } from "../../api/types.ts";
+import type { ImpactResult, ScanJob, SecurityEntryStatus, SecurityFinding, SecurityGateBand, SecurityModel, SecurityPage, SecurityScannerStatus } from "../../api/types.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import {
   ANCHOR_TEXT,
   CONTEXT_TEXT,
   COPY_TEXT,
-  IGNORED_PATHS_TEXT,
   FINDING_COUNT_TEXT,
+  FINDINGS_CELL_TEXT,
+  FINDINGS_TABLE_TEXT,
+  IGNORED_DIRS_LEGEND,
+  IGNORED_DIRS_TEXT,
   INSTALL_JOB_TEXT,
+  LIVE_STATE_TEXT,
+  NVD_KEY_TEXT,
   OWASP_TEXT,
-  REDACTED,
+  REDACTED_TEXT,
+  SCAN_JOB_TEXT,
+  SCOPE_TEXT,
   SECURITY_ABSENCE,
+  SCANNER_STATE_TEXT,
   SECURITY_GATE_TEXT,
   SUPPRESS_TEXT,
   SUPPRESSIONS_TEXT,
   UNCLASSIFIED_TEXT,
   findingDetail,
   owaspView,
-  scanJob,
   scannerMatrix,
   securityFindings,
   securityGate,
@@ -33,6 +40,7 @@ import {
 import { SCOPED_ONLY_COUNTED, SCOPED_ONLY_EXCLUDED } from "../../test/scopedOnlyProject.ts";
 import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import real from "./fixtures/security.real.json";
+import scanJob from "./fixtures/scan-job.real.json";
 import { FindingDetail } from "./FindingDetail.tsx";
 import { SecurityView } from "./SecurityView.tsx";
 import styles from "./SecurityView.module.css";
@@ -73,7 +81,7 @@ function stub(page: SecurityModel, impact: ImpactResult = IMPACT): string[] {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
-      // The scan panel's own reads (S-673, S-747) are not the page's reads.
+      // The Scanners widget's own job reads (S-673, S-747) are not the page's reads.
       if (url.startsWith("/api/v1/security/scan") || url.startsWith("/api/v1/security/install")) {
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ job: null }) } as Response);
       }
@@ -97,12 +105,16 @@ function finding(rule: string): SecurityFinding {
   return REAL.security.findings.findings.find((f) => f.rule_id === rule) as SecurityFinding;
 }
 
+/** `path:line` as the page spells a finding's location. */
+function findingLocationOf(f: SecurityFinding): string {
+  return `${f.path ?? f.report_path}:${f.start_line}`;
+}
+
 describe("SecurityView over the real payload", () => {
   it("renders one stack of catalogued widgets, the gate band left out without a table", async () => {
     const { root } = await mount(model());
     const widgets = expectOneWidgetStack(root);
-    expect(widgets.map(widgetTitle)).toEqual(["Run a scan", "Scanners", "Findings", "OWASP Top 10", "Finding detail"]);
-    expectWidgetCopy(widgetTitled(root, "Run a scan"), scanJob);
+    expect(widgets.map(widgetTitle)).toEqual(["Scanners", "Findings", "OWASP Top 10", "Finding detail"]);
     expectWidgetCopy(widgetTitled(root, "Scanners"), scannerMatrix);
     expectWidgetCopy(widgetTitled(root, "Findings"), securityFindings);
     expectWidgetCopy(widgetTitled(root, "OWASP Top 10"), owaspView);
@@ -117,6 +129,35 @@ describe("SecurityView over the real payload", () => {
     expect(readerText(rowOf("codeql"))).toContain("logos security ingest <report>");
     expect(readerText(rowOf("bandit"))).toContain("Installed but never run; run logos security scan --consent.");
     expect(readerText(rowOf("semgrep"))).toContain("2 findings");
+  });
+
+  it("reads Scanner · State · Version · Findings · Ignored dirs · Action, the command under the badge of each absent state", async () => {
+    const { root } = await mount(model());
+    const matrix = widgetTitled(root, "Scanners");
+    // A sortable header carries its sort control's text after its name.
+    expect(within(matrix).getAllByRole("columnheader").map((h) => h.textContent?.replace(/[^A-Za-z ]+$/, "").trim())).toEqual([
+      "Scanner",
+      "State",
+      "Version",
+      "Findings",
+      "Ignored dirs",
+      "Action",
+    ]);
+    const cell = (name: string, column: string) => {
+      const row = within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
+      const at = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent?.startsWith(column));
+      return row.querySelectorAll("td")[at] as HTMLElement;
+    };
+    // The fixing command sits in the State cell, beside the badge, as its own muted line.
+    expect(cell("trivy", "State").querySelector("p")?.textContent).toBe("Not installed; run logos security install trivy.");
+    expect(cell("bandit", "State").querySelector("p")?.textContent).toBe("Installed but never run; run logos security scan --consent.");
+    expect(cell("semgrep", "State").querySelector("p"), "a fresh row has nothing to fix").toBeNull();
+    // `never run` and `0 findings` stay different words in the Findings cell.
+    expect(readerText(cell("bandit", "Findings"))).toBe(FINDINGS_CELL_TEXT.neverRun);
+    expect(readerText(cell("semgrep", "Findings"))).toBe("2 findings");
+    expect(readerText(cell("trivy", "Findings"))).toBe(FINDINGS_CELL_TEXT.none);
+    // The "What it means" and "Copy" columns are gone: no sentence repeats the badge.
+    expect(within(matrix).queryByRole("columnheader", { name: /What it means|Copy/ })).toBeNull();
   });
 
   it("states each installed row's copy and an update, and offers Install and Update on the rows they fix (S-747)", async () => {
@@ -134,9 +175,10 @@ describe("SecurityView over the real payload", () => {
     const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
     const matrix = widgetTitled(root, "Scanners");
     const rowOf = (name: string) => within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
-    expect(readerText(rowOf("gitleaks"))).toContain(`${COPY_TEXT.managed} ${COPY_TEXT.updateAvailable("8.19.0")}`);
-    expect(readerText(rowOf("osv-scanner"))).toContain(COPY_TEXT.override);
-    expect(readerText(rowOf("bandit"))).toContain(COPY_TEXT.path);
+    // The copy in use shows in the Version cell, after the version.
+    expect(readerText(rowOf("gitleaks"))).toContain(`8.18.4 · ${COPY_TEXT.managed} ${COPY_TEXT.updateAvailable("8.19.0")}`);
+    expect(readerText(rowOf("osv-scanner"))).toContain(`1.9.2 · ${COPY_TEXT.override}`);
+    expect(readerText(rowOf("bandit"))).toContain(`· ${COPY_TEXT.path}`);
     expect(within(rowOf("trivy")).getByRole("button", { name: "Install trivy" })).toBeInTheDocument();
     expect(within(rowOf("gitleaks")).getByRole("button", { name: "Update gitleaks" })).toBeInTheDocument();
     // A copy that is not Logos's, or at its pin, has nothing to install or update;
@@ -144,34 +186,105 @@ describe("SecurityView over the real payload", () => {
     for (const name of ["osv-scanner", "bandit", "semgrep", "codeql"]) {
       expect(within(rowOf(name)).queryByRole("button"), name).toBeNull();
     }
-    // While a default scanner is missing, the panel's action is Install & scan.
-    expect(within(widgetTitled(root, "Run a scan")).getByRole("button", { name: INSTALL_JOB_TEXT.installAndScan })).toBeInTheDocument();
+    // While a default scanner is missing, the title row's action is Install & scan.
+    expect(within(widgetTitled(root, "Scanners")).getByRole("button", { name: INSTALL_JOB_TEXT.installAndScan })).toBeInTheDocument();
   });
 
-  it("states each scanner's coverage of the ignored directories, with the note when it read them (FR-SC-26)", async () => {
-    const [semgrep, trivy, gitleaks, ...rest] = REAL.security.status.scanners;
-    const note = "it reads the committed history, which holds any file committed inside an ignored directory";
+  it("marks each scanner's coverage of the ignored directories from its kind, with the note as tooltip and name, and a legend of exactly the markers shown (FR-SC-26)", async () => {
+    const [semgrep, trivy, gitleaks, osv, bandit, ...rest] = REAL.security.status.scanners;
+    const note = (text: string) => text;
     const scanners = [
       { ...semgrep, ignored_paths: "excluded" },
       trivy,
-      { ...gitleaks, ignored_paths: "scanned", coverage_note: note },
+      { ...gitleaks, ignored_paths: "scanned", coverage_kind: "history", coverage_note: note("it reads the committed history, which holds any file committed inside an ignored directory") },
+      // The note's words never pick the marker: this kind reads as the whole project.
+      { ...osv, ignored_paths: "scanned", coverage_kind: "whole_project", coverage_note: note("exclusion flag not proven by the harness") },
+      { ...bandit, ignored_paths: "scanned", coverage_kind: "unproven", coverage_note: note("exclusion flag not proven by the harness") },
       ...rest,
     ];
     const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
     const matrix = widgetTitled(root, "Scanners");
-    expect(within(matrix).getByRole("columnheader", { name: "Ignored paths" })).toBeInTheDocument();
+    expect(within(matrix).getByRole("columnheader", { name: "Ignored dirs" })).toBeInTheDocument();
     const cellOf = (name: string) => {
       const row = within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
-      const header = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent === "Ignored paths");
-      return readerText(row.querySelectorAll("td")[header] as HTMLElement);
+      const header = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent === "Ignored dirs");
+      return row.querySelectorAll("td")[header] as HTMLElement;
     };
-    expect(cellOf("semgrep")).toBe(IGNORED_PATHS_TEXT.excluded);
-    expect(cellOf("gitleaks")).toBe(`${IGNORED_PATHS_TEXT.scanned} ${note}`);
+    expect(readerText(cellOf("semgrep"))).toBe(IGNORED_DIRS_TEXT.skipped.marker);
+    expect(readerText(cellOf("gitleaks"))).toBe(IGNORED_DIRS_TEXT.history.marker);
+    expect(readerText(cellOf("osv-scanner"))).toBe(IGNORED_DIRS_TEXT.whole_project.marker);
+    expect(readerText(cellOf("bandit"))).toBe(IGNORED_DIRS_TEXT.unproven.marker);
     // Not installed here: no whole-project run to state, never a guess.
-    expect(cellOf("trivy")).toBe(IGNORED_PATHS_TEXT.absent);
+    expect(readerText(cellOf("trivy"))).toBe(IGNORED_DIRS_TEXT.none.marker);
+    // The full note is the marker's tooltip and its accessible name.
+    const marker = within(cellOf("gitleaks")).getByRole("note", {
+      name: `${IGNORED_DIRS_TEXT.history.marker}: it reads the committed history, which holds any file committed inside an ignored directory`,
+    });
+    expect(marker.getAttribute("title")).toBe("it reads the committed history, which holds any file committed inside an ignored directory");
+    // The legend lists each marker shown once, in plain words, and no other.
+    const legend = within(matrix).getByRole("list", { name: IGNORED_DIRS_LEGEND });
+    expect(within(legend).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      `${IGNORED_DIRS_TEXT.skipped.marker}: ${IGNORED_DIRS_TEXT.skipped.means}`,
+      `${IGNORED_DIRS_TEXT.unproven.marker}: ${IGNORED_DIRS_TEXT.unproven.means}`,
+      `${IGNORED_DIRS_TEXT.history.marker}: ${IGNORED_DIRS_TEXT.history.means}`,
+      `${IGNORED_DIRS_TEXT.whole_project.marker}: ${IGNORED_DIRS_TEXT.whole_project.means}`,
+      `${IGNORED_DIRS_TEXT.none.marker}: ${IGNORED_DIRS_TEXT.none.means}`,
+    ]);
   });
 
-  it("reads a scanner with nothing to scan as not applicable, and names a failed scan's cause (S-769)", async () => {
+  it("lists a marker in the legend only while a row shows it, and `partly skipped` when gosec was not given every directory", async () => {
+    const [semgrep, ...rest] = REAL.security.status.scanners;
+    const partial = { ...semgrep, ignored_paths: "scanned", coverage_kind: "partial", coverage_note: "it is not given 2 ignored directories past the 64 KiB argument budget" };
+    const installed = (row: (typeof rest)[number]) => ({ ...row, state: "never_run", installed: { copy: "path", binary: "/bin/x", version: "1", update_available: null }, install: null });
+    const scanners = [partial, ...rest.map((r) => ({ ...installed(r), ignored_paths: "excluded" }))];
+    const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
+    const legend = within(widgetTitled(root, "Scanners")).getByRole("list", { name: IGNORED_DIRS_LEGEND });
+    expect(within(legend).getAllByRole("listitem").map((li) => li.querySelector(".mono")?.textContent)).toEqual([
+      IGNORED_DIRS_TEXT.skipped.marker,
+      IGNORED_DIRS_TEXT.partial.marker,
+    ]);
+  });
+
+  it("reads a stale row's count, version and failure, and a row without a kind as `scanned` with its note (S-792)", async () => {
+    const [semgrep, trivy, gitleaks, osv, ...rest] = REAL.security.status.scanners;
+    const installed = (copy: string, version: string, update: string | null) => ({ copy, binary: "/bin/x", version, update_available: update });
+    const scanners = [
+      // Stale: its count and version come from the stored report, and its failure is still disclosed.
+      {
+        ...semgrep,
+        state: "stale",
+        because: "head_moved",
+        version: "1.85.0",
+        findings: 2,
+        suppressed: 0,
+        installed: installed("path", "1.90.0", null),
+        last_failure: ".logos/security/semgrep.failed.log",
+      },
+      trivy,
+      // A path copy is never offered an Update, whatever a pin says.
+      { ...gitleaks, state: "never_run", installed: installed("path", "8.18.4", "9.9.9"), install: null },
+      // A server that sent a note and no kind: a neutral marker, its note as tooltip and name.
+      { ...osv, ignored_paths: "scanned", coverage_note: "read without a kind" },
+      ...rest,
+    ];
+    const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
+    const matrix = widgetTitled(root, "Scanners");
+    const cell = (name: string, column: string) => {
+      const row = within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
+      const at = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent?.startsWith(column));
+      return row.querySelectorAll("td")[at] as HTMLElement;
+    };
+    expect(readerText(cell("semgrep", "Findings"))).toContain("2 findings");
+    expect(within(cell("semgrep", "Findings")).getByRole("button", { name: SCANNER_STATE_TEXT.lastFailed })).toBeInTheDocument();
+    expect(readerText(cell("semgrep", "Version"))).toContain("1.85.0 · path");
+    expect(within(cell("gitleaks", "Action")).queryByRole("button")).toBeNull();
+    expect(readerText(cell("osv-scanner", "Ignored dirs"))).toBe(IGNORED_DIRS_TEXT.scanned.marker);
+    expect(within(cell("osv-scanner", "Ignored dirs")).getByRole("note").getAttribute("title")).toBe("read without a kind");
+    const legend = within(matrix).getByRole("list", { name: IGNORED_DIRS_LEGEND });
+    expect(within(legend).getAllByRole("listitem").map((li) => li.querySelector(".mono")?.textContent)).toContain(IGNORED_DIRS_TEXT.scanned.marker);
+  });
+
+  it("reads a scanner with nothing to scan as not applicable, and a failed last scan as LAST SCAN FAILED that expands to its cause and log (S-769)", async () => {
     const scanners = REAL.security.status.scanners.map((row) => {
       if (row.scanner === "gosec") {
         return { ...row, state: "not_applicable", reason: "no Go source file (.go) among the files the project does not ignore", installed: null, install: null };
@@ -187,15 +300,37 @@ describe("SecurityView over the real payload", () => {
       const row = within(matrix).getByText(name, { selector: "td" }).closest("tr") as HTMLElement;
       // A sortable header carries its sort control's text after its name.
       const header = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent?.startsWith(column));
-      return readerText(row.querySelectorAll("td")[header] as HTMLElement);
+      return row.querySelectorAll("td")[header] as HTMLElement;
     };
-    expect(cellOf("gosec", "State")).toBe("not applicable");
-    expect(cellOf("gosec", "What it means")).toBe("Nothing to scan: no Go source file (.go) among the files the project does not ignore.");
-    expect(cellOf("dependency-check", "What it means")).toContain(
-      "last scan failed [ERROR] Error updating the NVD Data — the output is in .logos/security/dependency-check.failed.log.",
+    expect(readerText(cellOf("gosec", "State"))).toBe("not applicableNothing to scan: no Go source file (.go) among the files the project does not ignore.");
+    // The label is a collapsed disclosure; the cause and the log are behind it.
+    const failed = within(cellOf("dependency-check", "Findings")).getByRole("button", { name: SCANNER_STATE_TEXT.lastFailed });
+    expect(failed.getAttribute("aria-expanded")).toBe("false");
+    expect(readerText(cellOf("dependency-check", "Findings"))).not.toContain("NVD");
+    await userEvent.click(failed);
+    expect(failed.getAttribute("aria-expanded")).toBe("true");
+    expect(readerText(cellOf("dependency-check", "Findings"))).toContain(
+      "[ERROR] Error updating the NVD Data — the output is in .logos/security/dependency-check.failed.log.",
     );
+    await userEvent.click(failed);
+    expect(readerText(cellOf("dependency-check", "Findings"))).not.toContain("NVD");
     // A row without a failure log says nothing of one.
-    expect(cellOf("semgrep", "What it means")).not.toContain("last scan failed");
+    expect(within(cellOf("semgrep", "Findings")).queryByRole("button")).toBeNull();
+  });
+
+  it("states on Dependency-Check's row alone whether it has an NVD key, never the key (S-794)", async () => {
+    for (const [state, text] of [["set", NVD_KEY_TEXT.set], ["not_set", NVD_KEY_TEXT.not_set]] as const) {
+      const scanners = REAL.security.status.scanners.map((row) => (row.scanner === "dependency-check" ? { ...row, nvd_api_key: state } : row));
+      const { root } = await mount(model({ status: { ...REAL.security.status, scanners } as SecurityPage["status"] }));
+      const matrix = widgetTitled(root, "Scanners");
+      const scannerCell = (name: string) => within(matrix).getByText(name, { selector: "td" });
+      expect(readerText(scannerCell("dependency-check"))).toBe(`dependency-check${text}`);
+      const line = within(scannerCell("dependency-check")).getByText(text);
+      expect(line.getAttribute("title")).toBe(state === "not_set" ? NVD_KEY_TEXT.hint : null);
+      expect(readerText(scannerCell("semgrep"))).toBe("semgrep");
+      expect(within(matrix).getAllByText(/NVD key/)).toHaveLength(1);
+      cleanup();
+    }
   });
 
   it("starts a row's Install and Update through the install endpoint, with the intent token (S-747)", async () => {
@@ -264,20 +399,63 @@ describe("SecurityView over the real payload", () => {
   });
 });
 
-describe("no snippet, and secrets redacted (FR-SC-03, ADR-79 §2)", () => {
-  it("renders a secret-class message as [redacted] in the table and the detail, and never a snippet", async () => {
+describe("no snippet, and secrets redacted (FR-SC-03, ADR-79 §2, S-796)", () => {
+  const WHY = "Redacted: the scanner's message would contain the secret itself";
+
+  it("explains a secret-class message in the detail with its location, and never shows a snippet", async () => {
     const secret = { ...finding("generic.secrets.hardcoded-key"), message: `key=${PLANTED}` };
     // A snippet the server never sends: proof the page renders no such field.
     const withSnippet = { ...finding("rust.lang.security.formatted-sql"), snippet: PLANTED } as SecurityFinding;
     const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [withSnippet, secret] } }));
     expect(root.textContent).not.toContain(PLANTED);
     const table = within(widgetTitled(root, "Findings")).getByRole("table");
-    expect(within(table).getAllByText(REDACTED)).toHaveLength(1);
+    // No row carries a message — redacted or not (§4.23): it is the detail's.
+    expect(table.textContent).not.toContain(WHY);
+    expect(table.textContent).not.toContain("Formatted SQL query.");
 
     await userEvent.click(screen.getByRole("button", { name: /Show generic\.secrets\.hardcoded-key/ }));
-    expect(within(widgetTitled(root, "Finding detail")).getByText(REDACTED)).toBeInTheDocument();
+    const detail = widgetTitled(root, "Finding detail");
+    expect(within(detail).getByText(`${WHY}, at ${findingLocationOf(secret)}`)).toBeInTheDocument();
+    expect(root.textContent).not.toContain("[redacted]");
     expect(root.textContent).not.toContain(PLANTED);
     expect(root.querySelector("pre, code[class*='snippet']")).toBeNull();
+    // Another finding's detail shows its message, and not the redaction.
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    const other = widgetTitled(root, "Finding detail");
+    expect(within(other).getByText("Formatted SQL query.")).toBeInTheDocument();
+    expect(other.textContent).not.toContain(WHY);
+  });
+
+  it("gives a secret found only in history its location in the explanation", async () => {
+    const secret = finding("generic.secrets.hardcoded-key");
+    const historical = { ...secret, binding: "historical" as const, path: null, report_path: "legacy/client.py", start_line: 1 };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [historical] } }));
+    await userEvent.click(screen.getByRole("button", { name: /Show generic\.secrets\.hardcoded-key/ }));
+    expect(within(widgetTitled(root, "Finding detail")).getByText(`${WHY}, at legacy/client.py:1`)).toBeInTheDocument();
+  });
+
+  it("reads the explanation for every redacted finding, each with its own location", async () => {
+    const secret = finding("generic.secrets.hardcoded-key");
+    const second = { ...secret, fingerprint: "second", path: "src/other.rs", report_path: "src/other.rs", start_line: 41 };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [secret, second] } }));
+    for (const f of [secret, second]) {
+      await userEvent.click(screen.getByRole("button", { name: `Show ${f.rule_id} at ${findingLocationOf(f)}` }));
+      expect(within(widgetTitled(root, "Finding detail")).getByText(`${WHY}, at ${findingLocationOf(f)}`)).toBeInTheDocument();
+    }
+  });
+
+  it("keeps the bare constant out of the copy catalogue, the model and the detail", () => {
+    const sources = import.meta.glob(["../../copy/security.copy.ts", "./securityModel.ts", "./FindingDetail.tsx"], {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    expect(Object.keys(sources)).toHaveLength(3);
+    for (const [file, text] of Object.entries(sources)) {
+      expect(text, file).not.toMatch(/\bREDACTED\b/);
+      expect(text, file).not.toContain("[redacted]");
+    }
+    expect(REDACTED_TEXT.why).toBe(WHY);
   });
 });
 
@@ -302,6 +480,8 @@ describe("a secret found only in history (S-767)", () => {
 
     const row = rowOf("generic\\.secrets\\.hardcoded-key");
     expect(row.textContent).toContain("legacy/client.py:1");
+    // The report's path still goes through PathCell: its full path is the tooltip.
+    expect(row.querySelector('[data-path="legacy/client.py"]')).toHaveAttribute("title", "legacy/client.py");
     expect(within(row).getByText(ANCHOR_TEXT.historical)).toBeInTheDocument();
     const commit = within(row).getByText(anchor.short_commit);
     expect(commit).toHaveAttribute("title", ANCHOR_TEXT.commit(anchor));
@@ -321,26 +501,42 @@ describe("a secret found only in history (S-767)", () => {
 });
 
 describe("suppression", () => {
-  it("badges a suppressed finding's row, and only that row", async () => {
+  const rowOf = (table: HTMLElement, loc: RegExp) => within(table).getByRole("button", { name: loc }).closest("tr") as HTMLElement;
+
+  it("tags a suppressed finding's row, and only that row — its reason is the detail's", async () => {
     const secret = { ...finding("generic.secrets.hardcoded-key"), suppression: { state: "suppressed" as const, reason: "test key", expires: null, by: { fingerprint: finding("generic.secrets.hardcoded-key").fingerprint } } };
     const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [finding("rust.lang.security.formatted-sql"), secret] } }));
     const table = within(widgetTitled(root, "Findings")).getByRole("table");
-    const rowOf = (loc: string) => within(table).getByText(loc).closest("tr") as HTMLElement;
-    expect(within(rowOf("src/lib.rs:6")).getByText("suppressed")).toBeInTheDocument();
-    expect(within(rowOf("src/lib.rs:3")).queryByText("suppressed")).toBeNull();
+    expect(within(rowOf(table, /^Unsuppress generic/)).getByText("suppressed")).toBeInTheDocument();
+    expect(within(rowOf(table, /^Suppress rust/)).queryByText("suppressed")).toBeNull();
+    expect(table.textContent).not.toContain("test key");
+    expect(table.querySelector("[data-suppression-reason]")).toBeNull();
   });
 
-  it("labels a suppressed finding with its reason, and an expired one with when it lapsed (S-672)", async () => {
+  it("states a suppressed finding's state, reason and expiry in the detail, and an expired one's lapse (S-672)", async () => {
     const secret = { ...finding("generic.secrets.hardcoded-key"), suppression: { state: "suppressed" as const, reason: "rotated test key", expires: "2027-01-31", by: { fingerprint: finding("generic.secrets.hardcoded-key").fingerprint } } };
     const sql = { ...finding("rust.lang.security.formatted-sql"), suppression: { state: "expired" as const, reason: "legacy path", expires: "2026-01-31", by: { fingerprint: finding("rust.lang.security.formatted-sql").fingerprint } } };
     const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [sql, secret] } }));
     const table = within(widgetTitled(root, "Findings")).getByRole("table");
-    const rowOf = (loc: string) => within(table).getByText(loc).closest("tr") as HTMLElement;
-    expect(rowOf("src/lib.rs:6").querySelector("[data-suppression-reason]")?.textContent).toBe("rotated test key (until 2027-01-31)");
-    expect(rowOf("src/lib.rs:3").querySelector("[data-suppression-reason]")?.textContent).toBe("legacy path (expired after 2026-01-31)");
-    // Either way the entry exists, so the action removes it.
-    expect(within(rowOf("src/lib.rs:6")).getByRole("button", { name: /^Unsuppress / })).toBeInTheDocument();
-    expect(within(rowOf("src/lib.rs:3")).getByRole("button", { name: /^Unsuppress / })).toBeInTheDocument();
+    // Either way the entry exists, so the row's action removes it.
+    expect(within(rowOf(table, /^Unsuppress generic/)).getByText("suppressed")).toBeInTheDocument();
+    expect(within(rowOf(table, /^Unsuppress rust/)).getByText("expired")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Show generic\.secrets\.hardcoded-key/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    expect(detail.querySelector("[data-suppression-reason]")?.textContent).toBe("rotated test key (until 2027-01-31)");
+    expect(within(detail).getByText("suppressed")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    expect(widgetTitled(root, "Finding detail").querySelector("[data-suppression-reason]")?.textContent).toBe("legacy path (expired after 2026-01-31)");
+    expect(within(widgetTitled(root, "Finding detail")).getByText("expired")).toBeInTheDocument();
+  });
+
+  it("shows no suppression line in the detail of an active finding", async () => {
+    const { root } = await mount(model());
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    expect(within(detail).queryByText("Suppression")).toBeNull();
+    expect(detail.querySelector("[data-suppression-reason]")).toBeNull();
   });
 });
 
@@ -382,6 +578,17 @@ function stubTriage(pages: SecurityModel[], triage: { status: number; body: unkn
   return sent;
 }
 
+/** Makes the stubbed fetch (a {@link stubTriage}) answer `/api/v1/impact` with {@link IMPACT}, for a test that opens the detail. */
+function answerImpact(): void {
+  const page = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string, init?: RequestInit) =>
+      url.startsWith("/api/v1/impact") ? Promise.resolve({ ok: true, json: () => Promise.resolve(IMPACT) } as Response) : page(url, init),
+    ),
+  );
+}
+
 describe("triage (S-672, FR-SC-12)", () => {
   const sqlLoc = "src/lib.rs:3";
 
@@ -392,6 +599,7 @@ describe("triage (S-672, FR-SC-12)", () => {
     });
     const written = { file: ".logos/security-ignore.toml", entry: { fingerprint: sql.fingerprint, reason: "constant query", expires: null }, entries: 1 };
     const sent = stubTriage([model({ findings: { ...REAL.security.findings, findings: [sql] } }), after], { status: 200, body: written });
+    answerImpact();
     const view = render(<SecurityView />);
     await screen.findByRole("heading", { name: "Scanners" });
 
@@ -401,8 +609,11 @@ describe("triage (S-672, FR-SC-12)", () => {
     await userEvent.type(within(dialog).getByRole("textbox", { name: SUPPRESS_TEXT.reason }), "constant query");
     await userEvent.click(within(dialog).getByRole("button", { name: SUPPRESS_TEXT.confirm }));
 
-    const reason = await screen.findByText("constant query");
-    expect(reason).toHaveAttribute("data-suppression-reason");
+    // The reloaded row is tagged, and its reason is the detail's.
+    const unsuppress = await screen.findByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` });
+    expect(within(unsuppress.closest("tr") as HTMLElement).getByText("suppressed")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: `Show rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    expect(widgetTitled(view.container, "Finding detail").querySelector("[data-suppression-reason]")?.textContent).toBe("constant query");
     expect(screen.queryByRole("dialog")).toBeNull();
     const post = sent.find((r) => r.method === "POST");
     expect(post).toEqual({
@@ -492,6 +703,7 @@ describe("path suppressions (S-770)", () => {
   it("suppresses everything under a path from the dialog, and Unsuppress sends back the same selector", async () => {
     const written = { file: ".logos/security-ignore.toml", entry: entry.entry, entries: 1 };
     const sent = stubTriage([page(null), page(entry), page(null)], { status: 200, body: written });
+    answerImpact();
     const { container: root } = render(<SecurityView />);
     await screen.findByRole("heading", { name: "Scanners" });
 
@@ -503,10 +715,11 @@ describe("path suppressions (S-770)", () => {
 
     // Both rows the entry covers say so, and the entry is listed with its count.
     const table = await within(widgetTitled(root, "Findings")).findByRole("table");
-    await vi.waitFor(() => expect(table.querySelectorAll("[data-suppression-reason]").length).toBe(2));
-    for (const note of table.querySelectorAll("[data-suppression-reason]")) {
-      expect(note.textContent).toBe("generated — covers everything under src");
-    }
+    await vi.waitFor(() => expect(within(table).getAllByText("suppressed").length).toBe(2));
+    await userEvent.click(screen.getByRole("button", { name: `Show rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    expect(widgetTitled(root, "Finding detail").querySelector("[data-suppression-reason]")?.textContent).toBe(
+      "generated — covers everything under src",
+    );
     const suppressions = widgetTitled(root, SUPPRESSIONS_TEXT.title);
     expect(suppressions.textContent).toContain(SUPPRESSIONS_TEXT.figure(1, 2));
     expect(suppressions.textContent).toContain(SUPPRESSIONS_TEXT.count(2));
@@ -612,7 +825,7 @@ describe("the finding count (S-760)", () => {
     // swapped unnoticed; the literals are the definition's wording, not the
     // catalogue's own constants.
     const counted = { critical: 1, high: 2, medium: 3, low: 4, info: 5, unrated: 6, total: 21 };
-    const { root } = await mount(model({ counts: { counted, excluded: { not_fresh: 7, suppressed: 9 } } }));
+    const { root } = await mount(model({ counts: { counted, excluded: { not_fresh: 7, suppressed: 9, test: 0 } } }));
     const text = readerText(widgetTitled(root, "Findings"));
     expect(text).toContain("1 critical · 2 high · 3 medium · 4 low · 5 info · 6 unrated — fresh, unsuppressed findings only");
     expect(text).toContain("Left out: 7 findings in files changed since the scan, and 9 suppressed.");
@@ -638,6 +851,227 @@ describe("the finding count (S-760)", () => {
   });
 });
 
+/** The real page with two findings planted in test code — one by its enclosing
+ *  symbol, one by its path — classified under both editions as the SQL finding
+ *  is, and counted as the server counts them: apart (`excluded.test`), while the
+ *  payload's OWASP counts hold every stored finding. */
+function withTestCode(): { page: SecurityModel; inSymbol: SecurityFinding; inPath: SecurityFinding } {
+  const sql = finding("rust.lang.security.formatted-sql");
+  const inSymbol: SecurityFinding = {
+    ...sql,
+    fingerprint: "test-symbol",
+    path: "src/db.rs",
+    report_path: "src/db.rs",
+    start_line: 9,
+    code_scope: "test",
+    code_scope_reason: "test_symbol",
+  };
+  const inPath: SecurityFinding = {
+    ...sql,
+    fingerprint: "test-path",
+    path: "tests/fixtures/db.rs",
+    report_path: "tests/fixtures/db.rs",
+    start_line: 4,
+    code_scope: "test",
+    code_scope_reason: "test_path",
+  };
+  const planted = [inSymbol, inPath];
+  const editions = REAL.security.editions.map((e) => ({
+    ...e,
+    categories: e.categories.map((c) =>
+      c.state.state === "covered" && c.state.findings > 0 && e.findings.some((f) => f.categories.includes(c.id))
+        ? { ...c, state: { state: "covered" as const, findings: c.state.findings + planted.length } }
+        : c,
+    ),
+    findings: [...e.findings, ...planted.map((f) => ({ scanner_name: f.scanner_name, fingerprint: f.fingerprint, categories: e.findings.find((x) => x.fingerprint === sql.fingerprint)?.categories ?? [], unclassified: null }))],
+  }));
+  const page = model({
+    findings: { ...REAL.security.findings, findings: [...REAL.security.findings.findings, ...planted], total: REAL.security.findings.total + planted.length },
+    editions,
+    counts: { counted: REAL.security.counts.counted, excluded: { not_fresh: 0, suppressed: 0, test: planted.length } },
+  });
+  return { page, inSymbol, inPath };
+}
+
+describe("the code scope (FR-SC-28, S-796)", () => {
+  const rows = (root: HTMLElement) =>
+    [...within(widgetTitled(root, "Findings")).getByRole("table").querySelectorAll("tbody tr")] as HTMLElement[];
+  const scope = () => screen.getByLabelText(SCOPE_TEXT.label) as HTMLSelectElement;
+
+  it("lists production by default: no test-code row, no TEST tag, and the control reads Production", async () => {
+    const { page } = withTestCode();
+    const { root } = await mount(page);
+    expect(scope()).toHaveValue("production");
+    expect([...scope().options].map((o) => o.textContent)).toEqual(["Production", "Test code", "All"]);
+    expect(rows(root)).toHaveLength(2);
+    expect(widgetTitled(root, "Findings").querySelector("[data-code-scope]")).toBeNull();
+    expect(readerText(widgetTitled(root, "Findings"))).toContain("2 of 4 findings shown");
+  });
+
+  it("states the findings the counts leave out beside the count, equal to the payload's own remainder", async () => {
+    const { page } = withTestCode();
+    const { root } = await mount(page);
+    const findings = readerText(widgetTitled(root, "Findings"));
+    expect(findings).toContain(`${FINDING_COUNT_TEXT.totals(0, 2, 0, 0, 0, 0)} · 2 in test code`);
+    // The real payload, with nothing in test code, says so rather than saying nothing.
+    cleanup();
+    const plain = await mount(model());
+    expect(readerText(widgetTitled(plain.root, "Findings"))).toContain("· 0 in test code");
+  });
+
+  it("shows test-code rows under All, each tagged muted TEST with its reason on hover", async () => {
+    const { page } = withTestCode();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "all");
+    expect(rows(root)).toHaveLength(4);
+    const tags = [...widgetTitled(root, "Findings").querySelectorAll("[data-code-scope='test']")] as HTMLElement[];
+    expect(tags.map((t) => t.getAttribute("title"))).toEqual([SCOPE_TEXT.reason.test_symbol, SCOPE_TEXT.reason.test_path]);
+    for (const tag of tags) {
+      const badge = within(tag).getByText(SCOPE_TEXT.tag);
+      expect(badge.className).toContain("muted");
+      expect(tag.closest("tr")).not.toBeNull();
+    }
+    // The reason is also text for a reader without a pointer, not the tooltip alone.
+    expect(tags.map((t) => t.querySelector(".sr-only")?.textContent?.trim())).toEqual([SCOPE_TEXT.reason.test_symbol, SCOPE_TEXT.reason.test_path]);
+    // Each tag sits in its own row: the production rows carry none.
+    expect(rows(root).filter((r) => r.querySelector("[data-code-scope]"))).toHaveLength(2);
+  });
+
+  it("lists only test code under Test code", async () => {
+    const { page, inSymbol, inPath } = withTestCode();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "test");
+    expect(rows(root)).toHaveLength(2);
+    const text = widgetTitled(root, "Findings").textContent as string;
+    expect(text).toContain(inSymbol.path);
+    expect(text).toContain(inPath.path);
+    expect(text).not.toContain("src/lib.rs");
+  });
+
+  it("keeps the scope in the URL, in place, beside the other query pairs", async () => {
+    const { page } = withTestCode();
+    window.history.replaceState({ keep: 1 }, "", "/security?path=src%2Fa%20b&repo=web");
+    const length = window.history.length;
+    await mount(page);
+    await userEvent.selectOptions(scope(), "all");
+    expect(window.location.search).toBe("?path=src%2Fa%20b&repo=web&scope=all");
+    await userEvent.selectOptions(scope(), "test");
+    expect(window.location.search).toBe("?path=src%2Fa%20b&repo=web&scope=test");
+    await userEvent.selectOptions(scope(), "production");
+    expect(window.location.search).toBe("?path=src%2Fa%20b&repo=web");
+    expect(window.history.length, "the control adds no history entry").toBe(length);
+    expect(window.history.state).toEqual({ keep: 1 });
+  });
+
+  it("opens on the scope the URL names, and on production for one it does not know", async () => {
+    const { page } = withTestCode();
+    window.history.replaceState(null, "", "/security?scope=test");
+    const first = await mount(page);
+    expect(scope()).toHaveValue("test");
+    expect(rows(first.root)).toHaveLength(2);
+    cleanup();
+    window.history.replaceState(null, "", "/security?scope=everything");
+    const second = await mount(page);
+    expect(scope()).toHaveValue("production");
+    expect(rows(second.root)).toHaveLength(2);
+  });
+
+  it("says where a deep-linked file's findings went when the scope hides them all", async () => {
+    const { page } = withTestCode();
+    window.history.replaceState(null, "", "/security?path=tests/fixtures");
+    const { root } = await mount(page);
+    expect(within(widgetTitled(root, "Findings")).queryByRole("table")).toBeNull();
+    expect(readerText(widgetTitled(root, "Findings"))).toContain(SCOPE_TEXT.hidden(1, "production"));
+    await userEvent.selectOptions(scope(), "all");
+    expect(rows(root)[0].textContent).toContain("tests/fixtures/db.rs");
+  });
+
+  it("follows the Files & Risk link for a file's test-code findings", async () => {
+    const { page } = withTestCode();
+    window.history.replaceState(null, "", "/security?path=tests%2Ffixtures%2Fdb.rs&scope=test");
+    const { root } = await mount(page);
+    expect(scope()).toHaveValue("test");
+    expect(rows(root)).toHaveLength(1);
+  });
+
+  it("counts each OWASP category over the scope — the payload's own counts under All — and states the test code", async () => {
+    const { page } = withTestCode();
+    const { root } = await mount(page);
+    const owasp = () => widgetTitled(root, "OWASP Top 10");
+    const injection = () => readerText(within(owasp()).getByText("A05:2025").closest("tr") as HTMLElement);
+    expect(injection()).toContain("1 finding");
+    expect(readerText(owasp())).toContain(`OWASP Top 10:2025 ${FINDING_COUNT_TEXT.testCode(2)}`);
+    await userEvent.selectOptions(scope(), "all");
+    const payload = page.security.editions[0].categories.find((c) => c.id === "A05:2025")!.state;
+    expect(payload).toEqual({ state: "covered", findings: 3 });
+    expect(injection()).toContain("3 findings");
+    await userEvent.selectOptions(scope(), "test");
+    expect(injection()).toContain("2 findings");
+  });
+
+  it("states the one test-code figure the server counts, in both widgets, when a test finding is suppressed", async () => {
+    const { page, inPath } = withTestCode();
+    // One of the two test findings is suppressed: the server counts one (fresh,
+    // unsuppressed), though two test-code findings are listed.
+    const suppressed = { ...inPath, suppression: { state: "suppressed" as const, reason: "r", expires: null, by: { fingerprint: inPath.fingerprint } } };
+    const findings = page.security.findings.findings.map((f) => (f.fingerprint === inPath.fingerprint ? suppressed : f));
+    const { root } = await mount({
+      ...page,
+      security: {
+        ...page.security,
+        findings: { ...page.security.findings, findings },
+        counts: { ...page.security.counts, excluded: { not_fresh: 0, suppressed: 1, test: 1 } },
+      },
+    });
+    for (const title of ["Findings", "OWASP Top 10"]) {
+      expect(readerText(widgetTitled(root, title))).toContain("· 1 in test code");
+      expect(readerText(widgetTitled(root, title))).not.toContain("· 2 in test code");
+    }
+  });
+
+  it("follows the address when it changes under the page: Back, Forward, or a click on the Security link", async () => {
+    const { page } = withTestCode();
+    window.history.replaceState(null, "", "/security?scope=test");
+    const { root } = await mount(page);
+    expect(scope()).toHaveValue("test");
+    // The sidebar's click on the active link: `navigate` pushes the bare path and fires popstate.
+    act(() => {
+      window.history.pushState({}, "", "/security");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(scope()).toHaveValue("production");
+    expect(rows(root)).toHaveLength(2);
+    act(() => {
+      window.history.pushState({}, "", "/security?scope=all");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(scope()).toHaveValue("all");
+    expect(rows(root)).toHaveLength(4);
+    expect(window.location.search).toBe("?scope=all");
+  });
+
+  it("words an empty Test code table for the production findings it hides", async () => {
+    const { page } = withTestCode();
+    window.history.replaceState(null, "", "/security?scope=test&path=src/lib.rs");
+    const { root } = await mount(page);
+    expect(within(widgetTitled(root, "Findings")).queryByRole("table")).toBeNull();
+    // The production findings the path keeps: the real payload's, none of the planted test code.
+    const hidden = page.security.findings.findings.filter((f) => f.code_scope === "production" && f.path === "src/lib.rs").length;
+    expect(hidden).toBeGreaterThan(0);
+    expect(readerText(widgetTitled(root, "Findings"))).toContain(SCOPE_TEXT.hidden(hidden, "test-code"));
+  });
+
+  it("states a test-code finding's reason in its detail, and a production finding's none", async () => {
+    const { page, inPath } = withTestCode();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "all");
+    await userEvent.click(screen.getByRole("button", { name: `Show ${inPath.rule_id} at tests/fixtures/db.rs:4` }));
+    expect(widgetTitled(root, "Finding detail").querySelector("[data-code-scope]")?.textContent).toBe(SCOPE_TEXT.reason.test_path);
+    await userEvent.click(screen.getByRole("button", { name: "Show rust.lang.security.formatted-sql at src/lib.rs:3" }));
+    expect(widgetTitled(root, "Finding detail").querySelector("[data-code-scope]")).toBeNull();
+  });
+});
+
 describe("filters", () => {
   it("clears a category filter on an edition switch, so no hidden filter empties the table", async () => {
     const { root } = await mount(model());
@@ -659,7 +1093,7 @@ describe("filters", () => {
   it("keeps the deep-linked file's findings", async () => {
     window.history.replaceState(null, "", "/security?path=src/lib.rs");
     const { root } = await mount(model());
-    expect(within(widgetTitled(root, "Findings")).getAllByText("src/lib.rs:3")).toHaveLength(1);
+    expect(within(widgetTitled(root, "Findings")).getAllByRole("button", { name: /^Show .* at src\/lib\.rs:3$/ })).toHaveLength(1);
     expect(readerText(widgetTitled(root, "Findings"))).toContain("2 of 2 findings shown");
   });
 
@@ -675,11 +1109,14 @@ describe("filters", () => {
     expect(shown()).toContain(SECURITY_ABSENCE.noFindingAt("src/other.rs"));
   });
 
-  it("narrows by route reach", async () => {
+  it("narrows by Reachable, the filter named for the column and its tooltip", async () => {
     const { root } = await mount(model());
-    await userEvent.selectOptions(screen.getByLabelText("Route reach"), "unknown");
+    expect(screen.getByLabelText("Reachable")).toHaveAttribute("title", FINDINGS_TABLE_TEXT.reachableTip);
+    expect(screen.queryByLabelText("Route reach")).toBeNull();
+    expect(within(screen.getByLabelText("Reachable")).getAllByRole("option").map((o) => o.textContent)).toEqual(["Any", "yes", "no", "unknown"]);
+    await userEvent.selectOptions(screen.getByLabelText("Reachable"), "unknown");
     expect(readerText(widgetTitled(root, "Findings"))).toContain("2 of 2 findings shown");
-    await userEvent.selectOptions(screen.getByLabelText("Route reach"), "reachable");
+    await userEvent.selectOptions(screen.getByLabelText("Reachable"), "reachable");
     expect(readerText(widgetTitled(root, "Findings"))).toContain("0 of 2 findings shown");
   });
 
@@ -735,6 +1172,134 @@ describe("unclassified findings (FR-SC-04)", () => {
   });
 });
 
+describe("the Findings table (S-793, frontend-design §4.23)", () => {
+  const LONG = `src/${"deeply-nested-module/".repeat(5)}handler.rs`;
+  const tableOf = (root: HTMLElement) => within(widgetTitled(root, "Findings")).getByRole("table");
+  const rowOf = (table: HTMLElement, rule: string) =>
+    within(table).getByRole("button", { name: new RegExp(`^Show ${rule.replace(/\./g, "\\.")} `) }).closest("tr") as HTMLElement;
+
+  it("reads Severity · Rule · Location · Symbol · Reachable · Scanner · OWASP · Show · Triage, with no message column", async () => {
+    const { root } = await mount(model());
+    const headers = within(tableOf(root)).getAllByRole("columnheader").map((h) => h.textContent?.replace(/[↕▲▼]/g, "").trim());
+    expect(headers).toEqual(["Severity", "Rule", "Location", "Symbol", "Reachable", "Scanner", "OWASP", "Show", "Triage"]);
+  });
+
+  it("carries no message in any row — the detail does", async () => {
+    const { root } = await mount(model());
+    const table = tableOf(root);
+    for (const f of REAL.security.findings.findings) {
+      expect(table.textContent).not.toContain(f.message);
+    }
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    expect(within(widgetTitled(root, "Finding detail")).getByText("Formatted SQL query.")).toBeInTheDocument();
+  });
+
+  it("truncates a rule id with the full id as its tooltip and its accessible name", async () => {
+    const id = `rules.${"x".repeat(114)}`;
+    expect(id).toHaveLength(120);
+    const long = { ...finding("rust.lang.security.formatted-sql"), rule_id: id };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [long] } }));
+    const cell = within(tableOf(root)).getByText(id);
+    expect(cell).toHaveAttribute("title", id);
+    expect(cell.className).toContain(styles.rule);
+    // The full id is the text, so it is the name; CSS only clips what is drawn.
+    expect(within(tableOf(root)).getByRole("cell", { name: new RegExp(`^${id}$`) })).toBeInTheDocument();
+  });
+
+  it("shows a location through PathCell with :line — whole when short, abbreviated when long, the full path as title and name", async () => {
+    const long = { ...finding("rust.lang.security.formatted-sql"), path: LONG, report_path: LONG, start_line: 42 };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [long, finding("generic.secrets.hardcoded-key")] } }));
+    const table = tableOf(root);
+    const longRow = rowOf(table, "rust.lang.security.formatted-sql");
+    const path = longRow.querySelector(`[data-path="${LONG}"]`) as HTMLElement;
+    expect(path).toHaveAttribute("title", LONG);
+    expect(path.querySelector("[aria-hidden='true']")?.textContent).toBe("src/…/deeply-nested-module/handler.rs");
+    expect(within(longRow).getByRole("cell", { name: new RegExp(`^${LONG} ?:42$`) })).toBeInTheDocument();
+    expect(path.closest("td")?.textContent?.endsWith(":42")).toBe(true);
+
+    const short = rowOf(table, "generic.secrets.hardcoded-key").querySelector("[data-path]") as HTMLElement;
+    expect(short.textContent).toBe("src/lib.rs");
+    expect(short).toHaveAttribute("title", "src/lib.rs");
+  });
+
+  it("reads a finding with no path as 'no location', and one with no line as the bare path", async () => {
+    const none = { ...finding("rust.lang.security.formatted-sql"), path: null, report_path: null, start_line: null };
+    const noLine = { ...finding("generic.secrets.hardcoded-key"), start_line: null };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [none, noLine] } }));
+    const table = tableOf(root);
+    expect(within(rowOf(table, "rust.lang.security.formatted-sql")).getByText("no location")).toBeInTheDocument();
+    expect(rowOf(table, "generic.secrets.hardcoded-key").querySelector("[data-path]")?.nextSibling).toBeNull();
+  });
+
+  it("reads the Symbol as kind and short name, the full symbol as tooltip", async () => {
+    const { root } = await mount(model());
+    const cell = within(rowOf(tableOf(root), "rust.lang.security.formatted-sql")).getByText("find").closest("[title]") as HTMLElement;
+    expect(cell.textContent).toBe("function find");
+    expect(cell).toHaveAttribute("title", "logos . project . src/`lib.rs`/find().");
+  });
+
+  it("reads an unbound Symbol as — with its reason", async () => {
+    const sql = finding("rust.lang.security.formatted-sql");
+    const unbound: SecurityFinding = {
+      ...sql,
+      context: { ...sql.context, enclosing: { confidence: "unbound", symbol: null, unbound_because: "not_indexed" }, blast_radius: { confidence: "unbound" } },
+    };
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings: [unbound] } }));
+    const cell = within(rowOf(tableOf(root), "rust.lang.security.formatted-sql")).getByText("—").closest("[title]") as HTMLElement;
+    expect(cell).toHaveAttribute("title", CONTEXT_TEXT.unbound("not_indexed"));
+    expect(cell.textContent).toContain(CONTEXT_TEXT.unbound("not_indexed"));
+  });
+
+  it("reads Reachable as yes / no / unknown with the route tooltip — and unknown is never no", async () => {
+    const sql = finding("rust.lang.security.formatted-sql");
+    const reach = (verdict: "reachable" | "unreachable" | "unknown", route: { symbol: string; name: string; hops: number } | null) =>
+      ({ ...sql, rule_id: `r.${verdict}`, context: { ...sql.context, reachability: { confidence: "resolved" as const, verdict, route, unresolved_because: null } } }) as SecurityFinding;
+    const findings = [reach("reachable", { symbol: "s", name: "GET /users/:id", hops: 2 }), reach("unreachable", null), reach("unknown", null)];
+    const { root } = await mount(model({ findings: { ...REAL.security.findings, findings } }));
+    const table = tableOf(root);
+    const cellOf = (verdict: string) => rowOf(table, `r.${verdict}`).querySelector(`[data-reachable="${verdict}"]`) as HTMLElement;
+    expect(cellOf("reachable").textContent).toBe("yes");
+    expect(cellOf("reachable")).toHaveAttribute("title", CONTEXT_TEXT.reachable("GET /users/:id", 2));
+    expect(cellOf("unreachable").textContent).toBe("no");
+    expect(cellOf("unknown").textContent).toBe("unknown");
+    expect(cellOf("unknown").textContent).not.toBe("no");
+    expect(cellOf("unknown")).toHaveAttribute("title", CONTEXT_TEXT.unknown(null));
+    // The tooltip is the story's own sentence, not a copy of the constant.
+    expect(FINDINGS_TABLE_TEXT.reachableTip).toBe("an HTTP route handler can call this code");
+    expect(within(table).getByText("Reachable")).toHaveAttribute("title", "an HTTP route handler can call this code");
+  });
+
+  it("reads the Scanner and the OWASP category in their own columns", async () => {
+    const { root } = await mount(model());
+    const cells = within(rowOf(tableOf(root), "rust.lang.security.formatted-sql")).getAllByRole("cell").map((c) => c.textContent);
+    expect(cells[5]).toBe("Semgrep OSS");
+    expect(cells[6]).toBe("A05:2025");
+  });
+});
+
+describe("the empty blast-radius lists (S-793)", () => {
+  it("keeps each list's title above its empty sentence", async () => {
+    const empty: ImpactResult = { ...IMPACT, upstream_label: "Breaks if changed", upstream: [], downstream_label: "Depends on", downstream: [] };
+    const { root } = await mount(model(), empty);
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    const nothing = await within(detail).findByText("Nothing depends on it.");
+    const none = within(detail).getByText("It depends on nothing.");
+    expect(nothing.previousElementSibling?.textContent).toBe("Breaks if changed");
+    expect(none.previousElementSibling?.textContent).toBe("Depends on");
+  });
+
+  it("keeps a non-empty list's title as its table caption, and no empty sentence", async () => {
+    const { root } = await mount(model());
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    await within(detail).findByText("caller");
+    expect(within(detail).getByRole("table", { name: "Depends on it" })).toBeInTheDocument();
+    expect(within(detail).queryByText("Nothing depends on it.")).toBeNull();
+    expect(within(detail).getByText("It depends on nothing.")).toBeInTheDocument();
+  });
+});
+
 describe("the finding detail (FR-SC-13)", () => {
   it("states unknown reachability as unknown with its reason, never as unreachable, and fetches the impact lists", async () => {
     const { calls, root } = await mount(model());
@@ -744,6 +1309,9 @@ describe("the finding detail (FR-SC-13)", () => {
     expect(reach.dataset.reachability).toBe("unknown");
     expect(readerText(reach)).toContain("Unknown: the file's language binds no call across files.");
     expect(readerText(reach)).not.toMatch(/unreachable/i);
+    // The fact is named for what it asks, as the filter and the column are (§4.23).
+    expect(within(detail).getByText("Reachable from a route")).toBeInTheDocument();
+    expect(within(detail).queryByText("Route reach")).toBeNull();
     expect(readerText(detail)).toContain("find");
     // The lists come from impact on the enclosing symbol.
     expect(await within(detail).findByText("caller")).toBeInTheDocument();
@@ -980,5 +1548,65 @@ describe("the gate band (FR-SC-10)", () => {
     expect(within(band).getByText("FAIL")).toBeInTheDocument();
     expect(readerText(band)).toContain("Failing: 1 missing required scan, 2 findings a rule fails on.");
     expect(readerText(band)).toContain("required scanner bandit has no fresh scan at HEAD");
+  });
+});
+
+describe("the read after Run scan ends (HF-2)", () => {
+  /** The page with Bandit alone in the matrix, in `state`, its consent recorded. */
+  function banditPage(state: "stale" | "fresh"): SecurityModel {
+    const bandit = REAL.security.status.scanners.find((r) => r.scanner === "bandit")!;
+    const stored = { snapshot_head: "a".repeat(40), version: "1.7.10", findings: 0, suppressed: 0, not_fresh: 0, test: 0 };
+    const row = { ...bandit, ...stored, state, ...(state === "stale" ? { because: "head_moved" } : {}) } as SecurityScannerStatus;
+    const status = { ...REAL.security.status, consent: { consented: ["bandit"], pending: [] }, scanners: [row], other_reports: [] };
+    return model({ status });
+  }
+
+  /** The State cell's text on Bandit's row of the Scanners table. */
+  function banditState(root: HTMLElement): string {
+    const matrix = within(widgetTitled(root, "Scanners")).getByRole("table");
+    const header = within(matrix).getAllByRole("columnheader").findIndex((h) => h.textContent?.startsWith("State"));
+    const row = within(matrix).getByText("bandit", { selector: "td" }).closest("tr") as HTMLElement;
+    return row.querySelectorAll("td")[header].textContent ?? "";
+  }
+
+  it("never shows the stored state read before the scan once the job ended: the row reads `running` until the reload lands, then `fresh`", async () => {
+    const completed = scanJob as unknown as ScanJob;
+    const running: ScanJob = { ...completed, state: "running", result: null, events: completed.events.slice(0, 5) };
+    const [stale, fresh] = [banditPage("stale"), banditPage("fresh")];
+    let ended = false;
+    let reads = 0;
+    // The reload the job's end asks for is answered only when the test lets it.
+    let land: () => void = () => {};
+    const landed = new Promise<void>((done) => (land = done));
+    const answer = (body: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve(body) }) as Response;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init: RequestInit = {}) => {
+        if (url.startsWith("/api/v1/security/install")) return Promise.resolve(answer({ job: null }));
+        if (url.startsWith("/api/v1/security/scan")) {
+          if (init.method === "POST") return Promise.resolve(answer({ joined: false, job: running }));
+          return Promise.resolve(answer({ job: ended ? completed : null }));
+        }
+        reads += 1;
+        return reads === 1 ? Promise.resolve(answer(stale)) : landed.then(() => answer(fresh));
+      }),
+    );
+    const view = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    expect(banditState(view.container)).toContain("stale");
+    await userEvent.click(await screen.findByRole("button", { name: SCAN_JOB_TEXT.run }));
+    expect(banditState(view.container)).toBe(LIVE_STATE_TEXT.running);
+
+    ended = true;
+    // The job's end is seen and the reload asked for; its answer has not landed.
+    await vi.waitFor(() => expect(reads).toBe(2), { timeout: 5000 });
+    await act(() => new Promise((tick) => setTimeout(tick, 50)));
+    expect(banditState(view.container), "the page read before the scan is never shown as its result").toBe(LIVE_STATE_TEXT.running);
+    expect(screen.queryByText(SCAN_JOB_TEXT.completed(0, 1)), "the job reads ended once its result is shown").toBeNull();
+
+    land();
+    expect(await screen.findByText(SCAN_JOB_TEXT.completed(0, 1))).toBeInTheDocument();
+    expect(banditState(view.container)).toBe("fresh");
+    expect(reads, "one reload at the end").toBe(2);
   });
 });

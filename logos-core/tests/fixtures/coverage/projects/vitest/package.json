@@ -1,0 +1,10 @@
+{
+  "name": "calc",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "vitest" },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.2.4",
+    "vitest": "^3.2.4"
+  }
+}

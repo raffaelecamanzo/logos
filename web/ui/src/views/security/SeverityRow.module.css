@@ -1,0 +1,17 @@
+/*
+ * SeverityRow layout (S-789). A wrapping row of severity badges, each beside its
+ * count. Zero-runtime CSS Module, design tokens only (ADR-44).
+ */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+.item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}

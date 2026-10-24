@@ -52,3 +52,6 @@ cobertura.xml
 # commits), so an untracked .DS_Store appearing mid-gate changes that identity
 # and invalidates the evidence the run just produced.
 .DS_Store
+
+# LLVM coverage raw profiles written by an instrumented test run
+*.profraw

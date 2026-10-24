@@ -8,8 +8,10 @@
 //! the terminal's Ctrl-C. Without this, a stopped Logos freed the lock while
 //! its scanner ran on, and a second scan was admitted beside it. With it, the
 //! signal kills every [foreground](super::foreground) child's group first, and
-//! the process then exits, which frees the lock. SIGKILL cannot be caught: a
-//! Logos killed by it still leaves its scanners running.
+//! the process then exits, which frees the lock. The same holds for a job a
+//! `serve --mcp` runs, such as a coverage run (S-738): the signal kills each
+//! running job's children too ([`super::cancel_every_run`]). SIGKILL cannot be
+//! caught: a Logos killed by it still leaves its scanners running.
 //!
 //! [`foreground`]: super::foreground
 
@@ -39,8 +41,10 @@ impl StopExit {
     }
 }
 
-/// On SIGINT or SIGTERM, [cancel every foreground run](super::cancel_foreground)
-/// of this process, then exit as `exit` says. Installed once per process; a
+/// On SIGINT or SIGTERM, [cancel every foreground run and job](super::cancel_every_run)
+/// of this process, wait — to [`SHUTDOWN_GRACE`](super::SHUTDOWN_GRACE) — for
+/// each to end ([`stop_every_run`](super::stop_every_run)), then exit as
+/// `exit` says. Installed once per process; a
 /// later call does nothing. Returns whether the handlers are in place — when
 /// they cannot be installed, a signal stops the process as it would without
 /// them.
@@ -81,7 +85,7 @@ fn install(exit: StopExit) -> bool {
     let watcher = std::thread::Builder::new().name("logos-stop-signal".to_string()).spawn(move || {
         let mut signal = [0u8; 1];
         if reader.read_exact(&mut signal).is_ok() {
-            super::cancel_foreground();
+            super::stop_every_run(super::SHUTDOWN_GRACE);
             std::process::exit(exit.code(i32::from(signal[0])));
         }
     });

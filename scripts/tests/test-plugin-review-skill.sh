@@ -36,8 +36,12 @@
 #   5. re-measurement: every way a fix is not proven;
 #   6. the report check: each rule, each by a report one line from valid;
 #   7. a clean branch: no entries, no edit;
-#   8. debt mode, and the skill's files (frontmatter, the scripts it names).
-# Layers 1, 4 and 7 run under each distinct bash on this machine (/bin/bash is
+#   8. debt mode, and the skill's files (frontmatter, the scripts it names). Debt
+#      mode names a unit by its string `node_id` (a group by its own reason, an
+#      integer or null id by the counted fallback to name, file and dimension) and
+#      re-measures by that id: a renamed near miss and a second same-named symbol
+#      in the file are never the unit. Its string-id layer runs under each bash.
+# Layers 1, 4, 7 and the string-id half of 8 run under each distinct bash on this machine (/bin/bash is
 # 3.2 on macOS).
 #
 # Usage: bash scripts/tests/test-plugin-review-skill.sh
@@ -649,10 +653,10 @@ contains "... says 'not recorded', and that it is not clean" "$OUT" "not recorde
 contains "... denominator: 0 units" "$ERR" "0 units"
 cat >"$FX/improvements.json" <<'EOF'
 {"recorded":true,"basis":"estimate","outliers":[],"units":[
- {"kind":"function","node_id":10,"name":"covered_fn","file":"src/covered.rs","line":10,"dimensions":["nesting"],"points":159,"detail":"nesting depth 6","outliers":["nesting"]},
- {"kind":"function","node_id":11,"name":"bare_fn","file":"src/uncovered.rs","line":20,"dimensions":["nesting"],"points":40,"detail":"nesting depth 5","outliers":[]},
- {"kind":"function","node_id":12,"name":"thin_fn","file":"src/thin.py","line":5,"dimensions":["nesting"],"points":20,"detail":"nesting depth 5","outliers":[]},
- {"kind":"function","node_id":13,"name":"dirty_fn","file":"src/dirty.rs","line":2,"dimensions":["conciseness"],"points":10,"detail":"complexity 12","outliers":[]}]}
+ {"kind":"function","node_id":"src/`covered.rs`/covered_fn().","name":"covered_fn","file":"src/covered.rs","line":10,"dimensions":["nesting"],"points":159,"detail":"nesting depth 6","outliers":["nesting"]},
+ {"kind":"function","node_id":"src/`uncovered.rs`/bare_fn().","name":"bare_fn","file":"src/uncovered.rs","line":20,"dimensions":["nesting"],"points":40,"detail":"nesting depth 5","outliers":[]},
+ {"kind":"function","node_id":"src/`thin.py`/thin_fn().","name":"thin_fn","file":"src/thin.py","line":5,"dimensions":["nesting"],"points":20,"detail":"nesting depth 5","outliers":[]},
+ {"kind":"function","node_id":"src/`dirty.rs`/dirty_fn().","name":"dirty_fn","file":"src/dirty.rs","line":2,"dimensions":["conciseness"],"points":10,"detail":"complexity 12","outliers":[]}]}
 EOF
 printf '{"languages":[{"name":"rust","extensions":["rs"]},{"name":"python","extensions":["py","pyi"]}]}\n' >"$FX/languages.json"
 printf '{"resolution_by_language":[{"language":"rust","calls":{"cross_file_absence":null}},{"language":"python","calls":{"cross_file_absence":{"cause":"same-file-only"}}}]}\n' >"$FX/status.json"
@@ -663,13 +667,13 @@ contains "... summary" "$OUT" "debt list: 4 unit(s)"
 contains "... denominator" "$ERR" "4 unit(s) of the recorded where-to-start list (at most 10); 2 untrusted"
 expect "trust: a Python unit carries the language's cause, a dirty file reads stale, the rest resolved" \
     "$(jget "$WORK/debt.json" '",".join(e["trust"] for e in d["entries"])')" "resolved,resolved,same-file-only,stale"
-# bare names resolve through the same impact fixtures only when keyed by the name:
-impact covered_fn src/covered.rs tests/covered_test.rs >"$FX/impact.covered_fn.json"
+# the ids resolve through the impact fixtures keyed by the id (the stub's answer; the
+# 1.20.5 binary resolves only the bare name, which the coverage layer above covers).
 run "$B" coverage-lookup.sh --delta "$WORK/debt.json" --out "$WORK/debt.cov.json"
 run "$B" trust-gate.sh --delta "$WORK/debt.json" --coverage "$WORK/debt.cov.json" --out "$WORK/debt.triage.json"
 expect "debt mode: the same gate -> fix, test-first, untrusted, untrusted" \
     "$(jget "$WORK/debt.triage.json" '",".join(e["proposed"] for e in d["entries"])')" "fix,test-first,untrusted,untrusted"
-# debt re-measure: the unit is matched to the offender of the same name, file and dimension.
+# debt re-measure: the unit is matched to the offender with its node_id and dimension.
 STUB_REVIEW=review-resolved run "$B" remeasure.sh --triage "$WORK/debt.triage.json" --out "$WORK/debt.after.json" --entry e1
 expect "debt mode: a fix is proven by the delta's resolved entry (exit 0)" "$RC" 0
 contains "... cites it" "$OUT" "proven: e1 covered_fn"
@@ -897,16 +901,176 @@ rm2 review-unchanged-after --entry e1
 expect "an entry still 'unchanged' is not proven (exit 1)" "$RC" 1
 contains "... still unchanged" "$OUT" "still unchanged"
 
-echo "== remeasure.sh in debt mode: the match is by name, file and dimension"
-debt_case() { # label dimension file expected-rc
-    printf '{"mode":"debt","entries":[{"kind":"debt","dimension":"%s","status":"debt","symbol":"covered_fn","name":"covered_fn","file":"%s","line":10,"measure":"function","detail":"d","trust":"resolved"}]}\n' "$2" "$3" >"$WORK/dd.json"
+echo "== remeasure.sh in debt mode: the match is by node_id and dimension; a name-only unit by name, file and dimension"
+debt_case() { # label dimension file expected-rc identity symbol
+    printf '{"mode":"debt","entries":[{"kind":"debt","identity":"%s","dimension":"%s","status":"debt","symbol":"%s","name":"covered_fn","file":"%s","line":10,"measure":"function","detail":"d","trust":"resolved"}]}\n' "${5:-name}" "$2" "${6:-covered_fn}" "$3" >"$WORK/dd.json"
     bash "$SCR/trust-gate.sh" --delta "$WORK/dd.json" --coverage "$WORK/nocov.json" --out "$WORK/dd.tri.json" >/dev/null 2>&1
     STUB_REVIEW=review-resolved run "$B" remeasure.sh --triage "$WORK/dd.tri.json" --out "$WORK/dd.after.json" --entry e1
     expect "$1" "$RC" "$4"
 }
-debt_case "a debt unit in the offender's own dimension and file is proven" nesting src/covered.rs 0
-debt_case "a debt unit of another dimension is not the offender (near miss)" conciseness src/covered.rs 1
-debt_case "a debt unit of the same name in another file is not the offender (near miss)" nesting src/other.rs 1
+debt_case "a name-only unit in the offender's own dimension and file is proven" nesting src/covered.rs 0
+debt_case "a name-only unit of another dimension is not the offender (near miss)" conciseness src/covered.rs 1
+debt_case "a name-only unit of the same name in another file is not the offender (near miss)" nesting src/other.rs 1
+debt_case "a unit with the offender's node_id and dimension is proven" nesting src/covered.rs 0 node_id 'src/`covered.rs`/covered_fn().'
+debt_case "a unit with the offender's node_id in another dimension is not the offender (near miss)" conciseness src/covered.rs 1 node_id 'src/`covered.rs`/covered_fn().'
+debt_case "a unit of the same name whose node_id is another file's is not the offender (near miss)" nesting src/other.rs 1 node_id 'src/`other.rs`/covered_fn().'
+
+echo "== debt mode names a unit by its node_id (string-id fixtures; groups; the integer/null fallback)"
+printf '{"languages":[{"name":"rust","extensions":["rs"]},{"name":"python","extensions":["py","pyi"]}]}\n' >"$FX/languages.json"
+printf '{"resolution_by_language":[{"language":"rust","calls":{"cross_file_absence":null}},{"language":"python","calls":{"cross_file_absence":{"cause":"same-file-only"}}}]}\n' >"$FX/status.json"
+NEAR_ID='"src/`covered.rs`/Other#covered_fn()."'
+# The delta after a fix attempt, one fixture per way the same name can appear beside the unit.
+review_doc "[$(offender resolved "$NEAR_ID" covered_fn src/covered.rs 50 5 null resolved)]" >"$FX/review-nearmiss.json"
+review_doc "[$(offender resolved "$NEAR_ID" covered_fn src/covered.rs 50 5 null resolved),$(offender worsened "$COVERED_ID" covered_fn src/covered.rs 10 5 6 resolved)]" >"$FX/review-sibling-first-resolved.json"
+review_doc "[$(offender worsened "$NEAR_ID" covered_fn src/covered.rs 50 5 6 resolved),$(offender resolved "$COVERED_ID" covered_fn src/covered.rs 10 5 null resolved)]" >"$FX/review-sibling-first-worse.json"
+for B in "${BASHES[@]}"; do
+    T="[$B]"
+    cat >"$FX/improvements.json" <<'EOF'
+{"recorded":true,"basis":"estimate","outliers":[],"units":[
+ {"kind":"function","node_id":"src/`covered.rs`/covered_fn().","name":"covered_fn","file":"src/covered.rs","line":10,"dimensions":["nesting"],"points":159,"detail":"nesting depth 6","outliers":[]},
+ {"kind":"function","node_id":"src/`uncovered.rs`/bare_fn().","name":"bare_fn","file":"src/uncovered.rs","line":20,"dimensions":["nesting"],"points":40,"detail":"nesting depth 5","outliers":[]},
+ {"kind":"function","node_id":"src/`thin.py`/thin_fn().","name":"thin_fn","file":"src/thin.py","line":5,"dimensions":["nesting"],"points":20,"detail":"nesting depth 5","outliers":[]},
+ {"kind":"clone_group","node_id":"clone_group:0123456789abcdef","name":"covered_fn","file":"src/covered.rs","line":10,"dimensions":["uniqueness"],"points":30,"detail":"clone group #1 · 3 members × 7 lines","outliers":[]},
+ {"kind":"duplicate_group","node_id":"duplicate_group:fedcba9876543210","name":"bare_fn","file":"src/uncovered.rs","line":20,"dimensions":["redundancy"],"points":10,"detail":"duplicate group #2 · 2 members × 9 lines","outliers":[]}]}
+EOF
+    run "$B" debt-list.sh --out "$WORK/debt-id.json"
+    expect "$T string ids: exit 0" "$RC" 0
+    contains "$T ... summary names no fallback" "$OUT" "debt list: 5 unit(s)"
+    lacks "$T ... summary names no fallback" "$OUT" "known by name only"
+    contains "$T ... denominator: 3 by node_id, 2 groups, 0 fell back" "$ERR" "by node_id 3, groups naming no single symbol 2, fell back to name, file and dimension 0"
+    expect "$T a unit's symbol is its node_id; a group names no symbol" \
+        "$(jget "$WORK/debt-id.json" '",".join(str(e["symbol"]) for e in d["entries"])')" \
+        'src/`covered.rs`/covered_fn().,src/`uncovered.rs`/bare_fn().,src/`thin.py`/thin_fn().,None,None'
+    expect "$T the bare name is kept for reading" \
+        "$(jget "$WORK/debt-id.json" '",".join(e["name"] for e in d["entries"])')" "covered_fn,bare_fn,thin_fn,covered_fn,bare_fn"
+    expect "$T identities: node_id, node_id, node_id, group, group" \
+        "$(jget "$WORK/debt-id.json" '",".join(e["identity"] for e in d["entries"])')" "node_id,node_id,node_id,group,group"
+    contains "$T a clone group carries its own reason" "$(jget "$WORK/debt-id.json" 'd["entries"][3]["group_reason"]')" "clone group names no single symbol"
+    contains "$T a duplicate group carries its own reason" "$(jget "$WORK/debt-id.json" 'd["entries"][4]["group_reason"]')" "duplicate group names no single symbol"
+    expect "$T a group keeps its own id, apart from any symbol" \
+        "$(jget "$WORK/debt-id.json" 'd["entries"][3]["group"]')" "clone_group:0123456789abcdef"
+    : >"$CALLS"
+    run "$B" coverage-lookup.sh --delta "$WORK/debt-id.json" --out "$WORK/debt-id.cov.json"
+    expect "$T coverage by id: covered, uncovered, covered, then the two groups name no symbol" \
+        "$(jget "$WORK/debt-id.cov.json" '",".join(c["coverage"] for c in d["coverage"])')" "covered,uncovered,covered,no-symbol,no-symbol"
+    lacks "$T ... the id resolved, so no bare-name call was made" "$(cat "$CALLS")" "impact covered_fn --depth"
+    contains "$T ... a clone group's note is its own reason" "$(jget "$WORK/debt-id.cov.json" 'd["coverage"][3]["note"]')" "clone group names no single symbol"
+    contains "$T ... a duplicate group's note is its own reason" "$(jget "$WORK/debt-id.cov.json" 'd["coverage"][4]["note"]')" "duplicate group names no single symbol"
+    # A unit known by id is never made ambiguous by a same-named node of its file: the id tells them apart.
+    impact_as 'src/`covered.rs`/covered_fn().' 'src/`covered.rs`/covered_fn().' src/covered.rs tests/covered_test.rs \
+        '[{"symbol":"logos . repo . src/`covered.rs`/Other#covered_fn().","name":"covered_fn","kind":"function","file":"src/covered.rs","line":50}]' \
+        >"$FX/impact.$(k 'src/`covered.rs`/covered_fn().').json"
+    run "$B" coverage-lookup.sh --delta "$WORK/debt-id.json" --out "$WORK/debt-id.cov-alt.json"
+    expect "$T a string-id unit with a same-file same-name alternative is still covered by its own id" \
+        "$(jget "$WORK/debt-id.cov-alt.json" 'd["coverage"][0]["coverage"]')" covered
+    impact 'src/`covered.rs`/covered_fn().' src/covered.rs tests/covered_test.rs >"$FX/impact.$(k 'src/`covered.rs`/covered_fn().').json"
+    contains "$T ... denominator states the identities" "$ERR" "by node_id 3, groups naming no single symbol 2"
+    run "$B" trust-gate.sh --delta "$WORK/debt-id.json" --coverage "$WORK/debt-id.cov.json" --out "$WORK/debt-id.triage.json"
+    expect "$T the gate: fix, test-first, untrusted, then the groups no-action-warranted" \
+        "$(jget "$WORK/debt-id.triage.json" '",".join(e["proposed"] for e in d["entries"])')" "fix,test-first,untrusted,no-action-warranted,no-action-warranted"
+    contains "$T ... a group row's reason is its own" "$(jget "$WORK/debt-id.triage.json" 'd["entries"][3]["reason"]')" "clone group names no single symbol"
+    contains "$T ... denominator states the identities" "$ERR" "by node_id 3, groups naming no single symbol 2"
+
+    STUB_REVIEW=review-resolved run "$B" remeasure.sh --triage "$WORK/debt-id.triage.json" --out "$WORK/debt-id.after.json" --entry e1
+    expect "$T re-measure by id: the unit's own resolved entry proves it (exit 0)" "$RC" 0
+    contains "$T ... cites it" "$OUT" "proven: e1 covered_fn"
+    lacks "$T ... an id match carries no name-match suffix" "$OUT" "matched by name"
+    contains "$T ... denominator: one unit known by id" "$ERR" "by node_id 1, groups naming no single symbol 0, fell back to name, file and dimension 0"
+    STUB_REVIEW=review-nearmiss run "$B" remeasure.sh --triage "$WORK/debt-id.triage.json" --out "$WORK/debt-id.after2.json" --entry e1
+    expect "$T near miss: a same-named symbol of another id, in the same file and dimension, is not the unit (exit 1)" "$RC" 1
+    contains "$T ... the unit is not proven" "$OUT" "not proven: e1 covered_fn"
+    STUB_REVIEW=review-sibling-first-resolved run "$B" remeasure.sh --triage "$WORK/debt-id.triage.json" --out "$WORK/debt-id.after3.json" --entry e1
+    expect "$T two same-named symbols in one file: the first, resolved, is not the unit; the unit is still worsened (exit 1)" "$RC" 1
+    contains "$T ... read from the unit's own entry" "$OUT" "still worsened"
+    STUB_REVIEW=review-sibling-first-worse run "$B" remeasure.sh --triage "$WORK/debt-id.triage.json" --out "$WORK/debt-id.after4.json" --entry e1
+    expect "$T two same-named symbols in one file: the unit's own entry is the second, and resolved (exit 0)" "$RC" 0
+    STUB_REVIEW=review-resolved run "$B" remeasure.sh --triage "$WORK/debt-id.triage.json" --out "$WORK/debt-id.after5.json" --entry e4
+    expect "$T a group is never re-measured against an offender (exit 1)" "$RC" 1
+    contains "$T ... with its own reason" "$OUT" "clone group names no single symbol"
+    contains "$T ... and the group's detail" "$OUT" "3 members"
+    contains "$T ... denominator: one group asked" "$ERR" "by node_id 0, groups naming no single symbol 1"
+    # A resolved offender of the group's own name, file and dimension is still not the group.
+    UNIQ="$(offender resolved "$COVERED_ID" covered_fn src/covered.rs 10 5 null resolved | sed 's/"dimension":"nesting"/"dimension":"uniqueness"/')"
+    review_doc "[$UNIQ]" >"$FX/review-uniq.json"
+    contains "$T ... (the fixture offender is in the group's dimension)" "$(cat "$FX/review-uniq.json")" '"dimension":"uniqueness"'
+    STUB_REVIEW=review-uniq run "$B" remeasure.sh --triage "$WORK/debt-id.triage.json" --out "$WORK/debt-id.after6.json" --entry e4
+    expect "$T near miss: an offender of the group's name, file and dimension is not the group (exit 1)" "$RC" 1
+    contains "$T ... still reported with the group's reason" "$OUT" "clone group names no single symbol"
+    # A group in a thin-language file is untrusted first; its own reason is kept apart from the gate's.
+    cat >"$FX/improvements.json" <<'EOF'
+{"recorded":true,"basis":"estimate","outliers":[],"units":[
+ {"kind":"clone_group","node_id":"clone_group:0123456789abcdef","name":"thin_fn","file":"src/thin.py","line":5,"dimensions":["uniqueness"],"points":30,"detail":"clone group #1 · 3 members × 7 lines","outliers":[]}]}
+EOF
+    run "$B" debt-list.sh --out "$WORK/debt-ug.json"
+    run "$B" coverage-lookup.sh --delta "$WORK/debt-ug.json" --out "$WORK/debt-ug.cov.json"
+    run "$B" trust-gate.sh --delta "$WORK/debt-ug.json" --coverage "$WORK/debt-ug.cov.json" --out "$WORK/debt-ug.triage.json"
+    expect "$T an untrusted group: the gate reads untrusted first" "$(jget "$WORK/debt-ug.triage.json" 'd["entries"][0]["proposed"]')" untrusted
+    contains "$T ... the group's own reason survives the triage" "$(jget "$WORK/debt-ug.triage.json" 'd["entries"][0]["group_reason"]')" "clone group names no single symbol"
+    STUB_REVIEW=review-resolved run "$B" remeasure.sh --triage "$WORK/debt-ug.triage.json" --out "$WORK/debt-ug.after.json" --entry e1
+    contains "$T ... re-measurement states the group's reason" "$OUT" "clone group names no single symbol"
+    lacks "$T ... never the trust label spliced into it" "$OUT" "reported, never edited"
+    SAME="$(python3 -I -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from delta import make_entry, same_unit
+off = make_entry("offender", dimension="uniqueness", symbol="s/`a.rs`/f().", name="f", file="a.rs", status="new")
+grp = make_entry("debt", dimension="uniqueness", symbol=None, name="f", file="a.rs", identity="group")
+byid = make_entry("debt", dimension="uniqueness", symbol="s/`a.rs`/f().", name="f", file="a.rs", identity="node_id")
+other = make_entry("debt", dimension="uniqueness", symbol="s/`a.rs`/Other#f().", name="f", file="a.rs", identity="node_id")
+prefixed = make_entry(**__import__("delta").debt_entry({"kind": "function", "node_id": "clone_group:abc", "name": "f", "file": "a.rs", "dimensions": ["uniqueness"]}, set(), {}, {}))
+print(same_unit(grp, off), same_unit(off, grp), same_unit(byid, off), same_unit(other, off), same_unit(off, other), prefixed["identity"], prefixed["symbol"])' "$SCR/lib")"
+    expect "$T same_unit: a group is no offender, in either order; an id match is; a same-named other id is not" \
+        "$SAME" "False False True False False group None"
+done
+
+echo "== debt mode against an integer or null id (Logos 1.20.0-1.20.2): the fallback is visible"
+B="${BASHES[0]}"
+cat >"$FX/improvements.json" <<'EOF'
+{"recorded":true,"basis":"estimate","outliers":[],"units":[
+ {"kind":"function","node_id":10,"name":"covered_fn","file":"src/covered.rs","line":10,"dimensions":["nesting"],"points":159,"detail":"nesting depth 6","outliers":[]},
+ {"kind":"function","node_id":null,"name":"bare_fn","file":"src/uncovered.rs","line":20,"dimensions":["nesting"],"points":40,"detail":"nesting depth 5","outliers":[]},
+ {"kind":"function","node_id":"src/`thin.py`/thin_fn().","name":"thin_fn","file":"src/thin.py","line":5,"dimensions":["nesting"],"points":20,"detail":"nesting depth 5","outliers":[]},
+ {"kind":"clone_group","node_id":7,"name":"covered_fn","file":"src/covered.rs","line":10,"dimensions":["uniqueness"],"points":30,"detail":"clone group #1 · 3 members × 7 lines","outliers":[]}]}
+EOF
+run "$B" debt-list.sh --out "$WORK/debt-fb.json"
+expect "an integer or null id still lists (exit 0)" "$RC" 0
+contains "... the summary counts the fallback" "$OUT" "2 known by name only (no string id)"
+contains "... the denominator counts it: 1 by id, 1 group, 2 fell back" "$ERR" "by node_id 1, groups naming no single symbol 1, fell back to name, file and dimension 2"
+expect "identities: name, name, node_id, group (an integer group id is still a group)" \
+    "$(jget "$WORK/debt-fb.json" '",".join(e["identity"] for e in d["entries"])')" "name,name,node_id,group"
+expect "a fallback unit's symbol is its bare name" "$(jget "$WORK/debt-fb.json" 'd["entries"][0]["symbol"]')" covered_fn
+impact covered_fn src/covered.rs tests/covered_test.rs >"$FX/impact.covered_fn.json"
+run "$B" coverage-lookup.sh --delta "$WORK/debt-fb.json" --out "$WORK/debt-fb.cov.json"
+expect "coverage of a fallback unit is by its name: covered" "$(jget "$WORK/debt-fb.cov.json" 'd["coverage"][0]["coverage"]')" covered
+contains "... denominator counts the fallback" "$ERR" "fell back to name, file and dimension 2"
+# Two same-named nodes in the unit's file and no id to tell them apart: nothing is credited.
+impact_as covered_fn "$OWN" src/covered.rs tests/covered_test.rs \
+    "[{\"symbol\":\"$SIB\",\"name\":\"covered_fn\",\"kind\":\"function\",\"file\":\"src/covered.rs\",\"line\":50}]" >"$FX/impact.covered_fn.json"
+run "$B" coverage-lookup.sh --delta "$WORK/debt-fb.json" --out "$WORK/debt-fb.cov2.json"
+expect "near miss: two same-named symbols in the file, no id -> unknown" "$(jget "$WORK/debt-fb.cov2.json" 'd["coverage"][0]["coverage"]')" unknown
+contains "... the note says why" "$(jget "$WORK/debt-fb.cov2.json" 'd["coverage"][0]["note"]')" "carries no id"
+impact_as covered_fn "$OWN" src/covered.rs tests/covered_test.rs \
+    '[{"symbol":"logos . repo . src/`elsewhere.rs`/covered_fn().","name":"covered_fn","kind":"function","file":"src/elsewhere.rs","line":9}]' >"$FX/impact.covered_fn.json"
+run "$B" coverage-lookup.sh --delta "$WORK/debt-fb.json" --out "$WORK/debt-fb.cov3.json"
+expect "an alternative of that name in another file does not make the fallback unit ambiguous -> covered" \
+    "$(jget "$WORK/debt-fb.cov3.json" 'd["coverage"][0]["coverage"]')" covered
+impact covered_fn src/covered.rs tests/covered_test.rs >"$FX/impact.covered_fn.json"
+run "$B" coverage-lookup.sh --delta "$WORK/debt-fb.json" --out "$WORK/debt-fb.cov.json"
+run "$B" trust-gate.sh --delta "$WORK/debt-fb.json" --coverage "$WORK/debt-fb.cov.json" --out "$WORK/debt-fb.triage.json"
+contains "the gate's denominator counts the fallback" "$ERR" "fell back to name, file and dimension 2"
+STUB_REVIEW=review-resolved run "$B" remeasure.sh --triage "$WORK/debt-fb.triage.json" --out "$WORK/debt-fb.after.json" --entry e1
+expect "a fallback unit is proven by name, file and dimension (exit 0)" "$RC" 0
+contains "... and says it was matched that way" "$OUT" "matched by name, file and dimension: the unit has no string id"
+contains "... denominator counts the fallback" "$ERR" "fell back to name, file and dimension 1"
+STUB_REVIEW=review-sibling-first-resolved run "$B" remeasure.sh --triage "$WORK/debt-fb.triage.json" --out "$WORK/debt-fb.after2.json" --entry e1
+expect "near miss: two entries of the re-run share the fallback unit's name, file and dimension -> not proven (exit 1)" "$RC" 1
+contains "... the reason is the missing id" "$OUT" "carries no id to tell them apart"
+review_doc "[$(offender resolved '"src/`covered.rs`/other_fn()."' other_fn src/covered.rs 50 5 null resolved)]" >"$FX/review-othername.json"
+STUB_REVIEW=review-othername run "$B" remeasure.sh --triage "$WORK/debt-fb.triage.json" --out "$WORK/debt-fb.after3.json" --entry e1
+expect "near miss: an offender of another name in the same file and dimension is not the fallback unit (exit 1)" "$RC" 1
+contains "... not proven" "$OUT" "not proven: e1 covered_fn"
+rm -f "$FX/impact.covered_fn.json"
+expect "RV_MIN_LOGOS stays 1.20.0" "$(grep -c '^RV_MIN_LOGOS="1.20.0"$' "$SCR/lib/common.sh")" 1
 
 echo "== edit-scope.sh: pre-dirty files, hashes, deletions, HEAD, the contract, a subdirectory"
 R2="$WORK/repo2"
@@ -1066,7 +1230,8 @@ for v in fix test-first no-action-warranted untrusted; do
     contains "SKILL.md states the verdict $v" "$(cat "$SKILLMD")" "$v"
 done
 for phrase in "Never cite the aggregate quality number" "report it as \`cleared\`" "--triage \$W/triage.json" "Cross-rank it with churn" \
-    "Do not commit" "the same \`--base\` the triage used"; do
+    "Do not commit" "the same \`--base\` the triage used" "the entry's \`symbol\` is that id" "never the unit" \
+    "names no single symbol" "falls back to name,"; do
     contains "SKILL.md states: $phrase" "$(cat "$SKILLMD")" "$phrase"
 done
 expect "the skill names no host: no CLAUDE_ variable anywhere in it (FR-IN-15: the body and the scripts are host-neutral)" \

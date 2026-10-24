@@ -116,7 +116,9 @@ pub struct ParsedFinding {
     pub region: Region,
     /// The report's own identity for the result — `fingerprints`, else
     /// `partialFingerprints`, empty values dropped — as `key=value` pairs in key
-    /// order. Hashed into the stored fingerprint, never stored itself.
+    /// order. Hashed into the stored fingerprint, never stored itself; an
+    /// OSV-Scanner result's is not hashed at all since history.db migration 10
+    /// (its 2.x `partialFingerprints` would re-key it, [`super::fingerprint`]).
     pub identity: Vec<String>,
     /// The commit a Gitleaks history-mode result was found in
     /// (`partialFingerprints.commitSha`); `None` for a scoped (`--no-git`) run
@@ -533,7 +535,13 @@ fn parse_result(
 /// is the rule's `security-severity` instead. The driver name is matched with
 /// ASCII case and surrounding space ignored, as [`redact::is_gitleaks`] does.
 fn fixed_level(scanner_name: &str) -> Option<&'static str> {
-    scanner_name.trim().eq_ignore_ascii_case("osv-scanner").then_some("warning")
+    is_osv_scanner(scanner_name).then_some("warning")
+}
+
+/// Whether `scanner_name` is OSV-Scanner's driver name, ASCII case and
+/// surrounding space ignored, as [`redact::is_gitleaks`] matches Gitleaks'.
+pub(crate) fn is_osv_scanner(scanner_name: &str) -> bool {
+    scanner_name.trim().eq_ignore_ascii_case("osv-scanner")
 }
 
 /// A SARIF `level` must be one of the four the spec defines.

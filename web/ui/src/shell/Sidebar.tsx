@@ -78,6 +78,9 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // S-674: the app-level Security roll-up answers the member Security page's
   // question one scope up, so it carries the same shield (FR-SC-16).
   "workspace-security": IconSecurity,
+  // S-788: the app-level Coverage roll-up answers the member Coverage page's
+  // question one scope up, so it carries the same icon (FR-CV-16).
+  "workspace-coverage": IconCoverage,
   // An extension entry's icon comes with its registration (`ExtensionUi.icons`).
 };
 

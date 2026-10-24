@@ -40,10 +40,14 @@
 # HOW EACH SCANNER IS READ (the path-selection probe)
 #   semgrep      the template's argv, with a local one-rule config in place of
 #                `p/default` (the registry needs the network); SARIF result URIs.
-#   osv-scanner  the template's path argv with `--format json
-#                --experimental-offline --experimental-all-packages` in place of
-#                `--format sarif`: every lockfile it scanned, no advisory needed,
-#                no network. Exit 127 (no local database) is success here.
+#   osv-scanner  the template's path argv with `--format json --offline
+#                --all-packages` in place of `--format sarif --output-file`:
+#                every lockfile it scanned, no advisory needed, no network. The
+#                2.x spellings of the `--experimental-offline` and
+#                `--experimental-all-packages` the 1.9.2 run used. Exit 127 (no
+#                local database) is success here.
+#                A managed 1.9.x copy rejects those flags (every leg reads `failed`),
+#                so install the pin first; evidence.md marks a run off the pin.
 #   gosec        the template's argv; SARIF result URIs.
 #   codeql       the template's `database create`; the source archive
 #                (`src.zip`) is every file extraction kept, which bounds what
@@ -249,13 +253,16 @@ ZONES="app target src/target targets"
 # zone in their name (`planted_src_target.go`), so a reported path is placed in
 # its zone even when a scanner roots it somewhere other than the fixture (gosec
 # reports a URI relative to the package argument it came from).
+# Each Go file imports the standard library without adding a finding, so a gosec
+# that cannot type it under the local Go fails every leg instead of reading a
+# project with no import (S-782).
 plant() {
     local root="$1" zone="$2" dir key
     dir="$2${3:+/$3}"
     key="$(printf '%s' "$2" | tr '/' '_')"
     mkdir -p "$root/$dir"
     printf 'def run(cmd):\n    return eval(cmd)\n' >"$root/$dir/planted_$key.py"
-    printf 'package zone\n\n// Password is a planted G101 finding.\nvar Password = "Xk9mP2vL7qR4wZ8nB3jF6tY1hD5sG0aE"\n' >"$root/$dir/planted_$key.go"
+    printf 'package zone\n\nimport "strings"\n\n// Password is a planted G101 finding.\nvar Password = "Xk9mP2vL7qR4wZ8nB3jF6tY1hD5sG0aE"\n\n// Trim imports the standard library (S-782): gosec must type it, or the run fails\n// with "without types was imported" and writes no report, whatever the zone.\nvar Trim = strings.TrimSpace\n' >"$root/$dir/planted_$key.go"
     printf 'jinja2==2.4.1\n' >"$root/$dir/requirements.txt"
 }
 
@@ -353,7 +360,7 @@ argv() {
             esac
             ;;
         osv-scanner)
-            printf '%s\n' --format json --experimental-offline --experimental-all-packages --recursive
+            printf '%s\n' --format json --offline --all-packages --recursive
             case "$m" in
                 explicit-targets) printf '%s\n' .gitignore app go.mod src targets ;;
                 *) echo . ;;
@@ -649,7 +656,7 @@ probe = {
     "semgrep": "SARIF result URIs from the registry argv, with a local one-rule config "
                "(`eval(...)` in Python) in place of `p/default`, which needs the network.",
     "osv-scanner": "the lockfiles it scanned (`results[].source.path` of `--format json "
-                   "--experimental-offline --experimental-all-packages`, in place of "
+                   "--offline --all-packages`, in place of "
                    "`--format sarif`): path selection without an advisory and without the network.",
     "gosec": "SARIF result URIs (a planted G101 hardcoded credential) from the registry argv.",
     "codeql": "the files `database create` extracted (its `src.zip`), which bounds what any "

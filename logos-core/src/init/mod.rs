@@ -1109,7 +1109,8 @@ fn stdout_line(output: &Output) -> String {
 /// Install the sync hooks under `.logos/hooks/` and point `core.hooksPath`
 /// at them. Refuses (Skipped) when: not a git repository, `core.hooksPath`
 /// already points elsewhere, or an existing hook file is not Logos-managed —
-/// the user's hook setup is never clobbered (DL-07).
+/// the user's hook setup is never clobbered (DL-07). Logos-managed scripts are
+/// rewritten to the current canonical body when they differ.
 ///
 /// Hook scripts and the managed-marker constant are sourced from
 /// [`crate::hooks`] so both code paths (the `init -i` wizard and the
@@ -1160,14 +1161,13 @@ fn install_hooks(root: &Path) -> Result<InitStep> {
         let path = dir.join(hook);
         let existing = read_optional(&path)?;
         any_existed |= existing.is_some();
-        // Write only when absent or when the file carries our marker but not
-        // the richer targeted body from `Engine::install_hooks`. A file that
-        // already carries `MANAGED_MARKER` with a different (richer) body is
-        // left as-is — `init` never downgrades an existing managed installation.
-        let current_managed = existing
-            .as_deref()
-            .is_some_and(|b| b.contains(crate::hooks::MANAGED_MARKER));
-        if !current_managed {
+        // Write when absent, or when a managed script (the whole-install veto
+        // above already refused any foreign one) differs from the canonical
+        // body: a managed script is regenerated to what this version of Logos
+        // generates, exactly as `Engine::install_hooks` rewrites it, so a hook
+        // written by an older release picks up a fixed body on the next `init`
+        // instead of running the old one forever.
+        if existing.as_deref() != Some(body.as_str()) {
             fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
             wrote = true;
         }

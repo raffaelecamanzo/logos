@@ -16,10 +16,10 @@ use std::collections::BTreeSet;
 use rusqlite::Connection;
 
 use super::identity_tests::{
-    constants, fixture, git, gitleaks_findings, gitleaks_repo, ingest_history, key, settings_at, settings_finding, write, C1,
-    C2, C3, SECRET, SETTINGS,
+    constants, fixture, git, gitleaks_findings, gitleaks_repo, indexed, ingest_history, key, ratchet_violations, settings_at,
+    settings_finding, write, C1, C2, C3, LEGACY_SECRET, SECRET, SETTINGS,
 };
-use super::{read_latest, CommitAnchor, FindingBinding, SecurityFinding};
+use super::{label, read_latest, CommitAnchor, FindingBinding, IgnoreFile, SecurityFinding};
 use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA};
 
 const LEGACY: &str = "legacy/client.py";
@@ -389,4 +389,108 @@ fn a_store_from_before_migration_7_upgrades_its_gitleaks_full_scan_rows_to_histo
     ingest_history(&root);
     let settings = settings_finding(&root);
     assert_eq!((settings.binding, settings.path.as_deref()), (FindingBinding::Bound, Some(SETTINGS)), "the next full scan checks it");
+}
+
+/// The history report ingested over `root` with today's index plus `extra`.
+fn ingest_history_indexing(root: &std::path::Path, extra: &[&str]) {
+    let mut paths = indexed(root);
+    paths.extend(extra.iter().map(|p| p.to_string()));
+    super::ingest(root, &fixture("history.sarif"), &paths).unwrap();
+}
+
+/// Whether an ignore entry naming `fingerprint` still names, and suppresses,
+/// one finding of the store's latest scan.
+fn suppresses(root: &std::path::Path, fingerprint: &str) -> bool {
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    let text = format!("[[ignore]]\nfingerprint = \"{fingerprint}\"\nreason = \"rotated\"\n");
+    let labelled = label(&gitleaks_findings(root), &IgnoreFile::parse(&text).unwrap(), root, today);
+    let entry = &labelled.entries[0];
+    !entry.orphaned && entry.suppressed == 1 && entry.should_name.is_none()
+}
+
+/// S-780: a secret found only in history is known by its own path at its
+/// commit. Adding an unrelated root `client.py` — which the deleted
+/// `legacy/client.py` would bind to by suffix — and removing it again leave
+/// its key, its suppression and the ratchet's reading of it unchanged.
+#[test]
+fn an_unrelated_file_of_the_same_name_never_re_keys_a_history_only_secret() {
+    let (_t, root) = gitleaks_repo(3);
+    write(&root, ".logos/rules.toml", "[security]\nratchet_min_severity = \"info\"\n");
+    ingest_history(&root);
+    let before = legacy_finding(&root);
+    assert_eq!(ratchet_violations(&root).len(), 2, "the ratchet reads both secrets, unblessed, as new");
+    let user = root.parent().unwrap().join("user-config");
+    let blessed = crate::engine::Engine::open(&root)
+        .with_scan_environment(crate::security::ScanEnvironment {
+            user_dir: Some(user),
+            search_path: Some(std::ffi::OsString::new()),
+            tools_dir: None,
+            nvd_api_key: None,
+        })
+        .security_bless()
+        .unwrap();
+    assert!(blessed.recorded, "{blessed:?}");
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new());
+    assert!(suppresses(&root, &before.fingerprint));
+
+    write(&root, "client.py", "import os\n");
+    git(&root, Some("2026-10-04T09:00:00+00:00"), &["add", "-A"]);
+    git(&root, Some("2026-10-04T09:00:00+00:00"), &["commit", "-q", "-m", "C4: an unrelated client"]);
+    ingest_history_indexing(&root, &["client.py"]);
+    let added = legacy_finding(&root);
+    assert_eq!((added.binding, added.path.clone(), added.anchor.clone()), historical_at(C1, LEGACY), "never bound to client.py");
+    assert_eq!(added.fingerprint, before.fingerprint, "adding client.py leaves its key");
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "the ratchet reads it as known");
+    assert!(suppresses(&root, &before.fingerprint), "its suppression stays matched");
+
+    std::fs::remove_file(root.join("client.py")).unwrap();
+    git(&root, Some("2026-10-05T09:00:00+00:00"), &["commit", "-q", "-am", "C5: drop the client"]);
+    ingest_history(&root);
+    let removed = legacy_finding(&root);
+    assert_eq!(removed.fingerprint, before.fingerprint, "removing it leaves its key");
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new());
+    assert!(suppresses(&root, &before.fingerprint));
+}
+
+/// `still_on_its_line` reads the secret's own path: a same-suffix file at
+/// another path holding its identical text does not bind it, and its key is
+/// the one it has with no such file. The display binding comes after that
+/// decision: a secret still on its line in a file the index does not hold is
+/// never bound to the indexed file sharing its suffix.
+#[test]
+fn identical_text_in_a_same_suffix_file_elsewhere_never_binds_a_history_only_secret() {
+    let (_t, plain) = gitleaks_repo(3);
+    ingest_history(&plain);
+    let alone = legacy_finding(&plain);
+
+    let line = format!("CLIENT_TOKEN = \"{LEGACY_SECRET}\"\n");
+    let (_t2, root) = gitleaks_repo(3);
+    write(&root, "client.py", &line);
+    ingest_history_indexing(&root, &["client.py"]);
+    let legacy = legacy_finding(&root);
+    assert_eq!((legacy.binding, legacy.path.clone(), legacy.anchor.clone()), historical_at(C1, LEGACY));
+    assert_eq!(legacy.fingerprint, alone.fingerprint, "keyed by its own path, whatever else holds its text");
+    let anchored: i64 = Connection::open(crate::history::db_path(&root))
+        .unwrap()
+        .query_row("SELECT count(*) FROM security_files WHERE path = 'client.py'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(anchored, 0, "nothing of client.py is claimed for it");
+
+    // Its own file back, outside the index: still on its line there, so not
+    // historical — and unmatched, never bound to client.py.
+    let (_t3, back) = gitleaks_repo(3);
+    write(&back, "client.py", &line);
+    write(&back, LEGACY, &line);
+    let summary =
+        super::ingest(&back, &fixture("history.sarif"), &["app/main.py".to_string(), SETTINGS.to_string(), "client.py".to_string()])
+            .unwrap();
+    assert_eq!(
+        summary.unmatched,
+        [super::UnmatchedPath { path: LEGACY.to_string(), candidates: 0 }],
+        "its own path is reported unmatched, with no candidate claimed"
+    );
+    let present = legacy_finding(&back);
+    assert_eq!((present.binding, present.path.clone()), (FindingBinding::Unmatched, None));
+    assert_eq!(present.anchor, Some(CommitAnchor::new(C1.to_string(), LEGACY)));
+    assert_eq!(present.fingerprint, alone.fingerprint, "on its line or not, one key");
 }

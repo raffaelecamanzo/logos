@@ -13,9 +13,9 @@
 //!   watcher consults it to admit an artifact as an **allow-list exception** over
 //!   the `target/`-class ignore filter ([FR-CF-05]) — *without* ever weakening the
 //!   `.logos/`/`.git/` feedback-loop filters, which the watcher checks first.
-//! - [`discover`] — the opt-in `coverage refresh` resolves which artifact a just-
-//!   run `refresh_cmd` produced (newest existing convention/literal path), to
-//!   ingest it.
+//! - [`candidates`] — the existing convention/literal artifacts and when each
+//!   was written: the coverage runner's custom entry compares them before and
+//!   after its `refresh_cmd` runs, and ingests the newest one it wrote.
 //!
 //! Several conventions live under directories the indexer ignores (`target/`,
 //! `coverage/` are in `ignored_dirs`); that is the whole point — the artifact is
@@ -93,18 +93,15 @@ impl ArtifactMatcher {
     }
 }
 
-/// Resolve which coverage artifact to ingest after `coverage refresh` ran the
-/// `refresh_cmd` ([FR-CV-10]): the newest existing file among the built-in
+/// Every coverage artifact that exists under `root` among the built-in
 /// conventions and any **literal** (wildcard-free) `[coverage_ingest]
-/// .artifact_glob` entries, under `root`.
-///
-/// Returns the absolute path of the newest candidate, or `None` when none of the
-/// known locations exist on disk (the caller turns that into a loud "ran but
-/// produced no recognizable artifact" error — never a fabricated ingest,
-/// [NFR-RA-05]). Wildcard globs are not walked here — a `refresh_cmd` pairs with a
-/// known output path, which is literal — so discovery stays a bounded set of stat
-/// calls off the serve path.
-pub(crate) fn discover(root: &Path, cfg: &EffectiveCoverageIngest) -> Option<PathBuf> {
+/// .artifact_glob` entries, each with when it was last written (`UNIX_EPOCH`
+/// when that cannot be read): what the coverage runner's custom entry
+/// compares before and after its command, so that only an artifact the
+/// command wrote is credited to it ([FR-CV-10]). Wildcard globs are not
+/// walked — a `refresh_cmd` pairs with a known output path, which is literal —
+/// so this stays a bounded set of stat calls.
+pub(crate) fn candidates(root: &Path, cfg: &EffectiveCoverageIngest) -> Vec<(PathBuf, SystemTime)> {
     let mut candidates: Vec<String> = CONVENTIONS.iter().map(|s| (*s).to_string()).collect();
     // Literal (wildcard-free) configured globs are concrete artifact paths.
     for glob in &cfg.artifact_glob {
@@ -117,13 +114,11 @@ pub(crate) fn discover(root: &Path, cfg: &EffectiveCoverageIngest) -> Option<Pat
         .into_iter()
         .map(|rel| root.join(rel))
         .filter(|p| p.is_file())
-        .max_by_key(|p| {
-            // Newest by mtime; an unreadable mtime sorts oldest (UNIX_EPOCH) so a
-            // readable candidate always wins. Deterministic given the tree state.
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH)
+        .map(|p| {
+            let written = std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            (p, written)
         })
+        .collect()
 }
 
 #[cfg(test)]
@@ -180,50 +175,54 @@ mod tests {
         }
     }
 
+    fn paths(found: Vec<(PathBuf, SystemTime)>) -> Vec<PathBuf> {
+        found.into_iter().map(|(path, _)| path).collect()
+    }
+
     #[test]
-    fn discover_returns_none_when_no_artifact_exists() {
+    fn no_candidate_when_no_artifact_exists() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(
-            discover(tmp.path(), &cfg(&[])).is_none(),
+            candidates(tmp.path(), &cfg(&[])).is_empty(),
             "nothing on disk → no artifact to ingest (the caller errs, never guesses)"
         );
     }
 
     #[test]
-    fn discover_finds_a_conventional_artifact() {
+    fn a_conventional_artifact_is_a_candidate() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("lcov.info"), "x").unwrap();
         assert_eq!(
-            discover(tmp.path(), &cfg(&[])),
-            Some(tmp.path().join("lcov.info")),
+            paths(candidates(tmp.path(), &cfg(&[]))),
+            [tmp.path().join("lcov.info")],
             "an existing convention artifact is discovered with no config"
         );
     }
 
     #[test]
-    fn discover_includes_a_literal_configured_artifact() {
+    fn a_literal_configured_artifact_is_a_candidate() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("build")).unwrap();
         std::fs::write(tmp.path().join("build/cov.xml"), "x").unwrap();
         assert_eq!(
-            discover(tmp.path(), &cfg(&["build/cov.xml"])),
-            Some(tmp.path().join("build/cov.xml")),
+            paths(candidates(tmp.path(), &cfg(&["build/cov.xml"]))),
+            [tmp.path().join("build/cov.xml")],
             "a literal (wildcard-free) configured artifact path is a candidate"
         );
     }
 
     #[test]
-    fn discover_excludes_wildcard_globs_from_candidates() {
-        // The literal-only rule (line ~111): a wildcard `artifact_glob` is NOT
-        // walked by discover. A file matching only the wildcard — with no
-        // convention and no literal candidate present — yields None, so `coverage
-        // refresh` errs loudly rather than guessing. Regression guard for that rule.
+    fn wildcard_globs_are_not_candidates() {
+        // The literal-only rule: a wildcard `artifact_glob` is NOT walked. A file
+        // matching only the wildcard — with no convention and no literal
+        // candidate present — is no candidate, so the custom entry reads failed
+        // rather than guessing. Regression guard for that rule.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("ci/reports")).unwrap();
         std::fs::write(tmp.path().join("ci/reports/unit.xml"), "x").unwrap();
         assert!(
-            discover(tmp.path(), &cfg(&["ci/**/*.xml"])).is_none(),
-            "a wildcard glob is not a discover candidate (only conventions + literals)"
+            candidates(tmp.path(), &cfg(&["ci/**/*.xml"])).is_empty(),
+            "a wildcard glob is not a candidate (only conventions + literals)"
         );
     }
 }

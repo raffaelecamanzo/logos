@@ -10,6 +10,13 @@
 
 import { plural, type CopyEntry } from "./types.ts";
 
+// ── Security (S-790) ─────────────────────────────────────────────────────────
+
+export const workspaceSecurityWidget: CopyEntry = {
+  what: "Each member's own security findings that count — fresh, not suppressed and in production code — by severity, and whether its scan is fresh, stale or has never run, linked to that member's Security page.",
+  why: "A member nothing has scanned has looked at nothing, so it reads never run rather than a clean zero; a member that did not open is a row with its reason, not a row of zeros.",
+};
+
 // ── Cross-service reachability (item 2) ──────────────────────────────────────
 
 export const reachability: CopyEntry = {
@@ -56,6 +63,22 @@ export const DASHBOARD_TEXT = {
     `${n} ${plural(n, "callable is", "callables are")} unused across every service of the workspace.`,
   /** The Members figure. */
   membersRead: (opened: number, total: number) => `${opened} of ${total} members read`,
+  /** The Security figure: how many members have a fresh scan out of all of them
+   *  (S-790) — a count of members, never a count of findings across them. */
+  securityFresh: (fresh: number, total: number) =>
+    `${fresh} of ${total} ${plural(total, "member has", "members have")} a fresh scan`,
+  /** Members the Security read could not read: they are rows, not omissions. */
+  securityUnread: (n: number) =>
+    `${n} ${plural(n, "member", "members")} could not be read, so ${plural(n, "it has", "they have")} no count:`,
+  /** A member never scanned has no count, and the command that resolves it is
+   *  named (FR-UI-39, NFR-CC-04): shown when any row reads never run. */
+  securityNeverRunNote:
+    "A member nothing has scanned reads never run, which is not a count of zero; run logos security scan in that member, or open its Security page.",
+  /** The scan state in words, so the row is never colour alone. */
+  securityScan: (scan: "fresh" | "stale" | "never_run") =>
+    scan === "never_run" ? "never run" : scan,
+  /** BR-56 for the Security widget: per member, never rolled up. */
+  securityPerMember: "Counts are per member; they are not summed or averaged across members.",
   /** BR-56, as one plain sentence (CR-203 item 3). */
   notAveraged: "Figures are per service; they are not averaged.",
 } as const;

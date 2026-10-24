@@ -29,23 +29,35 @@ export function CoverageCellView({ cell, pct }: { cell: CoverageCell; pct: strin
 /** One Files & Risk findings cell (FR-SC-14), linking to the Security page
  *  filtered to the file: the count with its highest severity, `0` for a scanned
  *  file with none, and any stale findings labelled apart — they never join the
- *  count (the file changed since the scan, so they may no longer hold). */
+ *  count (the file changed since the scan, so they may no longer hold). The
+ *  findings in test code are `+N test` beside it (FR-SC-28, S-796), a second
+ *  link to the Security page's test-code scope: they are not in the count either. */
 export function FindingsCellView({ cell, path }: { cell: PathFindings; path: string }) {
   return (
-    <a href={securityHref(path)}>
-      {cell.count > 0 && cell.highest ? (
-        <>
-          <span className="mono">{cell.count}</span> <Badge tone={severityTone(cell.highest)}>{cell.highest}</Badge>
-        </>
-      ) : (
-        <span className="muted">0</span>
-      )}
-      {cell.stale > 0 && (
+    <>
+      <a href={securityHref(path)}>
+        {cell.count > 0 && cell.highest ? (
+          <>
+            <span className="mono">{cell.count}</span> <Badge tone={severityTone(cell.highest)}>{cell.highest}</Badge>
+          </>
+        ) : (
+          <span className="muted">0</span>
+        )}
+        {cell.stale > 0 && (
+          <>
+            {" "}
+            <Badge tone="orange">{cell.stale} stale</Badge>
+          </>
+        )}
+      </a>
+      {cell.test > 0 && (
         <>
           {" "}
-          <Badge tone="orange">{cell.stale} stale</Badge>
+          <a href={securityHref(path, "test")} className="muted">
+            +{cell.test} test
+          </a>
         </>
       )}
-    </a>
+    </>
   );
 }

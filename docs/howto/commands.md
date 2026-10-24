@@ -45,14 +45,16 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`session-end`](#session-start--session-end) | ✅ | Re-score against the baseline; exit 1 on regression (5 on a missing required security scan) |
 | [`doctor`](#doctor) | ✅ | Fast structural-integrity + admission tripwire; exit 1 on drift |
 | [`verify`](#verify) | ✅ | Deep reindex-diff consistency check; exit 1 on drift |
-| [`coverage refresh`](#coverage-refresh) | ✅ | Run the configured `refresh_cmd` and ingest what it produced |
+| [`coverage run`](#coverage-run---tool-id---consent---dependency-consent) | ✅ | Run every enabled, installed coverage tool and ingest one merged snapshot — needs the project's execution consent |
+| [`coverage refresh`](#coverage-refresh---consent) | ✅ | Run the configured `refresh_cmd` and ingest what it produced — `coverage run --tool custom` |
+| [`coverage install`](#coverage-install---from-dir---consent) | ✅ | Install the managed `cargo-llvm-cov` and add `llvm-tools-preview` under a per-user consent (CLI-only) |
 | [`quality-report`](#quality-report---hook-json) | ✅ | Non-blocking quality readout — writes nothing, always exits 0 (CLI-only) |
 | [`hook --emit`](#hook---emit---force) | ✅ | Install the Claude Code session-start quality-report hook (CLI-only) |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
 | [`dsm`](#dsm---granularity-g) | ✅ | Dependency-structure-matrix clusters |
 | [`doc-gaps`](#doc-gaps---limit-n) | ✅ | Undocumented exported symbols |
 | [`hotspots`](#hotspots) | ✅ | Churn × complexity ranking — the non-gated temporal tier |
-| [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura report into the evidence store |
+| [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura/JaCoCo/Go coverprofile report into the evidence store |
 | [`coverage status`](#coverage-status) | ✅ | Per-file coverage freshness + the overall fraction |
 | [`security scan`](#security-scan---consent---install---scanner-name---path-path) | ✅ | Run the installed, enabled scanners and ingest their SARIF — the first scan needs `--consent`; `--install` installs the missing ones first; `--scanner`/`--path` re-scan only what a fix touched |
 | [`security install`](#security-install-scanner--all---update---from-dir---consent---accept-codeql-licence) | ✅ | Download, verify and install scanners under a per-user consent; your own copy wins (CLI-only) |
@@ -95,10 +97,10 @@ spelling before reading an empty answer as "nothing".
 **Which commands cannot target another member.** The write and gate commands act on
 the repository they run in, and refuse `--repo` as an unknown argument (exit 2):
 `index`, `sync`, `scan`, `check`, `gate`, `verify`, `doctor`, `session-start`,
-`session-end`, `coverage ingest`, `coverage refresh`, `security scan`, `security ingest`,
+`session-end`, `coverage ingest`, `coverage run`, `coverage refresh`, `coverage install`, `security scan`, `security ingest`,
 `security bless`, `quality-report` and `hook`. Their
 MCP twins — `scan`, `rescan`, `check_rules`, `bless_rules`, `verify`, `doctor`, `session_start`,
-`session_end`, `coverage_ingest`, `coverage_refresh`, `security_scan`, `security_ingest` — take no `repo` either, and say they act on
+`session_end`, `coverage_ingest`, `coverage_run`, `coverage_refresh`, `security_scan`, `security_ingest` — take no `repo` either, and say they act on
 the default member. `affected`, `implements`, `referencing-docs`, `doc-gaps`,
 `stats` and `languages` have no MCP twin that takes `repo`, so they answer for the
 repository they run in.
@@ -217,7 +219,12 @@ flavours are installed:
 - **Freshness hooks** — `post-commit`, `post-checkout`, and `post-merge` each
   run `logos sync` on the changed file set after their git event, keeping the
   graph fresh. They are best-effort: they bail out silently when `logos` is
-  absent and always exit 0, so they never block or fail a git operation.
+  absent and always exit 0, so they never block or fail a git operation. The
+  changed set is read with `git diff` / `git diff-tree` using `-z --no-renames`,
+  so a path reaches the sync exactly as git records it (non-ASCII, quotes and
+  tabs included) and a rename syncs both its old and new path; an empty set
+  runs no sync. Re-running `logos init --hooks` rewrites a managed hook that an
+  older release wrote.
 - **Enforcing gate** — a `pre-push` hook runs [`logos check`](#check---rules-file---allow-no-rules) and
   **propagates its exit code**: a `severity='error'` violation
   (rule / structural / admission / dead-code) makes `git push` fail with exit
@@ -1286,7 +1293,7 @@ endpoints under [`serve --ui`](#serve) (both live now) — so the
 coverage/service-map/impact numbers are always the same whichever way you reach
 them. The matching `xservice_*` and `workspace_*` MCP tools are served by
 `serve --mcp` started in a workspace (the build with the web UI): the host then
-sees 42 tools, the 33 single-root ones plus these nine, and the read-only tools
+sees 43 tools, the 34 single-root ones plus these nine, and the read-only tools
 take `repo` ([usage.md](usage.md#asking-about-one-workspace-member-repo)).
 `--standalone`, and the slim headless build, serve the one repository instead.
 
@@ -2748,7 +2755,10 @@ first. It also lists the `drivers`, the offenders that pushed the dimension the
 way it moved: `new` and `worsened` entries for a fall, `resolved` and `improved`
 entries for a rise, largest change first. At most five are listed;
 `driver_count` gives the total. For Uniqueness the drivers are the near-clone
-groups that appeared or went, each with its `members`. Modularity has no
+groups that appeared or went, each with its `members`. A group's driver carries
+the identity its "where to start" unit carries: `node_id` is
+`clone_group:<digest>` and it is named after the same member, both stable across a
+re-index and a file reorder while the member set is unchanged. Modularity has no
 offender list, so its share names no drivers. `not_attributable_because` says
 why a change has no shares: a signal is `n/a`, or an applicable original
 dimension is 0.
@@ -2937,8 +2947,20 @@ cached by commit under `.logos/review-cache/`, so the first run can take as
 long as an index per branch, and a rerun prints the same bytes. A share is a
 difference, so a change two branches both make independently is counted
 twice, where the merge would count it once. The same holds for a branch whose
-work already reached the base by a squash merge. A ratchet budget is projected against its `max`;
-its blessed set is not read.
+work already reached the base by a squash merge.
+
+**Ratchet budgets.** Under `max_cc = { max = 15, ratchet = true }`, a function
+the blessed set holds at 22 and the base measures at 20 is projected against
+22: a branch share of +1 is not listed and +3 is listed as exceeded with
+`limit: 22` and a share of 3. The blessed set is read **as checked in at the
+base commit**, by the rule `review --headroom` applies, so on one base the two
+agree (a share equal to the headroom is not listed, one more is) and an
+uncommitted bless changes neither answer. Every other subject, including an
+unblessed one past `max`, is projected against `max`; a budget not under
+ratchet is projected as before. The `notes` name the blessed values used (up to
+five, then a count). The set is read only when a per-subject budget is under
+ratchet; one the base commit holds unreadable then makes the answer
+`measured: false` and says why.
 
 The MCP twin is the `review` tool with `branches`.
 
@@ -2979,6 +3001,111 @@ A `drift` key appears only when the summed drops exceed a numeric
 
 A base already past the budget is listed only when the branches lower the
 signal further.
+
+#### `review --headroom`: the room left under the shared budgets before work starts
+
+```bash
+logos review --headroom [--base main] [--subjects src/engine.rs run …] [--near 2] --json [--repo <MEMBER>]
+```
+
+Answers "how much room is left under the shared budgets, before any branch
+exists?". A sprint plan can split a module's remaining `max_fan_out` between
+its sessions only if it knows the figure. `--branches` answers after the work;
+this answers before it. It measures the **same base** as `--branches` (`--base`,
+else the default branch) from the same cached measurement, so a plan's
+allowance and the later merge-time projection start from the same numbers.
+Dividing the room between sessions is the planner's job, not Logos's.
+
+For every `[constraints]` budget `--branches` projects, each subject reads:
+
+- `current`: its value on the base commit;
+- `allowance`: the value it may reach;
+- `headroom`: `allowance − current`. A subject the base already has past its
+  limit reads negative and sorts first;
+- `kind`: `limit` (held to the budget's ceiling) or `ratchet` (see below);
+- `reason`, when the kind alone does not say why.
+
+Each rule lists its `limit`, `evaluated` (the subjects the base records a value
+for: the denominator) and `listed`. Without a filter it lists its **10
+tightest** subjects, headroom ascending. The project-wide counts
+(`max_cycles`, `max_dead`, `max_duplicates`, `max_brain_methods`) are single
+rows.
+
+- **`--subjects`** takes project-relative file paths and symbol names, as a
+  sprint task's `Targets` line holds them, and resolves each on the base commit.
+  A file lists its module under `max_fan_in`/`max_fan_out`, itself under
+  `no_god_files` and each of its functions under `max_cc`, `max_fn_lines` and
+  `max_nesting_depth`. A function name (`scan`) lists that function, every
+  overload of it, and, under their own budgets, its file and module; where the
+  language's symbols carry the owner (Java, Python) `Foo::bar` works too, and a
+  Rust or Go method answers to its own name only. A module's name (`engine.rs`)
+  lists that module. The match is on the whole name. An entry that resolves to
+  nothing is listed under `unresolved` with why: not in the base commit, a
+  directory, no function or module of that name has a value, or no budget is
+  declared that holds a per-subject value. Project-wide counts contain no entry
+  and are not listed under `--subjects`.
+- **`--near N`** keeps the subjects whose headroom is at most N.
+- Either flag lifts the cap of 10; given together they intersect.
+
+A module, function or file at **0** on the base is not listed under a budget: it
+has the whole allowance, and the measurement does not record it. A file whose
+every subject is at 0 is therefore `unresolved` under `--subjects`, with the
+reason saying so; read that as "the whole limit is free".
+
+**Ratchet budgets.** Under `max_cc = { max = 15, ratchet = true }`, a function
+the blessed set holds at 22 and the base measures at 20 reads `kind: "ratchet"`,
+`allowance: 22`, `headroom: 2`. The blessed set is read **as checked in at the
+base commit**, so a bless that is not committed gives no room. A function past
+`max` that the set does not hold reads `headroom: 0` with the reason: any
+further rise is new debt. Every other subject, including one under `max`, is
+`kind: "limit"` against `max`. A symbol set under ratchet (`max_dead = { max =
+0, ratchet = true }`) is one row with no room.
+
+**Drift.** A numeric `[review] drift_budget` gets `drift.headroom`: the budget
+less the signal's current drop, measured from the reference `--branches` uses,
+which `drift.reference` names (this checkout's comparable gate baseline, else the
+base commit itself, where the drop is 0). `drift_budget = "report"`, or no
+`[review]` table, reads `applicable: false` with the reason. The margin depends
+on this checkout's baseline, as `--branches` does.
+
+`not_projected` lists the budgets `--branches` does not project
+(`max_clone_ratio`, an enforced `no_god_containers`), unmeasured.
+
+It is **report only**. It exits 0 whenever it answers, including when no
+projectable budget is declared (no `rules`, and a note says so). It exits 1 with
+`measured: false` and `not_measured_because` when the base does not resolve,
+cannot be indexed, or holds a ratchet budget's `.logos/rules-baseline.json` that
+cannot be read or parsed, so a planner never reads an unmeasured base as
+unlimited room.
+`--headroom` excludes `--branches`, and `--subjects` and `--near` need
+`--headroom` (exit 2). The MCP twin is the `review` tool with `headroom: true`
+(and `subjects`, `near`); its answer is the CLI's `--json` bytes.
+
+The working tree and `HEAD` are never measured: an uncommitted edge changes
+nothing, and `base_commit` names the tree the answer holds for. The first run
+indexes the base commit, as long as an index; the entry is cached by commit under
+`.logos/review-cache/` and shared with `--branches`. A headroom run does not
+prune the cache.
+
+```json
+{
+  "base": "main", "base_origin": "stated", "base_commit": "0b18…",
+  "measured": true, "not_measured_because": null,
+  "rules": [
+    {"rule": "max_fan_out", "limit": 30, "evaluated": 41, "listed": 1,
+     "subjects": [{"subject": "module:src/`engine.rs`/", "file": "src/engine.rs", "trust": "resolved",
+                   "kind": "limit", "allowance": 30, "current": 28, "headroom": 2}]},
+    {"rule": "max_cc", "limit": 15, "evaluated": 212, "listed": 1,
+     "subjects": [{"subject": "src/`engine.rs`/run().", "file": "src/engine.rs", "trust": "resolved",
+                   "kind": "ratchet", "allowance": 22, "current": 20, "headroom": 2}]}
+  ],
+  "drift": {"applicable": true, "budget": 5.0, "drop": 3, "headroom": 2.0,
+            "reference": {"kind": "baseline", "snapshot_id": 812}},
+  "not_projected": [{"rule": "max_clone_ratio", "reason": "…"}],
+  "unresolved": [{"entry": "src/missing.rs", "reason": "not in the base commit"}],
+  "notes": ["the values are the base commit's: …"]
+}
+```
 
 ### `improvements`
 
@@ -3203,7 +3330,15 @@ the aggregate only when `exceeded` is true. `--threshold` still applies. A delta
 that cannot be measured adds a `[review]:` warning and judges no entry.
 A distributional dimension that fell in each of the last `trend_window`
 recorded snapshots adds a [trend warning](configuration.md#review--the-branch-delta-gate) to `warnings`; it never changes the verdict
-or the exit code.
+or the exit code. `trend` carries the same, structured: one entry per
+dimension in decline, with `dimension`, `values` (oldest first, exact) and
+`window`, from which the warning is spelled:
+
+```json
+"trend": [{ "dimension": "equality", "values": [0.9123458410127743, 0.9081204475611208, 0.9033771926630519], "window": 2 }]
+```
+
+`session-end` and the Health page (`GET /api/v1/health`) carry the same `trend`.
 Without the table neither field is printed and the gate is exactly as above.
 
 Under the table the result also carries `attribution`: the signal's change from
@@ -3751,7 +3886,9 @@ reports. They live in a separate store, `.logos/history.db`, on its own
 forward-only migration track — created on demand by the first `hotspots` or
 `coverage ingest` call. The quality `gate` never opens `history.db`, so nothing
 in this section can move the 0–10000 signal (see
-[metrics.md](metrics.md#the-non-gated-evidence-tiers)).
+[metrics.md](metrics.md#the-non-gated-evidence-tiers)). The coverage commands that
+*run* a project's tools (`coverage run`, `coverage refresh`, `coverage install`) are
+described here as a reference and end to end in [coverage.md](coverage.md).
 
 ### `hotspots`
 
@@ -3794,10 +3931,14 @@ identical rankings across the CLI, the MCP `hotspots` tool (`production_scope`),
 and the web Files & Risk view.
 
 Once a scan is stored (`security scan` or `security ingest`), each row also
-carries a `findings` cell — `count` of the file's unsuppressed findings and the
-`highest` severity among them — so a churning, untested file with a fresh high
-finding reads as such. A finding whose file changed since the scan is **stale**:
-it is tallied apart as `stale`, never counted, and never lifts `highest`; a
+carries a `findings` cell — `count` of the file's unsuppressed findings in
+production code and the `highest` severity among them — so a churning, untested
+file with a fresh high finding reads as such. A finding whose file changed since
+the scan is **stale**: it is tallied apart as `stale`, never counted, and never
+lifts `highest`; a fresh, unsuppressed finding in
+[test code](security.md#findings-in-test-code) is tallied apart as `test` the
+same way (a production file with an inline test module counts only its
+production findings, and `--with-findings` ranks by `count` alone); a
 finding an unexpired entry in `.logos/security-ignore.toml` suppresses is not
 counted either, while an expired entry no longer suppresses. These are the counts
 of [the one definition](security.md#one-definition-of-a-counted-finding), so a
@@ -3824,10 +3965,13 @@ logos coverage ingest target/coverage/lcov.info        # auto-detect format
 logos coverage ingest coverage.xml --format cobertura   # force the parser
 ```
 
-Parses an external **LCOV** or **Cobertura** coverage report and folds it into
-the evidence store as a new snapshot. Format is auto-detected from the content;
-`--format` (`lcov` | `cobertura`) forces it. Report-file paths are matched to
-indexed files by longest-unique-suffix; absolute build-dir prefixes can be
+Parses an external **LCOV**, **Cobertura**, **JaCoCo** XML or **Go coverprofile**
+coverage report and folds it into the evidence store as a new snapshot. Format
+is auto-detected from the content; `--format` (`lcov` | `cobertura` | `jacoco` |
+`gocover`) forces it. A JaCoCo `<package>/<sourcefile>` is a source-root-relative
+path (a Maven multi-module aggregate needs no module names); a Go profile's
+import paths are rewritten against the project's `go.mod` module path.
+Report-file paths are matched to indexed files by longest-unique-suffix; absolute build-dir prefixes can be
 stripped first via `[coverage] path_strip_prefixes` in
 [configuration.md](configuration.md#history--coverage--the-evidence-tiers).
 Parsing is **all-or-nothing**: a malformed report is rejected loudly and never
@@ -3835,19 +3979,60 @@ writes a partial store. An ambiguous report path that matches no single indexed
 file is reported `unmatched`, never guessed. Exit 3 on an unreadable report,
 unknown format, or absent HEAD.
 
-### `coverage refresh`
+### `coverage run [--tool <ID>] [--consent] [--dependency-consent]`
 
 ```bash
+logos coverage run                    # every enabled, installed tool, then the custom command
+logos coverage run --consent          # record the execution consent the run lacks, then run
+logos coverage run --tool vitest      # only this tool: a registry name or `custom`
+logos coverage run --consent --dependency-consent   # also add a missing coverage dev dependency
+logos coverage run --json             # one outcome per tool
+```
+
+Runs the project's own coverage tools: `cargo-llvm-cov`, `vitest`, `jest`, `pytest-cov`, `maven`,
+`gradle` and `go`, each selected by a marker file at the project root and started from a fixed
+argument list (the table, the markers and the tested versions are in
+[coverage.md](coverage.md#the-registry-seven-tools)), then the custom `refresh_cmd` when one is
+configured. Each report is ingested into the snapshot at HEAD as its tool ends, so a polyglot
+project ends with one merged snapshot. One tool's failure never stops the others.
+
+**A run executes the project's own code.** It builds the project and runs its tests, and it may
+reach the network to fetch dependencies, so it starts only under the project's **execution
+consent**. Without it the command exits 2, naming `--consent` and the tools (and the custom
+command, verbatim) it is missing, and starts nothing. `--consent` records what was missing, then
+runs; the consent is asked again for a tool or a `refresh_cmd` text it does not name. What it
+covers and what it does not is in [coverage.md](coverage.md#the-execution-consent).
+
+`--dependency-consent` records the per-project dependency consent and adds a vitest coverage
+provider (`@vitest/coverage-v8`) or `pytest-cov` as a dev dependency with the project's own package
+manager, naming the exact command and the files it changes; the package manager may run dependency
+lifecycle scripts, and nothing is committed
+([coverage.md](coverage.md#installing-cargo-llvm-cov-and-adding-a-missing-dependency)).
+
+One outcome per tool: `ran`, `tests_failed` (a failing suite that still wrote a report, which is
+ingested), `failed` (a masked excerpt; the whole output in `.logos/coverage/<tool>.failed.log`),
+`timed_out`, `cancelled`, or why it did not run (`not_applicable`, `disabled`, `not_installed`).
+Exit 0 when every tool the run started ran cleanly, 1 otherwise (and when `--tool` names a tool that
+did not start), 2 without the consent or for an unregistered `--tool`, 3 for `--tool custom` with no
+`refresh_cmd`. The MCP twin `coverage_run` starts the run as a job, or joins the running one, and
+cannot give either consent. A run starts only on request: never on the `serve`/watcher path, and it
+never moves the gate.
+
+### `coverage refresh [--consent]`
+
+```bash
+logos coverage refresh --consent   # the first run, and the first after the command's text changes
 logos coverage refresh             # run [coverage_ingest].refresh_cmd, then ingest the artifact it produces
 ```
 
-Runs the author-configured `[coverage_ingest].refresh_cmd` (see
-[configuration.md](configuration.md#history--coverage--the-evidence-tiers)) as a
-subprocess via `sh -c`, then discovers and ingests the coverage artifact it
-produced. This is the **only** place Logos ever *runs* a coverage command — never
-on the `serve`/watcher path ([ADR-38](../specs/architecture/decisions/ADR-38.md)),
-only on this explicit invocation. Errors loudly (exit 3) if no `refresh_cmd` is
-configured, the command fails, or it produces no recognizable artifact. Artifact
+`coverage run --tool custom`: runs the author-configured `[coverage_ingest].refresh_cmd` (see
+[configuration.md](configuration.md#history--coverage--the-evidence-tiers)) through `sh -c` in the
+project root, then ingests the newest conventional or configured coverage artifact it wrote or
+rewrote; an artifact an earlier run left is never credited. It is the one command a run starts
+through a shell, because the execution consent pins its **exact text**: the first run, and the
+first one after the text changes (the new text is shown verbatim), exits 2 without `--consent`
+and starts nothing. **That consent is new for existing `refresh_cmd` users.** Exit 3 if no
+`refresh_cmd` is configured; exit 1 when the command fails or writes no recognizable artifact. Artifact
 discovery resolves the built-in conventions plus *literal* `artifact_glob`
 entries (newest by mtime); a wildcard-only glob that matches no convention or
 literal yields a loud error. With a `[coverage_ingest]` table configured, a
@@ -3855,6 +4040,23 @@ running `serve` watcher **auto-ingests** a matching artifact whenever it appears
 or changes (a local read+parse, degraded to a warning on any failure — never a
 subprocess); `coverage refresh` is the manual counterpart that also produces the
 artifact first.
+
+### `coverage install [--from <DIR>] [--consent]`
+
+```bash
+logos coverage install                    # names what it would download and run; changes nothing
+logos coverage install --consent          # record the install consent, then install
+logos coverage install --from ./dist --consent   # offline, from pre-downloaded release artifacts
+```
+
+Installs `cargo-llvm-cov`, pinned in this Logos release and SHA-256-verified before anything from
+it runs, into the user-level tools directory, and adds `llvm-tools-preview` to your Rust toolchain
+with your own `rustup`. A copy of your own (a user-level path override, or one on `PATH` at 0.6.0 or
+later) is used and never downloaded beside. Without `--consent` it exits 2, naming each line and
+changing nothing; without `rustup` it names the command to run by hand. Exit 1 when
+`cargo-llvm-cov` had to be installed and was not, or the component step failed. CLI-only: an agent
+cannot give the consent. The full account is in
+[installation.md](installation.md#coverage-runs-on-a-rust-project).
 
 ### `coverage status`
 
@@ -3870,6 +4072,15 @@ data** (it reads as absent, not as the old number). With nothing ingested, the
 command returns `n/a` plus a notice (`no coverage ingested — run 'logos coverage
 ingest <report>' …`) and exits 0 — absent evidence is never fabricated into a
 zero.
+
+The payload also carries a `runner` block: one row per registered tool, then the custom
+entry when a `refresh_cmd` is configured, each with its one state (`not_applicable`,
+`disabled`, `not_installed`, else its last run — `ran`, `tests_failed`, `failed`,
+`timed_out`, `cancelled` — or `never_run`), its version and last run, and the project's
+execution consent: the tools it `consented` to, the ones the next run would ask for
+(`pending`), and whether the custom command's text has changed (`command_changed`). A row
+Logos can set up carries `offer` (`install` or `add_dependency`). The `runner` block starts no
+run: reading it starts no tool of the project's.
 
 ## Security findings
 
@@ -4038,9 +4249,12 @@ One state per registered scanner:
 | `stale` | A report is stored, but HEAD moved since the full scan behind it (`because: head_moved`), a file it anchors changed (`files_changed`), or only `--path` re-scans stand behind it (`scoped_only`) |
 | `fresh` | A report is stored at this HEAD and no file holding one of its findings has changed. A report with no findings anchors no file, so only a new HEAD makes it stale |
 
-`never_run` carries no count; `fresh` carries `findings` (unsuppressed) and
-`suppressed`, so a clean scan reads `fresh` with `findings: 0` and is never
-confused with a scanner that has not run. A stored report counts whether or not
+`never_run` carries no count; `fresh` and `stale` carry `findings` — the
+report's fresh, unsuppressed findings in production code — and the rest by why,
+each finding once and in this order: `suppressed`, `not_fresh` (its file changed
+since the scan) and `test` (in test code, the "N more in test code"). A clean
+scan reads `fresh` with every count `0` and is never confused with a scanner
+that has not run. A stored report counts whether or not
 the scanner is installed here, so a report ingested from CI reads `fresh` or
 `stale`. `consent` lists the scanners consented to and the `pending` ones the
 next scan will ask for. `suppressions` lists every entry of
@@ -4058,6 +4272,12 @@ for CodeQL with `--accept-codeql-licence` until its licence is accepted; the
 MCP `security_status` names it the same way, since no MCP tool installs.
 CodeQL's row also carries `licence`, the recorded acknowledgement. Reading
 the versions runs each installed scanner's version command; no scan starts.
+
+Dependency-Check's row alone carries `nvd_api_key`: `set` when `NVD_API_KEY` is
+set in the environment Logos runs in (for MCP and the web, the one `logos serve`
+was started with) or your user-level `extra_args` hand it a key, else
+`not_set`. It never carries the key
+([security.md](security.md#dependency-checks-nvd-api-key)).
 
 ### `security install [<SCANNER>…|--all] [--update] [--from <DIR>] [--consent] [--accept-codeql-licence]`
 
@@ -4137,16 +4357,30 @@ own `JAVA_HOME` says. The consent names `java` as a line of its own, with its
 download size, while it is not installed. A Dependency-Check you installed
 yourself still runs on your own Java. Its first scan downloads the NVD data,
 which takes a long time without an NVD API key, and Dependency-Check 13 fails
-outright without one: the scan reports it `failed` with the cause `the NVD API
-key is missing or rejected`, naming the remedy. Get a free key at
-https://nvd.nist.gov/developers/request-an-api-key and pass it through your
-user-level `config.toml` (never the repository's, which may not set
-`extra_args`):
+outright without one: the scan reports it `failed` with the cause `NVD API key
+missing or rejected`, naming the remedy. Get a free key at
+https://nvd.nist.gov/developers/request-an-api-key and export it as
+`NVD_API_KEY` where Logos runs — in your shell for the CLI, and before starting
+`logos serve` for MCP and the web:
+
+```bash
+export NVD_API_KEY=<key>
+logos security scan --scanner dependency-check
+```
+
+Logos hands it to Dependency-Check in a 0600 properties file it deletes when the
+run ends, never on the command line, and no repository file can supply it. Or
+pass it through your user-level `config.toml` (never the repository's, which may
+not set `extra_args`); when your `extra_args` carry `--nvdApiKey` or
+`--propertyfile`, Logos adds no file of its own:
 
 ```toml
 [security_scan.dependency-check]
 extra_args = ["--nvdApiKey", "<key>"]
 ```
+
+`security status` reads `nvd_api_key: set` or `not_set` on the Dependency-Check
+row ([security.md](security.md#dependency-checks-nvd-api-key)).
 
 **CodeQL (opt-in, licensed).** Installed only when named, and only once you
 accept its licence: the CodeQL CLI may be used to analyse open-source codebases
@@ -4196,7 +4430,9 @@ Each entry in `tools` is `removed`, `not_installed` or `failed` with a `reason`.
 ### `security findings`
 
 ```bash
-logos security findings                                  # everything stored
+logos security findings                                  # everything stored in production code
+logos security findings --scope all                      # every finding, test code included
+logos security findings --scope test --path tests        # test code only, under tests/
 logos security findings --severity high                  # high and critical
 logos security findings --scanner semgrep --path src/api # filters intersect
 logos security findings --category A05 --edition 2021    # OWASP Top 10:2021 numbering
@@ -4211,8 +4447,9 @@ finding counting as `medium`; or `unrated`, which lists the unrated findings
 alone), `--scanner` (a
 registry name or the report's tool name), `--category` (an id such as
 `A05:2025`, or its number `A05`), `--path` (a project-relative file, or a
-directory holding it), and `--suppression active|suppressed`; together they
-intersect. An unknown severity, edition or suppression token exits 2. A finding
+directory holding it), `--suppression active|suppressed`, and `--scope
+production|test|all` (`production` when not given); together they intersect.
+An unknown severity, edition, suppression or scope token exits 2. A finding
 whose report gave no rating reads `unrated` and carries `severity_reason`
 (`"the scanner gave none"`); a rated finding has no `severity_reason`
 ([security.md](security.md#severities-and-unrated)).
@@ -4223,19 +4460,33 @@ read as clean: `scanned` lists every stored report with its finding count
 `never_run` the installed, enabled scanners with none and something to scan (as
 `security status` means it, so never a `not_applicable` one), and `notice` says when nothing is stored at all. `categories` gives every category of the edition: `covered`
 with the count of every stored finding under it (suppressed ones included, and
-whatever the filters), or `not_covered` when no enabled scanner whose report is stored can
+whatever the filters, every code scope: `state.findings`) and `production_findings`,
+the part of that count in production code (suppressed ones included in both), the
+figure the Security page's OWASP list states under its default Production scope, or
+`not_covered` (with no `production_findings`) when no enabled scanner whose report is stored can
 detect it. An installed scanner that has never run covers nothing: it has not
 looked. A `not_covered` category never reads as 0, though a
 finding can still fall under it and is listed. `suppressions` lists every
 ignore entry — a `fingerprint`, or a `path` glob with its `rule` and `scanner` —
 with `suppressed`, the findings it suppresses now, flagged `expired` and
-`orphaned`; a finding's `suppression` names the entry under `by`. An orphaned entry that names a
-Gitleaks finding's earlier, per-commit fingerprint also carries `should_name`,
-the fingerprint that finding has now (the file is never rewritten). A Gitleaks
+`orphaned`; a finding's `suppression` names the entry under `by`. An entry that names a
+fingerprint a finding had before it was re-keyed (a Gitleaks finding's earlier,
+per-commit one, or an OSV-Scanner one from before history.db migration 10) still
+suppresses it and carries `should_name`, the fingerprint that finding has now
+(the file is never rewritten). A Gitleaks
 finding lists in `commits` every commit its secret was found in, newest first,
 and a history-mode one carries `anchor` (`commit`, `short_commit`, `path`): the
 commit it is anchored to. Its `binding` is `historical`, with no `path` and an
 unbound `context`, when its secret is no longer on that line in today's tree.
+
+Every finding carries `code_scope`, `test` or `production`, and
+`code_scope_reason`: `test_symbol` when the symbol around it is test code,
+`test_path` when its path is a test or fixture path, `null` for production
+([security.md](security.md#findings-in-test-code)). The listing keeps production
+code unless `--scope` says otherwise: `scope` names the scope listed and
+`hidden_by_scope` how many findings every other filter kept and the scope left
+out. `total` is still every stored finding. `--scope all` lists what earlier
+releases listed by default.
 
 ### `security bless`
 

@@ -234,7 +234,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // twin. Advisory — it exits 1 only when it could not measure, and
         // says on stderr whether the shadow before-state was built or reused.
         // `--branches` (FR-GV-28): the shared-budget projection, report only (exit 0).
-        Commands::Review { base, branches, member } if !branches.is_empty() => out.try_query_for(root, &member, |e| e.review_branches(base.as_deref(), &branches)),
+        // `--headroom` (FR-GV-29): the room left under those budgets; exit 1 only when the base cannot be measured.
+        Commands::Review { base, headroom: true, subjects, near, member, .. } => out.report_gate_for(root, &member, |e| e.review_headroom(base.as_deref(), &subjects, near), |r| r.measured),
+        Commands::Review { base, branches, member, .. } if !branches.is_empty() => out.try_query_for(root, &member, |e| e.review_branches(base.as_deref(), &branches)),
         Commands::Review { base, member, .. } => out.report_gate_for(root, &member, |e| {
             let review = e.review(base.as_deref())?;
             if let Some(note) = review.before_state_cache.note() { eprintln!("logos review: {note}"); }
@@ -252,13 +254,24 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         } => out.try_query_for(root, &member, |e| e.hotspots_with_findings(limit, untested, production_scope, with_findings)),
         // The coverage evidence tier (CR-007): each sub-subcommand is one `Engine`
         // call shared with its MCP twin.
-        Commands::Coverage { command } => match command {
-            CoverageCommands::Ingest { report, format } => {
-                out.try_query(root, |e| e.coverage_ingest(&report, format.as_deref()))
+        // A run stopped by SIGINT or SIGTERM kills the tool it started — in a
+        // process group of its own — then exits, as a security scan does.
+        Commands::Coverage { command } => {
+            logos_core::jobs::stop_on_signal(logos_core::jobs::StopExit::Interrupted);
+            match command {
+                CoverageCommands::Ingest { report, format } => {
+                    out.try_query(root, |e| e.coverage_ingest(&report, format.as_deref()))
+                }
+                CoverageCommands::Status { member } => out.try_query_for(root, &member, |e| e.coverage_status()),
+                CoverageCommands::Refresh { consent } => out.report_gate(root, |e| e.coverage_refresh(consent), logos_core::coverage::CoverageRunSummary::exit_code),
+                CoverageCommands::Run { tool, consent, dependency_consent } => out.report_gate(root, |e| e.coverage_run_adding(tool.as_deref(), consent, dependency_consent), logos_core::coverage::CoverageRunSummary::exit_code),
+                // Per-user installs need no index: the engine is only opened (FR-CV-17).
+                CoverageCommands::Install { from, consent } => {
+                    let request = logos_core::tools::surface::CoverageInstallRequest { from, consent };
+                    Engine::open(root).coverage_install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
+                }
             }
-            CoverageCommands::Status { member } => out.try_query_for(root, &member, |e| e.coverage_status()),
-            CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
-        },
+        }
         // The security evidence tier (S-667): the same one-call-per-twin shape.
         // A scan or install stopped by SIGINT or SIGTERM kills the scanners and
         // installers it started, then exits 128 + the signal: they run in
@@ -281,10 +294,10 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
                 SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security_uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
                 SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
                 SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
-                SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, member } => {
-                    let tokens = [severity, scanner, category, path, suppression, edition];
-                    let [severity, scanner, category, path, suppression, edition] = tokens.each_ref().map(Option::as_deref);
-                    let filter = FindingsFilter::parse(severity, scanner, category, path, suppression, edition)?;
+                SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, scope, member } => {
+                    let tokens = [severity, scanner, category, path, suppression, edition, scope];
+                    let [severity, scanner, category, path, suppression, edition, scope] = tokens.each_ref().map(Option::as_deref);
+                    let filter = FindingsFilter::parse(severity, scanner, category, path, suppression, edition, scope)?;
                     out.try_query_for(root, &member, |e| e.security_findings(&filter))
                 }
                 SecurityCommands::Bless => out.report_gate(root, Engine::security_bless, logos_core::security::SecurityBless::exit_code),

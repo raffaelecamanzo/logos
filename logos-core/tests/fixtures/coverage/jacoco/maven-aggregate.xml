@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">
+<report name="acme-aggregate">
+  <sessioninfo id="ci-1" start="1760000000000" dump="1760000009000"/>
+  <group name="core">
+    <package name="com/acme/core">
+      <class name="com/acme/core/Greeter" sourcefilename="Greeter.java">
+        <method name="greet" desc="()V" line="3">
+          <counter type="INSTRUCTION" missed="3" covered="7"/>
+        </method>
+        <counter type="LINE" missed="1" covered="3"/>
+      </class>
+      <sourcefile name="Greeter.java">
+        <line nr="3" mi="0" ci="4" mb="0" cb="0"/>
+        <line nr="4" mi="0" ci="2" mb="0" cb="0"/>
+        <line nr="5" mi="3" ci="0" mb="2" cb="0"/>
+        <line nr="6" mi="1" ci="1" mb="1" cb="1"/>
+        <counter type="LINE" missed="1" covered="3"/>
+      </sourcefile>
+      <sourcefile name="Util.java">
+        <line nr="2" mi="0" ci="1" mb="0" cb="0"/>
+      </sourcefile>
+      <counter type="LINE" missed="1" covered="4"/>
+    </package>
+    <counter type="LINE" missed="1" covered="4"/>
+  </group>
+  <group name="web">
+    <package name="com/acme/web">
+      <sourcefile name="Handler.java">
+        <line nr="10" mi="0" ci="7" mb="0" cb="0"/>
+        <line nr="11" mi="2" ci="0" mb="0" cb="0"/>
+        <line nr="12" mi="0" ci="0" mb="0" cb="0"/>
+        <line nr="13" mi="0" ci="3" mb="0" cb="0"/>
+      </sourcefile>
+    </package>
+    <package name="com/acme/core">
+      <sourcefile name="Util.java">
+        <line nr="2" mi="0" ci="1" mb="0" cb="0"/>
+      </sourcefile>
+    </package>
+    <package name="com/acme/gone">
+      <sourcefile name="Missing.java">
+        <line nr="1" mi="0" ci="1" mb="0" cb="0"/>
+      </sourcefile>
+    </package>
+  </group>
+  <counter type="LINE" missed="2" covered="9"/>
+</report>

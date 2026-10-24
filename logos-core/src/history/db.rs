@@ -31,7 +31,9 @@
 //! ratchet's baseline, migration 6 ([S-685]) the provenance of a scoped
 //! scan's snapshot, migration 7 ([S-765]) one identity for a Gitleaks
 //! finding, migration 8 ([S-767]) the commit a history-only secret is
-//! anchored to and migration 9 ([S-768]) the `unrated` severity — the
+//! anchored to, migration 9 ([S-768]) the `unrated` severity and
+//! migration 10 ([S-778]) one OSV-Scanner identity in any clone,
+//! migration 11 ([S-780]) a history-only secret's own path — the
 //! evidence store stays one file.
 //!
 //! Migrations follow the same forward-only `user_version` discipline as
@@ -53,6 +55,8 @@
 //! [S-765]: ../../../docs/planning/journal.md#s-765-a-gitleaks-finding-keeps-one-identity-across-scan-modes-and-commits
 //! [S-767]: ../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
 //! [S-768]: ../../../docs/planning/journal.md#s-768-osv-scanner-severities-are-never-made-up
+//! [S-778]: ../../../docs/planning/journal.md#s-778-an-osv-scanner-finding-has-one-identity-in-any-clone-and-at-any-scanner-version
+//! [S-780]: ../../../docs/planning/journal.md#s-780-a-secret-found-only-in-history-is-known-by-its-own-path-not-by-todays-files
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 
 use std::path::Path;
@@ -70,8 +74,9 @@ use super::miner::{CommitFact, FileChange};
 /// migration 5 for the security ratchet's baseline, [S-685] migration 6 for
 /// scoped-snapshot provenance, [S-765] migration 7 for the Gitleaks
 /// identity, [S-767] migration 8 for a history-only secret's commit
-/// anchor and [S-768] migration 9 for the `unrated` severity, on this same
-/// track. A shipped migration is **never** edited.
+/// anchor, [S-768] migration 9 for the `unrated` severity, [S-778]
+/// migration 10 for the OSV-Scanner identity and [S-780] migration 11 for a
+/// history-only secret's own path, on this same track. A shipped migration is **never** edited.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -484,6 +489,51 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE security_findings_v9 RENAME TO security_findings;
          CREATE INDEX security_findings_path ON security_findings (path);
          UPDATE security_snapshots SET report_hash = 'pre-9:' || report_hash;",
+    ),
+    // ── Migration 10 (S-778, CR-241, ADR-79): one identity for an OSV-Scanner
+    // finding in any clone and at any scanner version. Its fingerprint is its
+    // rule and project-relative location (plus region), never the report's
+    // `partialFingerprints`, which 2.x writes and 1.x did not; and any finding
+    // reported by an absolute path under the root that binds to no indexed
+    // file is keyed by its project-relative path, so the checkout's directory
+    // never enters a key.
+    //
+    // A stored row cannot be re-keyed here: the root it was keyed under and
+    // the report identity it hashed were never stored. The next OSV-Scanner
+    // ingest re-keys every stored row its results map, in every snapshot and
+    // in the ratchet's baseline, and each row lists its old key in
+    // `legacy_fingerprints` (store::rekey), which every surface honours. The
+    // stored OSV-Scanner snapshots' report hashes are marked so that
+    // re-ingesting one of their very reports is that ingest, not a no-op that
+    // would leave them under the old keys. Another scanner's unbound absolute
+    // path re-keys at its next ingest that is not a no-op.
+    (
+        10,
+        "UPDATE security_snapshots SET report_hash = 'pre-10:' || report_hash
+          WHERE lower(trim(scanner_name)) = 'osv-scanner';",
+    ),
+    // ── Migration 11 (S-780, CR-241, ADR-79): a secret found only in history is
+    // known by its own path. A history-mode Gitleaks finding's fingerprint
+    // folds in the path its report gives at its commit, made project-relative
+    // (the project's prefix below the git root taken off), never the indexed
+    // file that path binds to today by suffix — adding or removing an
+    // unrelated file of the same name no longer re-keys it.
+    //
+    // A stored row cannot be re-keyed here: its secret was never stored, and
+    // the binding it was keyed under depends on the index at that ingest. The
+    // next Gitleaks ingest re-keys every stored row its results map — by the
+    // old key today's suffix binding gives, and by the row's place (rule,
+    // report path, commit, exact region) in a snapshot marked here — in every
+    // snapshot and in the ratchet's baseline, and each row lists its old key
+    // in `legacy_fingerprints` (store::rekey, store::pre11_places), which
+    // every surface honours.
+    // The stored Gitleaks snapshots' report hashes are marked so that
+    // re-ingesting one of their very reports is that ingest, not a no-op that
+    // would leave them under the old keys.
+    (
+        11,
+        "UPDATE security_snapshots SET report_hash = 'pre-11:' || report_hash
+          WHERE lower(trim(scanner_name)) = 'gitleaks';",
     ),
 ];
 

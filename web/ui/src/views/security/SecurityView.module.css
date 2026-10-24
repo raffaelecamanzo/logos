@@ -81,3 +81,99 @@
 .impactSection + .impactSection {
   margin-top: var(--space-4);
 }
+
+/* The Scanners title row's controls: Run scan (or Install & scan) and Cancel. */
+.controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* The Scanners widget's one summary line, above its table (CR-245). */
+.summary {
+  margin: 0 0 var(--space-3);
+  color: var(--text-1);
+}
+
+/* A muted one-line sentence under a state badge, a failed-scan label or a scanner's name. */
+.fix {
+  margin: var(--space-1) 0 0;
+}
+
+/* `LAST SCAN FAILED`: a button that carries only its badge. */
+.disclosure {
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* The Ignored dirs legend under the Scanners table: one line per marker shown. */
+.legend {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-4);
+  line-height: var(--leading-base);
+  color: var(--text-2);
+}
+
+/* The Findings table fits its widget at 1024 px with the sidebar visible
+   (§4.23): nine columns and no message, so every cell is compact — tight
+   padding, the small face — and what can be long (a rule id, a path, a symbol
+   name) is held to its column and ellipsised, its full value the tooltip and
+   the cell's text (CR-245). */
+.findings table th,
+.findings table tbody td {
+  padding-inline: var(--space-1);
+}
+
+/* The uppercase header voice, untracked: nine headers of tracked capitals are
+   the widest thing in the table. */
+.findings table th {
+  letter-spacing: 0;
+}
+
+.findings table tbody td {
+  font-size: var(--text-xs);
+}
+
+.findings table tbody td button {
+  padding-inline: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+/* What can be long, held to its column and ellipsised: a rule id, a symbol
+   name, and a location's path as PathCell draws it (its abbreviation, or a whole
+   path). The abbreviated cell's full path is a sibling of the clipped label, so
+   it stays outside the clip, for the focus tip. A path is held to 10ch; the rule
+   id and the symbol name, below, to their own. */
+.rule,
+.symbolName,
+.findings [data-path] > [aria-hidden="true"],
+.findings [data-path]:not(:has(*)) {
+  display: inline-block;
+  max-width: 10ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.rule {
+  max-width: 7ch;
+}
+
+.symbolName {
+  max-width: 9ch;
+}
+
+/* A blast-radius list's title above its empty sentence: the voice of a visible
+   table caption. */
+.impactTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+}

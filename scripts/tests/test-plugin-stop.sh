@@ -86,7 +86,10 @@ GIT=(git -c user.name=t -c user.email=t@t -c maintenance.auto=false -c gc.auto=0
 # when there is one, as the findings it stored. The stub gitleaks appends its argv
 # to $STUB_DIR/gitleaks.calls: an empty file is proof that no scanner was spawned.
 # `security findings --path P` lists, as the binary does, only the findings whose
-# path (else report path) is P or lies under it; once a scan ran, it also takes
+# path (else report path) is P or lies under it. It is also the two binaries the hook
+# meets (FR-SC-28): from logos 1.21.0 on (the version file), a listing leaves out the
+# findings whose "code_scope" is "test" unless `--scope all` is given; before it, the
+# flag is refused (exit 2) and every finding is listed; once a scan ran, it also takes
 # $STUB_DIR/security-findings.after-scan.delay seconds, when that file exists, and
 # waits while security-findings.after-scan.gate does.
 
@@ -139,6 +142,28 @@ case "$leg" in
         [ -f "$STUB_DIR/security-findings-after.json" ] && mv "$STUB_DIR/security-findings-after.json" "$STUB_DIR/security-findings.json"
         ;;
 esac
+scope="" had=0 capable=0
+if [ "$leg" = security-findings ]; then
+    prev=""
+    for a in "$@"; do
+        [ "$prev" = --scope ] && scope="$a"
+        [ "$a" = --scope ] && had=1
+        prev="$a"
+    done
+    ver="$(cat "$STUB_DIR/version" 2>/dev/null || echo 'logos 99.0.0')"
+    ver="${ver#logos }"
+    maj="${ver%%.*}"
+    rest="${ver#*.}"
+    min="${rest%%.*}"
+    case "$maj.$min" in
+        *[!0-9.]* | . | .* | *.) ;;
+        *) if [ "$maj" -gt 1 ] || { [ "$maj" -eq 1 ] && [ "$min" -ge 21 ]; }; then capable=1; fi ;;
+    esac
+    if [ "$had" = 1 ] && [ "$capable" = 0 ]; then
+        echo "error: unexpected argument '--scope' found" >&2
+        exit 2
+    fi
+fi
 if [ "$leg" = security-findings ] && [ -f "$STUB_DIR/$leg.json" ]; then
     want="" prev=""
     for a in "$@"; do
@@ -157,7 +182,9 @@ if want:
     def within(p):
         return p is not None and (p == want or p.startswith(want.rstrip("/") + "/"))
     d["findings"] = [f for f in d["findings"] if within(f["path"] if f["path"] is not None else f["report_path"])]
-print(json.dumps(d, separators=(",", ":")))' "$STUB_DIR/$leg.json" "$want"
+if sys.argv[3] == "1" and sys.argv[4] != "all":
+    d["findings"] = [f for f in d["findings"] if f.get("code_scope") != "test"]
+print(json.dumps(d, separators=(",", ":")))' "$STUB_DIR/$leg.json" "$want" "$capable" "$scope"
 elif [ -f "$STUB_DIR/$leg.json" ]; then
     cat "$STUB_DIR/$leg.json"
 fi
@@ -227,6 +254,8 @@ sec_findings() {
 # secret FP PATH LINE: a Gitleaks AWS-key finding, stored redacted (as the ingest stores it).
 secret() { fnd "$1" aws-access-token medium true "$2" "$3" "secret-class finding redacted: rule aws-access-token at $2:$3"; }
 AWS_KEY=AKIAIOSFODNN7EXAMPLE
+# in_test FINDING: the finding as a binary with the scope filter writes one in test code (FR-SC-28).
+in_test() { printf '%s,"code_scope":"test","code_scope_reason":"test_path"}' "${1%\}}"; }
 
 # --- fixtures -------------------------------------------------------------------
 
@@ -353,6 +382,26 @@ two' | python3 -I -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["
 expect "[lib] a notice is valid JSON with only a systemMessage" \
     "$(lib logos_hook_notice 'n' | python3 -I -c 'import json,sys; print(sorted(json.loads(sys.stdin.read())))')" "['systemMessage']"
 
+# logos_scope_args: the version gate (FR-SC-28). A fake `logos` prints the line given.
+SCOPEBIN="$WORK/scopebin"
+mkdir -p "$SCOPEBIN"
+scope_for() { # VERSION-LINE: the flags the gate chooses for a binary that reports it
+    printf '#!/bin/sh\n[ -n "$1" ] || exit 0\necho "%s"\n' "$1" >"$SCOPEBIN/logos"
+    chmod +x "$SCOPEBIN/logos"
+    (. "$PLUGIN/hooks/lib/common.sh"; logos_scope_args "$SCOPEBIN/logos"; printf '[%s]' "${SCOPE_ARGS[*]+${SCOPE_ARGS[*]}}")
+}
+# The binary run with no argument prints nothing: --version is the argument the gate passes.
+for v in 1.21.0 1.21.1 1.22.0 1.100.0 2.0.0 99.0.0 1.21.0-dev v1.21.0; do
+    expect "[lib] the scope gate: logos $v has the filter, so the hook asks for --scope all" "$(scope_for "logos $v")" "[--scope all]"
+done
+for v in 1.20.5 1.20.0 1.20.99 1.9.0 1.2.100 0.99.0 1.20.5-dev; do
+    expect "[lib] the scope gate: logos $v has no filter (near miss: numeric, not lexical), so the flag is omitted" "$(scope_for "logos $v")" "[]"
+done
+expect "[lib] the scope gate: another program called logos reads no version, so no flag" "$(scope_for 'other 1.99.0')" "[]"
+expect "[lib] the scope gate: an unreadable version gets no flag" "$(scope_for 'logos dev')" "[]"
+expect "[lib] the scope gate: a binary that prints no version gets no flag" "$(scope_for '')" "[]"
+expect "[lib] the scope gate: a binary that does not exist gets no flag" "$(. "$PLUGIN/hooks/lib/common.sh"; logos_scope_args "$WORK/no-such-logos"; printf '[%s]' "${SCOPE_ARGS[*]+${SCOPE_ARGS[*]}}")" "[]"
+
 # --- 2-5. the hook, under each bash ---------------------------------------------
 
 for B in "${BASHES[@]}"; do
@@ -374,9 +423,9 @@ for B in "${BASHES[@]}"; do
     expect "$T ... check ran once, then review once, then the security leg, as --json, in the project" \
         "$(calls)" "check --json|$REPO
 review --json|$REPO
-security findings --json --suppression active --path src/app.rs|$REPO
+security findings --json --suppression active --scope all --path src/app.rs|$REPO
 security scan --json --scanner gitleaks --path src/app.rs|$REPO
-security findings --json --suppression active --path src/app.rs|$REPO"
+security findings --json --suppression active --scope all --path src/app.rs|$REPO"
     expect "$T ... the state is recorded under .logos/" "$([ -s "$REPO/.logos/stop-hook/state" ] && echo yes || echo no)" yes
 
     expect "$T ... the hook's records are ignored by git: .logos/stop-hook never shows as untracked" \
@@ -988,10 +1037,75 @@ security findings --json --suppression active --path src/app.rs|$REPO"
     printf 'fn other() {}\n' >"$REPO/src/other.rs"
     run "$B" "$REPO"
     expect "$S the stored findings are listed per changed file, before and after the scan: never the whole store" \
-        "$(grep '^security findings ' "$CALLS" | sed 's/|.*//')" "security findings --json --suppression active --path src/app.rs
-security findings --json --suppression active --path src/other.rs
-security findings --json --suppression active --path src/app.rs
-security findings --json --suppression active --path src/other.rs"
+        "$(grep '^security findings ' "$CALLS" | sed 's/|.*//')" "security findings --json --suppression active --scope all --path src/app.rs
+security findings --json --suppression active --scope all --path src/other.rs
+security findings --json --suppression active --scope all --path src/app.rs
+security findings --json --suppression active --scope all --path src/other.rs"
+
+    # The scope filter (S-797, FR-SC-28): the hook judges test code as it judges any
+    # other, so a secret added to a test file still blocks, once. A binary with the
+    # filter lists production code unless asked for every scope; a 1.20.x binary
+    # lists everything and refuses the flag. ver V: the stub reports logos V, and the
+    # before-state is warm under that version's key.
+    ver() {
+        printf 'logos %s\n' "$1" >"$STUB/version"
+        keyof "logos $1" >"$REPO/.logos/stop-hook/ready-$MB"
+    }
+    # nfind: the findings listings read; nscope_all: those that asked for every scope; nscope: those that named --scope at all.
+    nfind() { grep -c '^security findings ' "$CALLS" || true; }
+    nscope_all() { grep -c '^security findings --json --suppression active --scope all --path ' "$CALLS" || true; }
+    nscope() { grep -c '^security findings .*--scope' "$CALLS" || true; }
+    for v in 1.21.0 99.0.0 2.0.0 1.100.0; do
+        mkrepo; ver "$v"; edit
+        mkdir -p "$REPO/tests"
+        printf 'const KEY: &str = "%s";\n' "$AWS_KEY" >"$REPO/tests/test_app.rs"
+        sec_findings "$(in_test "$(secret fp-tkey tests/test_app.rs 1)")" >"$STUB/security-findings-after.json"
+        run "$B" "$REPO"
+        expect "$S logos $v (scope filter): a secret added to a test file blocks" "$RC|$(decision)" "0|block"
+        expect "$S ... with the rule, the test file and line, and the redacted message" \
+            "$(has "$(reason)" '- aws-access-token (tests/test_app.rs:1): secret-class finding redacted: rule aws-access-token at tests/test_app.rs:1 [gitleaks, medium]')" yes
+        expect "$S ... the value is nowhere in the output" "$(has "$OUT$ERR" "$AWS_KEY")" no
+        expect "$S ... every listing, two files before and after the scan, asked for every scope: $(nfind) read, $(nscope_all) with --scope all" \
+            "$(nfind)|$(nscope_all)" "4|4"
+        PAYLOAD='{"hook_event_name":"Stop","stop_hook_active":true,"session_id":"t"}'
+        run "$B" "$REPO"
+        expect "$S ... it blocks once: the next stop, with stop_hook_active, is silent and measures nothing" "$RC|$OUT|$(calls)" "0||"
+        PAYLOAD='{"hook_event_name":"Stop","stop_hook_active":false,"session_id":"t"}'
+    done
+
+    for v in 1.20.5 1.20.0 1.20.99; do
+        mkrepo; ver "$v"; edit
+        mkdir -p "$REPO/tests"
+        printf 'const KEY: &str = "%s";\n' "$AWS_KEY" >"$REPO/tests/test_app.rs"
+        sec_findings "$(secret fp-tkey tests/test_app.rs 1)" >"$STUB/security-findings-after.json"
+        run "$B" "$REPO"
+        expect "$S logos $v (no scope filter): a secret added to a test file blocks" "$RC|$(decision)|$(has "$(reason)" '- aws-access-token (tests/test_app.rs:1)')" "0|block|yes"
+        expect "$S ... the flag a 1.20.x binary refuses is not sent: $(nfind) listings read, $(nscope) naming --scope" "$(nfind)|$(nscope)" "4|0"
+        expect "$S ... no leg reports it could not run" "$(has "$(reason)$(jf systemMessage)" 'could not run')" no
+        PAYLOAD='{"hook_event_name":"Stop","stop_hook_active":true,"session_id":"t"}'
+        run "$B" "$REPO"
+        expect "$S ... it blocks once: the next stop is silent" "$RC|$OUT|$(calls)" "0||"
+        PAYLOAD='{"hook_event_name":"Stop","stop_hook_active":false,"session_id":"t"}'
+    done
+
+    # A version the hook cannot read gets the plain call, the one every binary takes.
+    mkrepo; ver "dev"; edit
+    mkdir -p "$REPO/tests"
+    printf 'const KEY: &str = "%s";\n' "$AWS_KEY" >"$REPO/tests/test_app.rs"
+    sec_findings "$(secret fp-tkey tests/test_app.rs 1)" >"$STUB/security-findings-after.json"
+    run "$B" "$REPO"
+    expect "$S a binary whose version cannot be read: no flag, and the test-file secret still blocks" "$(decision)|$(nscope)" "block|0"
+
+    # A test-file secret the store already held is not this turn's, on either binary.
+    for v in 1.21.0 1.20.5; do
+        mkrepo; ver "$v"; edit
+        mkdir -p "$REPO/tests"
+        printf 'const KEY: &str = "%s";\n' "$AWS_KEY" >"$REPO/tests/test_app.rs"
+        if [ "$v" = 1.21.0 ]; then F="$(in_test "$(secret fp-told tests/test_app.rs 1)")"; else F="$(secret fp-told tests/test_app.rs 1)"; fi
+        sec_findings "$F" >"$STUB/security-findings.json"
+        run "$B" "$REPO"
+        expect "$S logos $v: a test-file secret stored before the turn and found again: silent" "$RC|$OUT|$ERR" "0||"
+    done
 
     # A large store (a full Semgrep, Trivy and OSV scan stored) costs nothing when
     # the findings lie in other files. Read whole, a thousand of them took 31 s

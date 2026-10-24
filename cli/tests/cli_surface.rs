@@ -155,6 +155,8 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["coverage", "status"],
     &["coverage", "ingest", "coverage.lcov", "--format", "lcov"],
     &["coverage", "refresh"],
+    &["coverage", "run"],
+    &["coverage", "run", "--tool", "go", "--consent"],
     &["stats", "--window", "30"],
     &["languages"],
     &["serve", "--mcp"],

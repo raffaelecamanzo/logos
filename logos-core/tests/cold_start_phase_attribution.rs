@@ -235,7 +235,7 @@ fn cold_start_phase_attribution_child_sample() {
     let margin = Duration::from_millis(2).max(instrumented.mul_f64(0.02));
     let diff = phase_sum.max(instrumented) - phase_sum.min(instrumented);
     assert!(
-        diff <= margin,
+        cfg!(coverage) || diff <= margin,
         "phase sum {phase_sum:?} does not reconcile with the measured total {instrumented:?} \
          (diff {diff:?} exceeds the {margin:?} margin): {phases:?}"
     );
@@ -426,7 +426,9 @@ fn cold_start_phase_attribution() {
     // instrumentation itself becoming pathologically expensive in a typical
     // sample (e.g. an accidental syscall per phase) — loose, because the paired
     // per-sample delta still carries some of each process's own scheduling
-    // noise even though it cancels the cross-process ramp-up effect.
+    // noise even though it cancels the cross-process ramp-up effect. Skipped
+    // under coverage: an instrumented child's cold start is not the cold start
+    // this floor bounds, and its record is still printed above.
     //
     // Judged on the MEDIAN paired delta since 2026-10-06 (S-600), the 100 ms
     // floor unchanged. A real instrumentation cost moves every sample, and so
@@ -437,7 +439,7 @@ fn cold_start_phase_attribution() {
     // pre-CR-197 build, each from one outlying sample. The mean stays in the
     // record beside it.
     assert!(
-        overhead_median_ms.abs() < 100.0,
+        cfg!(coverage) || overhead_median_ms.abs() < 100.0,
         "the median paired instrumented-vs-uninstrumented delta is {overhead_median_ms:.1} ms \
          (mean {overhead_mean_ms:.1} ms, {overhead_pct:.1}% of the {uninstrumented_mean:.1} ms \
          uninstrumented mean) — the instrumentation itself looks expensive, not just measured"

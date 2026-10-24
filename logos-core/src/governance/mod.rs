@@ -119,6 +119,10 @@ mod go_dsm;
 #[cfg(test)]
 mod tests;
 
+/// The read-only verdict's trend over a store ([S-785](../../../docs/planning/journal.md#s-785-the-health-page-shows-the-trend-warning-beside-the-gate-verdict)).
+#[cfg(all(test, feature = "lang-rust"))]
+mod read_only_trend_tests;
+
 /// The gate's float-noise tolerance on the 0–10000 integer signal (BR-10,
 /// DL-04): fail iff `current < baseline − EPSILON`.
 const EPSILON: f64 = 1.0;
@@ -2488,8 +2492,14 @@ pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
 /// Its drivers are that snapshot's own offenders, read by its id — never by
 /// "latest" again, which a `scan` committing in between would move.
 ///
+/// Under the same table, on every arm, the verdict carries the trend the
+/// persisting gate reports ([FR-GV-27]), read off the snapshots up to this
+/// one by id for the same reason. Without the table, or with an unreadable
+/// contract, it carries none and the verdict is what it was.
+///
 /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 /// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
+/// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
 fn gate_from_snapshot(engine: &Engine, snapshot: Option<&PersistedSnapshot>) -> Result<GateResult> {
     let runtime = quality_runtime(engine)?;
     let Some(PersistedSnapshot { id: snapshot_id, metrics, .. }) = snapshot else {
@@ -2522,11 +2532,17 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&PersistedSnapshot>) -> 
         attribution: None,
         baseline_reason: None,
         baseline_reset: None,
+        trend: Vec::new(),
     };
 
     let (baseline, record) = runtime.submit_read(|store| {
         Ok((store.baseline_snapshot(SCOPE_PROJECT)?, store.baseline_record(SCOPE_PROJECT)?))
     })?;
+    // Read once, for every arm: the trend below reads it whatever the
+    // baseline, and only the comparable arm judges by it.
+    let review_table = crate::config::load_rules_from_root(engine.root())
+        .ok()
+        .and_then(|rules| rules.review);
     match baseline {
         None => {
             result.message =
@@ -2555,13 +2571,10 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&PersistedSnapshot>) -> 
             // FR-GV-16: the reason of the baseline compared against, as the
             // persisting gate reports it — never from one it cannot compare.
             result.baseline_reason = record.and_then(|r| r.reason);
-            let review_table = crate::config::load_rules_from_root(engine.root())
-                .ok()
-                .and_then(|rules| rules.review);
             if review_table.is_some() {
                 result.attribution = baseline_attribution(runtime, &base, *snapshot_id, metrics)?;
             }
-            match (metrics.aggregate_signal, base.aggregate_signal, review_table) {
+            match (metrics.aggregate_signal, base.aggregate_signal, review_table.as_ref()) {
                 (Some(current), Some(baseline_signal), Some(policy)) => {
                     // FR-GV-25, as `gate` judges it: the aggregate is a drift
                     // budget under `[review]`. Per-symbol entries need a branch
@@ -2593,6 +2606,12 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&PersistedSnapshot>) -> 
                 }
             }
         }
+    }
+    // FR-GV-27: the trend `gate` reports, over the snapshots up to this one —
+    // a `scan` committing after it never enters. Read, never computed into
+    // the store; it moves no verdict.
+    if let Some(table) = &review_table {
+        set_trend(&mut result, review::trend(runtime, table, Some(*snapshot_id))?);
     }
 
     Ok(result)
@@ -2687,6 +2706,20 @@ pub(crate) fn branches_review(
     branches: &[String],
 ) -> Result<crate::models::quality::BranchesProjection> {
     review::branches_review(engine, base, branches)
+}
+
+/// The room left under every projected budget on the base commit ([FR-GV-29],
+/// S-798) — the engine's entry point to [`review::headroom::headroom_review`],
+/// named here beside [`branches_review`] for the same fan-out reason.
+///
+/// [FR-GV-29]: ../../../docs/specs/requirements/FR-GV-29.md
+pub(crate) fn headroom_review(
+    engine: &Engine,
+    base: Option<&str>,
+    subjects: &[String],
+    near: Option<u64>,
+) -> Result<crate::models::quality::HeadroomReport> {
+    review::headroom::headroom_review(engine, base, subjects, near)
 }
 
 /// What the branch security delta classifies ([FR-SC-18], S-686), read by the
@@ -3155,7 +3188,7 @@ fn check_rules_run(
 /// branch delta against the merge-base of `HEAD` and the default branch: a
 /// gating entry fails it, and the aggregate fails only past `drift_budget`.
 /// Under the table, saved or compared, a distributional dimension in decline
-/// adds a trend warning ([FR-GV-27]) and moves no verdict. Without the table
+/// adds a `trend` entry and its warning ([FR-GV-27]) and moves no verdict. Without the table
 /// nothing of it runs.
 ///
 /// `save` records `reason` and the attribution of the change it blesses with
@@ -3200,9 +3233,18 @@ pub(crate) fn gate(
     // FR-GV-27: a warning beside the verdict, over the series including the
     // snapshot this gate recorded; it never moves `passed`.
     if let Some(table) = table {
-        result.warnings.extend(review::trend_warnings(quality_runtime(engine)?, table)?);
+        set_trend(&mut result, review::trend(quality_runtime(engine)?, table, None)?);
     }
     Ok(result)
+}
+
+/// Put `trend` on `result` ([FR-GV-27]): the structured list, and each entry's
+/// warning in `warnings` — one source for both, on every gate surface.
+///
+/// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+fn set_trend(result: &mut GateResult, trend: Vec<crate::models::DimensionTrend>) {
+    result.warnings.extend(trend.iter().map(crate::models::DimensionTrend::warning));
+    result.trend = trend;
 }
 
 /// What `gate --save` blesses under ([FR-GV-16]): the `--reason` given, and
@@ -3504,6 +3546,7 @@ fn gate_metrics(
         attribution: None,
         baseline_reason: None,
         baseline_reset: None,
+        trend: Vec::new(),
     };
 
     if let Some(bless) = save {

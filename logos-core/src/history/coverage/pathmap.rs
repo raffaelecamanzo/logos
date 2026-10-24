@@ -34,6 +34,8 @@
 //! [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
 //! [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
 
+use crate::resolve::go_module::GoModule;
+
 /// How one report path bound — the general answer [`PathMapper::bind`] gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Binding<'a> {
@@ -160,6 +162,34 @@ impl<'a> PathMapper<'a> {
         }
         normalized.to_string()
     }
+}
+
+/// Rewrite a Go coverprofile path — an import path, `<module path>/<dir>/<file>.go`
+/// — to the project-relative path it names, using the `go.mod` modules the tree
+/// declares ([FR-CV-12]): the module path is stripped at a component boundary and
+/// the module's own directory put in its place, so a nested module's file reads
+/// `svc/pkg/a.go`, not a bare `pkg/a.go` that a sibling module could share.
+/// `modules` is longest module path first ([`go_module::discover`]), so the most
+/// specific module claims the path. `None` when no declared module is a prefix;
+/// [`super::ingest`] then reports the path unmatched when the tree declares any
+/// module (a foreign module's file is not a project file), and hands it verbatim
+/// to the suffix mapper only when the tree has no `go.mod` at all.
+///
+/// [FR-CV-12]: ../../../../docs/specs/requirements/FR-CV-12.md
+/// [`go_module::discover`]: crate::resolve::go_module::discover
+pub(crate) fn strip_go_module(modules: &[GoModule], report_path: &str) -> Option<String> {
+    modules.iter().find_map(|m| {
+        let rest = report_path
+            .strip_prefix(m.path.as_str())?
+            .strip_prefix('/')?;
+        (!rest.is_empty()).then(|| {
+            if m.root.is_empty() {
+                rest.to_string()
+            } else {
+                format!("{}/{rest}", m.root)
+            }
+        })
+    })
 }
 
 /// Normalize separators: backslashes → `/`, and a leading `./` dropped. The
@@ -323,6 +353,57 @@ mod tests {
         assert_eq!(
             PathMapper::new(&three, &[]).bind("mod.py"),
             Binding::Ambiguous { candidates: 3 }
+        );
+    }
+
+    fn module(root: &str, path: &str) -> GoModule {
+        GoModule {
+            root: root.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    /// The module prefix is stripped at a component boundary and the module's own
+    /// directory restored; the longest module claims a path two modules prefix;
+    /// a module whose text merely *starts* the path (`app` vs `app-tools`) does
+    /// not; no declared module means no rewrite ([FR-CV-12]).
+    #[test]
+    fn go_module_prefix_strips_at_a_component_boundary() {
+        // Longest module path first, as `go_module::discover` returns them.
+        let nested = [
+            module("tools", "example.com/app/tools"),
+            module("", "example.com/app"),
+        ];
+        assert_eq!(
+            strip_go_module(&nested, "example.com/app/pkg/a.go").as_deref(),
+            Some("pkg/a.go"),
+            "root module: prefix stripped"
+        );
+        assert_eq!(
+            strip_go_module(&nested, "example.com/app/tools/gen/g.go").as_deref(),
+            Some("tools/gen/g.go"),
+            "the nested module claims it and restores its directory"
+        );
+        let root_only = [module("", "example.com/app")];
+        assert_eq!(
+            strip_go_module(&root_only, "example.com/app-tools/gen/g.go"),
+            None,
+            "`app` is not a component-boundary prefix of `app-tools`"
+        );
+        assert_eq!(
+            strip_go_module(&root_only, "example.com/app"),
+            None,
+            "no file part"
+        );
+        assert_eq!(strip_go_module(&[], "example.com/app/pkg/a.go"), None);
+        assert_eq!(
+            strip_go_module(
+                &[module("svc", "example.com/svc-two")],
+                "example.com/svc-two/p/a.go"
+            )
+            .as_deref(),
+            Some("svc/p/a.go"),
+            "a module path that does not spell its directory still resolves"
         );
     }
 }

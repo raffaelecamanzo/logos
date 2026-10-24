@@ -26,14 +26,17 @@ export interface ApiResource<T> {
   data: T | undefined;
   /** The failure once `status === "error"`, else `undefined`. */
   error: Error | undefined;
-  /** Re-run the fetch (e.g. a "retry" affordance, or a refresh). */
-  reload: () => void;
+  /** Re-run the fetch (e.g. a "retry" affordance, or a refresh). Settles once
+   *  a fetch started after the call has committed its result — the data, or
+   *  the failure — so a caller can wait for the page to show it (HF-2). */
+  reload: () => Promise<void>;
 }
 
 /**
  * Fetch `fetcher()` and track it as a {@link ApiResource}. The fetch re-runs when
  * any `deps` entry changes (same contract as `useEffect`'s dependency array) and
- * on an explicit `reload()`. A result that arrives after the component unmounted,
+ * on an explicit `reload()`, whose promise settles once a fetch started after it
+ * has committed. A result that arrives after the component unmounted,
  * or after a newer fetch superseded it, is dropped — so a fast filter change can
  * never let a stale response clobber a newer one (the legacy canvas's generation
  * guard, in hook form).
@@ -45,6 +48,9 @@ export function useApiResource<T>(fetcher: () => Promise<T>, deps: readonly unkn
   // A monotonic generation: only the latest fetch is allowed to commit its result.
   const generation = useRef(0);
   const [reloadTick, setReloadTick] = useState(0);
+  // Each `reload()` is numbered and waits for a fetch that started after it.
+  const requested = useRef(0);
+  const waiting = useRef<{ after: number; settle: () => void }[]>([]);
 
   // `fetcher` is intentionally not in the dependency array — callers pass an
   // inline closure that changes every render; `deps` is the real cache key (the
@@ -54,14 +60,25 @@ export function useApiResource<T>(fetcher: () => Promise<T>, deps: readonly unkn
 
   useEffect(() => {
     const gen = ++generation.current;
+    const asked = requested.current;
+    // Every reload asked for before this fetch started is answered by its result.
+    const answered = () => {
+      const [done, pending] = [waiting.current.filter((w) => w.after <= asked), waiting.current.filter((w) => w.after > asked)];
+      waiting.current = pending;
+      done.forEach((w) => w.settle());
+    };
     setState((prev) => (prev.status === "ready" ? prev : { status: "loading" }));
     run()
       .then((data) => {
-        if (gen === generation.current) setState({ status: "ready", data });
+        if (gen === generation.current) {
+          setState({ status: "ready", data });
+          answered();
+        }
       })
       .catch((err: unknown) => {
         if (gen === generation.current) {
           setState({ status: "error", error: err instanceof Error ? err : new Error(String(err)) });
+          answered();
         }
       });
     return () => {
@@ -70,7 +87,14 @@ export function useApiResource<T>(fetcher: () => Promise<T>, deps: readonly unkn
     };
   }, [run, reloadTick]);
 
-  const reload = useCallback(() => setReloadTick((t) => t + 1), []);
+  const reload = useCallback(
+    () =>
+      new Promise<void>((settle) => {
+        waiting.current.push({ after: ++requested.current, settle });
+        setReloadTick((t) => t + 1);
+      }),
+    [],
+  );
   return { status: state.status, data: state.data, error: state.error, reload };
 }
 

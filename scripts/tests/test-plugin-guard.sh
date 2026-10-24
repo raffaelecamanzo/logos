@@ -153,6 +153,15 @@ save("quotes.json", "Bash", {"command": "printf %s " + "x\"y" * 8000})
 save("multibyte-rm.json", "Bash", {"command": "echo " + "\u00e0b " * 6000 + "&& rm .logos/rules.toml"})
 save("utf8-path.json", "Write", {"file_path": "/tmp/citt\u00e0/.logos/rules.toml"})
 save("long-path.json", "Write", {"file_path": "/tmp/" + "\u00e0" * 1500 + "/.logos/rules.toml"})
+save("dollars.json", "Bash", {"command": "logos scan && echo " + "$x " * 8000})
+save("dollars-rm.json", "Bash", {"command": "F=.logos/rules.toml; echo " + "$x " * 8000 + "; rm $F"})
+save("backticks.json", "Bash", {"command": "logos scan && echo " + "`x` " * 4000})
+save("continuations.json", "Bash", {"command": "logos security status " + "a\\\n" * 8000})
+save("backticks-80k.json", "Bash", {"command": "echo " + "`x` " * 80000})
+save("equals-word.json", "Bash", {"command": "logos security status " + "=" * 80000 + " $X"})
+save("equals-assign.json", "Bash", {"command": "F=.logos/rules.toml; X=" + "=" * 160000 + "; rm notes.txt"})
+save("dollar-segments.json", "Bash", {"command": "cargo check $x;" * 64000})
+save("dollars-scan.json", "Bash", {"command": "logos scan && echo " + "$x " * 80000})
 PY
 
 for B in "${BASHES[@]}"; do
@@ -317,6 +326,121 @@ logos gate --save')" "logos gate --save"
         "$(file_payload Write file_path "$ENROLLED/svc/.logos/security-baseline.json")" ".logos/security-baseline.json"
     asks "a bare security-baseline.json after cd .logos asks" \
         "$(bash_payload 'cd .logos && rm security-baseline.json')" ".logos/security-baseline.json"
+    # Guarded words read as the shell reads them (S-784, CR-242). A backslash-newline
+    # inside a word is removed, and the word joined.
+    asks "a backslash-newline inside 'bless' asks" "$(bash_payload 'logos security bl\
+ess')" "logos security bless"
+    asks "a backslash-newline inside 'ingest' asks" "$(bash_payload 'logos security in\
+gest r.sarif')" "logos security ingest"
+    asks "a backslash-newline inside '--save' asks" "$(bash_payload 'logos gate --sa\
+ve')" "logos gate --save"
+    asks "a backslash-newline inside '--bless' asks" "$(bash_payload 'logos check --bl\
+ess')" "logos check --bless"
+    asks "a backslash-newline inside a guarded file name asks" "$(bash_payload 'rm .logos/rules-base\
+line.json')" ".logos/rules-baseline.json"
+    # An expansion where a guarded subcommand or option goes may become one.
+    # shellcheck disable=SC2016 # literal expansions, for the guard to read
+    asks "an assigned subcommand after logos security asks" \
+        "$(bash_payload 'S=bless; logos security $S')" 'gives `logos security` `$S`'
+    # shellcheck disable=SC2016
+    asks "an assigned option after logos gate asks" \
+        "$(bash_payload 'F=--save; logos gate $F')" 'gives `logos gate` `$F`'
+    # shellcheck disable=SC2016
+    asks "a braced expansion as logos security's subcommand asks, with nothing else named" \
+        "$(bash_payload 'logos security ${X}')" 'gives `logos security` `${X}`'
+    # shellcheck disable=SC2016
+    asks "a command substitution after logos check asks" \
+        "$(bash_payload 'logos check $(echo --bless)')" 'gives `logos check` a command substitution'
+    # shellcheck disable=SC2016
+    asks "a backtick substitution after logos check asks" \
+        "$(bash_payload 'logos check `echo --bless`')" 'gives `logos check` a command substitution'
+    # shellcheck disable=SC2016
+    asks "a backtick substitution as logos security's subcommand asks" \
+        "$(bash_payload 'logos security --json `echo bless`')" 'gives `logos security` a command substitution'
+    # shellcheck disable=SC2016
+    asks "an expansion completing an option word asks" \
+        "$(bash_payload 'logos gate --sa$V')" 'gives `logos gate` `--sa$V`'
+    # shellcheck disable=SC2016
+    asks "an expansion completing a subcommand word asks" \
+        "$(bash_payload 'logos security bl${X}')" 'gives `logos security` `bl${X}`'
+    # shellcheck disable=SC2016
+    asks "an ANSI-C quoted subcommand asks" \
+        "$(bash_payload "logos security \$'bl\\x65ss'")" 'gives `logos security`'
+    # shellcheck disable=SC2016
+    asks "an expansion after logos check behind a binary held in a variable asks" \
+        "$(bash_payload 'L=logos; $L check $B')" 'gives `logos check` `$B`'
+    # A writer given an expansion, in a command line that assigns a value naming .logos.
+    # shellcheck disable=SC2016
+    asks "a writer given a variable assigned a guarded path asks" \
+        "$(bash_payload 'F=.logos/rules.toml; rm $F')" 'F=.logos/rules.toml'
+    # shellcheck disable=SC2016
+    asks "a writer given a quoted variable assigned a quoted guarded path asks" \
+        "$(bash_payload 'F=".logos/rules.toml" && sed -i s/a/b/ "$F"')" '`sed` is given `$F`'
+    # shellcheck disable=SC2016
+    asks "a writer given a variable assigned the .logos directory asks" \
+        "$(bash_payload 'D=.logos; rm -rf $D')" 'D=.logos'
+    # shellcheck disable=SC2016
+    asks "a member's .logos assigned, then written through the variable, asks" \
+        "$(bash_payload 'F=web/.logos/rules-baseline.json; cp /tmp/x $F')" 'F=web/.logos/rules-baseline.json'
+    # shellcheck disable=SC2016
+    asks "a redirection into a variable assigned a guarded path asks" \
+        "$(bash_payload 'F=.logos/rules.toml; echo x > $F')" 'a shell redirection into `$F`'
+    # shellcheck disable=SC2016
+    asks "a bare redirection into a variable assigned a guarded path asks" \
+        "$(bash_payload 'F=.logos/rules.toml; > $F')" 'a shell redirection into `$F`'
+    # shellcheck disable=SC2016
+    asks "a writer given a substitution, in a line assigning a guarded path, asks" \
+        "$(bash_payload 'F=.logos/rules.toml; rm `echo $F`')" '`rm` is given a command substitution'
+    # The review's reproductions and surviving mutants (S-784 Phase 6).
+    # shellcheck disable=SC2016
+    asks "an expansion after a global option's value, before the security subcommand, asks" \
+        "$(bash_payload 'S=bless; logos security --project . $S')" 'gives `logos security` `$S` before its subcommand'
+    # shellcheck disable=SC2016
+    asks "an unquoted substitution glued to gate's option asks: it splits into a --save" \
+        "$(bash_payload 'logos gate --label=$(echo x --save)')" 'which may expand to --save'
+    # shellcheck disable=SC2016
+    asks "a variable glued to check's option asks" \
+        "$(bash_payload 'logos check --rules=$L')" 'gives `logos check` `--rules=$L`, which may expand to --bless'
+    # shellcheck disable=SC2016
+    asks "a substitution glued to security's global option asks" \
+        "$(bash_payload 'logos security --project=$(echo . bless)')" 'which may expand to bless or ingest'
+    # shellcheck disable=SC2016
+    asks "a positional parameter as logos security's subcommand asks" \
+        "$(bash_payload 'set -- bless; logos security $1')" 'gives `logos security` `$1`'
+    # shellcheck disable=SC2016
+    asks "\$@ after logos check asks" "$(bash_payload 'logos check $@')" 'gives `logos check` `$@`'
+    # shellcheck disable=SC2016
+    asks "an ANSI-C octal subcommand asks" \
+        "$(bash_payload "logos security \$'\\142less'")" 'gives `logos security` `$142less`'
+    # shellcheck disable=SC2016
+    asks "an expansion after security, the binary found by \`command -v\`, asks" \
+        "$(bash_payload '`command -v logos` security $S')" 'gives `logos security` `$S`'
+    # shellcheck disable=SC2016
+    asks "an expansion after gate, the binary found by \$(which), asks" \
+        "$(bash_payload '$(which logos) gate $X')" 'gives `logos gate` `$X`'
+    # shellcheck disable=SC2016
+    asks "a writer given a variable assigned a member's .logos directory asks" \
+        "$(bash_payload 'D=web/.logos; rm -rf $D')" 'D=web/.logos'
+    # shellcheck disable=SC2016
+    asks "a writer given an expansion glued to its option asks" \
+        "$(bash_payload 'F=.logos/rules.toml; dd if=/tmp/x of=$F')" '`dd` is given `of=$F`'
+    # shellcheck disable=SC2016
+    asks "a variable name holding a digit asks" \
+        "$(bash_payload 'F1=.logos/rules.toml; rm $F1')" 'F1=.logos/rules.toml, so it may write or delete what that value names under .logos/'
+    # shellcheck disable=SC2016
+    asks "a += assignment naming a guarded path asks" \
+        "$(bash_payload 'F+=.logos/rules.toml; rm $F')" 'F+=.logos/rules.toml'
+    # shellcheck disable=SC2016
+    asks "a >| redirection into a variable assigned a guarded path asks" \
+        "$(bash_payload 'F=.logos/rules.toml; echo x >| $F')" 'a shell redirection into `$F`'
+    # shellcheck disable=SC2016
+    asks "a >& redirection into a variable assigned a guarded path asks" \
+        "$(bash_payload 'F=.logos/rules.toml; echo x >&$F')" 'a shell redirection into `$F`'
+    # shellcheck disable=SC2016
+    asks "a 2>| redirection into a variable assigned a guarded path asks" \
+        "$(bash_payload 'F=.logos/rules.toml; echo x 2>| $F')" 'a shell redirection into `$F`'
+    asks "a >| redirection into a guarded file asks as a redirection" \
+        "$(bash_payload 'echo x >| .logos/rules.toml')" 'writes .logos/rules.toml through a shell redirection'
 
     # --- 3. pass-through --------------------------------------------------------
     passes "an Edit of an unguarded .logos/ file passes" \
@@ -379,6 +503,44 @@ logos gate --save')" "logos gate --save"
     passes "near miss: security_ingest under a foreign server passes" "$(mcp_payload mcp__other__security_ingest)"
     passes "near miss: the other security MCP tools pass" "$(mcp_payload mcp__plugin_logos_logos__security_findings)"
     passes "near miss: bless_rules under a foreign server passes" "$(mcp_payload mcp__other__bless_rules)"
+    # S-784 near misses: an expansion outside a guarded position, a value glued to its
+    # option, a reader given the variable, and a variable naming nothing under .logos.
+    # shellcheck disable=SC2016 # literal expansions, for the guard to read
+    passes "near miss: an operand expansion after logos security status passes" \
+        "$(bash_payload 'logos security status $X')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion after a literal subcommand of logos security passes" \
+        "$(bash_payload 'logos security scan --path $DIR')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion after logos check in another segment of a path ending /logos passes" \
+        "$(bash_payload 'cd /tmp/src/logos && cargo check -p logos-core $FEATURES')"
+    # shellcheck disable=SC2016
+    passes "near miss: 'check' and an expansion beside a crate named logos pass" \
+        "$(bash_payload 'cargo check --target-dir $T -p logos')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion after a security subcommand that follows a global option passes" \
+        "$(bash_payload 'logos security --project . status $X')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion in another command of the list passes" "$(bash_payload 'logos gate; echo $?')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion after an unguarded logos subcommand passes" "$(bash_payload 'logos scan --path $DIR')"
+    # shellcheck disable=SC2016
+    passes "near miss: a writer given a variable assigned an unguarded path passes" "$(bash_payload 'F=src/a.rs; rm $F')"
+    # shellcheck disable=SC2016
+    passes "near miss: a reader given a variable assigned a guarded path passes" \
+        "$(bash_payload 'F=.logos/rules.toml; cat $F')"
+    # shellcheck disable=SC2016
+    passes "near miss: git add of a variable assigned a guarded path passes" \
+        "$(bash_payload 'F=.logos/rules.toml; git add "$F"')"
+    passes "near miss: a writer given no expansion, in a line assigning a guarded path, passes" \
+        "$(bash_payload 'F=.logos/rules.toml; rm notes.txt')"
+    # shellcheck disable=SC2016
+    passes "near miss: a value naming x.logos, not .logos, passes" "$(bash_payload 'F=x.logos/rules.toml; rm $F')"
+    # shellcheck disable=SC2016
+    passes "near miss: a reader's substitution assigned beside a guarded path passes" \
+        "$(bash_payload 'F=.logos/rules.toml; N=$(wc -l < $F)')"
+    passes "near miss: a backslash-newline between words still separates them" "$(bash_payload 'logos security status \
+--json | grep bless')"
     passes "near miss: a guarded path inside another file's content passes" \
         '{"tool_name":"Write","tool_input":{"file_path":"notes.md","content":"see \"file_path\":\".logos/rules.toml\""}}'
 
@@ -406,6 +568,20 @@ logos gate --save')" "logos gate --save"
     # bash 3.2's ${var//pat/rep} is far worse than linear once matches are many,
     # and slower again on multibyte text under a UTF-8 locale.
     bounded passes "a command of 8000 quotes that names nothing guarded: passes" "$WORK/quotes.json"
+    bounded passes "8000 expansions beside logos, none in a guarded position: passes" "$WORK/dollars.json"
+    # shellcheck disable=SC2016 # a literal reason fragment
+    bounded asks "8000 expansions, then a writer given a variable assigned a guarded path: asks" \
+        "$WORK/dollars-rm.json" '`rm` is given `$F`'
+    bounded passes "4000 backtick substitutions beside logos: passes" "$WORK/backticks.json"
+    bounded passes "8000 backslash-newlines inside one logos command: passes" "$WORK/continuations.json"
+    # Sized past where a quadratic shape shows: an indexed loop over 80000 backtick
+    # parts, a two-star case pattern on a word of 80000 or 160000 '=', and a walk of 64000
+    # segments, or of 80000 words beside a logos that names no guarded subcommand.
+    bounded passes "80000 backtick substitutions naming nothing guarded: passes" "$WORK/backticks-80k.json"
+    bounded passes "a word of 80000 '=' after logos security status: passes" "$WORK/equals-word.json"
+    bounded passes "an assignment of 160000 '=' beside a guarded path: passes" "$WORK/equals-assign.json"
+    bounded passes "64000 segments holding check and an expansion, logos not named: passes" "$WORK/dollar-segments.json"
+    bounded passes "80000 expansions beside logos scan, no guarded subcommand named: passes" "$WORK/dollars-scan.json"
     RUN_LANG=en_US.UTF-8 bounded asks "6000 multibyte words, then a guarded rm, under a UTF-8 locale: asks" \
         "$WORK/multibyte-rm.json" ".logos/rules.toml"
     RUN_LANG=en_US.UTF-8 asks "a UTF-8 path is quoted in a valid JSON reason" "$(cat "$WORK/utf8-path.json")" \

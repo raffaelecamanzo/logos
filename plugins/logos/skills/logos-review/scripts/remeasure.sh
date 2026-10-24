@@ -16,6 +16,11 @@
 #               value (`unchanged`), listed under another measure, or the re-run
 #               lists an offender the triage did not have (the edit moved the offence)
 #
+# A debt unit is matched to an offender by `node_id` and dimension, so a symbol of
+# the same name and another id (a rename, a second one in the file) is never the
+# unit. A unit known by name only (an integer or null id) is matched by name, file
+# and dimension, and two such matches are not proven; a group is matched to none.
+#
 # A fix is claimed only for `proven` or `cleared`, and only with the tests passing
 # (the test run is the caller's: this script never runs the project's tests).
 # The aggregate signal is never read. Pass the --base the triage was made with.

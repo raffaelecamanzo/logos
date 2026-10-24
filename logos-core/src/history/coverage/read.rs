@@ -99,8 +99,15 @@ struct LatestSnapshot {
 
 /// Open the store and read the most-recent coverage snapshot's metadata + its
 /// covered-file rows with freshness resolved ([FR-CV-04], [FR-CV-05]). `Ok(None)`
-/// when no coverage has ever been ingested (no snapshot row).
+/// when no coverage has ever been ingested (no snapshot row) — and when there is
+/// no store at all, which a read never creates ([FR-UI-03]), as the security
+/// read does not (S-740).
+///
+/// [FR-UI-03]: ../../../../docs/specs/requirements/FR-UI-03.md
 fn latest_snapshot(root: &Path) -> Result<Option<LatestSnapshot>> {
+    if !super::super::db_path(root).exists() {
+        return Ok(None);
+    }
     let conn = super::super::open(root)?;
     // The newest snapshot: the store is append-only and a new HEAD always opens a
     // higher id, so MAX(id) is the most-recently-ingested snapshot ([FR-CV-04]).

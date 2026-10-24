@@ -33,9 +33,18 @@
 # can match a guarded name, or a bare guarded name, glob or brace list beside a
 # mention of .logos (`cd .logos && rm *`).
 #
+# Words are read as the shell reads them: a backslash-newline inside a word joins
+# it (`logos security bl\⏎ess`), and `>|` and `>&` redirect as `>` does. After
+# `logos security`, `logos gate` or `logos check`, an expansion or command
+# substitution where a subcommand or option goes asks, since it may become one
+# (`S=bless; logos security $S`); after a security subcommand
+# (`logos security status $X`) it passes. A writer given an expansion asks when
+# the same command line assigns a value naming .logos (`F=.logos/rules.toml; rm $F`).
+#
 # This is a guardrail against an agent loosening the contract by habit or by
 # mistake, not a sandbox: a command that assembles the path at run time (an
-# interpreter one-liner, a path piped into xargs) is not seen.
+# interpreter one-liner, a path piped into xargs, a variable set in another Bash
+# call) is not seen.
 #
 # Builtins only, bash 3.2, like every plugin script (hooks/lib/common.sh): the
 # payload is read with fixed-key regexes, not a JSON parser.
@@ -46,7 +55,9 @@
 # word splitting and matched by regex or `case`, all linear. It never goes
 # through ${var//pattern/replacement}, which bash 3.2 runs in far worse than
 # linear time once matches are many (8 KB of quotes: 7 s; 16 KB: 54 s), nor
-# through a $( ) fork per word.
+# through a $( ) fork per word. The same holds, more quietly, for a `case`
+# pattern with two stars around a literal (`*=*\$*`) and for a loop over a long
+# array by index.
 
 set -euo pipefail
 
@@ -76,6 +87,8 @@ READERS="cat head tail more grep egrep fgrep rg ag ack wc diff cmp comm stat fil
 # git subcommands that leave the working-tree file as it is (add and commit record it).
 GIT_READERS="diff log show status blame annotate ls-files ls-tree cat-file grep rev-parse shortlog check-ignore
     add commit"
+# logos security's subcommands: until one of them is read, an expansion may become bless or ingest.
+SECURITY_SUBS="scan install uninstall ingest status findings bless help"
 
 BS=\\
 
@@ -336,7 +349,9 @@ reader_cmd() {
 }
 
 # shell_segment TEXT — one simple command of a Bash call. Asks on a guarded
-# action, returns otherwise. TEXT is cut at > and at < first: the first word
+# action, returns otherwise, having set ASSIGNED (an assignment whose value names
+# .logos) and EXP_WRITE (a write handed an expansion) for shell_command to read
+# once the whole line is walked. TEXT is cut at > and at < first: the first word
 # after a > is a redirection target (`>>` leaves an empty field between its two
 # halves, so the rule still lands on the target), and the first word after a <
 # is read from, never written.
@@ -361,8 +376,19 @@ shell_segment() {
         done
     done
 
-    local cmd="" args=() mentions=() i=0 logos_at=-1 gate_at=-1 check_at=-1 security_at=-1
+    local cmd="" args=() mentions=() i=0 logos_at=-1 gate_at=-1 check_at=-1 security_at=-1 security_sub=no shown own
     for w in ${words[@]+"${words[@]}"}; do
+        # An assignment (or +=) whose value names .logos, for shell_command to read.
+        # Matched by an anchored regex: a two-star `case` pattern is quadratic in bash 3.2.
+        if [ "$DOT_LOGOS" = yes ]; then
+            case "$w" in
+                [A-Za-z_]*=*)
+                    if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*\+?=(.*)$ ]]; then
+                        case "${BASH_REMATCH[1]}" in .logos | .logos/* | */.logos | */.logos/*) ASSIGNED="$w" ;; esac
+                    fi
+                    ;;
+            esac
+        fi
         if [ -z "$cmd" ]; then
             case "$w" in
                 [A-Za-z_]*=* | env | sudo | command | builtin | exec | nice | nohup | time | xargs | "{" | "!" | \
@@ -373,8 +399,8 @@ shell_segment() {
         else
             args+=("$w")
         fi
-        case "${w##*/}" in
-            logos) [ "$logos_at" -lt 0 ] && logos_at=$i ;;
+        case "$w" in
+            logos | */logos) [ "$logos_at" -lt 0 ] && logos_at=$i ;;
         esac
         if [ "$logos_at" -ge 0 ] || [ "$BIN_NAMED" = yes ]; then
             case "$w" in
@@ -392,6 +418,30 @@ shell_segment() {
                 --bless) [ "$check_at" -gt "$logos_at" ] &&
                     ask "the command runs \`logos check --bless\`, which rewrites .logos/rules-baseline.json." ;;
             esac
+            # An expansion where a guarded subcommand or option goes may become one when
+            # the shell runs it (`S=bless; logos security $S`, `logos check $(echo --bless)`):
+            # any word after gate or check, and any word after security until one of its
+            # subcommands is read. A value glued to an option is no exception: unquoted,
+            # `--label=$(echo x --save)` splits into a --save of its own. The subcommand
+            # must be logos's own: the binary in this segment, a command word holding it
+            # (`$L check`), or the subcommand at the head of a segment a substitution
+            # left (`$(which logos) gate`), never `cd ~/src/logos && cargo check $X`.
+            case "$w" in
+                *\$*)
+                    shown="\`$w\`"
+                    [ "$w" = "\$" ] && shown="a command substitution"
+                    own=no
+                    case "$cmd" in *\$*) own=yes ;; esac
+                    [ "$logos_at" -ge 0 ] && own=yes
+                    [ "$gate_at" -gt "$logos_at" ] && { [ "$own" = yes ] || [ "$gate_at" -eq 0 ]; } &&
+                        ask "the command gives \`logos gate\` $shown, which may expand to --save: \`logos gate --save\` replaces the blessed quality baseline."
+                    [ "$check_at" -gt "$logos_at" ] && { [ "$own" = yes ] || [ "$check_at" -eq 0 ]; } &&
+                        ask "the command gives \`logos check\` $shown, which may expand to --bless: \`logos check --bless\` rewrites .logos/rules-baseline.json."
+                    [ "$security_at" -ge 0 ] && [ "$security_sub" = no ] && { [ "$own" = yes ] || [ "$security_at" -eq 0 ]; } &&
+                        ask "the command gives \`logos security\` $shown before its subcommand, which may expand to bless or ingest: \`logos security bless\` rewrites .logos/security-baseline.json, and \`logos security ingest\` stores a SARIF report as the security evidence."
+                    ;;
+                *) [ "$security_at" -ge 0 ] && [ "$security_at" -lt "$i" ] && one_of "$w" "$SECURITY_SUBS" && security_sub=yes ;;
+            esac
         fi
         i=$((i + 1))
     done
@@ -399,10 +449,29 @@ shell_segment() {
     for w in ${targets[@]+"${targets[@]}"}; do
         if mention "$w"; then ask "the command writes $HIT through a shell redirection."; fi
     done
+    # A write handed an expansion is held until the whole line is walked: it asks
+    # only beside an assignment naming .logos (shell_command).
+    if [ "$DOT_LOGOS" = yes ] && [ -z "$EXP_WRITE" ]; then
+        for w in ${targets[@]+"${targets[@]}"}; do
+            case "$w" in *\$*) EXP_WRITE="the command writes through a shell redirection into \`$w\`" && break ;; esac
+        done
+    fi
     [ -n "$cmd" ] || return 0
     for w in "$cmd" ${args[@]+"${args[@]}"}; do
         if mention "$w"; then mentions+=("$HIT"); fi
     done
+    if [ "$DOT_LOGOS" = yes ] && [ -z "$EXP_WRITE" ]; then
+        for w in ${args[@]+"${args[@]}"}; do
+            case "$w" in
+                *\$*)
+                    shown="\`$w\`"
+                    [ "$w" = "\$" ] && shown="a command substitution"
+                    reader_cmd "$cmd" ${args[@]+"${args[@]}"} || EXP_WRITE="the command \`${cmd##*/}\` is given $shown"
+                    break
+                    ;;
+            esac
+        done
+    fi
     [ "${#mentions[@]}" -gt 0 ] || return 0
     reader_cmd "$cmd" ${args[@]+"${args[@]}"} && return 0
     ask "the command \`${cmd##*/}\` may write or delete ${mentions[0]}."
@@ -414,18 +483,31 @@ shell_command() {
     # `bash -c "..."` is read inline), then the command cut into simple commands
     # at every list and pipe operator.
     split_on "$BS" "$c"
-    # A backslash-newline continues the line, so its newline is a blank, not a
-    # command boundary (`logos gate \⏎ --save`). An empty field is an escaped
-    # backslash, and the field after it starts with a literal character.
+    # A backslash-newline continues the line: the shell removes the pair, so the
+    # word around it is joined (`logos security bl\⏎ess` is bless) and the newline
+    # is no command boundary (`logos gate \⏎ --save`). An empty field is an escaped
+    # backslash, and the field after it starts with a literal character. This loop
+    # indexes PARTS, so it grows with the square of the backslash count (40000 take
+    # some 20 s); it is the one exception to the rule above, and predates it.
     while [ "$i" -lt "${#PARTS[@]}" ]; do
         if [ -z "${PARTS[i]}" ]; then i=$((i + 2)) && continue; fi
-        case "${PARTS[i]}" in $'\n'*) PARTS[i]=" ${PARTS[i]:1}" ;; esac
+        case "${PARTS[i]}" in $'\n'*) PARTS[i]="${PARTS[i]:1}" ;; esac
         i=$((i + 1))
     done
     join_parts ""
     split_on "\"'" "$JOINED"
     join_parts ""
-    c="$JOINED"
+    # A command substitution is cut out at its backticks below, which would leave
+    # no word where it stood: each opening backtick is read as `$`, the word a
+    # $( leaves, so `logos check \`echo --bless\`` holds an expansion after check.
+    # The format takes the parts two at a time, so only an opening backtick gains
+    # the `$`; the cycle's tail after the last part is cut off. One printf, not a
+    # loop over PARTS[i]: bash 3.2 walks the array to reach each index.
+    split_on '`' "$JOINED"
+    # shellcheck disable=SC2016 # a literal $ and backticks
+    printf -v JOINED '%s$`%s`' "${PARTS[@]}"
+    c="${JOINED%\$\`\`}"
+    ASSIGNED="" EXP_WRITE=""
     # Read after the quotes go, so `cd ".lo"gos` counts as naming .logos.
     case "$c" in *.logos*) DOT_LOGOS=yes ;; *) DOT_LOGOS=no ;; esac
     # The binary named anywhere in the command, as a word or a path's last part
@@ -436,17 +518,31 @@ shell_command() {
         *[[:space:]/=\(\`\;\&\|]logos[[:space:]\)\`\;\&\|]*) BIN_NAMED=yes ;;
         *) BIN_NAMED=no ;;
     esac
-    # Nothing guarded is named and nothing blessed, saved or ingested: the call passes
-    # without the word-by-word walk, so a long heredoc costs one test. `*bless*`
-    # covers both `check --bless` and `security bless`.
+    # Nothing guarded is named, nothing blessed, saved or ingested, and no expansion
+    # sits beside the binary: the call passes without the word-by-word walk, so a long
+    # heredoc costs one test. `*bless*` covers both `check --bless` and `security bless`.
     case "$c" in
         *.logos* | *rules.toml* | *rules-baseline.json* | *security-ignore.toml* | *security-baseline.json* | \
             *--save* | *bless* | *ingest*) ;;
+        *\$*)
+            [ "$BIN_NAMED" = yes ] || return 0
+            case "$c" in *gate* | *check* | *security*) ;; *) return 0 ;; esac
+            ;;
         *) return 0 ;;
     esac
-    split_on $';&|()`\n' "$c"
+    # `>|` and `>&` write their target as `>` does. Cut at | and &, the target would
+    # read as a command of its own, so the character after each > becomes a blank.
+    split_on ">" "$c"
+    PARTS=("${PARTS[@]/#[|&]/ }")
+    join_parts ">"
+    split_on $';&|()`\n' "$JOINED"
     segs=("${PARTS[@]}")
     for seg in "${segs[@]}"; do shell_segment "$seg"; done
+    # Read once the whole line is walked, so the assignment counts on either side of
+    # the writer. No variable is tracked across separate Bash calls.
+    if [ -n "$EXP_WRITE" ] && [ -n "$ASSIGNED" ]; then
+        ask "$EXP_WRITE, in a command line that assigns $ASSIGNED, so it may write or delete what that value names under .logos/."
+    fi
 }
 
 re='"tool_name"[[:space:]]*:[[:space:]]*"([^"\\]+)"'

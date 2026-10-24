@@ -11,9 +11,11 @@ import type { ExtensionNavEntry } from "./api/extensionsClient.ts";
 import { mountedNavAnchor, mountedNavEntries } from "./extensions/registry.ts";
 import { routeOwns } from "./routeOwns.ts";
 import { isViewHidden } from "./views/hiddenWidgets.ts";
+import { hasViewFor } from "./views/routes.ts";
 
-/** The three sidebar groups (CR-042): primary read surfaces, risk & coverage,
- *  and the isolated policy editor. */
+/** The three sidebar groups (CR-042, FR-UI-55): A assesses (Dashboard, Health,
+ *  Security, Coverage), B explores (Graph, Rule findings, Files & Risk), C
+ *  configures (Statistics, the isolated policy editor). */
 export type NavGroup = "A" | "B" | "C";
 
 /**
@@ -59,13 +61,24 @@ export interface NavItem {
   replacedInWorkspaceBy?: string;
 }
 
-/** Every navigable view, in sidebar order. */
+/**
+ * Every navigable view, in sidebar order (S-788, CR-244, FR-UI-55): the value
+ * proposition leads. The three groups say what the reader is doing — assess
+ * (Dashboard, Health, Security, Coverage), explore (Graph, Architecture, Rule
+ * findings, Files & Risk), configure (Statistics, Config). Ids, labels, routes and
+ * scopes are what they have always been; only the order and the group changed.
+ */
 export const NAV_ITEMS: readonly NavItem[] = [
-  // Group A — primary read surfaces.
+  // Group A — assess.
   // S-194: Dashboard is now at `/` (was `/overview` prior to Sprint 34).
   { id: "overview", label: "Dashboard", path: "/", group: "A", scope: "member" },
   { id: "health", label: "Health", path: "/health", group: "A", scope: "member" },
-  { id: "graph", label: "Graph", path: "/graph", group: "A", scope: "member" },
+  // S-670 (FR-SC-09): the Security page — scanner matrix, findings in graph
+  // context, the OWASP view.
+  { id: "security", label: "Security", path: "/security", group: "A", scope: "member" },
+  { id: "coverage", label: "Coverage", path: "/coverage", group: "A", scope: "member" },
+  // Group B — explore.
+  { id: "graph", label: "Graph", path: "/graph", group: "B", scope: "member" },
   // An extension entry its registration anchors to Graph (`ExtensionUi.navAfter`)
   // sits here, in the order the server lists the extensions.
   // S-612 (FR-UI-41): "Architecture", not "Architecture / Cycles" — the Cycles
@@ -78,28 +91,23 @@ export const NAV_ITEMS: readonly NavItem[] = [
     id: "architecture",
     label: "Architecture",
     path: "/architecture",
-    group: "A",
+    group: "B",
     scope: "member",
   },
-  // Group B — risk & coverage surfaces.
-  { id: "files", label: "Files & Risk", path: "/files", group: "B", scope: "member" },
   // CR-079: the "Gaps" tab is now "Rule findings" (test-gaps roll-up removed).
   { id: "gaps", label: "Rule findings", path: "/gaps", group: "B", scope: "member" },
-  { id: "coverage", label: "Coverage", path: "/coverage", group: "B", scope: "member" },
-  // S-670 (FR-SC-09): the Security page — scanner matrix, findings in graph
-  // context, the OWASP view — beside Rule findings and Coverage.
-  { id: "security", label: "Security", path: "/security", group: "B", scope: "member" },
-  // Group C — the isolated policy editor (the only mutating surface), with the
-  // read-only Statistics view directly above it (S-235, CR-058, FR-UI-27).
+  { id: "files", label: "Files & Risk", path: "/files", group: "B", scope: "member" },
+  // Group C — configure: the isolated policy editor (the only mutating surface),
+  // with the read-only Statistics view directly above it (S-235, CR-058, FR-UI-27).
   { id: "statistics", label: "Statistics", path: "/statistics", group: "C", scope: "member" },
   { id: "config", label: "Config", path: "/config", group: "C", scope: "member" },
 ];
 
 /**
  * The workspace-only tabs (S-250, CR-061, FR-UI-29; extended by S-428, FR-UI-36).
- * Appended to the sidebar **only in workspace mode** — a single-root serve has no
+ * Offered in the sidebar **only in workspace mode** — a single-root serve has no
  * cross-service axis, so offering a service map there would be a fabricated
- * surface, and the sidebar must stay byte-for-byte what it has always been.
+ * surface, and a single-root sidebar carries none of them.
  *
  * The **Workspace** tab is one tab over its panels (service map /
  * cross-service coverage; cross-service impact is hidden through the
@@ -119,19 +127,26 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * both — the declared scope drives both axes for them.)
  */
 export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
-  // S-428 (CR-137, FR-UI-36): the two app-level views over read-models that
-  // already existed and had never been reachable from the interface — the
-  // cross-service picture, and the operational roll-up.
+  // S-428 (CR-137, FR-UI-36): the app-level Dashboard — the cross-service picture
+  // and the operational roll-up — over read-models that already existed and had
+  // never been reachable from the interface.
   //
-  // Named "Dashboard" and "Health", exactly like their member-scoped twins.
-  // ADR-66 accepted that deliberately: `/` stays the per-member Dashboard so no
-  // bookmark changes meaning, and the two levels are told apart by the SECTION
+  // Named "Dashboard", "Health" and "Security" exactly like their member-scoped
+  // twins. ADR-66 accepted that deliberately: `/` stays the per-member Dashboard so
+  // no bookmark changes meaning, and the two levels are told apart by the SECTION
   // label the sidebar renders, not by a second name.
   //
   // Their routes are siblings of `/workspace`, not children of it. A path under
   // it would prefix-match in {@link navItemMatches} — the rule that keeps a tab
   // lit on the client sub-routes it owns — and light up BOTH the Workspace tab
   // and the new one at once.
+  //
+  // S-788 (CR-244, FR-UI-55): the section reads Dashboard, Workspace, Health,
+  // Security, Coverage, Statistics, Config, filed Dashboard, Workspace and Health in
+  // group A, Security and Coverage in group B, Statistics and Config in group C
+  // (FR-UI-55); the section renders the groups as one list. The literal roster in
+  // `nav.test.ts` pins this order and these groups, and `Sidebar.test.tsx` the
+  // rendered order.
   {
     id: "workspace-dashboard",
     label: "Dashboard",
@@ -139,13 +154,10 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
     group: "A",
     scope: "app",
   },
-  { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
+  { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   // S-674 (CR-217, FR-SC-16): every member's scanner states and fresh findings,
-  // with each member linked to its own Security page. Named "Security" like its
-  // member-scoped twin (ADR-66 tells the two apart by section label), group B
-  // beside it, and so after Workspace in the section. A sibling route of
-  // `/workspace`, not a child, for the reason the S-428 entries above give.
+  // with each member linked to its own Security page.
   {
     id: "workspace-security",
     label: "Security",
@@ -153,18 +165,25 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
     group: "B",
     scope: "app",
   },
+  // S-788 (CR-244): the entry the cross-service coverage roll-up sits behind. THIS
+  // story owns the entry; the view (S-740) registers only its route and adds no
+  // second entry. Until a view is registered for `/workspace-coverage`,
+  // {@link navItemsFor} leaves the entry out, so the sidebar never offers a tab
+  // that resolves to nothing.
+  {
+    id: "workspace-coverage",
+    label: "Coverage",
+    path: "/workspace-coverage",
+    group: "B",
+    scope: "app",
+  },
   // S-429 (CR-137, FR-UI-37): usage summed across every member, over an aggregate
   // that constructs no member engine (NFR-PE-10).
   //
-  // Group C, not A, so it sits apart from the three cross-service surfaces exactly
-  // as its member-scoped twin sits apart from the read surfaces above it — the
-  // CR-042 grouping is a property of WHAT a tab answers, and this one answers the
-  // same question one scope up. Group B holds only Workspace security (S-674), its
-  // member twin's group, so it renders between the cross-service tabs and this one.
-  //
-  // Appended LAST, and this position is load-bearing rather than incidental:
-  // `Sidebar.test.tsx` asserts the Workspace section renders in this list's order,
-  // and within the section a group-C entry renders after every group-A one.
+  // Group C, so it sits apart from the assess surfaces exactly as its
+  // member-scoped twin sits apart from the views above it — the CR-042 grouping is
+  // a property of WHAT a tab answers, and this one answers the same question one
+  // scope up.
   {
     id: "workspace-statistics",
     label: "Statistics",
@@ -173,11 +192,8 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
     scope: "app",
   },
   // S-430 (CR-137, FR-UI-38): the app-level Config editor over the workspace's own
-  // files — `logos.workspace.toml` today. Named "Config" like its member-scoped
-  // twin (ADR-66 tells the two apart by section label), group C beside it, and
-  // after Statistics exactly as the member-scoped Config sits after its
-  // Statistics. A sibling route of `/workspace`, not a child, for the reason the
-  // S-428 entries above give.
+  // files — `logos.workspace.toml` today. Group C beside its Statistics, exactly as
+  // the member-scoped Config sits after its Statistics.
   {
     id: "workspace-config",
     label: "Config",
@@ -248,8 +264,12 @@ function extensionNavItems(): { member: readonly NavItem[]; app: readonly NavIte
     keys.forEach((k) => taken.add(k));
     return true;
   });
+  // Only an app entry the sidebar OFFERS can replace a view, and one whose route owns
+  // no view (S-788) is not offered.
   const appIds = new Set(
-    [...WORKSPACE_NAV_ITEMS, ...accepted.filter((i) => i.scope === "app")].map((i) => i.id),
+    [...WORKSPACE_NAV_ITEMS, ...accepted.filter((i) => i.scope === "app")]
+      .filter((i) => hasViewFor(i.path))
+      .map((i) => i.id),
   );
   const checked = accepted.map((item) => {
     if (item.replacedInWorkspaceBy === undefined || appIds.has(item.replacedInWorkspaceBy)) {
@@ -307,15 +327,17 @@ function appNavItems(): readonly NavItem[] {
  * mode; in workspace mode, every one of them a workspace view does not replace
  * ({@link NavItem.replacedInWorkspaceBy}), plus {@link WORKSPACE_NAV_ITEMS}. In
  * both, a view the hidden-widget register hides (CR-208, FR-UI-41) is left out —
- * read off the register at call time, so removing its entry offers it again. The
- * entries of the mounted extensions are part of both lists (S-642).
+ * read off the register at call time, so removing its entry offers it again — and
+ * so is an entry whose route no registered view owns (S-788), so the sidebar never
+ * lists a tab that resolves to nothing. The entries of the mounted extensions are
+ * part of both lists (S-642).
  */
 export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
   const members = memberNavItems();
   const offered = isWorkspace
     ? [...members.filter((item) => item.replacedInWorkspaceBy === undefined), ...appNavItems()]
     : members;
-  return offered.filter((item) => !isViewHidden(item.path));
+  return offered.filter((item) => !isViewHidden(item.path) && hasViewFor(item.path));
 }
 
 /**

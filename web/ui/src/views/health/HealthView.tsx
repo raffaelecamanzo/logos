@@ -74,6 +74,7 @@ import {
   gateFigureText,
   gateLowest,
   GATE_NOT_COMPARED,
+  gateTrend,
   moreDrivers,
   nearCloneGroupDriver,
   offenderBadge,
@@ -110,6 +111,7 @@ import {
   signalAbsence,
   signedPoints,
   snapshotStaleness,
+  trendLines,
   unitLocation,
   whereToStart,
   type ChangeRow,
@@ -183,6 +185,7 @@ function ReadingFigure({
   note,
   fact,
   reason,
+  trend,
 }: {
   figure: ReactNode;
   currency: SnapshotCurrency | null;
@@ -193,6 +196,8 @@ function ReadingFigure({
   fact?: string;
   /** The reason the Gate's baseline was saved with (FR-GV-16). */
   reason?: string;
+  /** The Gate's trend notes (FR-GV-27): one per dimension in decline. */
+  trend?: string[];
 }) {
   return (
     <div className={styles.figureLines}>
@@ -204,6 +209,11 @@ function ReadingFigure({
           <CopyTextView text={gateBaselineReason(reason)} />
         </FigureNote>
       )}
+      {trend?.map((line) => (
+        <FigureNote block key={line}>
+          {line}
+        </FigureNote>
+      ))}
       {currency !== null && <FigureNote block>{staleNote(currency)}</FigureNote>}
     </div>
   );
@@ -222,7 +232,12 @@ function ReadingFigure({
  *  every figure — PASS/FAIL among them, as plain text — and drops only what
  *  asserts they are CURRENT: the green/red pass/fail badge (CR-135 §3.2, S-436).
  *  One rendering for all three causes — the chip and the sentence differ, the
- *  structure does not, so no fourth Health state is added (CR-135 §7). */
+ *  structure does not, so no fourth Health state is added (CR-135 §7).
+ *
+ *  Under a `rules.toml [review]` table the figure also carries one note per
+ *  dimension in decline (FR-GV-27, S-785), read from the snapshots up to the
+ *  displayed one: advisory, in the note style, never a verdict colour. On a
+ *  not-current snapshot it sits under the same chip and sentence as the rest. */
 function GateWidget({
   gate,
   absence,
@@ -282,6 +297,7 @@ function GateWidget({
           note={informational && gate.baseline_signal !== null ? GATE_NOT_COMPARED : undefined}
           fact={!gate.passed && currency === null && lowest !== null ? gateLowest(lowest.name) : undefined}
           reason={gate.baseline_reason}
+          trend={trendLines(gate).map(gateTrend)}
         />
       }
     />
@@ -350,11 +366,15 @@ function SignalChangeTable({ rows }: { rows: ChangeRow[] }) {
       cell: (r) => (
         <span>
           {r.drivers.map((d) => (
-            <span key={`${d.name}:${d.location}`} data-driver-status={d.status}>
+            <span
+              key={`${d.nodeId ?? ""}:${d.name}:${d.location}`}
+              data-driver-status={d.status}
+              data-driver-id={d.nodeId ?? undefined}
+            >
               {d.members === null ? (
                 <span className="mono">{d.name}</span>
               ) : (
-                <CopyTextView text={nearCloneGroupDriver(d.members)} />
+                <CopyTextView text={nearCloneGroupDriver(d.name, d.members)} />
               )}
               <FigureNote block>{[d.status, d.location].filter((part) => part !== "").join(" · ")}</FigureNote>
             </span>

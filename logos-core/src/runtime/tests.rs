@@ -341,7 +341,11 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
 /// `LOGOS_PERF_TOLERANCE`: that helper is local to
 /// `tests/runtime_concurrency.rs`, and duplicating it into `src` to band a
 /// diagnostic band would spread the knob without adding signal.
+///
+/// Skipped under coverage instrumentation: an instrumented suite at cargo's
+/// default parallelism measured 923 ms here with no store or pool change.
 #[test]
+#[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
 fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     use std::time::Instant;
 

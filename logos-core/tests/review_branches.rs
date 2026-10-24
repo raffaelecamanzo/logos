@@ -11,7 +11,11 @@
 //! - a project-wide count (`max_dead`) is projected as a module's fan-out
 //!   is, and a `"report"` drift budget is named as not projected;
 //! - the answer is byte-stable, and the second run reads every side back from
-//!   the cache.
+//!   the cache;
+//! - under a ratchet budget ([FR-GV-23]) a subject the blessed set — read at
+//!   the base commit, never the working tree — holds above `max` is projected
+//!   against its blessed value, every other subject against `max`, the notes
+//!   name the blessed values used, and the answer agrees with `--headroom`.
 //!
 //! The exit code and the CLI/MCP parity are surface contracts:
 //! `cli/tests/review_cli.rs` and `mcp/tests/review_parity.rs`.
@@ -19,6 +23,7 @@
 //! Every fixture is a throw-away repository with `GIT_CEILING_DIRECTORIES` set
 //! and git maintenance off, so nothing escapes into an enclosing repository.
 //!
+//! [FR-GV-23]: ../../docs/specs/requirements/FR-GV-23.md
 //! [FR-GV-28]: ../../docs/specs/requirements/FR-GV-28.md
 //! [UAT-GV-18]: ../../docs/specs/requirements/UAT-GV-18.md
 
@@ -457,4 +462,247 @@ fn the_drift_is_projected_from_a_comparable_baseline_as_the_merged_gate_judges_i
         (DriftReference::BASE, Some("the gate baseline was saved under other thresholds"))
     );
     assert_eq!(drift.drift.drop, drift.shares.iter().map(|s| s.share).sum::<i64>(), "from the base commit");
+}
+
+/// A function named `name` of cyclomatic complexity `cc` (one `if` each above 1).
+fn complex(name: &str, cc: usize) -> String {
+    let body: String = (1..cc).map(|i| format!("    if x == {i} {{ return {i}; }}\n")).collect();
+    format!("pub fn {name}(x: i32) -> i32 {{\n{body}    0\n}}\n")
+}
+
+/// `src/hot.rs` with the three functions at the given complexities.
+fn hot(blessed: usize, unblessed: usize, fine: usize) -> String {
+    format!("{}{}{}", complex("blessed", blessed), complex("unblessed", unblessed), complex("fine", fine))
+}
+
+fn bless(root: &Path, symbol: &str, value: u64) {
+    write(
+        root,
+        ".logos/rules-baseline.json",
+        &format!("{{\"version\":1,\"entries\":[{{\"rule\":\"max_cc\",\"symbol\":{symbol:?},\"value\":{value}}}]}}\n"),
+    );
+}
+
+/// A branch off `main` that rewrites `src/hot.rs`.
+fn hot_branch(root: &Path, name: &str, cc: (usize, usize, usize)) {
+    git(root, &["checkout", "-q", "-b", name, "main"]);
+    write(root, "src/hot.rs", &hot(cc.0, cc.1, cc.2));
+    commit(root, &format!("{name} reshapes hot.rs"));
+    git(root, &["checkout", "-q", "main"]);
+}
+
+/// `max_cc = { max = 3, ratchet = true }` — UAT-GV-19's 15/22/20 in miniature:
+/// `blessed` (cc 5) was blessed at 6 and the set is committed on `main`,
+/// `unblessed` (cc 4) is past `max` and not in it, `fine` (cc 2) is under it.
+/// Branches: `plus1`/`plus2`/`plus3` raise `blessed` by that much, `fine2`
+/// raises `fine` by 2, `unblessed1` raises `unblessed` by 1.
+fn ratchet_repo() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-q"]);
+    write(root, ".gitignore", ".logos/*\n!.logos/rules-baseline.json\n");
+    write(root, "src/lib.rs", "pub mod hot;\n");
+    write(root, "src/hot.rs", &hot(5, 4, 2));
+    write(root, ".logos/rules.toml", "[constraints]\nmax_cc = { max = 3, ratchet = true }\n");
+    commit(root, "base");
+    git(root, &["branch", "-M", "main"]);
+    let engine = Engine::start(root).expect("engine starts");
+    let symbol = engine
+        .review_headroom(Some("main"), &["src/hot.rs".to_string()], None)
+        .expect("the headroom runs")
+        .rules
+        .iter()
+        .flat_map(|r| r.subjects.iter())
+        .find(|s| s.subject.ends_with("/blessed()."))
+        .expect("blessed is measured")
+        .subject
+        .clone();
+    bless(root, &symbol, 6);
+    commit(root, "bless one function at 6");
+    for (name, by) in [("plus1", 1), ("plus2", 2), ("plus3", 3)] {
+        hot_branch(root, name, (5 + by, 4, 2));
+    }
+    hot_branch(root, "fine2", (5, 4, 4));
+    hot_branch(root, "unblessed1", (5, 5, 2));
+    tmp
+}
+
+/// The `max_cc` entries of `answer`, as `(function, limit, base, projected, shares)`.
+fn cc_listed(answer: &BranchesProjection) -> Vec<(String, u64, u64, i64, Vec<i64>)> {
+    answer
+        .exceeded
+        .iter()
+        .filter(|e| e.rule == "max_cc")
+        .map(|e| {
+            let name = e.subject.rsplit('/').next().unwrap_or(&e.subject).to_string();
+            (name, e.limit, e.base, e.projected, e.shares.iter().map(|s| s.share).collect())
+        })
+        .collect()
+}
+
+#[test]
+fn a_ratchet_subject_is_projected_against_its_blessed_value_and_every_other_against_max() {
+    let tmp = ratchet_repo();
+    let root = tmp.path();
+
+    let within = project(root, &["plus1"]);
+    assert!(within.measured, "{within:#?}");
+    assert_eq!(cc_listed(&within), [], "5 + 1 stays within its blessed 6: {within:#?}");
+
+    let beyond = project(root, &["plus3"]);
+    assert_eq!(
+        cc_listed(&beyond),
+        [("blessed().".to_string(), 6, 5, 8, vec![3])],
+        "5 + 3 passes its blessed 6, with a share of 3: {beyond:#?}"
+    );
+
+    let under_max = project(root, &["fine2"]);
+    assert_eq!(
+        cc_listed(&under_max),
+        [("fine().".to_string(), 3, 2, 4, vec![2])],
+        "an unblessed subject under max is held to max: {under_max:#?}"
+    );
+
+    let past_max = project(root, &["unblessed1"]);
+    assert_eq!(
+        cc_listed(&past_max),
+        [("unblessed().".to_string(), 3, 4, 5, vec![1])],
+        "an unblessed subject past max has only max: {past_max:#?}"
+    );
+}
+
+#[test]
+fn headroom_and_branches_agree_for_a_ratchet_subject() {
+    let tmp = ratchet_repo();
+    let root = tmp.path();
+    let engine = Engine::start(root).expect("engine starts");
+    let report = engine.review_headroom(Some("main"), &["src/hot.rs".to_string()], None).unwrap();
+    let room = report
+        .rules
+        .iter()
+        .flat_map(|r| r.subjects.iter())
+        .find(|s| s.subject.ends_with("/blessed()."))
+        .map(|s| s.headroom)
+        .expect("blessed has a row");
+    assert_eq!(room, 1, "blessed at 5 of 6");
+    assert_eq!(cc_listed(&project(root, &["plus1"])), [], "a share equal to the headroom is not listed");
+    assert_eq!(cc_listed(&project(root, &["plus2"])).len(), 1, "one more is");
+}
+
+#[test]
+fn only_the_base_commits_blessed_set_is_read() {
+    let tmp = ratchet_repo();
+    let root = tmp.path();
+    let committed = project(root, &["plus3"]);
+
+    // A bless made after the base commit changes neither the allowance nor the answer.
+    bless(root, "unrelated", 99);
+    let symbol = committed.exceeded[0].subject.clone();
+    bless(root, &symbol, 99);
+    assert_eq!(project(root, &["plus3"]), committed, "the working tree's blessed set is not read");
+
+    // Nor does the checked-out branch's.
+    git(root, &["checkout", "-q", "-b", "rebless"]);
+    commit(root, "bless it at 99 on another branch");
+    assert_eq!(project(root, &["plus3"]), committed, "HEAD's blessed set is not read either");
+    git(root, &["checkout", "-q", "main"]);
+}
+
+#[test]
+fn the_notes_name_the_blessed_values_used() {
+    let tmp = ratchet_repo();
+    let root = tmp.path();
+    let answer = project(root, &["plus1"]);
+    assert!(
+        answer.notes.iter().all(|n| !n.contains("is not consulted")),
+        "the blessed set is consulted now: {:#?}",
+        answer.notes
+    );
+    let note = answer.notes.iter().find(|n| n.contains(".logos/rules-baseline.json")).expect("a blessed-values note");
+    assert!(note.contains("max_cc") && note.contains("/blessed().") && note.contains("= 6"), "{note}");
+    assert!(note.contains("any other subject is projected against its max"), "{note}");
+
+    // A set that blesses nothing is said to.
+    git(root, &["checkout", "-q", "-b", "empty-set", "main"]);
+    git(root, &["rm", "-q", "-f", ".logos/rules-baseline.json"]);
+    git(root, &["commit", "-q", "-m", "no blessed set"]);
+    git(root, &["checkout", "-q", "main"]);
+    let engine = Engine::start(root).expect("engine starts");
+    let none = engine.review_branches(Some("empty-set"), &["plus1".to_string()]).unwrap();
+    assert!(none.notes.iter().any(|n| n.contains("blesses nothing above max")), "{:#?}", none.notes);
+}
+
+#[test]
+fn a_blessed_set_the_base_commit_holds_unusable_is_not_projected() {
+    let tmp = ratchet_repo();
+    let root = tmp.path();
+    git(root, &["checkout", "-q", "-b", "broken", "main"]);
+    write(root, ".logos/rules-baseline.json", "not json\n");
+    commit(root, "a broken blessed set");
+    git(root, &["checkout", "-q", "main"]);
+    let engine = Engine::start(root).expect("engine starts");
+    let answer = engine.review_branches(Some("broken"), &["plus1".to_string()]).unwrap();
+    assert!(!answer.measured, "{answer:#?}");
+    assert!(answer.not_measured_because.is_some_and(|w| w.contains("rules-baseline.json")), "named with why");
+}
+
+/// `max_fn_lines` and a ratchet `max_dead` beside nothing per-subject under
+/// ratchet: the blessed set is never consulted, so a set the base commit holds
+/// unusable changes nothing; and a non-ratchet per-subject budget keeps `max`
+/// whatever a stale blessed entry says.
+#[test]
+fn a_blessed_set_is_consulted_only_by_a_per_subject_ratchet_budget() {
+    let tmp = ratchet_repo();
+    let root = tmp.path();
+    let engine = Engine::start(root).expect("engine starts");
+    let symbol = engine
+        .review_headroom(Some("main"), &["src/hot.rs".to_string()], None)
+        .unwrap()
+        .rules
+        .iter()
+        .flat_map(|r| r.subjects.iter())
+        .find(|s| s.subject.ends_with("/blessed()."))
+        .unwrap()
+        .subject
+        .clone();
+
+    // `max_cc` is no longer under ratchet, a blessed entry for it is stale: max rules.
+    git(root, &["checkout", "-q", "main"]);
+    write(root, ".logos/rules.toml", "[constraints]\nmax_cc = 3\n");
+    bless(root, &symbol, 99);
+    commit(root, "a stale blessed entry for a budget no longer under ratchet");
+    let plain = project(root, &["plus3"]);
+    assert_eq!(
+        cc_listed(&plain),
+        [("blessed().".to_string(), 3, 5, 8, vec![3])],
+        "a budget not under ratchet is projected against max whatever the set holds: {plain:#?}"
+    );
+    assert!(plain.notes.iter().all(|n| !n.contains("rules-baseline.json")), "{:#?}", plain.notes);
+
+    // Only a symbol-set budget is under ratchet, and the set is unusable: it is not read.
+    write(root, ".logos/rules.toml", "[constraints]\nmax_cc = 3\nmax_dead = { max = 0, ratchet = true }\n");
+    write(root, ".logos/rules-baseline.json", "not json\n");
+    commit(root, "an unusable set beside a symbol-set ratchet budget only");
+    let answer = project(root, &["plus3"]);
+    assert!(answer.measured, "a set no budget would use does not block the projection: {answer:#?}");
+    assert_eq!(cc_listed(&answer).len(), 1, "{answer:#?}");
+    assert!(answer.notes.iter().all(|n| !n.contains("rules-baseline.json")), "{:#?}", answer.notes);
+
+    // `max_cc` is under ratchet, so the set is read; `max_fn_lines` is not, and its stale
+    // blessed entry never lifts it: the function stays listed against `max_fn_lines = 3`.
+    write(root, ".logos/rules.toml", "[constraints]\nmax_cc = { max = 3, ratchet = true }\nmax_fn_lines = 3\n");
+    write(
+        root,
+        ".logos/rules-baseline.json",
+        &format!(
+            "{{\"version\":1,\"entries\":[{{\"rule\":\"max_cc\",\"symbol\":{symbol:?},\"value\":6}},\
+             {{\"rule\":\"max_fn_lines\",\"symbol\":{symbol:?},\"value\":99}}]}}\n"
+        ),
+    );
+    commit(root, "a stale blessed entry for a budget not under ratchet, beside one that is");
+    let mixed = project(root, &["plus3"]);
+    let lines: Vec<_> = mixed.exceeded.iter().filter(|e| e.rule == "max_fn_lines" && e.subject.ends_with("/blessed().")).collect();
+    assert_eq!(lines.len(), 1, "max_fn_lines keeps max whatever the set holds: {mixed:#?}");
+    assert_eq!((lines[0].limit, lines[0].base, lines[0].projected), (3, 7, 10), "{mixed:#?}");
+    assert_eq!(cc_listed(&mixed), [("blessed().".to_string(), 6, 5, 8, vec![3])], "{mixed:#?}");
 }

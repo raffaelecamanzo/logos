@@ -1,0 +1,19 @@
+// Written by Logos for a coverage run (`--init-script`), and rewritten before
+// each one: it attaches JaCoCo to every Java project of the build without
+// editing any build file (Gradle 7 and later).
+//
+// Each project that applies the `java` plugin (directly, or through a plugin
+// that applies it, such as Kotlin JVM) also gets `jacoco`, and its
+// `jacocoTestReport` writes the XML report the run collects from
+// `build/reports/jacoco/test/jacocoTestReport.xml`, after `test` has run.
+allprojects {
+    plugins.withId('java') {
+        apply plugin: 'jacoco'
+        tasks.named('jacocoTestReport') {
+            dependsOn tasks.named('test')
+            reports {
+                xml.required.set(true)
+            }
+        }
+    }
+}

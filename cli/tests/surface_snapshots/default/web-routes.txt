@@ -4,6 +4,10 @@ GET      /api/v1/branch-overlap
 GET      /api/v1/code-refs
 GET      /api/v1/config
 GET      /api/v1/coverage
+POST     /api/v1/coverage/dependency
+POST     /api/v1/coverage/install
+GET POST /api/v1/coverage/run
+POST     /api/v1/coverage/run/cancel
 GET      /api/v1/extensions
 GET      /api/v1/files
 GET      /api/v1/gaps
@@ -33,6 +37,7 @@ GET      /api/v1/workspace/config
 GET      /api/v1/workspace/config/read-roots
 POST     /api/v1/workspace/config/save
 POST     /api/v1/workspace/config/secret
+GET      /api/v1/workspace/coverage
 GET      /api/v1/workspace/impact
 GET      /api/v1/workspace/manifest
 POST     /api/v1/workspace/manifest/save
@@ -41,6 +46,7 @@ GET      /api/v1/workspace/roster
 GET      /api/v1/workspace/route-providers
 GET      /api/v1/workspace/search
 GET      /api/v1/workspace/security
+GET      /api/v1/workspace/security/summary
 GET      /api/v1/workspace/statistics
 GET      /api/v1/workspace/status
 POST     /config/apply

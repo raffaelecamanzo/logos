@@ -2869,6 +2869,7 @@ fn structural_check_on_the_real_schema_detects_orphans_inserted_past_the_fk() {
 }
 
 #[test]
+#[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
 fn structural_check_stays_within_the_point_query_budget() {
     // NFR-PE-01: the check is a handful of indexed queries — it must not scan
     // row content. A few hundred nodes/edges/shingles completes far inside a

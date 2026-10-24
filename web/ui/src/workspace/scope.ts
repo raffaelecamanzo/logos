@@ -115,10 +115,10 @@ export function withMemberScope(path: string): string {
 /** The decoded key of one raw `k=v` pair, or the raw key if it will not decode.
  *
  *  Percent escapes only. Form-urlencoding's `+`-for-space is deliberately NOT undone:
- *  the one key this is ever compared against is `repo`, which contains no space, so
- *  no `+`-bearing spelling could ever decode to it — undoing it would be a
- *  transformation that cannot change any answer. */
-function pairKey(pair: string): string {
+ *  the keys this is compared against are `repo` and, on the Security page, `scope`,
+ *  which contain no space, so no `+`-bearing spelling could ever decode to them —
+ *  undoing it would be a transformation that cannot change any answer. */
+export function pairKey(pair: string): string {
   const raw = pair.split("=", 1)[0];
   try {
     return decodeURIComponent(raw);

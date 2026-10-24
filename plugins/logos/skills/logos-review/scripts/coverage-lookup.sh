@@ -17,6 +17,11 @@
 #               resolved to another file (no test is ever credited to it)
 #   no-symbol   the entry names no single symbol (a chain, a cycle, a file rule)
 #
+# The symbol is asked by its `node_id` first, then by the bare name it ends in. A
+# debt unit whose id is an integer or null is known by its name only: when two
+# symbols of that name sit in its file nothing is credited. A group (`clone_group:`,
+# `duplicate_group:`) names no single symbol and reads `no-symbol`.
+#
 # Reach is by test-marked FILES. A unit test inside the offender's own file is not
 # seen, so such an entry reads file-only or uncovered, and the gate sends it to
 # `test-first`: the safe side.

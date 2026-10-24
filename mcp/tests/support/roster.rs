@@ -70,9 +70,10 @@ pub const QUALITY_TOOLS: &[&str] = &[
 pub const TEMPORAL_TOOLS: &[&str] = &["hotspots"];
 
 /// The coverage tools wired to the evidence store (S-051, CR-007, FR-CV-06/07;
-/// `coverage_refresh` added by S-140/CR-036, FR-CV-10).
+/// `coverage_refresh` added by S-140/CR-036, FR-CV-10; `coverage_run` by
+/// S-737/CR-234, FR-CV-14).
 pub const COVERAGE_TOOLS: &[&str] =
-    &["coverage_ingest", "coverage_status", "coverage_refresh"];
+    &["coverage_ingest", "coverage_status", "coverage_refresh", "coverage_run"];
 
 /// The security tools wired to the evidence store and the scanner orchestrator
 /// (S-667, CR-217, FR-SC-01/06/07/08).

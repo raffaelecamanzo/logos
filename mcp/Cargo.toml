@@ -55,3 +55,6 @@ tempfile = { workspace = true }
 [[bin]]
 name = "logos-mcp"
 path = "src/bin/logos-mcp.rs"
+
+[lints]
+workspace = true

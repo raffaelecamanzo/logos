@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import legacyEditor from "../../../../assets/config-editor.js?raw";
 import { dropEmptyTable, patch, readValue, tomlValue, type TomlFieldType } from "./toml.ts";
 
 describe("tomlValue — typed-field serialisation (S-191, FR-UI-12)", () => {
@@ -334,5 +335,68 @@ describe("readValue — the number and list shapes near the edges (S-730 review)
   it("leaves a leading-zero integer and a list missing its separator untyped", () => {
     expect(readValue("[p]\nk = 007\n", "p", "k", "int")).toEqual({ kind: "untyped", text: "007" });
     expect(readValue('[p]\nk = ["a" "b"]\n', "p", "k", "list")).toEqual({ kind: "untyped", text: '["a" "b"]' });
+  });
+});
+
+/*
+ * `escapeRe` builds a RegExp from a table or key name (HF-4). A static scanner flags
+ * `new RegExp(...)` over a non-literal; what makes it safe is that no regex
+ * metacharacter survives the escape, so the name matches only itself. Every
+ * character `RegExp` gives a meaning outside a character class is in the name below,
+ * and the lookalikes are the lines an unescaped metacharacter would also match.
+ */
+const METACHARS = ".*+?^${}()|[]\\";
+
+/** The legacy editor's `escapeRe`, read out of the shipped script. */
+const legacyEscapeRe = new Function(
+  `${/function escapeRe\(s\) \{[\s\S]*?\n {2}\}/.exec(legacyEditor)![0]}\nreturn escapeRe;`,
+)() as (s: string) => string;
+
+describe("escapeRe — a name full of regex metacharacters matches only itself (HF-4)", () => {
+  it("the legacy editor's escapeRe escapes every metacharacter and nothing else", () => {
+    for (const c of METACHARS) {
+      expect(legacyEscapeRe(c)).toBe("\\" + c);
+      // `new RegExp(escapeRe(c))` matches the character and nothing else.
+      expect(new RegExp("^" + legacyEscapeRe(c) + "$").test(c)).toBe(true);
+      expect(new RegExp("^" + legacyEscapeRe(c) + "$").test("x")).toBe(false);
+    }
+    expect(legacyEscapeRe("a-b_c/d")).toBe("a-b_c/d"); // not special outside a class
+  });
+
+  it("the SPA patcher addresses the one table whose name is made of metacharacters, and no lookalike", () => {
+    const table = "a.b*c+d?e^f$g{1}(h)|i[j]k\\l";
+    // The first header is the table name's own prefix, before an unescaped `|`; it must
+    // stay a different table from the real one.
+    const raw = `[a.b*c+d?e^f$g{1}(h)]\nk = "prefix"\n\n[aXb]\nk = "lookalike"\n\n[${table}]\nk = "real"\n\n[a.b]\nk = "other"\n`;
+    expect(readValue(raw, table, "k", "str")).toEqual({ kind: "typed", value: "real" });
+    expect(patch(raw, table, "k", "str", "b")).toBe(raw.replace('k = "real"', 'k = "b"'));
+    // `a.b` is a real table here, and `.` does not reach `aXb`.
+    expect(readValue(raw, "a.b", "k", "str")).toEqual({ kind: "typed", value: "other" });
+    expect(readValue("[aXb]\nk = 1\n", "a.b", "k", "int")).toEqual({ kind: "absent" });
+  });
+
+  it("the SPA patcher addresses the one key whose name is made of metacharacters, and no lookalike", () => {
+    const key = "a.b*c+d?e^f$g{1}(h)|i[j]k\\l";
+    const raw = `[t]\naXb = 1\na.b*c+d?e^f$g{1}(h) = 0\n${key} = 2\n`;
+    expect(readValue(raw, "t", key, "int")).toEqual({ kind: "typed", value: "2" });
+    expect(patch(raw, "t", key, "int", "9")).toBe(raw.replace(`${key} = 2`, `${key} = 9`));
+    // The key never matches a line it only resembles: `.` is not "any character",
+    // `*` is not a repeat, `(` does not open a group (it would throw unescaped).
+    expect(readValue("[t]\naXb = 1\n", "t", "a.b", "int")).toEqual({ kind: "absent" });
+    expect(readValue("[t]\nab = 1\n", "t", "a*b", "int")).toEqual({ kind: "absent" });
+    expect(() => patch("[t]\nk = 1\n", "t", "(", "int", "1")).not.toThrow();
+    expect(() => patch("[(]\nk = 1\n", "(", "k", "int", "2")).not.toThrow();
+  });
+});
+
+describe("the legacy editor builds its two patterns through escapeRe (HF-4)", () => {
+  // The legacy script is a classic script in an IIFE, so its `regionBounds` and `patch`
+  // cannot be called from here: what the suppressions rely on is that no table or key name
+  // reaches `new RegExp` unescaped, which is read off the source.
+  it("passes the table and the key through escapeRe at both `new RegExp` sites, and has no other", () => {
+    const sites = legacyEditor.split("\n").filter((l) => l.includes("new RegExp("));
+    expect(sites).toHaveLength(2);
+    expect(sites[0]).toContain("escapeRe(table)");
+    expect(sites[1]).toContain("escapeRe(key)");
   });
 });
