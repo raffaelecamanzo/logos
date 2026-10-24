@@ -17,7 +17,12 @@ import badgeStyles from "../../components/Badge.module.css";
 import statesStyles from "../../components/States.module.css";
 import { COVERAGE_TEXT, resolvedEdges } from "../../copy/coverage.copy.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
-import { DASHBOARD_TEXT, members, reachability } from "../../copy/workspaceDashboard.copy.ts";
+import {
+  DASHBOARD_TEXT,
+  members,
+  reachability,
+  workspaceSecurityWidget,
+} from "../../copy/workspaceDashboard.copy.ts";
 import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import { removeHiddenWidgetEntry } from "../../test/hiddenWidgets.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
@@ -29,6 +34,8 @@ import {
   oneDegraded,
   POPULATED_COVERAGE,
   reachabilityAnswer,
+  securityRow,
+  securityStateAnswer,
   statusInfo,
   stubAppApi,
   workspaceStatus,
@@ -40,7 +47,7 @@ import { EDGE_COLOR } from "../graph/graphModel.ts";
 import { ASSERTED_EDGE_TYPE } from "./serviceMapModel.ts";
 import { WorkspaceDashboardView } from "./WorkspaceDashboardView.tsx";
 
-/** The two reads this view issues, each with the card that read alone supplies.
+/** The reads this view issues, each with the card that read alone supplies.
  *
  *  The card is what makes the spec precise. When the INNER read fails the outer
  *  one has already succeeded, so the boards it fed are correctly still on screen
@@ -49,6 +56,7 @@ import { WorkspaceDashboardView } from "./WorkspaceDashboardView.tsx";
 const READS = [
   { path: "/api/v1/workspace/status", card: /^Members$/ },
   { path: "/api/v1/workspace/reachability", card: /^Cross-service reachability$/ },
+  { path: "/api/v1/workspace/security/summary", card: /^Security$/ },
 ] as const;
 
 /** The view under test, inside the provider that establishes workspace mode. */
@@ -338,11 +346,15 @@ describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
 });
 
 describe("the view is app-level and honest about its mode", () => {
-  it("reads the two unscoped fan-outs and carries no ?repo= from the shell", async () => {
+  it("reads the three unscoped fan-outs and carries no ?repo= from the shell", async () => {
     setScopedMember("api");
     const { calls } = await mount();
     const reads = calls().filter((u) => !u.startsWith("/api/v1/workspace/roster"));
-    expect(reads).toEqual(["/api/v1/workspace/status", "/api/v1/workspace/reachability"]);
+    expect(reads.sort()).toEqual([
+      "/api/v1/workspace/reachability",
+      "/api/v1/workspace/security/summary",
+      "/api/v1/workspace/status",
+    ]);
   });
 
   it("states honestly that a single-root serve is not a workspace", async () => {
@@ -399,11 +411,12 @@ describe("a failed read is stated, never papered over (NFR-RA-05)", () => {
   it("has a read to fail for every read this view issues", () => {
     // The floor: `it.each([])` registers zero tests silently, so an empty roster
     // would delete the coverage below rather than fail it.
-    expect(READS.length).toBe(2);
+    expect(READS.length).toBe(3);
   });
 
   it.each(READS)("states the failure when $path fails", async ({ path, card }) => {
-    // Both views wire TWO resources into nested `AsyncResource` frames. The
+    // The view wires THREE resources into `AsyncResource` frames (two nested, the
+    // Security one beside them). The
     // generic hook has its own specs, but those prove the primitive works in
     // isolation — not that THIS view passed the right resource into the right
     // frame. A swap or a shared reference would leave one failure invisible,
@@ -454,6 +467,7 @@ describe("the per-arm coverage board is hidden through the register (S-612, FR-U
 
 /** The dashboard's widgets, top to bottom. The per-arm board is hidden (S-612). */
 const DASHBOARD_WIDGETS = [
+  "Security",
   "Resolved cross-service edges",
   "Spec conformance (declared endpoints vs controllers)",
   "Coverage by intake",
@@ -727,4 +741,136 @@ describe("WorkspaceDashboardView — asserted reachability (S-709, FR-WS-41, BR-
     expect(w.textContent).not.toContain("declared link");
     expect(within(w).queryByText(DASHBOARD_TEXT.assertedLegend)).toBeNull();
   });
+});
+
+// ── S-790: the Security widget leads, one row per member ─────────────────────
+
+describe("the Security widget rolls security up per member (S-790, FR-UI-36, BR-56)", () => {
+  /** The Security widget, and its rows by member name. */
+  async function securityWidget(opts: AppStubOptions = {}) {
+    const { container, calls } = await mount(opts);
+    const w = widget(container, "Security");
+    const row = (member: string) => within(w).getByRole("row", { name: new RegExp(`^${member}\\b`) });
+    return { w, row, container, calls };
+  }
+
+  it("is the first widget on the Dashboard, after the workspace callout", async () => {
+    const { container } = await mount();
+    expect(expectOneWidgetStack(container).map(widgetTitle)[0]).toBe("Security");
+  });
+
+  it("carries the message standard and states the members with a fresh scan out of all, as the figure", async () => {
+    const { w } = await securityWidget();
+    expectWidgetCopy(w, workspaceSecurityWidget);
+    expect(figureText(w)).toBe(DASHBOARD_TEXT.securityFresh(1, 3));
+    expect(figureText(w)).toBe("1 of 3 members have a fresh scan");
+  });
+
+  it("gives each member its own row: scan state in words, the S-789 severity row, a link to its Security page", async () => {
+    const { w, row } = await securityWidget();
+    const rows = within(w).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["api", "orders", "web"]);
+
+    const api = row("api");
+    expect(within(api).getByRole("link", { name: "api" })).toHaveAttribute("href", "/security?repo=api");
+    expect(within(api).getByText("fresh")).toHaveClass(badgeStyles.green);
+    const counts = (r: HTMLElement) =>
+      Object.fromEntries(
+        [...r.querySelectorAll("[data-severity]")].map((li) => [li.getAttribute("data-severity"), li.querySelector(".num")?.textContent]),
+      );
+    expect(counts(api)).toEqual({ critical: "0", high: "1", medium: "1", unrated: "0", low: "0", info: "0" });
+    // A stale member still counts its findings, each by its own freshness, and says it is stale.
+    expect(within(row("orders")).getByText("stale")).toHaveClass(badgeStyles.orange);
+    expect(counts(row("orders")).low).toBe("3");
+  });
+
+  it("reads a member never scanned as never run, never as a row of zeros", async () => {
+    const { row } = await securityWidget();
+    const web = row("web");
+    expect(within(web).getAllByText("never run")).toHaveLength(2);
+    expect(web.querySelector("[data-severity-row]")).toBeNull();
+    expect(within(web).queryByText("0")).toBeNull();
+  });
+
+  it("names the command that resolves a never-run member, and only when one reads never run", async () => {
+    const { w } = await securityWidget();
+    expect(within(w).getByText(DASHBOARD_TEXT.securityNeverRunNote)).toHaveTextContent("logos security scan");
+    cleanup();
+    const scanned = await securityWidget({
+      security: securityStateAnswer([securityRow("api", "fresh", { high: 1 }), securityRow("orders", "stale", { low: 3 })]),
+    });
+    expect(within(scanned.w).queryByText(DASHBOARD_TEXT.securityNeverRunNote)).toBeNull();
+  });
+
+  it("renders an unopenable member as a degraded row with its name and reason, hiding no other member", async () => {
+    const dead = { member: "web", error: "unable to open database file" };
+    const { w, row } = await securityWidget({
+      security: securityStateAnswer(
+        [securityRow("api", "fresh", { high: 2 }), dead, securityRow("orders", "never_run", null)],
+        oneDegraded("web"),
+      ),
+    });
+    const web = row("web");
+    expect(web).toHaveTextContent("unable to open database file");
+    // Told apart twice over, as a never-run row is: the red badge and the
+    // findings cell, which reads "not read" rather than a count.
+    const notRead = within(web).getAllByText("not read");
+    expect(notRead).toHaveLength(2);
+    expect(notRead[0]).toHaveClass(badgeStyles.red);
+    expect(web.querySelector("[data-severity-row]")).toBeNull();
+    expect(within(web).getByRole("link", { name: "web" })).toHaveAttribute("href", "/security?repo=web");
+    expect(within(row("api")).getByText("fresh")).toBeInTheDocument();
+    expect(row("orders")).toBeInTheDocument();
+    // The figure says how many members could not be read, and which.
+    expect(figureText(w)).toContain(DASHBOARD_TEXT.securityUnread(1));
+    expect(figureText(w)).toContain("web");
+    expect(figureText(w)).toContain(DASHBOARD_TEXT.securityFresh(1, 3));
+  });
+
+  it("renders no figure summed, averaged or weighted across members (BR-56)", async () => {
+    const { w } = await securityWidget();
+    // The figure row is the one count of members and nothing else.
+    expect(figureText(w)).toBe("1 of 3 members have a fresh scan");
+    const text = readerText(w);
+    // The rows hold 1 + 1 + 3 findings: no element states their sum, and nothing
+    // announces itself as a workspace-wide total, mean, score or signal.
+    expect([...w.querySelectorAll("*")].filter((el) => el.children.length === 0 && el.textContent === "5")).toEqual([]);
+    expect(text).not.toMatch(/\b(total|mean|overall|workspace signal|weighted)\b/i);
+    expect(within(w).getByText(DASHBOARD_TEXT.securityPerMember)).toBeInTheDocument();
+  });
+
+  /** Fail `path` with a 500 and answer every other read normally. */
+  function failOne(path: string) {
+    stubAppApi();
+    const fetchOk = globalThis.fetch as unknown as (u: string) => Promise<Response>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        url.startsWith(path)
+          ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: "boom" }) } as Response)
+          : fetchOk(url),
+      ),
+    );
+  }
+
+  it("a failed security read is stated and hides no other widget", async () => {
+    failOne("/api/v1/workspace/security/summary");
+    render(tree());
+    expect(await screen.findByText(/workspace\/security\/summary.*failed/i)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Members$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Security$/ })).toBeNull();
+  });
+
+  it.each(["/api/v1/workspace/status", "/api/v1/workspace/reachability"])(
+    "a failed read of %s hides no Security row",
+    async (path) => {
+      failOne(path);
+      render(tree());
+      expect(await screen.findByText(new RegExp(`${path.replace("/api/v1/", "")}.*failed`, "i"))).toBeInTheDocument();
+      const w = (await screen.findByRole("heading", { name: /^Security$/ })).closest("section") as HTMLElement;
+      for (const member of ["api", "orders", "web"]) {
+        expect(within(w).getByRole("link", { name: member })).toBeInTheDocument();
+      }
+    },
+  );
 });

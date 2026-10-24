@@ -711,10 +711,15 @@ sec_scan() {
 # host's timeout. A file holding more than SEC_LIST_MAX bytes of findings is not
 # read either. Returns 1 when a listing was not read (its line recorded).
 SEC_LIST_MAX=131072
+# Every listing is the full one, test code included (FR-SC-28): a secret added to a
+# test file blocks as one in `src/` does. `--scope all` where the binary has the
+# filter; a 1.20.x binary lists everything without it and rejects the flag.
 sec_list() {
     local fn="$1" p
+    # The version is read once per run: the listing before the scan and the one after it ask alike.
+    [ -n "${SCOPE_READ:-}" ] || { logos_scope_args "$BIN"; SCOPE_READ=1; }
     for p in "${SEC_PATHS[@]}"; do
-        sec_run "security findings" security findings --json --suppression active --path "$p" || return 1
+        sec_run "security findings" security findings --json --suppression active ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"} --path "$p" || return 1
         if [ "${#RB_OUT}" -gt "$SEC_LIST_MAX" ]; then
             leg_unmeasured "security not measured: $p holds more stored findings than the hook reads (${#RB_OUT} bytes)"
             return 1

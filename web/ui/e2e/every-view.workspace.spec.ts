@@ -3,12 +3,13 @@
 // workspace sidebar adds, read in a real browser over the two-member fixture.
 // The member views are the project spec's (`every-view.project.spec.ts`).
 //
-// "Every" is the sidebar's own list (`WORKSPACE_NAV_ITEMS` in src/nav.ts) plus the
-// app-level views the served build's active extensions add (`GET /api/v1/extensions`,
-// S-642): the first test fails until a new workspace view has a case here.
+// "Every" is the sidebar's own app-scoped list (`navItemsFor(true)` in src/nav.ts — the
+// registry less an entry no view owns, S-788) plus the app-level views the served
+// build's active extensions add (`GET /api/v1/extensions`, S-642): the first test
+// fails until a new workspace view has a case here.
 import { expect, test } from "@playwright/test";
 
-import { WORKSPACE_NAV_ITEMS } from "../src/nav.ts";
+import { navItemsFor } from "../src/nav.ts";
 import { expectWidgetStackLayout } from "./layout.ts";
 import { composesNoExtension, extensionNavPaths, layoutCase, type ViewCase } from "./views.ts";
 
@@ -20,13 +21,15 @@ const CASES: Record<string, ViewCase> = {
   "/workspace": { ready: "Cross-service bindings" },
   // S-674: the per-member roll-up; `api` has a stored report, `web` none.
   "/workspace-security": { ready: "Members" },
+  // S-740: the per-member coverage roll-up; neither fixture member has a report.
+  "/workspace-coverage": { ready: "Members" },
   "/workspace-statistics": { ready: "Estimated value" },
   "/workspace-config": { ready: "Workspace manifest" },
 };
 
 test("a layout case exists for every view the workspace sidebar adds", async ({ request }) => {
   const composed = [
-    ...WORKSPACE_NAV_ITEMS.map((item) => item.path),
+    ...navItemsFor(true).filter((item) => item.scope === "app").map((item) => item.path),
     ...(await extensionNavPaths(request, "app")),
   ];
   expect(Object.keys(CASES).sort()).toEqual(composed.sort());

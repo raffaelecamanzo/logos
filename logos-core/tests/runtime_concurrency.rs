@@ -125,6 +125,7 @@ fn engine_survives_a_failed_write_batch_and_stays_consistent() {
 }
 
 #[test]
+#[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
 fn cold_start_to_ready_engine_is_within_pe05_budget() {
     // NFR-PE-05: cold start completes in ≤ 600 ms in total before serving the
     // first request. This measures the *whole* ready-engine path through the

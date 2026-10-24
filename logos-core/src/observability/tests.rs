@@ -403,8 +403,10 @@ fn a_full_queue_drops_instead_of_blocking() {
     for i in 0..10_000 {
         sink.record(record("search", i, true, NOW));
     }
+    // A blocking `record` would hang the loop above, so under coverage the
+    // contract is still held; only the wall-clock bound is skipped.
     assert!(
-        start.elapsed() < Duration::from_millis(500),
+        cfg!(coverage) || start.elapsed() < Duration::from_millis(500),
         "10k records against a stalled writer must return ~instantly, took {:?}",
         start.elapsed()
     );

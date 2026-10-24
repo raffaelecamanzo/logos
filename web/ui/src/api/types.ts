@@ -336,6 +336,21 @@ export interface GateResult {
   /** Under a `rules.toml [review]` table: the aggregate judged by its
    *  `drift_budget` (FR-GV-25), as `gate` judges it. Absent without the table. */
   drift?: SignalDrift;
+  /** Under a `rules.toml [review]` table: each distributional dimension in
+   *  decline over the snapshots up to the one judged (FR-GV-27, S-785).
+   *  `warnings` carries each entry's CLI spelling; the view renders these
+   *  fields, never that string. Absent without the table. */
+  trend?: DimensionTrend[];
+}
+
+/** A dimension in decline (mirrors `DimensionTrend`, FR-GV-27). */
+export interface DimensionTrend {
+  /** The canonical metric spelling: `equality`, `modularity`, `acyclicity`, `depth`. */
+  dimension: string;
+  /** Its `window + 1` normalised values, oldest first, exact. */
+  values: number[];
+  /** The `review.trend_window` the run filled. */
+  window: number;
 }
 
 /** The signal's movement judged by a `drift_budget` (mirrors `SignalDrift`). */
@@ -553,6 +568,9 @@ export interface OverviewModel {
    *  (CR-079). Replaces the retired `gaps`/`cross`/`hotspots` roll-ups. */
   rules: RulesReport;
   stats: StatsInfo;
+  /** The Security widget's data: the stored summary, or the fault that kept it
+   *  from being read (S-789). */
+  security: OverviewSecurity;
 }
 
 /** A normalized + raw metric pair (mirrors `MetricValue`). */
@@ -811,6 +829,8 @@ export interface PathFindings {
   highest: SecuritySeverity | null;
   /** Unsuppressed findings the file's later change made stale — labelled, never counted. */
   stale: number;
+  /** Fresh, unsuppressed findings in test code (FR-SC-28, S-795): "+N test", never part of `count`. */
+  test: number;
 }
 
 /** The hotspot ranking read-model (mirrors `HotspotReport`, [FR-GH-06]). */
@@ -911,6 +931,58 @@ export interface CoverageStatus {
   head_stale: boolean;
   /** A one-line refresh prompt when `head_stale`; `null` otherwise. */
   staleness_prompt: string | null;
+  /** The coverage runner's state (S-737): each tool's state and the execution
+   *  consent. Absent on the Dashboard's read, which probes no tool. */
+  runner?: CoverageRunnerStatus;
+}
+
+/** The coverage runner on the status read-model (mirrors `CoverageRunnerStatus`, S-737). */
+export interface CoverageRunnerStatus {
+  consent: CoverageConsentStatus;
+  /** Registry order, then `custom` when a `refresh_cmd` is configured. */
+  tools: CoverageToolStatus[];
+}
+
+/** The project's coverage execution consent (mirrors `CoverageConsentStatus`, FR-CV-13). */
+export interface CoverageConsentStatus {
+  consented: string[];
+  /** What the next full run would ask consent for. */
+  pending: string[];
+  /** The consented custom command's text changed since. */
+  command_changed: boolean;
+}
+
+/** One coverage tool's one state (mirrors `CoverageToolStatus`, FR-CV-11). */
+export interface CoverageToolStatus {
+  tool: string;
+  state:
+    | "not_applicable"
+    | "disabled"
+    | "not_installed"
+    | "never_run"
+    | "ran"
+    | "tests_failed"
+    | "failed"
+    | "timed_out"
+    | "cancelled";
+  version?: string;
+  origin?: "override" | "wrapper" | "project" | "path" | "managed";
+  hint?: string;
+  /** What Logos can do for a tool not installed, on consent (S-750): install a
+   *  managed tool, or add its missing coverage dev dependency. */
+  offer?: "install" | "add_dependency";
+  last_run: CoverageLastRun | null;
+}
+
+/** How a tool's last run ended (mirrors `CoverageLastRun`, S-737). */
+export interface CoverageLastRun {
+  outcome: "ran" | "tests_failed" | "failed" | "timed_out" | "cancelled";
+  exit_code: number | null;
+  head_sha: string | null;
+  /** Unix seconds. */
+  finished_at: number;
+  /** Root-relative log of a failed run's whole bounded output. */
+  log: string | null;
 }
 
 /** `GET /api/v1/files` bundle (mirrors `FilesModel`): the ranked hotspot board
@@ -2692,7 +2764,7 @@ export interface WorkspaceStatistics {
 // The wire mirrors of `logos-core/src/security/{surface,context,page,gate}.rs` and
 // `history/security/{owasp,suppress}.rs`. A stored finding carries no source
 // snippet (ADR-79 §2), and a secret-class one is stored with a fixed, redacted
-// message — the page still renders `[redacted]` for it.
+// message — the page explains the redaction in words instead of showing it.
 
 /** A finding's normalised severity (mirrors `Severity`). `unrated`: the report
  *  gave no rating (S-768); a threshold gates it as `medium`. */
@@ -2741,6 +2813,11 @@ export type SecurityScanState =
  *  `coverage_note` saying why. */
 export type SecurityIgnoredPaths = "excluded" | "scanned";
 
+/** The way a `scanned` run read the project's ignored directories (mirrors
+ *  `CoverageKind`): no exclusion proven for it, the committed history, the whole
+ *  project because its target list could not be passed, or all but some of them. */
+export type SecurityCoverageKind = "unproven" | "history" | "whole_project" | "partial";
+
 /** The coverage fact a whole-project run carries (mirrors `Coverage`, flattened):
  *  absent when the scanner did not run, or ran only on the paths a scoped scan named.
  *  On a status row it forecasts a whole-project scan of the tree as it is now, and is
@@ -2748,6 +2825,10 @@ export type SecurityIgnoredPaths = "excluded" | "scanned";
  *  config. */
 export interface SecurityCoverage {
   ignored_paths?: SecurityIgnoredPaths;
+  /** Which way a `scanned` run read them (mirrors `CoverageKind`, S-792): the
+   *  page maps this to a marker, never the note's text. Present exactly when
+   *  `coverage_note` is. */
+  coverage_kind?: SecurityCoverageKind;
   coverage_note?: string;
 }
 
@@ -2771,7 +2852,14 @@ export type SecurityScannerStatus = SecurityScanState & SecurityCoverage & {
   /** Why that scan failed, in one masked line read from the log (S-769); absent
    *  without a failure log. */
   last_failure_cause?: string;
+  /** Dependency-Check's row alone (FR-SC-27, S-794): whether it has an NVD API
+   *  key — from `NVD_API_KEY` where `serve` runs, or the user's own `extra_args`
+   *  — never the key (mirrors `NvdKeyState`). */
+  nvd_api_key?: SecurityNvdKeyState;
 };
+
+/** Whether Dependency-Check has an NVD API key (mirrors `NvdKeyState`). */
+export type SecurityNvdKeyState = "set" | "not_set";
 
 /** `security status` (mirrors `SecurityStatus`). */
 export interface SecurityStatus {
@@ -2850,7 +2938,7 @@ export interface SecurityEntryStatus {
   orphaned: boolean;
   /** The findings it suppresses; `0` when expired or orphaned. */
   suppressed: number;
-  /** For an entry orphaned by a finding's identity change, the fingerprint it should name. */
+  /** For an entry written under a key a finding had before a re-key — it still applies — the fingerprint it should name. */
   should_name: string | null;
 }
 
@@ -2873,7 +2961,7 @@ export interface SecurityFinding {
   cwes: string[];
   /** The rule message — or, when `redacted`, fixed text the page never shows. */
   message: string;
-  /** A secret-class finding: its message reads `[redacted]` on the page. */
+  /** A secret-class finding: the page explains the redaction in words and shows no message. */
   redacted: boolean;
   /** `historical`: a secret found only in history, anchored to its commit and
    *  bound to no file of today's tree (S-767). */
@@ -2897,8 +2985,19 @@ export interface SecurityFinding {
   owasp: string[];
   unclassified: SecurityUnclassified | null;
   suppression: SecuritySuppression | null;
+  /** The finding's code scope, computed when it is read (FR-SC-28, S-795). */
+  code_scope: SecurityCodeScope;
+  /** Why it reads `test`; `null` exactly when it is `production`. */
+  code_scope_reason: SecurityScopeReason | null;
   context: SecurityFindingContext;
 }
+
+/** Whether a finding sits in shipped or in test code (mirrors `CodeScope`). */
+export type SecurityCodeScope = "production" | "test";
+
+/** Why a finding reads `test` (mirrors `ScopeReason`): its enclosing symbol is
+ *  test code, or its location matches the security path rule. */
+export type SecurityScopeReason = "test_symbol" | "test_path";
 
 /** The commit a history-mode finding is anchored to (mirrors `CommitAnchor`). */
 export interface SecurityCommitAnchor {
@@ -2919,6 +3018,10 @@ export interface SecurityCategoryCoverage {
   scanners: string[];
   enabled_scanners: string[];
   state: { state: "not_covered" } | { state: "covered"; findings: number };
+  /** The part of a covered category's `findings` in production code, suppressed
+   *  ones included: what the page's OWASP list states under its default scope.
+   *  Absent for a category not covered. */
+  production_findings?: number;
 }
 
 /** `security findings` (mirrors `SecurityFindings`). */
@@ -3093,6 +3196,8 @@ export interface SecurityExcluded {
   not_fresh: number;
   /** Suppressed by a current entry, whatever their file's state. */
   suppressed: number;
+  /** Fresh, unsuppressed findings in test code (FR-SC-28, S-795): "N more in test code". */
+  test: number;
 }
 
 /** Every stored finding, counted or left out (mirrors `FindingTally`). */
@@ -3156,6 +3261,78 @@ export interface WorkspaceSecurity {
 /** `GET /api/v1/workspace/security` (mirrors `WorkspaceSecurityAnswer`). */
 export interface WorkspaceSecurityAnswer extends AnswerCompleteness {
   security: WorkspaceSecurity;
+}
+
+// ── Workspace Dashboard security (mirrors `WorkspaceSecurityStateAnswer`, S-790) ─
+// The stored-only read behind the Workspace Dashboard's Security widget: each
+// member's own scan state and counts — the figures `workspace/security` states
+// for the same stores — and how many members have a fresh scan. No figure is
+// summed, averaged or weighted across members (BR-56).
+
+/** One member's row (mirrors `MemberSecurityState`). */
+export interface MemberSecurityState {
+  scan: MemberSecurityScan;
+  /** Fresh, unsuppressed production findings by severity; `null` only for a
+   *  member never scanned: nothing to count from, which is not 0 (BR-66). */
+  findings: SecuritySeverityCounts | null;
+}
+
+/** The Dashboard read (mirrors `WorkspaceSecurityState`). */
+export interface WorkspaceSecurityState {
+  /** One row per member, roster order; an unread member carries `error`. */
+  members: MemberResult<MemberSecurityState>[];
+  members_total: number;
+  members_read: number;
+  /** Members whose scan is fresh at HEAD: "N of `members_total`". */
+  members_fresh: number;
+}
+
+/** `GET /api/v1/workspace/security/summary` (mirrors `WorkspaceSecurityStateAnswer`). */
+export interface WorkspaceSecurityStateAnswer extends AnswerCompleteness {
+  security: WorkspaceSecurityState;
+}
+
+// ── Workspace coverage (mirrors `WorkspaceCoverageAnswer`, S-740, FR-CV-16) ────
+// Each member's coverage read as its own Coverage page reads it, narrowed to one
+// row, and how many members have fresh coverage. No figure is summed, averaged
+// or weighted across members (BR-56).
+
+/** Whether a member has coverage evidence (mirrors `MemberCoverageState`). */
+export type MemberCoverageState = "never_run" | "unmatched" | "stale" | "fresh";
+
+/** One member's row (mirrors `MemberCoverage`). */
+export interface MemberCoverage {
+  coverage: MemberCoverageState;
+  /** Covered ÷ instrumented lines over the fresh files, basis points; `null`
+   *  (`n/a`, FR-CV-06) when no line of a fresh file is covered, and for a member
+   *  never run — never 0 %. */
+  overall_coverage_bp: number | null;
+  fresh_files: number;
+  total_files: number;
+  /** Tools reading `ran` or `tests_failed`. */
+  tools_ran: number;
+  /** Tools reading `failed` or `timed_out`. */
+  tools_failed: number;
+  /** Tools that apply and are not disabled: the two counts' denominator. */
+  tools_applicable: number;
+  /** When any tool's last run ended, Unix seconds; `null` before any run. */
+  last_run: number | null;
+}
+
+/** The roll-up (mirrors `WorkspaceCoverage`). */
+export interface WorkspaceCoverage {
+  /** One row per member, roster order; an unread member carries `error`. */
+  members: MemberResult<MemberCoverage>[];
+  members_total: number;
+  members_read: number;
+  /** Members with fresh coverage: "m of `members_total`". */
+  members_fresh: number;
+  members_never_run: number;
+}
+
+/** `GET /api/v1/workspace/coverage` (mirrors `WorkspaceCoverageAnswer`). */
+export interface WorkspaceCoverageAnswer extends AnswerCompleteness {
+  coverage: WorkspaceCoverage;
 }
 
 // ── Scanner install (mirrors `tools::surface::{InstallPlan, InstallStep,
@@ -3253,3 +3430,227 @@ export interface SecurityInstallAsk {
   accept_licences?: string[];
   scan_consent?: string[];
 }
+
+// ── The Dashboard's Security widget (S-789, FR-UI-09) ──────────────────────────
+
+/** The stored security state the Dashboard widget states (mirrors
+ *  `logos_core::security::SecuritySummary`): read with no scanner started, not
+ *  even a version probe. Every count is the Security page's own (S-760, S-795). */
+export interface SecuritySummary {
+  /** Whether a report is stored, and whether any is fresh at HEAD. */
+  scan: MemberSecurityScan;
+  /** The counted and left-out findings; `null` when no report is stored —
+   *  nothing to count from, never a count of zero (BR-66). */
+  tally: SecurityFindingTally | null;
+  /** When the newest stored report was ingested, unix seconds; `null` with none. */
+  newest_scan_at: number | null;
+  /** Scanners whose last scan failed. */
+  scanners_failed: number;
+  /** Scanners that could have run: the denominator of `scanners_failed`. */
+  scanners_total: number;
+  /** The project's recorded scan consent. */
+  consent: { consented: string[]; pending: string[] };
+  /** `null` without a `rules.toml [security]` table. */
+  gate: SecurityGateBand | null;
+}
+
+/** `OverviewModel.security` (mirrors `api_v1::OverviewSecurity`): exactly one of
+ *  `summary` and `error` is set — a read fault is stated, never zero findings. */
+export interface OverviewSecurity {
+  summary: SecuritySummary | null;
+  error: string | null;
+}
+
+// ── The Coverage page's Run coverage job (S-739, FR-CV-15, FR-CV-13) ───────────
+//
+// The wire of `GET|POST /api/v1/coverage/run` and its cancel (S-738), pinned by
+// `web/tests/coverage_job.rs`: the job is the same `JobSnapshot` the scan job
+// is, its events are `logos_core::coverage::RunProgress`.
+
+/** One ingested report of a tool's run (mirrors `IngestSummary`, the fields the
+ *  page reads). */
+export interface CoverageIngestSummary {
+  format: string;
+  head_sha: string;
+  snapshot_id: number;
+  /** Report files that bound to an indexed file. */
+  matched_files: number;
+  /** Report paths that bound to none, or to more than one. */
+  unmatched: string[];
+  instrumented_lines: number;
+  covered_lines: number;
+}
+
+/** How one tool's part in a run ended (mirrors `ToolOutcome`, tag `outcome`). */
+export type CoverageToolOutcome =
+  | { outcome: "ran"; reports: string[]; ingests: CoverageIngestSummary[] }
+  | { outcome: "tests_failed"; exit_code: number | null; reports: string[]; ingests: CoverageIngestSummary[] }
+  | { outcome: "failed"; exit_code: number | null; stderr: string; log: string | null; ingests?: CoverageIngestSummary[] }
+  | { outcome: "timed_out"; after_secs: number }
+  | { outcome: "cancelled" }
+  | { outcome: "not_applicable" }
+  | { outcome: "disabled" }
+  | { outcome: "not_installed"; hint?: string };
+
+/** One tool's part in a run (mirrors `ToolRun`: the outcome flattened in). */
+export type CoverageToolRun = { tool: string; version?: string } & CoverageToolOutcome;
+
+/** What a run returns (mirrors `CoverageRunSummary`). */
+export interface CoverageRunSummary {
+  head_sha: string | null;
+  consent_recorded: string[];
+  /** One per registered tool in registry order — `not_applicable` ones
+   *  included — then `custom` when a `refresh_cmd` is configured. */
+  tools: CoverageToolRun[];
+  snapshot_id: number | null;
+}
+
+/** One step of a run as it happens (mirrors `RunProgress`, tag `phase`). */
+export type CoverageRunProgress =
+  | { phase: "started"; tool: string }
+  | ({ phase: "finished" } & CoverageToolRun)
+  | CoveragePrepareProgress;
+
+/** One replayed job event (mirrors `JobEvent`). */
+export interface CoverageJobEvent {
+  seq: number;
+  at_ms: number;
+  event: CoverageRunProgress;
+}
+
+/** The member's coverage job (mirrors `JobSnapshot`). */
+export interface CoverageJob {
+  id: number;
+  kind: "coverage-run";
+  state: ScanJobState;
+  elapsed_ms: number;
+  /** Empty in the event stream's `end`: the steps came before it. */
+  events: CoverageJobEvent[];
+  events_dropped: number;
+  /** Once `completed`. */
+  result: CoverageRunSummary | null;
+  /** Once `failed`. */
+  error: string | null;
+}
+
+/** `GET /api/v1/coverage/run`, the cancel's answer and the stream's `end`:
+ *  `null` when no run ran in this serve. */
+export interface CoverageJobModel {
+  job: CoverageJob | null;
+}
+
+/** `POST /api/v1/coverage/run` (mirrors `jobs::Started`). */
+export interface CoverageJobStarted {
+  /** A run was already going: this start joined it. */
+  joined: boolean;
+  job: CoverageJob;
+}
+
+/** What a run would ask consent for (mirrors `PendingConsent`). */
+export interface CoveragePendingConsent {
+  /** The tools the consent does not cover yet; `custom` for the custom command. */
+  tools: string[];
+  /** The custom command's exact text, when it is pending: a start echoes it back. */
+  refresh_cmd: string | null;
+  /** A custom command was consented to before and its text changed since. */
+  command_changed: boolean;
+}
+
+/** The `409` of a start the consent does not cover (mirrors
+ *  `api_v1::CoverageConsentRequired`). */
+export interface CoverageConsentRequired {
+  error: string;
+  consent_required: CoveragePendingConsent;
+  /** The custom command as the dialog displays it: control and bidi
+   *  characters escaped, as the terminal consent shows it. */
+  refresh_cmd_shown: string | null;
+}
+
+/** What `POST /api/v1/coverage/run` reads: the dialog's accepted tools, and the
+ *  custom command's exact text when it was shown. */
+export interface CoverageRunAsk {
+  consent: string[];
+  refresh_cmd?: string;
+}
+
+// ── The Coverage page's Install and Add dependency (S-750, FR-CV-17, FR-CV-18) ──
+//
+// `POST /api/v1/coverage/install` and `/dependency` start the member's
+// `coverage-run` job with the install or the addition first, pinned by
+// `web/tests/coverage_install_job.rs`. Their `409` is Run coverage's question
+// with the install lines and the dependency beside it; the job is followed and
+// cancelled on the run's own routes, its first steps the ones below.
+
+/** One install line of the dialog (mirrors `tools::surface::CoverageInstallLine`). */
+export type CoverageInstallLine =
+  | { line: "tool"; tool: string; version: string; source: string; size: number; text: string }
+  | { line: "toolchain"; command: string; text: string };
+
+/** A dependency the dialog asks to add (mirrors `coverage::job::DependencyAsk`). */
+export interface CoverageDependencyAsk {
+  tool: string;
+  package: string;
+  manager: string;
+  /** The exact command; an accepting start echoes it. */
+  command: string;
+  /** The files it changes, relative to the project root. */
+  files: string[];
+}
+
+/** The `409` of an Install or Add dependency start with a line unanswered
+ *  (mirrors `api_v1::CoveragePrepareRequired`). */
+export interface CoveragePrepareRequired extends CoverageConsentRequired {
+  install: CoverageInstallLine[];
+  dependencies: CoverageDependencyAsk[];
+}
+
+/** What the two starts read: Run coverage's answer, the tool whose dependency
+ *  to add (that route only), and the install lines and commands accepted. */
+export interface CoveragePrepareAsk extends CoverageRunAsk {
+  tool?: string;
+  install?: string[];
+  dependency?: string[];
+}
+
+/** How one tool's install ended (mirrors `tools::InstallOutcome`, tag `outcome`). */
+export type CoverageInstallOutcome =
+  | { outcome: "installed"; binary: string }
+  | { outcome: "already_present"; binary: string }
+  | { outcome: "unavailable"; reason: string }
+  | { outcome: "failed"; stage: string; reason: string }
+  | { outcome: "cancelled" };
+
+/** How the `llvm-tools-preview` step ended (mirrors `tools::ComponentOutcome`). */
+export type CoverageComponentOutcome =
+  | { outcome: "already_present" }
+  | { outcome: "added" }
+  | { outcome: "failed"; reason: string }
+  | { outcome: "no_rustup"; reason: string; command: string }
+  | { outcome: "cancelled" };
+
+/** How one dev-dependency addition ended (mirrors `coverage::DependencyRun`). */
+export type CoverageDependencyRun = {
+  tool: string;
+  package: string;
+  manager?: string;
+  command?: string;
+  files?: string[];
+  /** What an addition that did not end added put back as it was. */
+  restored?: string[];
+} & (
+  | { outcome: "pending"; consent: string }
+  | { outcome: "refused"; reason: string; hand_command: string }
+  | { outcome: "added" }
+  | { outcome: "failed"; exit_code: number | null; stderr: string; log: string | null }
+  | { outcome: "timed_out"; after_secs: number }
+  | { outcome: "cancelled" }
+);
+
+/** The steps a prepared run reports before its tools run. */
+export type CoveragePrepareProgress =
+  | { phase: "install_started"; tool: string; version: string }
+  | ({ phase: "install_finished"; tool: string; version: string } & CoverageInstallOutcome)
+  | { phase: "component_started"; component: string; command: string }
+  | ({ phase: "component_finished"; component: string } & CoverageComponentOutcome)
+  | { phase: "dependency_started"; tool: string; command: string }
+  | ({ phase: "dependency_finished" } & CoverageDependencyRun);

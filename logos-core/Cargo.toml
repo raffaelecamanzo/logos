@@ -368,3 +368,6 @@ petgraph = { workspace = true }
 # telemetry.db event rows directly — proving the store survives a logos.db wipe
 # + reindex (NFR-OO-05) without widening the public stats surface.
 rusqlite = { workspace = true }
+
+[lints]
+workspace = true

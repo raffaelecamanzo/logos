@@ -76,6 +76,7 @@ fn project() -> Project {
         user_dir: Some(user),
         search_path: Some(bin.into_os_string()),
         tools_dir: None,
+        nvd_api_key: None,
     };
     let p = Project { _tmp: tmp, root, env };
     let engine = p.engine();
@@ -127,6 +128,7 @@ fn inline_project(files: &[(&str, &str)], findings: &[(&str, i64)]) -> Project {
         user_dir: Some(user),
         search_path: Some(bin.into_os_string()),
         tools_dir: None,
+        nvd_api_key: None,
     };
     let p = Project { _tmp: tmp, root, env };
     let engine = p.engine();
@@ -293,7 +295,7 @@ fn a_finding_whose_file_changed_since_the_scan_is_never_bound() {
 #[test]
 fn a_filtered_listing_carries_each_kept_findings_own_context() {
     let p = project();
-    let filter = FindingsFilter::parse(None, None, None, Some("scripts"), None, None).unwrap();
+    let filter = FindingsFilter::parse(None, None, None, Some("scripts"), None, None, None).unwrap();
     let listed = serde_json::to_value(p.engine().security_findings(&filter).unwrap()).unwrap();
 
     let kept = listed["findings"].as_array().unwrap();
@@ -455,7 +457,7 @@ fn a_listing_where_nothing_binds_still_says_why_each_finding_is_unbound() {
     // Only the lockfile finding is kept: no listed finding has an indexed
     // file to bind in.
     let p = project();
-    let filter = FindingsFilter::parse(None, Some("osv-scanner"), None, None, None, None).unwrap();
+    let filter = FindingsFilter::parse(None, Some("osv-scanner"), None, None, None, None, None).unwrap();
     let listed = serde_json::to_value(p.engine().security_findings(&filter).unwrap()).unwrap();
 
     let kept = listed["findings"].as_array().unwrap();
@@ -464,4 +466,78 @@ fn a_listing_where_nothing_binds_still_says_why_each_finding_is_unbound() {
     assert_eq!(context["enclosing"]["unbound_because"], "not_indexed");
     assert_eq!(context["line"], 7);
     assert!(context["resolution"].is_null());
+}
+
+// ── Code scope by the graph (S-795, FR-SC-28) ────────────────────────────────
+
+/// `src/keys.rs`: a production function at line 2 and, from line 6, an inline
+/// test module whose `#[test]` fn holds a fake key at line 9 — the shape of
+/// this repository's `mask.rs:214`.
+const KEYS_RS: &str = r#"pub fn mask(secret: &str) -> String {
+    secret.chars().map(|_| '*').collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_key_is_masked() {
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        assert_eq!(super::mask(key).len(), key.len());
+    }
+}
+"#;
+
+/// The scope of the listed finding at `path:line`, by `report_path`.
+fn scope_at(findings: &Value, path: &str, line: i64) -> (String, Value) {
+    let f = at(findings, path, line);
+    (f["code_scope"].as_str().unwrap().to_string(), f["code_scope_reason"].clone())
+}
+
+/// The engine classifies each finding by its enclosing node in this graph,
+/// else by the security path rule: a key in a `#[test]` fn in `src/` reads
+/// `test_symbol`; the production fn beside it in the same file reads
+/// production; a fixture Dockerfile and an OSV lockfile named by its
+/// absolute path under the root read `test_path`. The default listing hides
+/// the test-code ones and says so, and `security status` counts production
+/// alone and states the rest.
+#[test]
+fn the_engine_reads_each_findings_code_scope_from_its_graph_and_its_path() {
+    let p = inline_project(
+        &[("src/keys.rs", KEYS_RS), ("tests/fixtures/app/Dockerfile", "FROM rust\nUSER root\n"), ("Cargo.toml", "[package]\nname = \"keys\"\n")],
+        &[("src/keys.rs", 2), ("src/keys.rs", 9), ("tests/fixtures/app/Dockerfile", 2)],
+    );
+    let lockfile = p.root.join("tests/fixtures/app/Cargo.lock");
+    fs::write(&lockfile, "version = 3\n").unwrap();
+    let osv = p.root.parent().unwrap().join("osv.sarif");
+    let uri = format!("file://{}", lockfile.display());
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": [{"id": "GHSA-xxxx"}]}},
+        "results": [{"ruleId": "GHSA-xxxx", "message": {"text": "a vulnerable package"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}, "region": {"startLine": 1}}}]}]
+    }]});
+    fs::write(&osv, sarif.to_string()).unwrap();
+    p.engine().security_ingest(&osv).expect("the osv report ingests");
+
+    let all = FindingsFilter::parse(None, None, None, None, None, None, Some("all")).unwrap();
+    let listed = serde_json::to_value(p.engine().security_findings(&all).unwrap()).unwrap();
+    let production = ("production".to_string(), Value::Null);
+    assert_eq!(scope_at(&listed, "src/keys.rs", 2), production, "outside the test module");
+    assert_eq!(scope_at(&listed, "src/keys.rs", 9), ("test".to_string(), Value::from("test_symbol")), "{listed}");
+    assert_eq!(scope_at(&listed, "tests/fixtures/app/Dockerfile", 2), ("test".to_string(), Value::from("test_path")));
+    let osv_row = listed["findings"].as_array().unwrap().iter().find(|f| f["scanner_name"] == "osv-scanner").unwrap();
+    assert_eq!((osv_row["code_scope"].as_str(), osv_row["code_scope_reason"].as_str()), (Some("test"), Some("test_path")), "{osv_row}");
+
+    let default = serde_json::to_value(p.engine().security_findings(&FindingsFilter::parse(None, None, None, None, None, None, None).unwrap()).unwrap()).unwrap();
+    let kept: Vec<i64> = default["findings"].as_array().unwrap().iter().map(|f| f["start_line"].as_i64().unwrap()).collect();
+    assert_eq!((kept, default["hidden_by_scope"].as_u64()), (vec![2], Some(3)), "{default}");
+
+    let status = serde_json::to_value(p.engine().security_status().unwrap()).unwrap();
+    let semgrep = status["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == "semgrep").unwrap();
+    assert_eq!((semgrep["findings"].as_u64(), semgrep["test"].as_u64()), (Some(1), Some(2)), "{semgrep}");
+
+    // Files & Risk classifies by the same graph: the production file with an
+    // inline test module counts its production finding alone.
+    let board = serde_json::to_value(p.engine().hotspots_with_findings(None, false, false, false).unwrap()).unwrap();
+    let keys = board["files"].as_array().unwrap().iter().find(|h| h["path"] == "src/keys.rs").expect("src/keys.rs is ranked");
+    assert_eq!((keys["findings"]["count"].as_u64(), keys["findings"]["test"].as_u64()), (Some(1), Some(1)), "{keys}");
 }

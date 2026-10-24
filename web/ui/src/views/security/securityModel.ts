@@ -9,21 +9,38 @@
  *   `logos-core/src/security/surface.rs`): least severity, scanner by registry or
  *   driver name, category by full id or number, a file or a directory holding it,
  *   and suppression — plus route reachability, which FR-SC-08 lists and each
- *   finding's graph context already carries. A `?path=` deep link (Files & Risk, S-671) seeds the path.
+ *   finding's graph context already carries. The code scope is the one clause
+ *   `keeps` here folds in that the server applies in a pass of its own (so it can
+ *   count `hidden_by_scope`; `hiddenByScope` below counts the same way). A `?path=` deep link (Files & Risk, S-671) seeds the path.
  * - Absent states: each scanner state and each not-covered category resolves to
  *   the command that fixes it (`copy/security.copy.ts`).
- * - Redaction: a secret-class message is never rendered, whatever text it holds.
+ * - Redaction: a secret-class message is never rendered, whatever text it holds;
+ *   the page says why, and where the finding is (S-796).
+ * - Code scope (FR-SC-28, S-796): the payload lists every finding with its
+ *   `code_scope`; the Production · Test code · All control narrows it from
+ *   memory, is kept in the URL's `?scope=`, and the OWASP counts follow it.
  * - Triage: "everything under this path" starts from the finding's directory
  *   (S-770), and an entry's selector keys the rows an unsuppress is in flight for.
+ * - Live state (S-792, CR-245): the job the page already polls says which
+ *   scanner runs and which tool installs — `jobProgress` reads its events, and
+ *   `liveStates` is what each Scanners row reads while the job runs. Nothing is
+ *   added to the job's wire.
+ * - Ignored dirs: a row's marker is picked from its `coverage_kind`, never from
+ *   the note's text; `markersShown` is what the legend lists.
  */
 
 import type {
+  InstallJob,
   OwaspEditionYear,
+  ScanJob,
+  SecurityCoverage,
   SecurityCategoryCoverage,
+  SecurityCodeScope,
   SecurityEditionClassification,
   SecurityFinding,
   SecurityFindingContext,
   SecurityPage,
+  SecurityInstallStep,
   SecurityScannerStatus,
   SecuritySelector,
   SecuritySeverity,
@@ -31,11 +48,30 @@ import type {
   SecurityUnclassified,
 } from "../../api/types.ts";
 import type { BadgeTone } from "../../components/index.ts";
-import { REDACTED, SCANNER_STATE_TEXT, SECURITY_COMMANDS, notCoveredText } from "../../copy/security.copy.ts";
+import { pairKey } from "../../workspace/scope.ts";
+import {
+  CONTEXT_TEXT,
+  FINDINGS_TABLE_TEXT,
+  INSTALL_JOB_TEXT,
+  INSTALL_OUTCOME_TEXT,
+  REDACTED_TEXT,
+  SCAN_JOB_TEXT,
+  SCOPE_TEXT,
+  SCANNER_STATE_TEXT,
+  SECURITY_COMMANDS,
+  notCoveredText,
+  IGNORED_DIRS_TEXT,
+  type IgnoredDirsMarker,
+} from "../../copy/security.copy.ts";
 
 /** Severities from most to least severe, `unrated` (no rating, S-768) where a
  *  threshold gates it: with `medium`, listed just after it. */
 export const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "unrated", "low", "info"];
+
+/** A count for each severity: what `SeverityRow` (S-789) is given. The server's
+ *  `SeverityCounts` (with its `total`) is one; typed here, beside `SEVERITIES`,
+ *  so the row names no further importer of the wire-type hub. */
+export type SeverityCounts = Record<SecuritySeverity, number>;
 
 /** The editions the page offers, the default first. */
 export const EDITIONS: readonly OwaspEditionYear[] = ["2025", "2021"];
@@ -68,9 +104,12 @@ export function editionOf(page: SecurityPage, year: OwaspEditionYear): {
   };
 }
 
-/** The message a finding renders: a secret-class one reads `[redacted]` (FR-SC-03). */
+/** The message a finding renders: a secret-class one reads why it is withheld
+ *  and where the finding is, whatever text it holds (FR-SC-03, S-796). */
 export function findingMessage(f: SecurityFinding): string {
-  return f.redacted ? REDACTED : f.message;
+  if (!f.redacted) return f.message;
+  const located = (f.path ?? f.report_path) !== null;
+  return REDACTED_TEXT.why + (located ? REDACTED_TEXT.at(findingLocation(f)) : REDACTED_TEXT.nowhere);
 }
 
 /** `path:line`, the report's path when the finding bound to no indexed file. */
@@ -78,6 +117,26 @@ export function findingLocation(f: SecurityFinding): string {
   const path = f.path ?? f.report_path;
   if (path === null) return "no location";
   return f.start_line !== null ? `${path}:${f.start_line}` : path;
+}
+
+/** The word the Reachable column reads for a verdict: yes / no / unknown.
+ *  `unknown` stays its own word — never `no` (NFR-CC-04). */
+export function reachableWord(verdict: SecurityFindingContext["reachability"]["verdict"]): string {
+  return FINDINGS_TABLE_TEXT.reachable[verdict];
+}
+
+/** The sentence behind a finding's Reachable word: the Reachable cell's tooltip
+ *  and the detail's line. */
+export function reachabilityText(r: SecurityFindingContext["reachability"]): string {
+  if (r.verdict === "reachable" && r.route !== null) return CONTEXT_TEXT.reachable(r.route.name, r.route.hops);
+  if (r.verdict === "unreachable") return CONTEXT_TEXT.unreachable;
+  return CONTEXT_TEXT.unknown(r.unresolved_because);
+}
+
+/** A symbol's kind as the Symbol column reads it: the wire token's words
+ *  (`type_alias` → "type alias"). */
+export function symbolKindWord(kind: string): string {
+  return kind.replaceAll("_", " ");
 }
 
 /** The path "everything under this path" offers for `f` (S-770): the directory
@@ -109,6 +168,81 @@ export interface FindingFilters {
   /** The route-reachability verdict (FR-SC-08); `unknown` is its own value,
    *  never folded into `unreachable`. */
   reachability: "" | SecurityFindingContext["reachability"]["verdict"];
+  /** Which code the table lists (FR-SC-28): production by default, never "any". */
+  scope: ScopeFilter;
+}
+
+/** The code scope control's values, as `security findings --scope` spells them. */
+export type ScopeFilter = SecurityCodeScope | "all";
+
+/** The scopes the control offers, the default first. */
+export const SCOPES: readonly ScopeFilter[] = ["production", "test", "all"];
+
+/** The scope a query string names; absent or unrecognised is production. The last
+ *  `scope` wins, as the last `repo` does (`memberFromSearch`). */
+export function scopeFromSearch(search: string): ScopeFilter {
+  const want = new URLSearchParams(search).getAll("scope").at(-1)?.toLowerCase();
+  return SCOPES.find((s) => s === want) ?? "production";
+}
+
+/** `url` with its `?scope=` set to `scope`. Production is the default, so it
+ *  carries none; every other pair — `?repo=`, `?path=` — is kept byte-for-byte,
+ *  as `urlWithMember` keeps them. A pair is `scope` by its decoded key
+ *  (`pairKey`), as `scopeFromSearch` reads it. */
+export function urlWithScope(url: string, scope: ScopeFilter): string {
+  const hashAt = url.indexOf("#");
+  const hash = hashAt === -1 ? "" : url.slice(hashAt);
+  const bare = hashAt === -1 ? url : url.slice(0, hashAt);
+  const queryAt = bare.indexOf("?");
+  const path = queryAt === -1 ? bare : bare.slice(0, queryAt);
+  const kept = (queryAt === -1 ? "" : bare.slice(queryAt + 1)).split("&").filter((pair) => pair !== "" && pairKey(pair) !== "scope");
+  if (scope !== "production") kept.push(`scope=${scope}`);
+  return `${path}${kept.length > 0 ? `?${kept.join("&")}` : ""}${hash}`;
+}
+
+/** Why a finding reads `test`, in words — the `TEST` tag's hover and the detail's
+ *  line; `null` for a production finding. */
+export function scopeReasonText(f: SecurityFinding): string | null {
+  if (f.code_scope !== "test") return null;
+  return f.code_scope_reason === null ? SCOPE_TEXT.reason.unstated : SCOPE_TEXT.reason[f.code_scope_reason];
+}
+
+/** Does the scope list a finding? */
+export function inScope(f: SecurityFinding, scope: ScopeFilter): boolean {
+  return scope === "all" || f.code_scope === scope;
+}
+
+/** How many findings the scope alone leaves out of the table: those every
+ *  other filter keeps (the CLI's `hidden_by_scope`, counted the same way). */
+export function hiddenByScope(
+  findings: readonly SecurityFinding[],
+  filters: FindingFilters,
+  classify: (f: SecurityFinding) => Classification,
+  scanners: ReadonlyMap<string, string>,
+): number {
+  const rest = { ...filters, scope: "all" as const };
+  return findings.filter((f) => !inScope(f, filters.scope) && keeps(f, rest, classify(f), scanners)).length;
+}
+
+/** How many findings in `scope` fall under no OWASP category. */
+export function unclassifiedCount(
+  findings: readonly SecurityFinding[],
+  classify: (f: SecurityFinding) => Classification,
+  scope: ScopeFilter,
+): number {
+  return findings.filter((f) => inScope(f, scope) && classify(f).unclassified !== null).length;
+}
+
+/** A covered category's count of the findings in `scope`, as the server states
+ *  it: `state.findings` counts every code scope and `production_findings` the
+ *  production part of it, suppressed findings in both (`categories[]` of
+ *  `security findings`). Test code is what is left of the first after the
+ *  second, so the three scopes partition one figure and the page holds no count
+ *  of its own. `null` for a category nothing could detect. */
+export function categoryCount(c: SecurityCategoryCoverage, scope: ScopeFilter): number | null {
+  if (c.state.state !== "covered") return null;
+  const production = c.production_findings ?? 0;
+  return scope === "all" ? c.state.findings : scope === "production" ? production : c.state.findings - production;
 }
 
 export const NO_FILTERS: FindingFilters = {
@@ -118,6 +252,7 @@ export const NO_FILTERS: FindingFilters = {
   path: "",
   suppression: "",
   reachability: "",
+  scope: "production",
 };
 
 /** A path as `security findings --path` reads it: no `./`, no trailing `/`, `/`
@@ -180,7 +315,7 @@ export function keeps(
   const suppressed = f.suppression?.state === "suppressed";
   const suppression = filters.suppression === "" || suppressed === (filters.suppression === "suppressed");
   const reachability = filters.reachability === "" || f.context.reachability.verdict === filters.reachability;
-  return severity && scanner && category && path && suppression && reachability;
+  return severity && scanner && category && path && suppression && reachability && inScope(f, filters.scope);
 }
 
 /** Registry name → driver name, over the registered scanners. An unregistered
@@ -236,4 +371,148 @@ export function notCoveredCommand(category: SecurityCategoryCoverage, status: Se
 /** The not-covered sentence for a category, with its command. */
 export function notCoveredSentence(category: SecurityCategoryCoverage, status: SecurityStatus): string {
   return notCoveredText(notCoveredCommand(category, status));
+}
+
+/** The status types the Scanners widget reads, re-exported so the widget takes them
+ *  from the model: a new importer of `api/types.ts` would push its fan-in past the
+ *  architecture rule's cap. */
+export type { SecurityScannerStatus, SecurityStatus } from "../../api/types.ts";
+
+/** The scan or install job the page follows. */
+export type Job = ScanJob | InstallJob;
+
+/** What a job's replayed events say is happening, by registry name. */
+export interface JobProgress {
+  /** Scanners that finished, in the order they did, each with whether it ran. */
+  finished: { scanner: string; ran: boolean }[];
+  /** Scanners started and not finished. */
+  running: string[];
+  /** Tools whose install started and has not finished. */
+  installing: string[];
+  /** Tools whose install finished, whatever its outcome. */
+  toolsDone: number;
+  /** Whether the scan after an install has begun. */
+  scanning: boolean;
+}
+
+/** The progress a job's events state; an absent job states none. */
+export function jobProgress(job: Job | null): JobProgress {
+  const steps: readonly SecurityInstallStep[] = job?.events.map((e) => e.event) ?? [];
+  const running = new Set<string>();
+  const installing = new Set<string>();
+  const finished: JobProgress["finished"] = [];
+  let toolsDone = 0;
+  let scanning = false;
+  for (const step of steps) {
+    switch (step.phase) {
+      case "started":
+        running.add(step.scanner);
+        scanning = true;
+        break;
+      case "finished":
+        running.delete(step.scanner);
+        finished.push({ scanner: step.scanner, ran: step.outcome === "ran" });
+        scanning = true;
+        break;
+      case "install_started":
+        installing.add(step.tool);
+        break;
+      case "install_finished":
+        installing.delete(step.tool);
+        toolsDone += 1;
+        break;
+      case "cancelled":
+        break;
+    }
+  }
+  return { finished, running: [...running], installing: [...installing], toolsDone, scanning };
+}
+
+/** A row's live state while its job runs. */
+export type LiveState = "running" | "installing";
+
+/** Each scanner running, and each tool installing, in a job that has not ended;
+ *  the Scanners rows read these in place of their stored state. Once the job
+ *  ends, none: the job is shown ended only after the page's reload landed, so
+ *  every row then shows what the job stored (HF-2). */
+export function liveStates(job: Job | null): ReadonlyMap<string, LiveState> {
+  if (job?.state !== "running") return new Map();
+  const { running, installing } = jobProgress(job);
+  return new Map<string, LiveState>([...installing.map((t) => [t, "installing"] as const), ...running.map((n) => [n, "running"] as const)]);
+}
+
+/** The tools an install left out, each with why, from its events: the result
+ *  exists only once it completed, and a cancelled install states them too. */
+function toolsLeftOut(job: InstallJob): string[] {
+  return job.events.flatMap(({ event }) => {
+    if (event.phase !== "install_finished") return [];
+    if (event.outcome === "unavailable") return [INSTALL_OUTCOME_TEXT.unavailable(event.tool, event.reason)];
+    if (event.outcome === "failed") return [INSTALL_OUTCOME_TEXT.failed(event.tool, event.stage, event.reason)];
+    return [];
+  });
+}
+
+/** An ended install's own sentence: what it installed and what its scan found. */
+function installOutcome(job: InstallJob): string {
+  switch (job.state) {
+    case "completed": {
+      const installed = job.result?.install.tools.filter((t) => t.outcome === "installed").length ?? 0;
+      const scan = job.result?.scan ?? null;
+      return INSTALL_JOB_TEXT.completed(installed, scan && { findings: scan.findings, ran: scan.scanners.filter((s) => s.outcome === "ran").length });
+    }
+    case "cancelled": {
+      const report = job.events.map(({ event }) => event).find((e) => e.phase === "cancelled");
+      return INSTALL_JOB_TEXT.cancelled(report?.phase === "cancelled" ? report.installed : []);
+    }
+    case "failed":
+      return INSTALL_JOB_TEXT.failed(job.error ?? "");
+    case "running":
+      return "";
+  }
+}
+
+/** The one summary line's sentence for `job`: its progress while it runs, its
+ *  outcome once it ended. */
+export function summaryText(job: Job | null): string {
+  if (job === null) return SCAN_JOB_TEXT.idle;
+  const progress = jobProgress(job);
+  if (job.kind === "tool-install") {
+    if (job.state === "running") {
+      return progress.scanning ? INSTALL_JOB_TEXT.scanning(progress.finished.length) : INSTALL_JOB_TEXT.running(progress.toolsDone);
+    }
+    const left = toolsLeftOut(job);
+    return installOutcome(job) + (left.length > 0 ? INSTALL_JOB_TEXT.notInstalled(left) : "");
+  }
+  switch (job.state) {
+    case "running":
+      return SCAN_JOB_TEXT.running(progress.finished.length, progress.running);
+    case "completed": {
+      const ran = job.result?.scanners.filter((s) => s.outcome === "ran").length ?? 0;
+      return SCAN_JOB_TEXT.completed(job.result?.findings ?? 0, ran);
+    }
+    case "cancelled":
+      return SCAN_JOB_TEXT.cancelled(progress.finished.filter((f) => f.ran).map((f) => f.scanner));
+    case "failed":
+      return SCAN_JOB_TEXT.failed(job.error ?? "");
+  }
+}
+
+/** Which Ignored dirs marker a row shows. */
+export type IgnoredDirsKey = keyof typeof IGNORED_DIRS_TEXT;
+
+/** The markers in the order the legend lists them. */
+const MARKER_ORDER: readonly IgnoredDirsKey[] = ["skipped", "unproven", "history", "whole_project", "partial", "scanned", "none"];
+
+/** A row's marker, from its `ignored_paths` and `coverage_kind` — never from its
+ *  note. A row with no whole-project run to state shows `none`. */
+export function ignoredDirsKey(row: SecurityCoverage): IgnoredDirsKey {
+  if (row.ignored_paths === undefined) return "none";
+  if (row.ignored_paths === "excluded") return "skipped";
+  return row.coverage_kind ?? "scanned";
+}
+
+/** The legend: each marker some row shows, once, in a fixed order. */
+export function markersShown(rows: readonly SecurityCoverage[]): { key: IgnoredDirsKey; text: IgnoredDirsMarker }[] {
+  const shown = new Set(rows.map(ignoredDirsKey));
+  return MARKER_ORDER.filter((key) => shown.has(key)).map((key) => ({ key, text: IGNORED_DIRS_TEXT[key] }));
 }

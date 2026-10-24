@@ -122,7 +122,8 @@ pub(crate) struct SecuritySummary {
     pub baseline_source: BaselineSource,
     /// The checked-in baseline's `(rule id, project-relative path)` pairs —
     /// empty for the store's — matched for a finding with an
-    /// [`unbound_location`](SummaryFinding::unbound_location) only.
+    /// [`unbound_location`](SummaryFinding::unbound_location) only: the
+    /// stopgap for a file blessed before history.db migration 10.
     pub baseline_locations: BTreeSet<(String, String)>,
 }
 
@@ -180,9 +181,10 @@ pub(crate) struct SummaryFinding {
     pub legacy_fingerprints: Vec<String>,
     /// The project-relative path of a finding that binds to no indexed file
     /// and is reported by an absolute path under the root (OSV-Scanner on a
-    /// lockfile). Its fingerprint then carries the checkout's directory, so a
-    /// checked-in baseline also knows it by rule id and this path — a stopgap
-    /// until the osv-scanner 2.x identity change re-keys such findings.
+    /// lockfile). Before history.db migration 10 its fingerprint carried the
+    /// checkout's directory, so a checked-in baseline blessed then also knows
+    /// it by rule id and this path — a stopgap kept for one release after
+    /// migration 10, then removed (CR-241).
     pub unbound_location: Option<String>,
     pub rule_id: String,
     pub severity: Severity,
@@ -203,7 +205,9 @@ pub(crate) struct SummaryFinding {
 impl SummaryFinding {
     /// Whether `recorded` holds this finding, under its key or one it had
     /// before a re-key — a checked-in baseline is never re-keyed (S-764 ×
-    /// S-765), so a secret blessed under its old key stays known.
+    /// S-765), so a secret blessed under its old key stays known: before
+    /// history.db migration 7, or, for a history-only secret, before migration
+    /// 11 keyed it by its own path instead of the file it bound to (S-780).
     fn recorded_in(&self, recorded: &BTreeSet<String>) -> bool {
         recorded.contains(&self.fingerprint) || self.legacy_fingerprints.iter().any(|old| recorded.contains(old))
     }

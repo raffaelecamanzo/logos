@@ -189,6 +189,7 @@ fn open(repo: &Path, bin: &Path, user: &Path, rec: &Path) -> Engine {
         user_dir: Some(user.to_path_buf()),
         search_path: Some(bin.as_os_str().to_owned()),
         tools_dir: Some(rec.join("tools")),
+        nvd_api_key: None,
     })
 }
 

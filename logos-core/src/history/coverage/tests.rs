@@ -538,3 +538,378 @@ fn coverage_survives_a_full_index() {
         "coverage survives a full logos.db rebuild (FR-CV-02)"
     );
 }
+
+// ── JaCoCo XML and Go coverprofile ([FR-CV-12], [S-734]) ────────────────────
+
+const JACOCO_AGGREGATE: &str =
+    include_str!("../../../tests/fixtures/coverage/jacoco/maven-aggregate.xml");
+const GO_COVERPROFILE: &str =
+    include_str!("../../../tests/fixtures/coverage/gocover/coverprofile.out");
+
+/// A git repo holding exactly `files` (path, contents), all committed.
+fn repo_with(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().expect("temp root");
+    let r = tmp.path().join("repo");
+    std::fs::create_dir_all(&r).unwrap();
+    sh_git(&r, &["init", "-q", "-b", "main"]);
+    for (path, body) in files {
+        commit(&r, path, body, path);
+    }
+    (tmp, r)
+}
+
+fn paths_of(files: &[(&str, &str)]) -> Vec<String> {
+    files.iter().map(|(p, _)| p.to_string()).collect()
+}
+
+/// `(path, instrumented, covered)` per stored file, sorted by path — the
+/// per-file counts an acceptance criterion states.
+fn file_counts(conn: &Connection) -> Vec<(String, i64, i64)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT cf.path, count(*), sum(cl.hits > 0)
+             FROM coverage_files cf JOIN coverage_lines cl ON cl.file_id = cf.id
+             GROUP BY cf.path ORDER BY cf.path",
+        )
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn ingest_default(
+    root: &Path,
+    report: &Path,
+    format: Option<CoverageFormat>,
+    indexed: &[String],
+) -> anyhow::Result<super::IngestSummary> {
+    ingest(
+        root,
+        report,
+        format,
+        &EffectiveCoverage::default(),
+        &EffectiveCoverageIngest::default(),
+        indexed,
+    )
+}
+
+/// The Maven multi-module layout [`JACOCO_AGGREGATE`] describes: `Util.java` sits
+/// at the same package-relative path in both modules.
+const MAVEN_FILES: &[(&str, &str)] = &[
+    ("core/src/main/java/com/acme/core/Greeter.java", "class Greeter {}\n"),
+    ("core/src/main/java/com/acme/core/Util.java", "class Util {}\n"),
+    ("web/src/main/java/com/acme/web/Handler.java", "class Handler {}\n"),
+    ("web/src/main/java/com/acme/core/Util.java", "class Util2 {}\n"),
+];
+
+/// [FR-CV-12] / [UAT-CV-05]: a Maven multi-module JaCoCo aggregate ingests with the
+/// hand-computed per-file counts, auto-detected, source-root-relative
+/// `<package>/<sourcefile>` paths bound across module directories, and the
+/// `ci` count stored as the hit count.
+///
+/// Hand computation, from `maven-aggregate.xml`:
+/// - `Greeter.java`: lines 3,4,5,6 instrumented; 3 (ci 4), 4 (ci 2), 6 (mi 1, ci 1)
+///   covered, 5 (ci 0) not → 4 instrumented / 3 covered.
+/// - `Handler.java`: lines 10,11,13 instrumented (line 12 has `mi=ci=0`: no
+///   instructions, skipped); 10 and 13 covered → 3 / 2.
+/// - `com/acme/core/Util.java` is indexed under BOTH modules → ambiguous, so
+///   unmatched, listed once though the report names it twice (core and web groups);
+///   `com/acme/gone/Missing.java` binds nothing → unmatched.
+#[test]
+fn maven_multi_module_jacoco_ingests_with_hand_computed_counts() {
+    let (_t, r) = repo_with(MAVEN_FILES);
+    let report = write(&r, "jacoco.xml", JACOCO_AGGREGATE);
+
+    let s = ingest_default(&r, &report, None, &paths_of(MAVEN_FILES)).unwrap();
+
+    assert_eq!(s.format, CoverageFormat::Jacoco, "detected with no --format");
+    assert_eq!(s.matched_files, 2);
+    assert_eq!((s.instrumented_lines, s.covered_lines), (7, 5));
+    assert_eq!(
+        s.unmatched,
+        vec![
+            "com/acme/core/Util.java".to_string(),
+            "com/acme/gone/Missing.java".to_string(),
+        ],
+        "the ambiguous and the absent path are counted unmatched, never guessed"
+    );
+
+    let conn = super::super::open(&r).unwrap();
+    assert_eq!(
+        file_counts(&conn),
+        vec![
+            ("core/src/main/java/com/acme/core/Greeter.java".to_string(), 4, 3),
+            ("web/src/main/java/com/acme/web/Handler.java".to_string(), 3, 2),
+        ]
+    );
+    assert_eq!(
+        coverage_rows(&conn)
+            .into_iter()
+            .filter(|(p, ..)| p.ends_with("Greeter.java"))
+            .collect::<Vec<_>>(),
+        vec![
+            ("core/src/main/java/com/acme/core/Greeter.java".to_string(), 3, 4),
+            ("core/src/main/java/com/acme/core/Greeter.java".to_string(), 4, 2),
+            ("core/src/main/java/com/acme/core/Greeter.java".to_string(), 5, 0),
+            ("core/src/main/java/com/acme/core/Greeter.java".to_string(), 6, 1),
+        ],
+        "the hit count is JaCoCo's covered-instruction count"
+    );
+}
+
+/// The project a Go profile is ingested against: a root module, plus a nested
+/// module whose declared path (`…/app-tools`) is NOT a directory-shaped suffix of
+/// where it sits (`tools/`) — only the `go.mod` read can bind it.
+const GO_FILES: &[(&str, &str)] = &[
+    ("go.mod", "module github.com/acme/app\n\ngo 1.22\n"),
+    ("main.go", "package main\n"),
+    ("pkg/calc/calc.go", "package calc\n"),
+    ("tools/go.mod", "module github.com/acme/app-tools\n\ngo 1.22\n"),
+    ("tools/gen/gen.go", "package gen\n"),
+];
+
+/// [FR-CV-12] / [UAT-CV-05]: a Go coverprofile ingests with the hand-computed
+/// per-file counts, the `go.mod` module prefix stripped (the nested module's
+/// own directory restored), blocks expanded per line, the maximum count kept where
+/// blocks overlap, and a zero-statement block skipped.
+///
+/// Hand computation, from `coverprofile.out` (`mode: count`):
+/// - `main.go`: block `5.13,7.2` count 3 → lines 5,6,7 = 3; block `9.2,9.20`
+///   count 0 → line 9 = 0 → 4 instrumented / 3 covered.
+/// - `pkg/calc/calc.go`: `3.20,6.2` count 4 → lines 3–6 = 4; `6.2,8.3` count 0 →
+///   lines 6,7,8 (line 6 keeps the max, 4); `10.2,10.15` has 0 statements →
+///   skipped; `12.2,13.10` count 2 → lines 12,13 → lines 3,4,5,6,7,8,12,13 =
+///   8 instrumented / 6 covered.
+/// - `tools/gen/gen.go`: `4.2,5.2` count 1 → lines 4,5 → 2 / 2.
+/// - `github.com/other/dep/x.go` belongs to no module of this tree → unmatched.
+#[test]
+fn go_coverprofile_ingests_with_hand_computed_counts() {
+    let (_t, r) = repo_with(GO_FILES);
+    let report = write(&r, "coverprofile.out", GO_COVERPROFILE);
+
+    let s = ingest_default(&r, &report, None, &paths_of(GO_FILES)).unwrap();
+
+    assert_eq!(s.format, CoverageFormat::Gocover, "detected with no --format");
+    assert_eq!(s.matched_files, 3);
+    assert_eq!((s.instrumented_lines, s.covered_lines), (14, 11));
+    assert_eq!(s.unmatched, vec!["github.com/other/dep/x.go".to_string()]);
+
+    let conn = super::super::open(&r).unwrap();
+    assert_eq!(
+        file_counts(&conn),
+        vec![
+            ("main.go".to_string(), 4, 3),
+            ("pkg/calc/calc.go".to_string(), 8, 6),
+            ("tools/gen/gen.go".to_string(), 2, 2),
+        ]
+    );
+    let calc: Vec<(i64, i64)> = coverage_rows(&conn)
+        .into_iter()
+        .filter(|(p, ..)| p == "pkg/calc/calc.go")
+        .map(|(_, line, hits)| (line, hits))
+        .collect();
+    assert_eq!(
+        calc,
+        vec![(3, 4), (4, 4), (5, 4), (6, 4), (7, 0), (8, 0), (12, 2), (13, 2)],
+        "line 6 is shared by a count-4 and a count-0 block: the maximum wins"
+    );
+}
+
+/// [FR-CV-12]: `--format jacoco` / `--format gocover` force their parsers, and the
+/// tokens round-trip through the flag parser the engine uses.
+#[test]
+fn forced_format_selects_the_new_parsers() {
+    assert_eq!(CoverageFormat::from_flag("jacoco"), Some(CoverageFormat::Jacoco));
+    assert_eq!(CoverageFormat::from_flag("gocover"), Some(CoverageFormat::Gocover));
+
+    let (_t, r) = repo_with(GO_FILES);
+    // Forcing a parser never relaxes it: a header-less file is a parse failure
+    // under `gocover`, not silently read as some other format.
+    let bad = write(&r, "noheader.out", "main.go:1.1,2.1 1 1\n");
+    assert!(
+        ingest_default(&r, &bad, Some(CoverageFormat::Gocover), &paths_of(GO_FILES)).is_err(),
+        "a forced Go parse of a header-less file is rejected"
+    );
+    let jacoco = write(&r, "x.xml", JACOCO_AGGREGATE);
+    let forced =
+        ingest_default(&r, &jacoco, Some(CoverageFormat::Jacoco), &paths_of(GO_FILES)).unwrap();
+    assert_eq!(forced.format, CoverageFormat::Jacoco);
+    assert_eq!(forced.matched_files, 0, "no Java file is indexed here");
+    assert_eq!(
+        forced.unmatched.len(),
+        4,
+        "all four distinct report paths are counted unmatched"
+    );
+}
+
+/// [FR-CV-12] / [UAT-CV-01]: a malformed JaCoCo or Go report is rejected before
+/// anything is written — on a fresh repo the store is never created, and on an
+/// existing store every row count is unchanged.
+#[test]
+fn malformed_jacoco_and_go_reports_write_nothing() {
+    let (_t, r) = repo_with(GO_FILES);
+    let idx = paths_of(GO_FILES);
+    let malformed: &[(&str, &str)] = &[
+        // truncated JaCoCo: the root never closes
+        (
+            "trunc.xml",
+            "<report name=\"x\"><sessioninfo id=\"a\"/><package name=\"p\"><sourcefile name=\"A.java\"><line nr=\"1\" mi=\"0\" ci=\"1\"/>",
+        ),
+        // JaCoCo with a non-integer line number
+        (
+            "badnr.xml",
+            "<report name=\"x\"><sessioninfo id=\"a\"/><package name=\"p\"><sourcefile name=\"A.java\"><line nr=\"one\" mi=\"0\" ci=\"1\"/></sourcefile></package></report>",
+        ),
+        // Go: a block cut off before its count
+        ("trunc.out", "mode: set\nmain.go:1.1,2.1 1\n"),
+        // Go: a non-integer count
+        ("badcount.out", "mode: set\nmain.go:1.1,2.1 1 many\n"),
+        // Go: a range that ends before it starts
+        ("backwards.out", "mode: set\nmain.go:5.1,2.1 1 1\n"),
+        // Go: a range so wide it would expand past the cap
+        ("huge.out", "mode: count\nmain.go:1.1,2000000000.1 1 1\n"),
+    ];
+    for (name, body) in malformed {
+        let p = write(&r, name, body);
+        // Detection recognises each of these as its own format (the damage is
+        // inside), so no `--format` is passed.
+        assert!(
+            ingest_default(&r, &p, None, &idx).is_err(),
+            "{name} is rejected"
+        );
+        assert!(
+            !super::super::db_path(&r).exists(),
+            "{name}: a rejected report never creates the store"
+        );
+    }
+
+    // Existing store: the same rejects leave every count untouched.
+    let good = write(&r, "good.out", GO_COVERPROFILE);
+    ingest_default(&r, &good, None, &idx).unwrap();
+    let conn = super::super::open(&r).unwrap();
+    let before = (
+        count(&conn, "coverage_snapshots"),
+        count(&conn, "coverage_files"),
+        count(&conn, "coverage_lines"),
+        count(&conn, "coverage_reports"),
+    );
+    for (name, _) in malformed {
+        assert!(ingest_default(&r, &r.join(name), None, &idx).is_err());
+    }
+    let conn = super::super::open(&r).unwrap();
+    assert_eq!(
+        before,
+        (
+            count(&conn, "coverage_snapshots"),
+            count(&conn, "coverage_files"),
+            count(&conn, "coverage_lines"),
+            count(&conn, "coverage_reports"),
+        ),
+        "rejected reports write nothing"
+    );
+}
+
+/// [FR-CV-12]: a Go profile against a tree with **no** `go.mod` keeps the import
+/// path verbatim; the suffix mapper may still bind it, and an unbindable path is
+/// counted unmatched, never guessed.
+#[test]
+fn go_paths_are_not_guessed_without_or_against_the_wrong_module() {
+    // No go.mod anywhere: `main.go` binds by plain suffix, the rest cannot.
+    let files: &[(&str, &str)] = &[("main.go", "package main\n"), ("tools/gen/gen.go", "package gen\n")];
+    let (_t, r) = repo_with(files);
+    let report = write(&r, "c.out", GO_COVERPROFILE);
+    let s = ingest_default(&r, &report, None, &paths_of(files)).unwrap();
+    assert_eq!(s.matched_files, 1, "only main.go binds, by suffix");
+    assert!(
+        s.unmatched.contains(&"github.com/acme/app-tools/gen/gen.go".to_string()),
+        "the nested module's file cannot bind without its go.mod: {:?}",
+        s.unmatched
+    );
+}
+
+/// [FR-CV-12] / [NFR-RA-05]: once the tree declares Go modules, a profile path is
+/// bound by its module — a foreign module's file that merely shares a basename
+/// with an indexed one (`github.com/other/dep/main.go` vs the root `main.go`) is
+/// unmatched, never bound to it.
+#[test]
+fn go_path_outside_every_declared_module_is_unmatched_not_suffix_bound() {
+    let files: &[(&str, &str)] = &[
+        ("go.mod", "module github.com/acme/app\n\ngo 1.22\n"),
+        ("main.go", "package main\n"),
+    ];
+    let (_t, r) = repo_with(files);
+    let report = write(
+        &r,
+        "c.out",
+        "mode: set\ngithub.com/other/dep/main.go:1.1,3.1 1 1\n",
+    );
+    let s = ingest_default(&r, &report, None, &paths_of(files)).unwrap();
+    assert_eq!(s.matched_files, 0, "a foreign module's file binds nothing");
+    assert_eq!(s.unmatched, vec!["github.com/other/dep/main.go".to_string()]);
+}
+
+/// [FR-CV-12] / [NFR-RA-05]: a path rewritten through its module names ONE
+/// project-relative file. When that file is not indexed (deleted, excluded), the
+/// path is unmatched — not suffix-bound to a same-tailed file elsewhere.
+#[test]
+fn go_module_rewrite_binds_the_exact_file_or_nothing() {
+    let files: &[(&str, &str)] = &[
+        ("go.mod", "module github.com/acme/app\n\ngo 1.22\n"),
+        ("main.go", "package main\n"),
+        ("svc/pkg/a.go", "package pkg\n"),
+    ];
+    let (_t, r) = repo_with(files);
+    let report = write(
+        &r,
+        "c.out",
+        "mode: set\n\
+         github.com/acme/app/pkg/a.go:1.1,3.1 1 1\n\
+         github.com/acme/app/internal/main.go:1.1,3.1 1 1\n",
+    );
+    let s = ingest_default(&r, &report, None, &paths_of(files)).unwrap();
+    assert_eq!(s.matched_files, 0, "neither rewritten path is an indexed file");
+    assert_eq!(
+        s.unmatched,
+        vec![
+            "github.com/acme/app/internal/main.go".to_string(),
+            "github.com/acme/app/pkg/a.go".to_string(),
+        ],
+        "`pkg/a.go` must not bind `svc/pkg/a.go`, `internal/main.go` must not bind `main.go`"
+    );
+}
+
+/// [FR-CV-12]: the Go module rewrite belongs to a Go profile alone. An LCOV report
+/// ingested in a tree that declares a Go module still binds its repo-relative
+/// path by suffix, as it did before the Go parser existed.
+#[test]
+fn go_module_rewrite_is_confined_to_go_profiles() {
+    let files: &[(&str, &str)] = &[
+        ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+        ("pkg/a.go", "package pkg\n"),
+        ("web/app.js", "export {}\n"),
+    ];
+    let (_t, r) = repo_with(files);
+    let report = write(
+        &r,
+        "cov.info",
+        "SF:/ci/build/web/app.js\nDA:1,1\nend_of_record\n",
+    );
+    let s = ingest_default(&r, &report, None, &paths_of(files)).unwrap();
+    assert_eq!(s.format, CoverageFormat::Lcov);
+    assert_eq!(s.matched_files, 1, "the LCOV path binds by suffix");
+    assert!(s.unmatched.is_empty(), "{:?}", s.unmatched);
+}
+
+/// A status read of a repository with no store answers "no coverage" and creates no
+/// store: a read writes nothing ([FR-UI-03]), so a page or a workspace roll-up
+/// over a member never mined leaves it as it found it (S-740).
+///
+/// [FR-UI-03]: ../../../../docs/specs/requirements/FR-UI-03.md
+#[test]
+fn a_status_read_of_a_repository_with_no_store_creates_none() {
+    let (_t, r) = repo();
+    let status = super::status(&r).expect("a no-coverage status");
+    assert_eq!((status.report_count, status.notice.as_deref()), (0, Some(super::NO_COVERAGE_NOTICE)));
+    assert!(!super::super::db_path(&r).exists(), "the read created no store");
+}

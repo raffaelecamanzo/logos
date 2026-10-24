@@ -56,8 +56,9 @@
 //!
 //! A coverage artifact or a SARIF report is ingested by a local read, parse and
 //! store. The watcher never runs a test suite or a scanner: the explicit
-//! `coverage refresh` and `security scan` engine paths are the only ones that
-//! spawn one, and this module names neither.
+//! `coverage run` (with `coverage refresh`, its custom entry) and `security
+//! scan` engine paths are the only ones that spawn one, and this module names
+//! neither.
 //!
 //! [S-022]: ../../../docs/planning/journal.md#s-022-incremental-sync-hardening-with-watcher-and-git-hooks
 //! [FR-SY-04]: ../../../docs/specs/requirements/FR-SY-04.md

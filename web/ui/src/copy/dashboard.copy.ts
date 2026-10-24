@@ -21,6 +21,11 @@ export const codeCoverage: CopyEntry = {
   why: "Uncovered code is code a change can break without a test noticing.",
 };
 
+export const securityWidget: CopyEntry = {
+  what: "The security findings that count — fresh, not suppressed and in production code — by severity, the verdict of the [security] table, when the newest scan ran, and how many scanners failed their last scan.",
+  why: "A scanner that failed or never ran has looked at nothing, so a count of zero beside it is not a clean result.",
+};
+
 export const languages: CopyEntry = {
   what: "The languages indexed here, sized by how many symbols each holds — symbols, not files.",
   why: "It shows which code the graph can see; a language missing here is code no question about the graph will reach.",
@@ -41,6 +46,15 @@ export const DASHBOARD_ABSENCE = {
   noSignal: "No quality signal recorded yet; run logos scan to record one.",
   /** The Coverage view's own sentence, so the ingest command is worded once. */
   noCoverage: COVERAGE_VIEW_ABSENCE.notIngested,
+  /** Nothing ever scanned, and scanning is already allowed. */
+  noSecurityScan: "No security scan has run yet, so nothing was looked at; run logos security scan.",
+  /** Nothing ever scanned, and no scanner is consented to yet. */
+  noSecurityConsent:
+    "No security scan has run yet and no scanner is consented to; run logos security scan --consent to allow and run the first one.",
+  /** A read that failed is stated with its cause, never shown as zero findings. */
+  securityFault: (cause: string) => `The security state could not be read, so no count is shown: ${cause}`,
+  /** The gate band's absence: no `[security]` table, so nothing is evaluated. */
+  noSecurityTable: "No [security] table in .logos/rules.toml, so no security verdict is reached.",
   noLanguages: "No languages indexed yet; run logos index.",
   noLines: "Lines of code not yet counted; a full logos index counts them.",
   noTelemetry:

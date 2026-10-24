@@ -50,17 +50,11 @@ import {
   workspaceOwasp,
 } from "../../copy/workspaceSecurity.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-import { urlWithMember } from "../../workspace/scope.ts";
 import { OWASP_TEXT } from "../../copy/security.copy.ts";
 import { EditionSwitch } from "../security/EditionSwitch.tsx";
 import { EDITIONS } from "../security/securityModel.ts";
+import { absentFigure, memberColumn } from "./memberSecurityRow.tsx";
 import styles from "./Workspace.module.css";
-
-/** The member-scoped Security page (S-670) for `member`: its route with the
- *  member in `?repo=`, the one way a URL names a member (S-426). */
-export function memberSecurityHref(member: string): string {
-  return urlWithMember("/security", member);
-}
 
 export function WorkspaceSecurityView() {
   const { mode, workspace, members, error } = useWorkspace();
@@ -116,12 +110,6 @@ export function WorkspaceSecurityView() {
  *  findings are `info` or `unrated` never reads as a row of zeros. */
 const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "low", "info", "unrated"];
 
-/** What a figure cell says when the member has nothing to count from: it was
- *  never scanned, or it could not be read. */
-function absentFigure(row: MemberResult<MemberSecurity>): string {
-  return row.result ? WORKSPACE_SECURITY_TEXT.neverRun : WORKSPACE_SECURITY_TEXT.notRead;
-}
-
 function severityColumn(severity: SecuritySeverity): Column<MemberResult<MemberSecurity>> {
   return {
     key: severity,
@@ -136,23 +124,7 @@ function severityColumn(severity: SecuritySeverity): Column<MemberResult<MemberS
 }
 
 const MEMBER_COLUMNS: Column<MemberResult<MemberSecurity>>[] = [
-  {
-    key: "member",
-    header: "Member",
-    mono: true,
-    cell: (row) => (
-      <>
-        <a href={memberSecurityHref(row.member)}>{row.member}</a>
-        {row.error && (
-          <>
-            <br />
-            <span className="muted">{row.error}</span>
-          </>
-        )}
-      </>
-    ),
-    sortValue: (row) => row.member,
-  },
+  memberColumn<MemberSecurity>(),
   {
     key: "scanners",
     header: "Scanners fresh",
@@ -214,6 +186,7 @@ function MembersWidget({ answer }: { answer: WorkspaceSecurityAnswer }) {
           </FigureNote>
           <FigureNote block>{WORKSPACE_SECURITY_TEXT.reportsFresh(s.reports_fresh, s.reports_stored)}</FigureNote>
           <FigureNote block>{WORKSPACE_SECURITY_TEXT.excluded(s.excluded.not_fresh, s.excluded.suppressed)}</FigureNote>
+          <FigureNote block>{WORKSPACE_SECURITY_TEXT.testCode(s.excluded.test)}</FigureNote>
         </div>
       }
     >

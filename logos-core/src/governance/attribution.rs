@@ -40,10 +40,11 @@
 
 use std::cmp::Reverse;
 
+use crate::metrics::insight::group_identity;
 use crate::metrics::SignalTerms;
 use crate::models::quality::{
-    AttributionDriver, DimensionContribution, DriverMember, FixUnit, ReviewStatus, ReviewedOffender,
-    SignalAttribution,
+    AttributionDriver, DimensionContribution, DriverMember, FixUnit, FixUnitKind, ReviewStatus,
+    ReviewedOffender, SignalAttribution,
 };
 
 /// What names the drivers of each contribution: the classified offenders of
@@ -228,8 +229,14 @@ fn symbol(e: &ReviewedOffender) -> AttributionDriver {
     }
 }
 
-/// A near-clone group as a driver, ranked by its size and named by its first
-/// member; `None` for an empty group.
+/// A near-clone group as a driver, ranked by its size and known the way its
+/// "where to start" unit is ([`group_identity`]): `node_id` is
+/// `clone_group:<digest>` over its members' identities, and the member first in
+/// identity order names it. Both are functions of the member set alone, so a
+/// re-index or a file reorder leaves them as they were. A group with a member
+/// that carries no identity names none — it has no id to derive, and is shown
+/// by its first member in file order, never by a fabricated id; `None` for an
+/// empty group.
 fn clone_group(members: &[DriverMember], status: ReviewStatus) -> Option<(i64, AttributionDriver)> {
     let first = members.first()?;
     let size = members.len() as i64;
@@ -237,14 +244,22 @@ fn clone_group(members: &[DriverMember], status: ReviewStatus) -> Option<(i64, A
         ReviewStatus::New => (None, Some(size)),
         _ => (Some(size), None),
     };
+    let identities: Option<Vec<&str>> = members.iter().map(|m| m.node_id.as_deref()).collect();
+    let (node_id, named_by) = match identities {
+        Some(ids) => (
+            Some(group_identity(FixUnitKind::CloneGroup, &ids)),
+            members.iter().min_by(|a, b| a.node_id.cmp(&b.node_id)).unwrap_or(first),
+        ),
+        None => (None, first),
+    };
     Some((
         size,
         AttributionDriver {
             status,
-            name: first.name.clone(),
-            node_id: first.node_id.clone(),
-            file: first.file.clone(),
-            line: first.line,
+            name: named_by.name.clone(),
+            node_id,
+            file: named_by.file.clone(),
+            line: named_by.line,
             measure: Some("group_size".to_string()),
             before,
             after,
@@ -556,5 +571,46 @@ mod tests {
         assert_eq!((group.status, group.before, group.after), (ReviewStatus::Resolved, Some(2), None));
         let members: Vec<&str> = group.members.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(members, ["cancelInstall", "cancelScan"]);
+    }
+
+    fn identified(id: &str, name: &str, file: &str, line: i64) -> DriverMember {
+        DriverMember {
+            node_id: Some(id.to_string()),
+            name: name.to_string(),
+            file: file.to_string(),
+            line: Some(line),
+        }
+    }
+
+    #[test]
+    fn a_group_driver_is_the_group_named_by_its_first_member_in_identity_order() {
+        // By file and line `zulu` is first; by identity `alpha` is.
+        let members = [identified("a/`z.rs`/zulu().", "zulu", "a/z.rs", 1), identified("a/`z.rs`/alpha().", "alpha", "a/z.rs", 9)];
+        let (_, driver) = clone_group(&members, ReviewStatus::New).expect("a group");
+        assert_eq!(
+            driver.node_id.as_deref(),
+            Some(group_identity(FixUnitKind::CloneGroup, &["a/`z.rs`/alpha().", "a/`z.rs`/zulu()."]).as_str())
+        );
+        assert!(driver.node_id.as_deref().unwrap().starts_with("clone_group:"));
+        assert_eq!((driver.name.as_str(), driver.line), ("alpha", Some(9)), "named by the identity-first member");
+        let listed: Vec<&str> = driver.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(listed, ["zulu", "alpha"], "every member, as given");
+
+        // Reordered members: the same group, the same name; a member fewer is another.
+        let reordered = [members[1].clone(), members[0].clone()];
+        let (_, again) = clone_group(&reordered, ReviewStatus::New).expect("a group");
+        assert_eq!((again.node_id, again.name), (driver.node_id.clone(), driver.name.clone()));
+        let (_, fewer) = clone_group(&members[..1], ReviewStatus::New).expect("a group");
+        assert_ne!(fewer.node_id, driver.node_id);
+    }
+
+    #[test]
+    fn a_group_with_a_member_that_has_no_identity_carries_no_id() {
+        let members = [
+            identified("a/`z.rs`/zulu().", "zulu", "a/z.rs", 1),
+            DriverMember { node_id: None, name: "anon".to_string(), file: "a/z.rs".to_string(), line: Some(5) },
+        ];
+        let (_, driver) = clone_group(&members, ReviewStatus::Resolved).expect("a group");
+        assert_eq!((driver.node_id, driver.name.as_str()), (None, "zulu"), "an id is never fabricated");
     }
 }

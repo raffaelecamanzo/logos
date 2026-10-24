@@ -264,6 +264,11 @@ anything.
   reason lists each one's rule, file, line, scanner and severity with the stored
   message, which was redacted at ingest; nothing is read from the scanned files, so
   no secret value reaches it.
+- **Test code is judged like any other code.** From Logos 1.21.0 `security findings`
+  lists production code unless it is given `--scope all`, so the hook asks for every
+  scope and a secret added to a test file blocks once, as one in `src/` does. A
+  1.20.x binary lists every finding and does not take the flag, so the hook leaves
+  it out there. The choice is made from `logos --version` on each run.
 - **Silence is not a clean bill.** It means no new finding in those files. A
   store resting on scoped runs alone still reads `stale` (`scoped_only`) in
   `logos security status`. A leg that could not scan says so (see below); a turn
@@ -321,7 +326,9 @@ The report ends with the scripts' denominators and is itself checked by a script
 (`ENTRY`, `FIXED` and `UNPROVEN` lines, and no mention of the aggregate). With the
 word `debt`, the skill reads the recorded "where to start" list instead of the
 branch, cross-ranks it with churn, and applies the same verdicts, edit scope and
-proof.
+proof. A unit is known by its `node_id`, so a fix is proven against the offender with
+the same id and dimension, never a same-named symbol elsewhere; a duplicate or
+near-clone group names no single symbol and is reported, never edited.
 
 The skill needs `python3`, `logos` 1.20.0 or newer and a `.logos/` store; without
 them a script exits 3 and the review stops saying what is missing.
@@ -431,9 +438,20 @@ So does a writer given the `.logos` directory itself, or a glob or brace list
 that can reach a guarded name (`rm -rf .logos`). A
 payload the hook cannot read **asks**; it never fails toward allow.
 
+Words are read as the shell reads them. A backslash-newline inside a word joins
+it, so `logos security bl\⏎ess` asks. After `logos security …`, `logos gate` or
+`logos check`, a variable or command substitution where a subcommand or option
+goes asks, because the shell may turn it into one (`S=bless; logos security $S`,
+`logos check $(echo --bless)`). That includes an option's value (`logos check
+--rules $F`, `--rules=$F`): unquoted, the shell splits it into words of their own.
+An argument after a security subcommand (`logos security status $X`) passes. A
+writer given a variable, or a redirection into one, asks when the same command line
+assigns a value naming `.logos` (`F=.logos/rules.toml; rm $F`); a reader given it
+(`F=.logos/rules.toml; cat $F`) passes.
+
 It is a guardrail against loosening the contract by habit or by mistake, not a
 sandbox: a command that assembles the path at run time (an interpreter one-liner,
-a path piped into `xargs`) is not seen. There is no environment variable that
+a path piped into `xargs`, a variable set by an earlier Bash call) is not seen. There is no environment variable that
 turns it off. The way to stop it asking is to disable the plugin, which is the
 decision it exists to put in your hands.
 

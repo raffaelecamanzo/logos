@@ -181,10 +181,11 @@ pub struct Hotspot {
     /// Per-file coverage column ([FR-CV-05], [FR-CV-07]): fresh value / stale
     /// label / `n/a`. `n/a` for every file when no coverage is ingested.
     pub coverage: CoverageCell,
-    /// The findings cell ([FR-SC-14]): the file's counted findings
-    /// ([`counts`](super::security::counts)) with the highest severity, and the
-    /// stale ones, labelled and uncounted. Absent when no report is stored — no
-    /// column rather than zeros.
+    /// The findings cell ([FR-SC-14]): the file's counted findings — fresh,
+    /// unsuppressed, in production code ([`counts`](super::security::counts)) —
+    /// with the highest severity, and the stale ones and those in test code,
+    /// labelled and uncounted. Absent when no report is stored — no column
+    /// rather than zeros.
     ///
     /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -982,7 +983,7 @@ mod tests {
     }
 
     fn cell(count: usize, highest: Option<crate::model::Severity>, stale: usize) -> PathFindings {
-        PathFindings { count, highest, stale }
+        PathFindings { count, highest, stale, test: 0 }
     }
 
     #[test]

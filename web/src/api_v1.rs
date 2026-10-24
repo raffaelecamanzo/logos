@@ -72,7 +72,7 @@ use logos_core::history::security::Selector;
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::observability::Surface;
-use logos_core::security::SecurityPage;
+use logos_core::security::{SecurityPage, SecuritySummary};
 use logos_core::models::navigation::{
     BranchOverlapResult, GraphElements, GraphGranularity, ImpactIntersectionResult, ImpactResult,
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
@@ -130,7 +130,8 @@ pub fn respond<T: Serialize>(model: anyhow::Result<T>) -> Response {
 /// The Dashboard bundle ([FR-UI-09]): every read-model the verdict-rich landing
 /// composes, each field traceable to its `Engine` read-model. Built over the
 /// **read-only** accessors so the load is write-free ([ADR-28]). The
-/// `composition` defaults on a read fault — mirroring the view's own per-widget
+/// `composition` defaults on a read fault, and `security` states its fault
+/// (`OverviewSecurity::error`) — mirroring the view's own per-widget
 /// degradation ([NFR-CC-04]); a genuinely-required read failing aborts the whole
 /// bundle to a `500`.
 #[derive(Debug, Serialize)]
@@ -145,6 +146,9 @@ pub(crate) struct OverviewModel {
     /// onboarding when no `rules.toml` (`rules_present == false`).
     rules: RulesReport,
     stats: StatsInfo,
+    /// The Security widget's figures ([FR-SC-08], S-789): the stored summary,
+    /// read with no version probe, or the fault that kept it from being read.
+    security: OverviewSecurity,
     /// The fields the active extensions add ([`OverviewField`], [FR-DS-04]),
     /// after the core's, each under its own key — the `wiki` extension's
     /// `overview_page`, the Project Overview its Dashboard card renders (S-644).
@@ -159,8 +163,32 @@ pub(crate) struct OverviewModel {
 /// is dropped rather than allowed to shadow it, as the MCP adapter drops an
 /// extension tool named like a core tool. Pinned to the model's serialised keys
 /// (`the_core_overview_keys_are_the_models_own`).
-const OVERVIEW_CORE_KEYS: [&str; 7] =
-    ["status", "composition", "languages", "gate", "coverage", "rules", "stats"];
+const OVERVIEW_CORE_KEYS: [&str; 8] =
+    ["status", "composition", "languages", "gate", "coverage", "rules", "stats", "security"];
+
+/// The Dashboard's Security widget data ([FR-SC-08], S-789): exactly one of
+/// `summary` and `error`. A security read that fails (an invalid
+/// `.logos/rules.toml`, consent record or ignore file) is stated by the widget
+/// and never blanks the page ([NFR-CC-04]), nor reads as zero findings: the
+/// summary is absent, not empty.
+///
+/// [FR-SC-08]: ../../docs/specs/requirements/FR-SC-08.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Serialize)]
+struct OverviewSecurity {
+    summary: Option<SecuritySummary>,
+    error: Option<String>,
+}
+
+impl OverviewSecurity {
+    /// The widget data over `e`: the stored summary, no scanner started.
+    fn read(e: &Engine) -> Self {
+        match e.security_summary() {
+            Ok(summary) => Self { summary: Some(summary), error: None },
+            Err(err) => Self { summary: None, error: Some(format!("{err:#}")) },
+        }
+    }
+}
 
 /// The extension fields the overview serves, in registration order: a field whose
 /// key a core field or an earlier field already holds is dropped, so the first
@@ -193,9 +221,11 @@ fn read_overview(e: &Engine, fields: &[OverviewField]) -> anyhow::Result<Overvie
         composition: e.language_composition().unwrap_or_default(),
         languages: e.languages(),
         gate: e.latest_gate()?,
-        coverage: e.coverage_status()?,
+        // The evidence alone: the Dashboard probes no coverage tool (S-737).
+        coverage: e.coverage_evidence()?,
         rules: e.check_rules(None, false)?,
         stats: e.stats(None),
+        security: OverviewSecurity::read(e),
         extensions: fields
             .iter()
             .map(|field| Ok((field.key().to_string(), field.read(e)?)))
@@ -541,7 +571,10 @@ fn wants_flag(params: &HashMap<String, String>, key: &str) -> bool {
 // ── Coverage (mirrors `crate::analytics::coverage`, [FR-UI-05]) ───────────────
 
 /// The Coverage bundle ([FR-UI-05]): the coverage status read-model joined with
-/// the untested hotspot board ([FR-CV-07]). Both reads are read-only.
+/// the untested hotspot board ([FR-CV-07]). Both reads are read-only. The
+/// status carries the coverage runner's state — each tool's state and the
+/// execution consent (S-737) — for the page's run controls, read with no
+/// version probe: a page load starts no tool process (ADR-38).
 #[derive(Debug, Serialize)]
 pub(crate) struct CoverageModel {
     status: StatusInfo,
@@ -554,7 +587,7 @@ pub(crate) async fn coverage(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_coverage", Surface::Web, |e| -> anyhow::Result<CoverageModel> {
         Ok(CoverageModel {
             status: e.status(),
-            coverage: e.coverage_status()?,
+            coverage: e.coverage_status_probing(logos_core::coverage::Probes::Never)?,
             untested: e.latest_hotspots(Some(20), true, false)?,
         })
     })
@@ -1665,16 +1698,41 @@ pub(crate) async fn workspace_statistics_aggregate(
     .await
 }
 
-/// The `GET /api/v1/workspace/security` payload ([FR-SC-16]).
+/// The payload of the workspace security reads ([FR-SC-16], [FR-UI-36]): the
+/// per-member roll-up under `security` — [`WorkspaceSecurity`](fed_query::WorkspaceSecurity)
+/// for `GET /api/v1/workspace/security`,
+/// [`WorkspaceSecurityState`](fed_query::WorkspaceSecurityState) for the
+/// stored-only `GET /api/v1/workspace/security/summary` — beside the open-state
+/// completeness rider every workspace route carries.
 ///
 /// [FR-SC-16]: ../../docs/specs/requirements/FR-SC-16.md
+/// [FR-UI-36]: ../../docs/specs/requirements/FR-UI-36.md
 #[derive(Debug, Serialize)]
-pub(crate) struct WorkspaceSecurityAnswer {
-    /// The per-member roll-up and its totals
-    /// ([`WorkspaceSecurity`](fed_query::WorkspaceSecurity)).
-    security: fed_query::WorkspaceSecurity,
+pub(crate) struct WorkspaceSecurityAnswer<T> {
+    security: T,
     #[serde(flatten)]
     completeness: AnswerCompleteness,
+}
+
+/// The one body of the two workspace security reads: `read` over the registry,
+/// then the completeness rider **after** it — the open-state ledger the rider
+/// reads is filled by the member fan-out, so a rider read first would answer
+/// `complete: true` on a cold registry. Written once so the two handlers cannot
+/// order it differently.
+async fn workspace_security_answer<T>(
+    backing: Arc<Backing<Engine>>,
+    bridge: Arc<ContractBridge>,
+    view: &'static str,
+    read: fn(&EngineRegistry<Engine>) -> T,
+) -> Response
+where
+    T: Serialize + Send + 'static,
+{
+    workspace_fan(backing, bridge, view, Surface::Web, move |registry, _bridge| {
+        let security = read(registry);
+        WorkspaceSecurityAnswer { security, completeness: AnswerCompleteness::after_reading(registry) }
+    })
+    .await
 }
 
 /// `GET /api/v1/workspace/security` — every member's scanner states and fresh,
@@ -1702,9 +1760,68 @@ pub(crate) async fn workspace_security(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,
 ) -> Response {
-    workspace_fan(backing, bridge, "api_v1_workspace_security", Surface::Web, |registry, _bridge| {
-        let security = fed_query::workspace_security(registry);
-        WorkspaceSecurityAnswer { security, completeness: AnswerCompleteness::after_reading(registry) }
+    workspace_security_answer(backing, bridge, "api_v1_workspace_security", fed_query::workspace_security).await
+}
+
+/// `GET /api/v1/workspace/security/summary` — the Workspace Dashboard's
+/// Security widget ([`workspace_security_state`](fed_query::workspace_security_state),
+/// [FR-UI-36], S-790): each member's scan state and fresh, unsuppressed
+/// production severity counts, the figures [`workspace_security`] states for
+/// the same stores, read from **stored state only**. Unlike that roll-up it
+/// starts no version probe — a consented scanner is not invoked either — and
+/// carries no total, mean or score across members ([BR-56]); a Dashboard load
+/// is a read a cross-site page can trigger ([ADR-80]).
+///
+/// A member that could not be opened or read is a row with its `error` beside
+/// the others. Infallible at the surface, as [`workspace_security`] is, and the
+/// same honest `404` under a single-root backing.
+///
+/// [FR-UI-36]: ../../docs/specs/requirements/FR-UI-36.md
+/// [BR-56]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [ADR-80]: ../../docs/specs/architecture/decisions/ADR-80.md
+pub(crate) async fn workspace_security_summary(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_security_answer(backing, bridge, "api_v1_workspace_security_summary", fed_query::workspace_security_state)
+        .await
+}
+
+/// The payload of `GET /api/v1/workspace/coverage` ([FR-CV-16]): the
+/// per-member roll-up under `coverage` beside the open-state completeness rider
+/// every workspace route carries.
+///
+/// [FR-CV-16]: ../../docs/specs/requirements/FR-CV-16.md
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceCoverageAnswer {
+    coverage: fed_query::WorkspaceCoverage,
+    #[serde(flatten)]
+    completeness: AnswerCompleteness,
+}
+
+/// `GET /api/v1/workspace/coverage` — every member's coverage state, overall
+/// line coverage over its fresh files, fresh files of total, tool outcomes and
+/// last run, and how many members have fresh coverage of all
+/// ([`workspace_coverage`](fed_query::workspace_coverage), [FR-CV-16], S-740):
+/// the **`app`-scoped** roll-up of what [`coverage`] answers for one member.
+///
+/// A member with nothing ingested reads `never_run`, never 0 %; a member that
+/// could not be opened or read is a row with its `error` beside the others. The
+/// rider is read **after** the fan-out, which fills the open-state ledger it
+/// reads, as [`workspace_security_answer`] orders it. Read-only: each member is
+/// read as its own Coverage page reads it, with no version probe, so no tool
+/// process starts and no coverage runs — the page has no Run button. Infallible
+/// at the surface, and the same honest `404` under a single-root backing as
+/// every other `/api/v1/workspace/*` route.
+///
+/// [FR-CV-16]: ../../docs/specs/requirements/FR-CV-16.md
+pub(crate) async fn workspace_coverage(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan(backing, bridge, "api_v1_workspace_coverage", Surface::Web, move |registry, _bridge| {
+        let coverage = fed_query::workspace_coverage(registry);
+        WorkspaceCoverageAnswer { coverage, completeness: AnswerCompleteness::after_reading(registry) }
     })
     .await
 }
@@ -2129,7 +2246,7 @@ pub(crate) async fn verify(MemberEngine(engine): MemberEngine) -> Response {
 
 use axum::body::Bytes;
 use logos_core::jobs::lock::{peek, Busy};
-use logos_core::jobs::{JobKind, JobSnapshot, JobState, Refused, ScanJobs, Started};
+use logos_core::jobs::{AnalysisJobs, JobKind, JobSnapshot, JobState, Refused, Started};
 
 /// What `POST /api/v1/security/scan` reads. An empty body is `{}`.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -2173,7 +2290,7 @@ enum ScanStart {
 /// `GET /api/v1/security/scan[?repo=]` — the member's scan job with every
 /// event it reported so far, oldest first. Reads memory only.
 pub(crate) async fn security_scan_job(
-    State(jobs): State<Arc<ScanJobs>>,
+    State(jobs): State<Arc<AnalysisJobs>>,
     MemberEngine(engine): MemberEngine,
 ) -> Response {
     ok(ScanJobModel { job: jobs.snapshot(JobKind::SecurityScan, engine.root()) })
@@ -2189,7 +2306,7 @@ pub(crate) async fn security_scan_job(
 /// install started elsewhere holds the project's lock (S-758), `409` naming
 /// it, and nothing is recorded or started.
 pub(crate) async fn security_scan_start(
-    State(jobs): State<Arc<ScanJobs>>,
+    State(jobs): State<Arc<AnalysisJobs>>,
     MemberEngine(engine): MemberEngine,
     body: Bytes,
 ) -> Response {
@@ -2277,7 +2394,7 @@ pub(crate) async fn security_scan_start(
 /// instant later); a job that already ended is left as it is; `null` when
 /// none ran.
 pub(crate) async fn security_scan_cancel(
-    State(jobs): State<Arc<ScanJobs>>,
+    State(jobs): State<Arc<AnalysisJobs>>,
     MemberEngine(engine): MemberEngine,
 ) -> Response {
     ok(ScanJobModel { job: jobs.cancel(JobKind::SecurityScan, engine.root()) })
@@ -2349,7 +2466,7 @@ enum InstallStart {
 /// `GET /api/v1/security/install[?repo=]` — the member's `tool-install` job,
 /// running or last run, with every step it reported so far. Reads memory only.
 pub(crate) async fn security_install_job(
-    State(jobs): State<Arc<ScanJobs>>,
+    State(jobs): State<Arc<AnalysisJobs>>,
     MemberEngine(engine): MemberEngine,
 ) -> Response {
     ok(ScanJobModel { job: jobs.snapshot(JobKind::ToolInstall, engine.root()) })
@@ -2368,7 +2485,7 @@ pub(crate) async fn security_install_job(
 /// same holds for a scan or install started elsewhere — over MCP, from the
 /// CLI, in another process — whose `409` names it (S-758).
 pub(crate) async fn security_install_start(
-    State(jobs): State<Arc<ScanJobs>>,
+    State(jobs): State<Arc<AnalysisJobs>>,
     MemberEngine(engine): MemberEngine,
     body: Bytes,
 ) -> Response {
@@ -2443,6 +2560,8 @@ pub(crate) async fn security_install_start(
             let error = match kind {
                 JobKind::ToolInstall => "an install is already running on this project; wait for it to finish or cancel it, then install again",
                 JobKind::SecurityScan => "a scan is running on this project; wait for it to finish or cancel it, then install",
+                // Never excluded: a coverage run goes beside an install (S-738).
+                JobKind::CoverageRun => "a coverage run is running on this project; wait for it to finish or cancel it, then install",
             }
             .to_string();
             (StatusCode::CONFLICT, Json(ApiError { error })).into_response()
@@ -2457,10 +2576,404 @@ pub(crate) async fn security_install_start(
 /// partial tool is left, and the job's last step names the tools installed by
 /// then. Answers the job as it stands; `null` when none ran.
 pub(crate) async fn security_install_cancel(
-    State(jobs): State<Arc<ScanJobs>>,
+    State(jobs): State<Arc<AnalysisJobs>>,
     MemberEngine(engine): MemberEngine,
 ) -> Response {
     ok(ScanJobModel { job: jobs.cancel(JobKind::ToolInstall, engine.root()) })
+}
+
+// ── Coverage run job (S-738, [FR-CV-15], [ADR-87] §5) ────────────────────────
+//
+// The Run coverage button's server side: a `coverage-run` job per member on
+// the runner the security scan runs on, independent of it — a scan and a
+// coverage run go side by side, and a second start joins the running run.
+// Start and cancel are intent-guarded POSTs (`COVERAGE_RUN_POST_ROUTES`).
+// Nothing starts until the project's execution consent covers the run: a
+// start that the consent dialog has not answered for every tool it lacks —
+// and for the custom command's exact text — answers `409` with what is
+// pending, records nothing and starts no process ([FR-CV-13]). The GET
+// answers the job as it stands, or, to a client that accepts
+// `text/event-stream`, streams its events as they happen.
+//
+// [FR-CV-15]: ../../docs/specs/requirements/FR-CV-15.md
+// [FR-CV-13]: ../../docs/specs/requirements/FR-CV-13.md
+// [ADR-87]: ../../docs/specs/architecture/decisions/ADR-87.md
+
+use axum::http::HeaderMap;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use logos_core::coverage::consent::{ConsentAnswer, PendingConsent};
+use logos_core::coverage::CoverageJobStart;
+use logos_core::jobs::JobHandle;
+
+/// How often the event stream reads the job for what is new.
+const COVERAGE_STREAM_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// What `POST /api/v1/coverage/run` reads. An empty body is `{}`: every
+/// enabled, installed tool, nothing answered.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageRunStartRequest {
+    /// Run only this tool — a registry name or `custom` — rather than all.
+    #[serde(default)]
+    tool: Option<String>,
+    /// The tools the consent dialog showed and the user accepted (`custom`
+    /// for the custom command).
+    #[serde(default)]
+    consent: Vec<String>,
+    /// The custom command's text as the dialog showed it: the consent pins
+    /// exactly this text, so one changed since is asked for again.
+    #[serde(default)]
+    refresh_cmd: Option<String>,
+}
+
+/// The `409` of a start the consent does not cover yet: what the dialog
+/// shows — the tools, and the custom command verbatim.
+#[derive(Debug, Serialize)]
+pub(crate) struct CoverageConsentRequired {
+    error: String,
+    /// What is pending; its `refresh_cmd` is the exact text a start echoes
+    /// back to accept it.
+    consent_required: PendingConsent,
+    /// The custom command as the dialog displays it: control and bidi
+    /// characters escaped, as the terminal consent shows it
+    /// ([`shown`](logos_core::coverage::consent::shown)), so that the command
+    /// a user reads is the command that runs.
+    refresh_cmd_shown: Option<String>,
+}
+
+/// `GET /api/v1/coverage/run[?repo=]` — the member's `coverage-run` job,
+/// running or last run, with every event it reported so far; `null` when none
+/// ran in this serve. Reads memory only. With `Accept: text/event-stream` the
+/// answer is a stream instead ([`coverage_run_stream`]).
+pub(crate) async fn coverage_run_job(
+    State(jobs): State<Arc<AnalysisJobs>>,
+    MemberEngine(engine): MemberEngine,
+    headers: HeaderMap,
+) -> Response {
+    if crate::wants_event_stream(&headers) {
+        return coverage_run_stream(jobs.handle(JobKind::CoverageRun, engine.root())).into_response();
+    }
+    ok(ScanJobModel { job: jobs.snapshot(JobKind::CoverageRun, engine.root()) })
+}
+
+/// The member's coverage job as Server-Sent Events: each event the job kept
+/// — the replay first, so a late subscriber catches up — as a `step` whose
+/// data is the [`JobEvent`](logos_core::jobs::JobEvent), then one `end` whose
+/// data is `{"job": …}`, the job as it ended without its events, and the
+/// stream closes. The stream follows the job that was there when it opened
+/// (`job`), never a later run that takes its place. With no job, the `end`
+/// carries `{"job": null}` at once. An event dropped past the job's bound is
+/// never sent.
+fn coverage_run_stream(
+    job: Option<JobHandle>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    struct Follow {
+        job: Option<JobHandle>,
+        /// The `seq` of the first event not sent yet.
+        next: u64,
+        queued: std::collections::VecDeque<Event>,
+        ended: bool,
+    }
+    fn json_event(name: &str, data: &impl Serialize) -> Event {
+        let event = Event::default().event(name);
+        event.clone().json_data(data).unwrap_or(event)
+    }
+    let follow = Follow { job, next: 0, queued: std::collections::VecDeque::new(), ended: false };
+    let stream = futures_util::stream::unfold(follow, |mut f| async move {
+        loop {
+            if let Some(event) = f.queued.pop_front() {
+                return Some((Ok(event), f));
+            }
+            if f.ended {
+                return None;
+            }
+            // One snapshot is taken under the job's lock: once it reads ended,
+            // every event the job will ever report is in it.
+            let Some(mut job) = f.job.as_ref().map(JobHandle::snapshot) else {
+                f.queued.push_back(json_event("end", &ScanJobModel { job: None }));
+                f.ended = true;
+                continue;
+            };
+            let from = f.next;
+            for step in job.events.iter().filter(|step| step.seq >= from) {
+                f.queued.push_back(json_event("step", step));
+                f.next = step.seq + 1;
+            }
+            if job.state != JobState::Running {
+                job.events.clear();
+                f.queued.push_back(json_event("end", &ScanJobModel { job: Some(job) }));
+                f.ended = true;
+            } else if f.queued.is_empty() {
+                tokio::time::sleep(COVERAGE_STREAM_POLL).await;
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod coverage_stream_tests {
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+    use logos_core::jobs::{AnalysisJobs, JobKind, JobState};
+    use serde_json::json;
+
+    use super::coverage_run_stream;
+
+    /// A review finding (S-738): when the run a stream follows ends and the
+    /// next one starts within one poll, the stream still ends with the run it
+    /// followed — its `end`, its result — and sends none of the next run's
+    /// events.
+    #[tokio::test]
+    async fn the_stream_ends_with_the_run_it_followed_never_the_next() {
+        let jobs = std::sync::Arc::new(AnalysisJobs::new());
+        let root = Path::new("/project");
+        let (release, hold) = mpsc::channel::<()>();
+        jobs.start(JobKind::CoverageRun, root, move |ctx| {
+            for i in 0..3 {
+                ctx.emit(json!({ "run": "A", "i": i }));
+            }
+            hold.recv().ok();
+            Ok(json!("A's summary"))
+        })
+        .unwrap();
+        let mut body = coverage_run_stream(jobs.handle(JobKind::CoverageRun, root)).into_response().into_body();
+        let mut text = String::new();
+        while text.matches("event: step").count() < 3 {
+            let frame = body.frame().await.expect("a frame").unwrap();
+            text.push_str(&String::from_utf8_lossy(frame.data_ref().unwrap()));
+        }
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while jobs.snapshot(JobKind::CoverageRun, root).unwrap().state == JobState::Running {
+            assert!(Instant::now() < deadline, "A never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        jobs.start(JobKind::CoverageRun, root, |ctx| {
+            for i in 0..5 {
+                ctx.emit(json!({ "run": "B", "i": i }));
+            }
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(json!("B's summary"))
+        })
+        .unwrap();
+
+        let rest = body.collect().await.unwrap().to_bytes();
+        text.push_str(&String::from_utf8_lossy(&rest));
+        assert!(!text.contains(r#""run":"B""#), "the stream sent the next run's events: {text}");
+        let end = text.split("event: end").nth(1).expect("an end event");
+        assert!(end.contains("A's summary") && !end.contains("B's summary"), "the end is not A's: {end}");
+    }
+}
+
+/// `POST /api/v1/coverage/run[?repo=]` — start the member's coverage run, or
+/// join the one running (`joined: true`, the same job). Answers at once; the
+/// run goes on its own thread, beside any scan. While the project's execution
+/// consent lacks a tool the run would start, or the custom command's exact
+/// text, and the request's `consent` and `refresh_cmd` do not accept all of
+/// it, nothing is recorded or started and the answer is `409` with what is
+/// pending. Otherwise exactly what was pending is recorded in the user-level
+/// consent record, never in the repository, and the run starts.
+pub(crate) async fn coverage_run_start(
+    State(jobs): State<Arc<AnalysisJobs>>,
+    MemberEngine(engine): MemberEngine,
+    body: Bytes,
+) -> Response {
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        CoverageRunStartRequest::default()
+    } else {
+        match serde_json::from_slice::<CoverageRunStartRequest>(&body) {
+            Ok(request) => request,
+            Err(e) => {
+                let error = format!(
+                    "the coverage run request is not {{\"tool\"?: …, \"consent\": [tool, …], \"refresh_cmd\"?: …}}: {e}"
+                );
+                return (StatusCode::BAD_REQUEST, Json(ApiError { error })).into_response();
+            }
+        }
+    };
+    let started = run_blocking("api_v1_coverage_run_start", Surface::Web, move || {
+        let answer = ConsentAnswer { tools: &request.consent, refresh_cmd: request.refresh_cmd.as_deref() };
+        logos_core::coverage::job::start(&engine, &jobs, request.tool.as_deref(), Some(&answer), Surface::Web)
+    })
+    .await;
+    match started {
+        Ok(CoverageJobStart::Started(started)) => ok(started),
+        Ok(CoverageJobStart::Ask(pending)) => {
+            let error = format!(
+                "a coverage run needs consent first: it builds this project and runs its tests ({}), which executes \
+                 the project's own code and may reach the network",
+                pending.tools.join(", ")
+            );
+            let refresh_cmd_shown = pending.refresh_cmd.as_deref().map(logos_core::coverage::consent::shown);
+            let refused = CoverageConsentRequired { error, consent_required: pending, refresh_cmd_shown };
+            (StatusCode::CONFLICT, Json(refused)).into_response()
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `POST /api/v1/coverage/run/cancel[?repo=]` — cancel the member's running
+/// coverage run: the tool running is killed with its whole process group —
+/// a build daemon or a forked test JVM in it included — and no tool starts
+/// after. Answers the job as it stands (still `running` until the run
+/// notices, an instant later); a job that already ended is left as it is;
+/// `null` when none ran.
+pub(crate) async fn coverage_run_cancel(
+    State(jobs): State<Arc<AnalysisJobs>>,
+    MemberEngine(engine): MemberEngine,
+) -> Response {
+    ok(ScanJobModel { job: jobs.cancel(JobKind::CoverageRun, engine.root()) })
+}
+
+// ── Install and Add dependency before a coverage run (S-750, [FR-CV-17], [FR-CV-18]) ──
+//
+// The Coverage tools widget's **Install** (a managed coverage tool missing from
+// the machine) and **Add dependency** (a tool's missing coverage dev
+// dependency): each starts the member's `coverage-run` job with the install or
+// the addition as its first step, then the run — followed and cancelled on the
+// run's own routes. Intent-guarded POSTs (`COVERAGE_PREPARE_POST_ROUTES`).
+// One dialog answers every consent the start needs; until it has, the answer
+// is `409` with what it shows — the run's `consent_required` as Run coverage's
+// `409` carries it, plus the install lines and the dependency's exact command
+// and files — and nothing is recorded, downloaded or run.
+//
+// [FR-CV-17]: ../../docs/specs/requirements/FR-CV-17.md
+// [FR-CV-18]: ../../docs/specs/requirements/FR-CV-18.md
+
+use logos_core::coverage::job::{DependencyAsk, Prepare, PrepareAnswer, PreparedStart};
+use logos_core::tools::surface::CoverageInstallLine;
+
+/// What `POST /api/v1/coverage/install` and `/dependency` read. An empty body
+/// is `{}`: nothing answered.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoveragePrepareRequest {
+    /// The registry tool whose dependency to add; the dependency route only.
+    #[serde(default)]
+    tool: Option<String>,
+    /// The tools the dialog showed for the execution consent.
+    #[serde(default)]
+    consent: Vec<String>,
+    /// The custom command's exact text, when the dialog showed it.
+    #[serde(default)]
+    refresh_cmd: Option<String>,
+    /// The install lines accepted: `<tool> <version>`, or the `rustup` command.
+    #[serde(default)]
+    install: Vec<String>,
+    /// The dependency commands accepted, exactly as shown.
+    #[serde(default)]
+    dependency: Vec<String>,
+}
+
+/// The `409` of a prepared start with a line unanswered: Run coverage's
+/// question, plus the install lines and the dependency to add.
+#[derive(Debug, Serialize)]
+pub(crate) struct CoveragePrepareRequired {
+    error: String,
+    consent_required: PendingConsent,
+    refresh_cmd_shown: Option<String>,
+    install: Vec<CoverageInstallLine>,
+    dependencies: Vec<DependencyAsk>,
+}
+
+/// The `422` of a dependency Logos will not add here: why, and the command to
+/// run by hand.
+#[derive(Debug, Serialize)]
+pub(crate) struct CoverageDependencyRefused {
+    error: String,
+    hand_command: String,
+}
+
+/// `POST /api/v1/coverage/install[?repo=]` — install the missing managed
+/// coverage tools and `llvm-tools-preview`, then run coverage, as the
+/// member's `coverage-run` job ([FR-CV-17]).
+pub(crate) async fn coverage_install_start(
+    State(jobs): State<Arc<AnalysisJobs>>,
+    MemberEngine(engine): MemberEngine,
+    body: Bytes,
+) -> Response {
+    coverage_prepared_start(jobs, engine, body, false).await
+}
+
+/// `POST /api/v1/coverage/dependency[?repo=]` — add `tool`'s missing coverage
+/// dev dependency with the project's own package manager, then run coverage,
+/// as the member's `coverage-run` job ([FR-CV-18]). A dependency Logos will
+/// not add here is `422`, naming the command to run by hand.
+pub(crate) async fn coverage_dependency_start(
+    State(jobs): State<Arc<AnalysisJobs>>,
+    MemberEngine(engine): MemberEngine,
+    body: Bytes,
+) -> Response {
+    coverage_prepared_start(jobs, engine, body, true).await
+}
+
+/// Both prepared starts: `dependency` is the route. Answers at once; the job
+/// goes on its own thread. A coverage run already going is `409`, never
+/// joined, since it would not ready the tool; so is a scan or install holding
+/// the project's lock, for an install.
+async fn coverage_prepared_start(jobs: Arc<AnalysisJobs>, engine: Arc<Engine>, body: Bytes, dependency: bool) -> Response {
+    let bad = |error: String| (StatusCode::BAD_REQUEST, Json(ApiError { error })).into_response();
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        CoveragePrepareRequest::default()
+    } else {
+        match serde_json::from_slice::<CoveragePrepareRequest>(&body) {
+            Ok(request) => request,
+            Err(e) => {
+                return bad(format!(
+                    "the request is not {{\"tool\"?: …, \"consent\": [tool, …], \"refresh_cmd\"?: …, \"install\": [line, …], \
+                     \"dependency\": [command, …]}}: {e}"
+                ))
+            }
+        }
+    };
+    let prepare = match (dependency, request.tool.clone()) {
+        (true, Some(tool)) => Prepare::Dependency(tool),
+        (true, None) => return bad("Add dependency names the tool whose dependency to add: {\"tool\": …}".to_string()),
+        (false, None) => Prepare::Install,
+        (false, Some(_)) => return bad("Install takes no tool: it installs every missing managed coverage tool".to_string()),
+    };
+    let started = run_blocking("api_v1_coverage_prepared_start", Surface::Web, move || {
+        let answer = PrepareAnswer {
+            run: ConsentAnswer { tools: &request.consent, refresh_cmd: request.refresh_cmd.as_deref() },
+            install: &request.install,
+            dependency: &request.dependency,
+        };
+        logos_core::coverage::job::start_prepared(&engine, &jobs, &prepare, &answer, Surface::Web)
+    })
+    .await;
+    let conflict = |error: String| (StatusCode::CONFLICT, Json(ApiError { error })).into_response();
+    match started {
+        Ok(PreparedStart::Started(started)) => ok(started),
+        Ok(PreparedStart::Ask(pending)) => {
+            let error = "this needs your consent first: each line below is downloaded and run, or changes the \
+                         project, on this machine"
+                .to_string();
+            let refresh_cmd_shown = pending.run.refresh_cmd.as_deref().map(logos_core::coverage::consent::shown);
+            let required = CoveragePrepareRequired {
+                error,
+                consent_required: pending.run,
+                refresh_cmd_shown,
+                install: pending.install,
+                dependencies: pending.dependencies,
+            };
+            (StatusCode::CONFLICT, Json(required)).into_response()
+        }
+        Ok(PreparedStart::Refused { reason, hand_command }) => {
+            let error = format!("{reason}. Nothing was changed. Run it by hand: {hand_command}");
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(CoverageDependencyRefused { error, hand_command })).into_response()
+        }
+        Ok(PreparedStart::Running) => conflict(
+            "a coverage run is going on this project; wait for it to finish or cancel it, then start again".to_string(),
+        ),
+        Ok(PreparedStart::Busy(busy)) => conflict(busy.to_string()),
+        Err(e) => fail(e),
+    }
 }
 
 // ── Security triage (S-672, [FR-SC-12]) ──────────────────────────────────────

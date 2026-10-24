@@ -1,4 +1,4 @@
-import { cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 afterEach(cleanup);
@@ -20,14 +20,86 @@ describe("useApiResource", () => {
     await waitFor(() => expect(result.current.status).toBe("error"));
     expect(result.current.error).toBe(err);
   });
+
+  /** A fetcher answering "before" first, then each later read when the test releases it. */
+  function heldReloads(outcome: "after" | Error) {
+    let reads = 0;
+    let release: () => void = () => {};
+    const fetcher = () => {
+      reads += 1;
+      if (reads === 1) return Promise.resolve("before");
+      return new Promise<string>((done, fail) => (release = () => (outcome instanceof Error ? fail(outcome) : done(outcome))));
+    };
+    return { fetcher, reads: () => reads, release: () => release() };
+  }
+
+  it("settles a reload only once the data it fetched is the data shown (HF-2)", async () => {
+    const held = heldReloads("after");
+    const { result } = renderHook(() => useApiResource(held.fetcher, []));
+    await waitFor(() => expect(result.current.data).toBe("before"));
+    let settled = false;
+    let reloaded: Promise<void> = Promise.resolve();
+    act(() => {
+      reloaded = result.current.reload().then(() => {
+        settled = true;
+      });
+    });
+    await waitFor(() => expect(held.reads()).toBe(2));
+    await act(() => new Promise((tick) => setTimeout(tick, 20)));
+    expect(settled, "the reload's answer has not landed").toBe(false);
+    expect(result.current.data).toBe("before");
+
+    held.release();
+    await act(() => reloaded);
+    expect(result.current.data).toBe("after");
+  });
+
+  it("never settles a reload with a fetch that started before it (HF-2 review)", async () => {
+    const releases: ((v: string) => void)[] = [];
+    const fetcher = () => new Promise<string>((done) => releases.push(done));
+    const { result } = renderHook(() => useApiResource(fetcher, []));
+    expect(releases).toHaveLength(1);
+    let settled = false;
+    let reloaded: Promise<void> = Promise.resolve();
+    await act(async () => {
+      reloaded = result.current.reload().then(() => {
+        settled = true;
+      });
+      // The first fetch answers after the reload was asked for, before its own fetch ran.
+      releases[0]("first");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(settled, "settled by a fetch that started before it").toBe(false);
+    await waitFor(() => expect(releases).toHaveLength(2));
+    act(() => releases[1]("second"));
+    await act(() => reloaded);
+    expect(settled).toBe(true);
+    expect(result.current.data).toBe("second");
+  });
+
+  it("settles a reload that fails, with the failure shown", async () => {
+    const err = new ApiError("/api/v1/security", 503);
+    const held = heldReloads(err);
+    const { result } = renderHook(() => useApiResource(held.fetcher, []));
+    await waitFor(() => expect(result.current.data).toBe("before"));
+    let reloaded: Promise<void> = Promise.resolve();
+    act(() => {
+      reloaded = result.current.reload();
+    });
+    await waitFor(() => expect(held.reads()).toBe(2));
+    held.release();
+    await act(() => reloaded);
+    expect(result.current.error).toBe(err);
+  });
 });
 
 describe("AsyncResource", () => {
-  const ready = <T,>(data: T) => ({ status: "ready" as const, data, error: undefined, reload: () => {} });
+  const ready = <T,>(data: T) => ({ status: "ready" as const, data, error: undefined, reload: () => Promise.resolve() });
 
   it("renders a busy indicator while loading", () => {
     render(
-      <AsyncResource resource={{ status: "loading", data: undefined, error: undefined, reload: () => {} }}>
+      <AsyncResource resource={{ status: "loading", data: undefined, error: undefined, reload: () => Promise.resolve() }}>
         {() => <div>body</div>}
       </AsyncResource>,
     );
@@ -42,7 +114,7 @@ describe("AsyncResource", () => {
           status: "error",
           data: undefined,
           error: new ApiError("/api/v1/impact", 503),
-          reload: () => {},
+          reload: () => Promise.resolve(),
         }}
       >
         {() => <div>body</div>}
@@ -59,7 +131,7 @@ describe("AsyncResource", () => {
           status: "error",
           data: undefined,
           error: new ApiError("/api/v1/config", 500),
-          reload: () => {},
+          reload: () => Promise.resolve(),
         }}
         errorNote={<a href="/workspace-config">workspace Config</a>}
       >
@@ -78,7 +150,7 @@ describe("AsyncResource", () => {
   it("never renders errorNote outside the error state, even if a caller passed one", () => {
     const { rerender } = render(
       <AsyncResource
-        resource={{ status: "loading", data: undefined, error: undefined, reload: () => {} }}
+        resource={{ status: "loading", data: undefined, error: undefined, reload: () => Promise.resolve() }}
         errorNote={<a href="/workspace-config">workspace Config</a>}
       >
         {() => <div>body</div>}

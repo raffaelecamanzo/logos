@@ -2513,6 +2513,13 @@ pub trait GraphStore {
     /// [FR-QM-07]: ../../../docs/specs/requirements/FR-QM-07.md
     fn metric_snapshots(&self) -> Result<Vec<MetricSnapshotRow>>;
 
+    /// [`metric_snapshots`](Self::metric_snapshots) up to and including the
+    /// snapshot `id`, ordered by `id` — the series a verdict over that
+    /// snapshot reads, which one recorded after it never enters ([FR-GV-27]).
+    ///
+    /// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+    fn metric_snapshots_through(&self, id: i64) -> Result<Vec<MetricSnapshotRow>>;
+
     /// The metric snapshot the `baseline` row for `scope` points at, or
     /// `None` when no baseline has been saved (S-020, [FR-GV-04]).
     ///
@@ -4370,51 +4377,11 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn metric_snapshots(&self) -> Result<Vec<MetricSnapshotRow>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, created_at, commit_sha, node_count, edge_count, function_count, \
-                    test_function_count, metric_version, empty, \
-                    modularity_raw, modularity_normalized, \
-                    acyclicity_raw, acyclicity_normalized, \
-                    depth_raw, depth_normalized, \
-                    equality_raw, equality_normalized, \
-                    redundancy_raw, redundancy_normalized, \
-                    thresholds_hash, aggregate_signal, modularity_applicable, \
-                    acyclicity_applicable, depth_applicable, cross_module_edges \
-             FROM metric_snapshots ORDER BY id",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(MetricSnapshotRow {
-                    id: row.get(0)?,
-                    created_at: row.get(1)?,
-                    commit_sha: row.get(2)?,
-                    node_count: row.get(3)?,
-                    edge_count: row.get(4)?,
-                    function_count: row.get(5)?,
-                    test_function_count: row.get(6)?,
-                    metric_version: row.get(7)?,
-                    empty: row.get::<_, i64>(8)? != 0,
-                    modularity_raw: row.get(9)?,
-                    modularity_normalized: row.get(10)?,
-                    acyclicity_raw: row.get(11)?,
-                    acyclicity_normalized: row.get(12)?,
-                    depth_raw: row.get(13)?,
-                    depth_normalized: row.get(14)?,
-                    equality_raw: row.get(15)?,
-                    equality_normalized: row.get(16)?,
-                    redundancy_raw: row.get(17)?,
-                    redundancy_normalized: row.get(18)?,
-                    thresholds_hash: row.get(19)?,
-                    aggregate_signal: row.get(20)?,
-                    modularity_applicable: row.get::<_, Option<i64>>(21)?.map(|n| n != 0),
-                    acyclicity_applicable: row.get::<_, Option<i64>>(22)?.map(|n| n != 0),
-                    depth_applicable: row.get::<_, Option<i64>>(23)?.map(|n| n != 0),
-                    cross_module_edges: row.get(24)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("collecting metric snapshots")?;
-        Ok(rows)
+        self.metric_snapshots_up_to(i64::MAX)
+    }
+
+    fn metric_snapshots_through(&self, id: i64) -> Result<Vec<MetricSnapshotRow>> {
+        self.metric_snapshots_up_to(id)
     }
 
     fn baseline_record(&self, scope: &str) -> Result<Option<BaselineRecord>> {
@@ -4652,6 +4619,57 @@ const SQL_NEIGHBOURS_OUT: &str =
      ORDER BY e.kind, n.id";
 
 impl SqliteGraphStore {
+    /// Shared body of [`GraphStore::metric_snapshots`] /
+    /// [`GraphStore::metric_snapshots_through`]: every snapshot whose id is at
+    /// most `id`, ordered by `id`. `id` is a bound parameter.
+    fn metric_snapshots_up_to(&self, id: i64) -> Result<Vec<MetricSnapshotRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, created_at, commit_sha, node_count, edge_count, function_count, \
+                    test_function_count, metric_version, empty, \
+                    modularity_raw, modularity_normalized, \
+                    acyclicity_raw, acyclicity_normalized, \
+                    depth_raw, depth_normalized, \
+                    equality_raw, equality_normalized, \
+                    redundancy_raw, redundancy_normalized, \
+                    thresholds_hash, aggregate_signal, modularity_applicable, \
+                    acyclicity_applicable, depth_applicable, cross_module_edges \
+             FROM metric_snapshots WHERE id <= ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([id], |row| {
+                Ok(MetricSnapshotRow {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    commit_sha: row.get(2)?,
+                    node_count: row.get(3)?,
+                    edge_count: row.get(4)?,
+                    function_count: row.get(5)?,
+                    test_function_count: row.get(6)?,
+                    metric_version: row.get(7)?,
+                    empty: row.get::<_, i64>(8)? != 0,
+                    modularity_raw: row.get(9)?,
+                    modularity_normalized: row.get(10)?,
+                    acyclicity_raw: row.get(11)?,
+                    acyclicity_normalized: row.get(12)?,
+                    depth_raw: row.get(13)?,
+                    depth_normalized: row.get(14)?,
+                    equality_raw: row.get(15)?,
+                    equality_normalized: row.get(16)?,
+                    redundancy_raw: row.get(17)?,
+                    redundancy_normalized: row.get(18)?,
+                    thresholds_hash: row.get(19)?,
+                    aggregate_signal: row.get(20)?,
+                    modularity_applicable: row.get::<_, Option<i64>>(21)?.map(|n| n != 0),
+                    acyclicity_applicable: row.get::<_, Option<i64>>(22)?.map(|n| n != 0),
+                    depth_applicable: row.get::<_, Option<i64>>(23)?.map(|n| n != 0),
+                    cross_module_edges: row.get(24)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting metric snapshots")?;
+        Ok(rows)
+    }
+
     /// Shared body of [`GraphStore::callers`] / [`GraphStore::callees`].
     ///
     /// Selects one of two fixed `const` statements by [`Direction`]; `id` and

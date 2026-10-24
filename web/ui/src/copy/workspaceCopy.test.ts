@@ -10,6 +10,7 @@ import type { CopyText } from "./types.ts";
 import { DASHBOARD_TEXT } from "./workspaceDashboard.copy.ts";
 import { BINDING_KIND_LABEL, SERVICE_MAP_TEXT } from "./serviceMap.copy.ts";
 import { HEALTH_TEXT } from "./workspaceHealth.copy.ts";
+import { WORKSPACE_COVERAGE_TEXT } from "./workspaceCoverage.copy.ts";
 
 /** The arguments each sentence function is sampled with: every branch its body
  *  takes — zero, one and many; both booleans; a one- and a two-element list. A
@@ -39,6 +40,9 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     skipped: [[["web"]], [["api", "web"]]],
     deadCount: [[1], [5]],
     membersRead: [[3, 3], [2, 3]],
+    securityFresh: [[0, 1], [1, 1], [1, 3]],
+    securityUnread: [[1], [2]],
+    securityScan: [["fresh"], ["stale"], ["never_run"]],
   },
   HEALTH_TEXT: {
     rulesChecked: [[1, 1, 1], [2, 9, 0]],
@@ -58,9 +62,22 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     hintFigure: [[1], [2]],
     assertedFigure: [[1, 1], [2, 3]],
   },
+  WORKSPACE_COVERAGE_TEXT: {
+    heading: [[1], [2]],
+    denominator: [[0, 1, 1], [1, 1, 0], [2, 3, 1], [1, 4, 3]],
+    unread: [[1], [2]],
+    freshFiles: [[0, 0], [1, 1], [2, 3]],
+    tools: [[0, 0, 1], [1, 0, 1], [2, 1, 3]],
+  },
 };
 
-const TABLES: Record<string, Record<string, unknown>> = { COVERAGE_TEXT, DASHBOARD_TEXT, HEALTH_TEXT, SERVICE_MAP_TEXT };
+const TABLES: Record<string, Record<string, unknown>> = {
+  COVERAGE_TEXT,
+  DASHBOARD_TEXT,
+  HEALTH_TEXT,
+  SERVICE_MAP_TEXT,
+  WORKSPACE_COVERAGE_TEXT,
+};
 
 /** Every sentence a table can produce: fixed ones as they are (a fixed sentence
  *  may be catalogue text with glosses in it), functions over their samples. */
@@ -75,11 +92,9 @@ function sentences(name: string): [string, CopyText][] {
 }
 
 describe("workspace catalogue sentences", () => {
+  // Every table, not a list of them: a table added to TABLES is checked here too.
   const all = [
-    ...sentences("COVERAGE_TEXT"),
-    ...sentences("DASHBOARD_TEXT"),
-    ...sentences("HEALTH_TEXT"),
-    ...sentences("SERVICE_MAP_TEXT"),
+    ...Object.keys(TABLES).flatMap(sentences),
     ...Object.entries(BINDING_KIND_LABEL).map(([k, label]) => [`kind ${k}`, label] as [string, CopyText]),
   ];
 
@@ -127,6 +142,12 @@ describe("workspace catalogue sentences", () => {
     expect(HEALTH_TEXT.unknownMembers(1)).toContain("so that rule was silently narrowed");
     expect(COVERAGE_TEXT.notResolvedCaption(1)).toBe("Why 1 outbound call site did not resolve, largest reason first");
     expect(COVERAGE_TEXT.notResolvedCaption(7)).toBe("Why 7 outbound call sites did not resolve, largest reason first");
+    expect(WORKSPACE_COVERAGE_TEXT.heading(1)).toMatch(/^1 member · /);
+    expect(WORKSPACE_COVERAGE_TEXT.heading(2)).toMatch(/^2 members · /);
+    expect(WORKSPACE_COVERAGE_TEXT.denominator(1, 1, 1)).toBe("Coverage from 1 of 1 member; 1 member never run.");
+    expect(WORKSPACE_COVERAGE_TEXT.denominator(1, 3, 2)).toBe("Coverage from 1 of 3 members; 2 members never run.");
+    expect(WORKSPACE_COVERAGE_TEXT.unread(1)).toMatch(/^1 member could not be read/);
+    expect(WORKSPACE_COVERAGE_TEXT.unread(2)).toMatch(/^2 members could not be read/);
   });
 });
 

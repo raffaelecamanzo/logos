@@ -97,21 +97,29 @@ pub(crate) fn publish(target: &Path, bytes: &[u8], unix_mode: Option<u32>) -> st
 ///
 /// On Unix with `Some(mode)` the file is opened with the mode applied via
 /// [`std::os::unix::fs::OpenOptionsExt`], so it is never momentarily readable at
-/// the default umask before a follow-up `chmod`. `None` (or non-Unix) falls back
-/// to [`fs::File::create`].
+/// the default umask before a follow-up `chmod`. `None` (or non-Unix) leaves the
+/// OS default.
+///
+/// The temp is created **exclusively** (`O_EXCL`), never opened through what is
+/// already at its path: a file or symlink there — an orphan of a crashed
+/// publish, or a symlink planted in a project directory a publish writes into
+/// (S-750) — is unlinked first, and should one appear again before the create,
+/// the create fails rather than write through it. A symlink at the temp path
+/// would otherwise receive the bytes at its target, outside the directory, and
+/// the `rename` would then publish the symlink itself over `target`.
 fn create_temp(tmp: &Path, unix_mode: Option<u32>) -> std::io::Result<fs::File> {
+    // Unlinks a symlink itself, never its target; a directory stays and fails
+    // the create below.
+    let _ = fs::remove_file(tmp);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     if let Some(mode) = unix_mode {
         use std::os::unix::fs::OpenOptionsExt as _;
-        return fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(tmp);
+        options.mode(mode);
     }
     let _ = unix_mode;
-    fs::File::create(tmp)
+    options.open(tmp)
 }
 
 /// A sibling temp path for `target`: `.<name>.<pid>.<tid>.tmp`, in the same
@@ -200,8 +208,8 @@ mod tests {
         let target = dir.path().join("doc");
         publish(&target, b"original", None).expect("seed");
 
-        // A directory where the temp must be created: `File::create` cannot
-        // succeed on it for any user, on any platform.
+        // A directory where the temp must be created: an exclusive create
+        // cannot succeed on it for any user, on any platform.
         fs::create_dir(sibling_tmp_path(&target)).expect("obstruct the temp path");
 
         assert!(publish(&target, b"replacement", None).is_err());
@@ -219,5 +227,27 @@ mod tests {
 
         let mode = fs::metadata(&target).expect("target").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the temp's mode reached the target");
+    }
+
+    /// S-750, a review finding: a symlink planted at the temp path is never
+    /// written through — the bytes outside the directory stay as they were, and
+    /// the target becomes a regular file holding the new bytes, not the symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_temp_path_is_never_written_through() {
+        let dir = tempfile::tempdir().expect("dir");
+        let outside = tempfile::tempdir().expect("outside");
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, b"untouched").expect("victim");
+        let target = dir.path().join("package.json");
+        fs::write(&target, b"changed by the package manager").expect("target");
+        std::os::unix::fs::symlink(&victim, sibling_tmp_path(&target)).expect("plant the symlink");
+
+        publish(&target, b"the bytes it held before", None).expect("publish");
+
+        assert_eq!(fs::read(&victim).expect("victim"), b"untouched", "written through the symlink");
+        let meta = fs::symlink_metadata(&target).expect("target");
+        assert!(meta.file_type().is_file(), "the target is a regular file, not the planted symlink");
+        assert_eq!(fs::read(&target).expect("target"), b"the bytes it held before");
     }
 }

@@ -812,12 +812,94 @@ fn adapter_lines() -> usize {
 ///
 /// Routing, not logic: the handler, the kill of every foreground run's process
 /// groups and the exit code are `logos_core::jobs::stop_on_signal`'s.
+///
+/// **S-795 1130→1132** for `security findings --scope` ([FR-SC-28]), measured
+/// 1130→1132 (+2), no headroom. Sibling sessions in Sprint 108 Iteration 1 add
+/// their own deltas to the 1130 this one branched from; the merged budget is
+/// the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `scope` field of `SecurityCommands::Findings` and its `#[arg]` | **+2** |
+/// | `dispatch.rs`: the token joins the arm's existing tuple, same lines | **0** |
+/// | | **+2** |
+///
+/// Routing, not logic: the classification, the default and the hidden count
+/// are `logos_core::security::scope`'s.
+///
+/// [FR-SC-28]: ../../docs/specs/requirements/FR-SC-28.md
+///
+/// **S-798 1132→1139** for `review --headroom` ([FR-GV-29]), measured
+/// 1132→1139 (+7), no headroom. Sibling sessions in Sprint 108 Iteration 2 add
+/// their own deltas to the 1132 this one branched from; the merged budget is
+/// the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: `--headroom`, `--subjects` and `--near` on `Review` (attribute + field each) | **+6** |
+/// | `dispatch.rs`: a `Review` arm guarded on `headroom`, calling `Engine::review_headroom` | **+1** |
+/// | | **+7** |
+///
+/// Routing, not logic: the base, the measurement, the subject resolution and
+/// the allowances are `logos_core::governance`'s, the call the MCP tool makes.
+///
+/// [FR-GV-29]: ../../docs/specs/requirements/FR-GV-29.md
+///
+/// **S-737 1139→1149** for `coverage run` ([FR-CV-14]), measured 1139→1149
+/// (+10), no headroom. Sibling sessions in Sprint 108 Iteration 3 add their own
+/// deltas to the 1139 this one branched from; the merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Run { tool, consent }` variant of `CoverageCommands` (attribute + field each) | **+6** |
+/// | `dispatch.rs`: the `Coverage` arm becomes a block that installs the stop handler, then matches as before | **+3** |
+/// | `dispatch.rs`: the `Run` arm, calling `Engine::coverage_run`; `Refresh` now exits through the same `report_gate` | **+1** |
+/// | | **+10** |
+///
+/// Routing, not logic: the run, the consent, the outcomes and the exit code are
+/// `logos_core::coverage`'s, the call the MCP tool makes.
+///
+/// [FR-CV-14]: ../../docs/specs/requirements/FR-CV-14.md
+///
+/// **S-748 1149→1159** for `coverage install` ([FR-CV-17]), measured 1149→1159
+/// (+10), no headroom. Sibling sessions in Sprint 108 Iteration 5 add their own
+/// deltas to the 1149 this one branched from; the merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Install { from, consent }` variant of `CoverageCommands` (attribute + field each) | **+6** |
+/// | `dispatch.rs`: the `Install` arm, building the request and exiting through `CoverageInstall::exit_code` | **+4** |
+/// | | **+10** |
+///
+/// Routing, not logic: the precedence, the consent, the install and the
+/// `rustup` step are `logos_core::tools::surface::coverage_install`'s. No MCP
+/// tool calls it; the CLI-only roster row is test code.
+///
+/// [FR-CV-17]: ../../docs/specs/requirements/FR-CV-17.md
+///
+/// **S-749 1149→1151** for `coverage run --dependency-consent` ([FR-CV-18]),
+/// measured 1149→1151 (+2), no headroom. Sibling sessions in Sprint 108
+/// Iteration 5 add their own deltas to the 1149 this one branched from; the
+/// merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `dependency_consent` field of `CoverageCommands::Run` and its `#[arg]` | **+2** |
+/// | `dispatch.rs`: the flag joins the `Run` arm's pattern, calling `Engine::coverage_run_adding` on the same line | **0** |
+/// | | **+2** |
+///
+/// Routing, not logic: the plan, the consent, the package-manager run and the
+/// refusals are `logos_core::coverage::deps`'s.
+///
+/// [FR-CV-18]: ../../docs/specs/requirements/FR-CV-18.md
+///
+/// **Merged at Sprint 108 Iteration 5 assembly: 1149 + 10 + 2 = 1161.**
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 1130,
-        "cli adapter exceeds the 1130 production-LOC budget (NFR-MA-02): \
+        lines <= 1161,
+        "cli adapter exceeds the 1161 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

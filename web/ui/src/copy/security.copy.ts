@@ -13,6 +13,7 @@
 
 import type {
   SecurityCommitAnchor,
+  SecurityCoverageKind,
   SecurityEntryStatus,
   SecurityFindingContext,
   SecuritySelector,
@@ -23,12 +24,12 @@ import type {
 import { plural, type CopyEntry } from "./types.ts";
 
 export const scannerMatrix: CopyEntry = {
-  what: "Each security scanner's state here: not installed, disabled, installed but never run, not applicable when the project has none of the files it reads, stale since HEAD moved, or fresh with its finding count — why its last scan failed, if it did — and whether a whole-project scan keeps it out of the directories the project ignores.",
+  what: "Each security scanner's state here, live while a scan or install runs: not installed, disabled, installed but never run, not applicable when the project has none of the files it reads, stale since HEAD moved, or fresh with its finding count — with its version and copy, why its last scan failed if it did, and whether a whole-project scan keeps it out of the directories the project ignores. Run scan, Install & scan and Cancel sit on the title row.",
   why: "A scanner that has not run on this commit has looked at nothing, so its silence is not a clean result.",
 };
 
 export const securityFindings: CopyEntry = {
-  what: "Every stored finding with its severity, scanner, location and the symbol that encloses it, narrowed by the filters above the table.",
+  what: "Every stored finding with its severity, scanner, location and the symbol that encloses it, narrowed by the filters above the table; production code by default, a finding in test code tagged TEST.",
   why: "The enclosing symbol and whether a route reaches it say which findings an attacker can get to first.",
 };
 
@@ -58,8 +59,32 @@ export const SECURITY_COMMANDS = {
   ingest: "logos security ingest <report>",
 } as const;
 
-/** The text a secret-class finding's message renders as (FR-SC-03). */
-export const REDACTED = "[redacted]";
+/** What a secret-class finding's message reads as (FR-SC-03, S-796): the
+ *  reason the page shows no message, then where the finding is. The stored text
+ *  (`redact.rs`) is what the CLI and MCP print; the page explains it instead. */
+export const REDACTED_TEXT = {
+  why: "Redacted: the scanner's message would contain the secret itself",
+  at: (location: string) => `, at ${location}`,
+  /** A finding bound to no file: its location is not withheld, it has none. */
+  nowhere: ", and the finding has no location",
+} as const;
+
+/** The code scope control and the `TEST` tag (FR-SC-28, S-796). A test-code
+ *  row says why it reads `test`: its enclosing symbol, or its path. */
+export const SCOPE_TEXT = {
+  label: "Code scope",
+  options: { production: "Production", test: "Test code", all: "All" },
+  tag: "TEST",
+  reason: {
+    /** A test-code finding the payload gave no reason for. */
+    unstated: "In test code.",
+    test_symbol: "In test code: the symbol that encloses it is a test.",
+    test_path: "In test code: its path is a test, fixtures or testdata path.",
+  },
+  /** A table that lists nothing because the scope hid what the other filters kept. */
+  hidden: (n: number, scopeWord: string) =>
+    `No ${scopeWord} finding matches these filters; ${n} ${plural(n, "finding does", "findings do")} in the other code: change the code scope to see ${plural(n, "it", "them")}.`,
+} as const;
 
 /** The named absences, each with the command that fixes it. */
 export const SECURITY_ABSENCE = {
@@ -99,9 +124,9 @@ export const SCANNER_STATE_TEXT = {
   disabled: "Disabled in .logos/config.toml; enable it there to scan with it.",
   /** Nothing it reads is in the project (S-769): no scan is missing. */
   notApplicable: (reason: string) => `Nothing to scan: ${reason}.`,
-  /** Its last scan failed: a badge, then the one-line cause from its log and
-   *  where that log is. */
-  lastFailed: "last scan failed",
+  /** Its last scan failed: a red label that expands to the one-line cause from
+   *  its log and where that log is. */
+  lastFailed: "LAST SCAN FAILED",
   failureCause: (cause: string | undefined, log: string) => `${cause !== undefined ? `${cause} — ` : ""}the output is in ${log}.`,
   fresh: (findings: number, suppressed: number) =>
     `${findings} ${plural(findings, "finding", "findings")}${suppressed > 0 ? `, ${suppressed} suppressed` : ""}`,
@@ -130,6 +155,9 @@ export const FINDING_COUNT_TEXT = {
   /** What the count leaves out, and why. */
   excluded: (notFresh: number, suppressed: number) =>
     `Left out: ${notFresh} ${plural(notFresh, "finding", "findings")} in files changed since the scan, and ${suppressed} suppressed.`,
+  /** The findings in test code, which no count includes (FR-SC-28): stated
+   *  beside the count, `security status`'s "N more in test code". */
+  testCode: (n: number) => `· ${n} in test code`,
 } as const;
 
 /** Why a finding has no OWASP category under the edition shown (FR-SC-04). */
@@ -173,6 +201,17 @@ const UNRESOLVED_BECAUSE: Record<NonNullable<SecurityFindingContext["reachabilit
   not_in_graph: "it is not in the graph yet",
 };
 
+/** The Findings table's own words (frontend-design §4.23): the Reachable column
+ *  reads yes / no / unknown — `unknown` is never `no` (NFR-CC-04) — and the full
+ *  sentence behind each is the cell's tooltip. */
+export const FINDINGS_TABLE_TEXT = {
+  /** The Reachable header's tooltip, and the filter's name (CR-245). */
+  reachableTip: "an HTTP route handler can call this code",
+  reachable: { reachable: "yes", unreachable: "no", unknown: "unknown" },
+  /** The detail's line for a suppressed or expired finding's state, reason and expiry. */
+  suppression: "Suppression",
+} as const;
+
 /** The detail's sentences over one finding's graph context. */
 export const CONTEXT_TEXT = {
   unbound: (because: keyof typeof UNBOUND_BECAUSE) => `No enclosing symbol: ${UNBOUND_BECAUSE[because]}.`,
@@ -192,39 +231,31 @@ export const CONTEXT_TEXT = {
 
 // ── Run scan (S-673, FR-SC-15, FR-SC-07) ─────────────────────────────────────
 
-export const scanJob: CopyEntry = {
-  what: "Runs every installed, enabled scanner on this project and ingests what each reports, showing each scanner as it starts and finishes. While a default scanner is missing, Install & scan installs the missing ones first, then scans.",
-  why: "The scan runs in the background, so the rest of the UI keeps answering, and a cancel stops every scanner process at once.",
-};
-
-/** The scan panel's sentences. */
+/** The scan controls' sentences, and the summary line's (CR-245). */
 export const SCAN_JOB_TEXT = {
   run: "Run scan",
   cancel: "Cancel scan",
   idle: "No scan has run from the UI since serve started.",
-  running: (seconds: number) => `Scanning — ${seconds} s so far`,
+  /** The summary line while it runs: the scanners finished so far, and the ones
+   *  running now. No time is counted: a live region repeats what changes. */
+  running: (done: number, running: readonly string[]) =>
+    `Scan running — ${done} ${plural(done, "scanner", "scanners")} done${running.length > 0 ? `; ${running.join(", ")} running` : ""}`,
   joined: "A scan was already running, so this click joined it.",
   completed: (findings: number, ran: number) =>
     `Scan finished: ${findings} ${plural(findings, "finding", "findings")} from ${ran} ${plural(ran, "scanner", "scanners")} that ran.`,
-  cancelled: "Scan cancelled: every scanner process was stopped, and the previous results are kept.",
+  /** `finished` names the scanners that had finished before the cancel. */
+  cancelled: (finished: readonly string[]) =>
+    `Scan cancelled: every scanner process was stopped, and the previous results are kept.${
+      finished.length > 0 ? ` Finished before the cancel: ${finished.join(", ")}.` : ""
+    }`,
   failed: (error: string) => `The scan failed: ${error}`,
   requestFailed: (detail: string) => `The scan could not be started or cancelled: ${detail}`,
-  scannerRunning: "running",
-  /** A scanner that started and never settled because the scan ended first:
-   *  cancelled, or failed. */
-  scannerUnfinished: "did not finish",
 } as const;
 
-/** One scanner's settled outcome in the panel. */
-export const SCAN_OUTCOME_TEXT = {
-  ran: (findings: number) => `ran: ${findings} ${plural(findings, "finding", "findings")}`,
-  not_installed: "not installed",
-  disabled: "disabled",
-  not_selected: "not selected",
-  requires_build: "not run: every language present needs a build",
-  not_applicable: (reason: string) => `not run: ${reason}`,
-  failed: (exitCode: number | null, log: string | null, cause: string) =>
-    `failed${exitCode !== null ? ` (exit ${exitCode})` : ""}: ${cause}${log !== null ? `; its output is in ${log}` : ""}`,
+/** A row's live state while a job runs (it replaces the stored state's badge). */
+export const LIVE_STATE_TEXT = {
+  running: "running",
+  installing: "installing",
 } as const;
 
 /** The first-use consent dialog (FR-SC-07): it names the scanners, and says
@@ -245,20 +276,23 @@ export function megabytes(bytes: number): string {
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
-/** The install job's sentences in the scan panel, and the matrix's actions. */
+/** The install job's sentences in the scan summary line, and the matrix's actions. */
 export const INSTALL_JOB_TEXT = {
   installAndScan: "Install & scan",
   install: "Install",
   update: "Update",
   cancel: "Cancel install",
-  running: (seconds: number) => `Installing — ${seconds} s so far`,
-  scanning: (seconds: number) => `Installed; scanning — ${seconds} s so far`,
+  /** The summary line while the install runs, then while the scan after it does. */
+  running: (done: number) => `Installing — ${done} ${plural(done, "tool", "tools")} done`,
+  scanning: (done: number) => `Installed; scanning — ${done} ${plural(done, "scanner", "scanners")} done`,
   joined: "An install was already running, so this click joined it.",
   completed: (installed: number, scan: { findings: number; ran: number } | null) =>
     `Installed ${installed} ${plural(installed, "tool", "tools")}` +
     (scan === null
       ? "."
       : `; scan finished: ${scan.findings} ${plural(scan.findings, "finding", "findings")} from ${scan.ran} ${plural(scan.ran, "scanner", "scanners")} that ran.`),
+  /** What an ended install left out, each tool with why, after its outcome. */
+  notInstalled: (left: readonly string[]) => ` Not installed: ${left.join("; ")}.`,
   /** `installed` names each `<tool> <version>` that landed before the cancel. */
   cancelled: (installed: readonly string[]) =>
     `Install cancelled: the download was stopped and no partial tool was left. ${
@@ -268,23 +302,78 @@ export const INSTALL_JOB_TEXT = {
   requestFailed: (detail: string) => `The install could not be started or cancelled: ${detail}`,
 } as const;
 
-/** One tool's state in the install job, as the panel lists it. */
+/** A tool the install left out, with why — in the summary line once the job ended. */
 export const INSTALL_OUTCOME_TEXT = {
-  installing: "installing",
-  installed: "installed",
-  already_present: "already installed",
-  unavailable: (reason: string) => `not installed: ${reason}`,
-  failed: (stage: string, reason: string) => `failed at ${stage}: ${reason}`,
-  cancelled: "cancelled: nothing of it was left",
+  unavailable: (tool: string, reason: string) => `${tool} (${reason})`,
+  failed: (tool: string, stage: string, reason: string) => `${tool} (failed at ${stage}: ${reason})`,
 } as const;
 
-/** The matrix's ignored-paths cell (FR-SC-26): whether a whole-project scan keeps
- *  the scanner out of the project's ignored directories; `scanned` is followed by
- *  the server's one-line note. Absent — not installed, disabled — reads a dash. */
-export const IGNORED_PATHS_TEXT = {
-  excluded: "excluded",
-  scanned: "scanned",
-  absent: "—",
+/** One marker of the Ignored dirs column and what it means in plain words. */
+export interface IgnoredDirsMarker {
+  readonly marker: string;
+  readonly means: string;
+}
+
+/**
+ * The Ignored dirs column's markers (FR-SC-26, CR-245): a short marker per way a
+ * whole-project scan treats the directories the project ignores, each with one
+ * legend line. The page picks a marker from the row's `coverage_kind`, never from
+ * the note's text; the full note is the marker's tooltip and accessible name.
+ * `none` marks a row with no whole-project run to state (not installed, disabled).
+ */
+export const IGNORED_DIRS_TEXT: Readonly<Record<"none" | "skipped" | "scanned" | SecurityCoverageKind, IgnoredDirsMarker>> = {
+  none: {
+    marker: "—",
+    means:
+      "No whole-project scan to describe: the scanner is not installed, disabled, has nothing to scan here or was refused by the repository's config, or this is a report ingested from another tool.",
+  },
+  skipped: {
+    marker: "skipped",
+    means: "This scanner kept out of the directories your .gitignore excludes (vendor/, target/…), or your project ignores none.",
+  },
+  unproven: {
+    marker: "not proven †",
+    means:
+      "This scanner may have looked inside directories your .gitignore excludes (vendor/, target/…), so findings there can appear; Logos could not prove it skipped them.",
+  },
+  history: {
+    marker: "reads history ‡",
+    means:
+      "This scanner reads the committed history, which holds any file once committed inside a directory you now ignore, so findings there can appear.",
+  },
+  whole_project: {
+    marker: "whole project §",
+    means:
+      "This scanner was given the whole project, because the list of files outside your ignored directories could not be passed to it, so findings in ignored directories can appear.",
+  },
+  partial: {
+    marker: "partly skipped ¶",
+    means:
+      "This scanner was told to skip your ignored directories except some it could not take (a name it could misread, or a list too long), so findings in those can appear.",
+  },
+  scanned: {
+    marker: "scanned",
+    means: "This scanner read directories your .gitignore excludes; the server gave no further detail.",
+  },
+};
+
+/** The legend's accessible name. */
+export const IGNORED_DIRS_LEGEND = "Ignored dirs markers";
+
+/** The Findings cell's words where a scanner has no count to show: `never run` and
+ *  `0 findings` are different words and never share a cell (NFR-CC-04). */
+export const FINDINGS_CELL_TEXT = {
+  neverRun: "never run",
+  none: "—",
+} as const;
+
+/** Dependency-Check's row (FR-SC-27, S-794): whether it has an NVD API key,
+ *  never what the key is. `hint` is the not-set line's tooltip: where a key
+ *  comes from. */
+export const NVD_KEY_TEXT = {
+  set: "NVD key: set",
+  not_set: "NVD key: not set",
+  hint: "Dependency-Check 13 needs an NVD API key: export NVD_API_KEY before starting logos serve, or set your own extra_args in the user config.",
 } as const;
 
 /** The matrix's copy cell: which copy runs, and a newer pin when there is one. */

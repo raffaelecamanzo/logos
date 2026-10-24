@@ -359,6 +359,13 @@ pub struct CategoryCoverage {
     pub enabled_scanners: Vec<&'static str>,
     /// Covered with a count, or not covered.
     pub state: CoverageState,
+    /// The part of a covered category's [`findings`](CoverageState::Covered)
+    /// that sits in production code, suppressed ones included: the figure the
+    /// Security page's OWASP list states under its default code scope. `None`
+    /// for a not-covered category, and until [`count_production`] has been given
+    /// the findings' code scopes ([`classify`] alone knows none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_findings: Option<usize>,
 }
 
 /// The result of [`classify`].
@@ -448,6 +455,7 @@ pub fn classify<S: AsRef<str>>(
                 scanners: category.scanners.to_vec(),
                 enabled_scanners,
                 state,
+                production_findings: None,
             }
         })
         .collect();
@@ -457,6 +465,30 @@ pub fn classify<S: AsRef<str>>(
         findings: classified,
         categories: coverage,
         unclassified,
+    }
+}
+
+/// Set each covered category's [`production_findings`](CategoryCoverage::production_findings):
+/// the classified findings under it whose entry in `production` is `true`.
+/// `production` is one flag per entry of `classified`, in the same order; a
+/// not-covered category keeps `None`, never a count of zero.
+pub fn count_production(
+    categories: &mut [CategoryCoverage],
+    classified: &[FindingClassification],
+    production: &[bool],
+) {
+    debug_assert_eq!(classified.len(), production.len());
+    for category in categories
+        .iter_mut()
+        .filter(|c| matches!(c.state, CoverageState::Covered { .. }))
+    {
+        category.production_findings = Some(
+            classified
+                .iter()
+                .zip(production)
+                .filter(|(class, &production)| production && class.categories.contains(&category.id))
+                .count(),
+        );
     }
 }
 
@@ -626,6 +658,32 @@ mod tests {
             coverage(&r25, "A09:2025").state,
             CoverageState::Covered { findings: 0 }
         );
+    }
+
+    #[test]
+    fn production_counts_cover_a_covered_category_alone_and_leave_the_total_unchanged() {
+        // A different category set at each position, so a flag applied to the wrong
+        // finding (shifted, reversed) changes a count; `a` falls under two categories.
+        let f = [
+            finding("semgrep", "a", &["CWE-89", "CWE-798"]),
+            finding("semgrep", "b", &["CWE-89"]),
+            finding("semgrep", "c", &["CWE-798"]),
+            finding("semgrep", "d", &[]),
+        ];
+        let mut with = classify(&f, OwaspEdition::V2025, &["semgrep"]);
+        assert!(with.categories.iter().all(|c| c.production_findings.is_none()), "classify knows no scope");
+        count_production(&mut with.categories, &with.findings, &[true, false, true, true]);
+        // `a` counts once under each of its two categories; `b` is not production.
+        assert_eq!(coverage(&with, "A05:2025").production_findings, Some(1));
+        assert_eq!(coverage(&with, "A05:2025").state, CoverageState::Covered { findings: 2 });
+        assert_eq!(coverage(&with, "A07:2025").production_findings, Some(2));
+        assert_eq!(coverage(&with, "A07:2025").state, CoverageState::Covered { findings: 2 });
+        // Covered with no production finding is a real zero; not covered states none.
+        assert_eq!(coverage(&with, "A09:2025").production_findings, Some(0));
+        assert_eq!(coverage(&with, "A03:2025").state, CoverageState::NotCovered);
+        assert_eq!(coverage(&with, "A03:2025").production_findings, None);
+        let json = serde_json::to_value(coverage(&with, "A03:2025")).unwrap();
+        assert!(json.get("production_findings").is_none(), "{json}");
     }
 
     #[test]

@@ -65,12 +65,12 @@ describe("fileRiskRows — the temporal join and the n/a rule", () => {
 });
 
 describe("findings column model (S-671, FR-SC-14)", () => {
-  const row = (findings: { count: number; highest: "high" | "low" | null; stale: number } | undefined) =>
+  const row = (findings: { count: number; highest: "high" | "low" | null; stale: number; test: number } | undefined) =>
     ({ path: "a.rs", findings }) as unknown as Parameters<typeof hasFindingsColumn>[0][number];
 
   it("shows the column only when some row carries a cell — a scanned zero counts, no scan does not", () => {
     expect(hasFindingsColumn([row(undefined), row(undefined)])).toBe(false);
-    expect(hasFindingsColumn([row(undefined), row({ count: 0, highest: null, stale: 0 })])).toBe(true);
+    expect(hasFindingsColumn([row(undefined), row({ count: 0, highest: null, stale: 0, test: 0 })])).toBe(true);
     expect(hasFindingsColumn([])).toBe(false);
   });
 
@@ -78,10 +78,21 @@ describe("findings column model (S-671, FR-SC-14)", () => {
     expect(securityHref("src/a b.rs")).toBe("/security?path=src%2Fa%20b.rs");
   });
 
+  it("links the file's test-code findings to the Security page's code scope, which production never names (S-796)", () => {
+    expect(securityHref("src/a.rs", "test")).toBe("/security?path=src%2Fa.rs&scope=test");
+    expect(securityHref("src/a.rs", "all")).toBe("/security?path=src%2Fa.rs&scope=all");
+    expect(securityHref("src/a.rs")).not.toContain("scope");
+  });
+
   it("sorts the highest severity first, then the count, and a clean file below both", () => {
-    const sev = (highest: "high" | "low", count: number) => findingsSortValue({ count, highest, stale: 0 });
+    const sev = (highest: "high" | "low", count: number) => findingsSortValue({ count, highest, stale: 0, test: 0 });
     expect(sev("high", 1)).toBeGreaterThan(sev("low", 99));
     expect(sev("high", 2)).toBeGreaterThan(sev("high", 1));
-    expect(findingsSortValue({ count: 0, highest: null, stale: 5 })).toBeLessThan(sev("low", 1));
+    expect(findingsSortValue({ count: 0, highest: null, stale: 5, test: 0 })).toBeLessThan(sev("low", 1));
+  });
+
+  it("leaves the test-code remainder out of the sort key, as it is out of the count (S-796)", () => {
+    expect(findingsSortValue({ count: 1, highest: "low", stale: 0, test: 9 })).toBe(findingsSortValue({ count: 1, highest: "low", stale: 0, test: 0 }));
+    expect(findingsSortValue({ count: 0, highest: null, stale: 0, test: 9 })).toBe(0);
   });
 });

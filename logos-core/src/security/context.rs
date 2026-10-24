@@ -51,7 +51,7 @@
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 use petgraph::graph::NodeIndex;
@@ -61,6 +61,7 @@ use serde::Serialize;
 
 use crate::engine::Engine;
 use crate::graph_store::NodeRow;
+use crate::history::security::CodeScope;
 use crate::history::{FindingBinding, SecurityFinding, FRESHNESS_STALE};
 use crate::hydrate::{Granularity, GraphView};
 use crate::model::{EdgeKind, NodeId, NodeKind};
@@ -249,12 +250,7 @@ impl FindingContext {
 /// A store or hydration failure.
 pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result<Vec<FindingContext>> {
     let anchors: Vec<Result<(&str, u32), UnboundBecause>> = findings.iter().map(|f| anchor(f)).collect();
-    let paths: Vec<String> = anchors
-        .iter()
-        .filter_map(|a| a.as_ref().ok().map(|(path, _)| (*path).to_string()))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let paths = anchored_paths(&anchors);
     if paths.is_empty() {
         return Ok(findings
             .iter()
@@ -271,19 +267,7 @@ pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result
             crate::resolve::coverage_by_language(store)?,
         ))
     })?;
-    let mut by_path: BTreeMap<&str, Vec<&NodeRow>> = BTreeMap::new();
-    for row in spans.iter().filter(|row| encloses_code(row.kind)) {
-        if let Some(path) = row.file_path.as_deref() {
-            by_path.entry(path).or_default().push(row);
-        }
-    }
-    let bound: Vec<Result<&NodeRow, UnboundBecause>> = anchors
-        .iter()
-        .map(|anchor| {
-            let (path, line) = (*anchor)?;
-            by_path.get(path).and_then(|nodes| enclosing(nodes, line)).ok_or(UnboundBecause::NoSymbol)
-        })
-        .collect();
+    let bound = bind(&spans, &anchors);
 
     let view = engine.hydrate(Granularity::ExcludeContains)?;
     // The full symbol view keeps `Contains` and the structural facts
@@ -350,6 +334,78 @@ pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result
         });
     }
     Ok(out)
+}
+
+/// Whether each finding's enclosing code node is test code ([FR-AN-05]), in
+/// order: the graph's half of its code scope ([`super::scope`], [FR-SC-28]).
+/// A finding binds exactly as [`contexts`] binds it, so a historical, unbound
+/// or stale one has no enclosing node and reads `false`, as does one whose
+/// line lies in no code symbol. One span read and one read of the test-marked
+/// ids, with no hydration: the counting surfaces ask it of every stored
+/// finding. It reads the graph as it stands and never indexes first; an engine
+/// with no graph reader (a transient [`Engine::open`]) answers `false` for
+/// every finding, so the path rule alone classifies them.
+///
+/// # Errors
+/// A store failure.
+///
+/// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
+/// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+pub(crate) fn in_test_symbols(engine: &Engine, findings: &[&SecurityFinding]) -> Result<Vec<bool>> {
+    let anchors: Vec<Result<(&str, u32), UnboundBecause>> = findings.iter().map(|f| anchor(f)).collect();
+    let paths = anchored_paths(&anchors);
+    let Some(runtime) = engine.nav_runtime_no_prologue().ok().filter(|_| !paths.is_empty()) else {
+        return Ok(vec![false; findings.len()]);
+    };
+    let (spans, tests) = runtime.submit_read(move |store| Ok((store.span_nodes_in_files(&paths)?, store.test_node_ids()?)))?;
+    let tests: HashSet<NodeId> = tests.into_iter().collect();
+    Ok(bind(&spans, &anchors)
+        .into_iter()
+        .map(|row| row.is_ok_and(|row| tests.contains(&row.id)))
+        .collect())
+}
+
+/// Each finding's code scope by this engine's graph ([`super::scope::scopes`]
+/// over [`in_test_symbols`]): what the Files & Risk and hotspot findings cell
+/// counts by. Here, beside the graph read, so the engine names one module for
+/// both.
+///
+/// # Errors
+/// A store failure.
+pub(crate) fn code_scopes(engine: &Engine, findings: &[&SecurityFinding]) -> Result<Vec<CodeScope>> {
+    let scopes = super::scope::scopes(engine.root(), findings, |f| in_test_symbols(engine, f))?;
+    Ok(scopes.into_iter().map(|s| s.code_scope).collect())
+}
+
+/// The distinct paths `anchors` bind in, sorted: what one span read covers.
+fn anchored_paths(anchors: &[Result<(&str, u32), UnboundBecause>]) -> Vec<String> {
+    anchors
+        .iter()
+        .filter_map(|a| a.as_ref().ok().map(|(path, _)| (*path).to_string()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Each anchor's enclosing code node among `spans`, or why it has none: the
+/// one binding [`contexts`] and [`in_test_symbols`] share.
+fn bind<'a>(
+    spans: &'a [NodeRow],
+    anchors: &[Result<(&str, u32), UnboundBecause>],
+) -> Vec<Result<&'a NodeRow, UnboundBecause>> {
+    let mut by_path: BTreeMap<&str, Vec<&NodeRow>> = BTreeMap::new();
+    for row in spans.iter().filter(|row| encloses_code(row.kind)) {
+        if let Some(path) = row.file_path.as_deref() {
+            by_path.entry(path).or_default().push(row);
+        }
+    }
+    anchors
+        .iter()
+        .map(|anchor| {
+            let (path, line) = (*anchor)?;
+            by_path.get(path).and_then(|nodes| enclosing(nodes, line)).ok_or(UnboundBecause::NoSymbol)
+        })
+        .collect()
 }
 
 /// The indexed path and line a finding binds at, or why it binds at none.

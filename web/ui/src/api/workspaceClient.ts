@@ -25,7 +25,9 @@ import type {
   WorkspaceManifestDocument,
   WorkspaceReachabilityAnswer,
   WorkspaceRoster,
+  WorkspaceCoverageAnswer,
   WorkspaceSecurityAnswer,
+  WorkspaceSecurityStateAnswer,
   WorkspaceStatistics,
   WorkspaceStatus,
   WorkspaceTierDocument,
@@ -147,6 +149,35 @@ export function fetchWorkspaceManifest(): Promise<WorkspaceManifestDocument> {
  */
 export function fetchWorkspaceSecurity(): Promise<WorkspaceSecurityAnswer> {
   return apiFetch<WorkspaceSecurityAnswer>("workspace/security");
+}
+
+/**
+ * `GET /api/v1/workspace/security/summary` (S-790, FR-UI-36) — the Workspace
+ * Dashboard's Security widget: each member's scan state and fresh, unsuppressed
+ * production severity counts (the figures {@link fetchWorkspaceSecurity} states
+ * for the same stores) and how many members have a fresh scan. **Stored state
+ * only** — no scanner, not even a version probe, starts — and no figure is
+ * summed or averaged across members (BR-56).
+ *
+ * App-level: no `?repo=`, like every `workspace/*` read.
+ */
+export function fetchWorkspaceSecuritySummary(): Promise<WorkspaceSecurityStateAnswer> {
+  return apiFetch<WorkspaceSecurityStateAnswer>("workspace/security/summary");
+}
+
+/**
+ * `GET /api/v1/workspace/coverage` (S-740, FR-CV-16) — each member's coverage
+ * state, overall line coverage over its fresh files, fresh files of total, tool
+ * outcomes and last run, and how many members have fresh coverage of all. A
+ * member never run has no percentage (`null`, never 0 %); one that could not be
+ * opened is a row with its `error`, named by `degraded_rollup`.
+ *
+ * App-level: no `?repo=`, like every `workspace/*` read. Read-only — no tool
+ * starts, not even a version probe; a run is started per member, from that
+ * member's Coverage page, under that member's consent.
+ */
+export function fetchWorkspaceCoverage(): Promise<WorkspaceCoverageAnswer> {
+  return apiFetch<WorkspaceCoverageAnswer>("workspace/coverage");
 }
 
 /**

@@ -21,6 +21,8 @@ import type {
   CoverageRider,
   CrossServiceCoverage,
   DegradedRollup,
+  MemberResult,
+  MemberSecurityState,
   MemberStatus,
   MemberTopics,
   ReferenceCoverage,
@@ -31,6 +33,7 @@ import type {
   WorkspaceGovernanceAnswer,
   WorkspaceReachabilityAnswer,
   WorkspaceRoster,
+  WorkspaceSecurityStateAnswer,
   WorkspaceStatus,
 } from "../../api/types.ts";
 import { EMPTY_COVERAGE } from "../../workspace/testFixtures.ts";
@@ -314,6 +317,40 @@ export function workspaceStatus(over: Partial<WorkspaceStatus> = {}): WorkspaceS
   };
 }
 
+/** One member's row of `GET /api/v1/workspace/security/summary` (S-790). */
+export function securityRow(
+  member: string,
+  scan: MemberSecurityState["scan"],
+  counts: Partial<Record<"critical" | "high" | "medium" | "low" | "info" | "unrated", number>> | null,
+): MemberResult<MemberSecurityState> {
+  const base = { critical: 0, high: 0, medium: 0, low: 0, info: 0, unrated: 0, ...counts };
+  const total = base.critical + base.high + base.medium + base.low + base.info + base.unrated;
+  return { member, result: { scan, findings: counts === null ? null : { ...base, total } } };
+}
+
+/** `GET /api/v1/workspace/security/summary`: `api` fresh with two findings,
+ *  `orders` stale, `web` never run — one of three members with a fresh scan. */
+export function securityStateAnswer(
+  members: MemberResult<MemberSecurityState>[] = [
+    securityRow("api", "fresh", { high: 1, medium: 1 }),
+    securityRow("orders", "stale", { low: 3 }),
+    securityRow("web", "never_run", null),
+  ],
+  degraded = allOpened(),
+): WorkspaceSecurityStateAnswer {
+  const read = members.filter((m) => m.result);
+  return {
+    security: {
+      members,
+      members_total: members.length,
+      members_read: read.length,
+      members_fresh: read.filter((m) => m.result?.scan === "fresh").length,
+    },
+    complete: degraded.degraded_members.length === 0,
+    degraded_rollup: degraded,
+  };
+}
+
 /** What the stubbed surface answers with. */
 export interface AppStubOptions {
   /** `200` ⇒ workspace, `404` ⇒ single-root (the shell's mode probe). */
@@ -321,6 +358,7 @@ export interface AppStubOptions {
   status?: WorkspaceStatus;
   reachability?: WorkspaceReachabilityAnswer;
   governance?: WorkspaceGovernanceAnswer;
+  security?: WorkspaceSecurityStateAnswer;
   coverage?: CrossServiceCoverage;
   topics?: MemberTopics[];
 }
@@ -340,6 +378,7 @@ export function stubAppApi(opts: AppStubOptions = {}): () => string[] {
     });
   const reach = opts.reachability ?? reachabilityAnswer();
   const gov = opts.governance ?? governanceAnswer(governanceReport());
+  const security = opts.security ?? securityStateAnswer();
 
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -355,6 +394,7 @@ export function stubAppApi(opts: AppStubOptions = {}): () => string[] {
       if (url.startsWith("/api/v1/workspace/status")) return json(model);
       if (url.startsWith("/api/v1/workspace/reachability")) return json(reach);
       if (url.startsWith("/api/v1/workspace/check")) return json(gov);
+      if (url.startsWith("/api/v1/workspace/security/summary")) return json(security);
       return json({});
     }),
   );

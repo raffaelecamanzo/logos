@@ -24,7 +24,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use logos_core::security::{FindingsFilter, ScanEnvironment, ScanRequest};
+use logos_core::security::{FindingsFilter, NvdApiKey, ScanEnvironment, ScanRequest};
 use logos_core::Engine;
 use mcp::LogosMcp;
 use rmcp::{
@@ -87,7 +87,7 @@ fn stub(bin: &Path, name: &str, report: Option<&Path>, exit: i32, stderr: &str) 
         "#!/bin/sh\n\
          case \"$1\" in --version|version|-version) printf '%s\\n' '{name} 1.2.3'; exit 0;; esac\n\
          out=''; prev=''\n\
-         for a in \"$@\"; do case \"$prev\" in --output|--report-path) out=\"$a\";; esac; prev=\"$a\"; done\n\
+         for a in \"$@\"; do case \"$prev\" in --output|--output-file|--report-path) out=\"$a\";; esac; prev=\"$a\"; done\n\
          {copy}\n\
          printf '%s\\n' '{stderr}' >&2\n\
          exit {exit}\n"
@@ -107,6 +107,10 @@ fn fixture() -> Fixture {
         fs::create_dir_all(dir).unwrap();
     }
     fs::write(root.join("app/db.py"), DB_PY).unwrap();
+    // One ignored directory on disk, so a scanner that reads it states how (FR-SC-26).
+    fs::write(root.join(".gitignore"), "/build/\n").unwrap();
+    fs::create_dir_all(root.join("build")).unwrap();
+    fs::write(root.join("build/gen.py"), "x = 1\n").unwrap();
     fs::write(root.join(".logos/config.toml"), "[project]\nid = \"security-parity-fixture\"\n").unwrap();
     git(&root, &["init", "-q", "-b", "main"]);
     git(&root, &["add", "."]);
@@ -121,6 +125,7 @@ fn fixture() -> Fixture {
         user_dir: Some(user),
         search_path: Some(bin.into_os_string()),
         tools_dir: None,
+        nvd_api_key: None,
     };
     Engine::start(&root).expect("engine").index();
     Fixture { _tmp: tmp, root, env, clean }
@@ -232,6 +237,11 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     assert_eq!((bandit["state"].as_str(), bandit["findings"].as_u64()), (Some("fresh"), Some(0)));
     assert_eq!(row(&mcp_status, "semgrep")["findings"], 2);
     assert_eq!(row(&mcp_status, "semgrep")["ignored_paths"], "excluded");
+    // FR-SC-26: the kind of each note rides on the MCP payload — the CLI's twin
+    // is equal above — and an excluded scanner states none.
+    assert_eq!((row(&mcp_status, "bandit")["coverage_kind"].as_str(), row(&mcp_scan, "bandit")["coverage_kind"].as_str()), (Some("unproven"), Some("unproven")));
+    assert_eq!(row(&mcp_status, "gitleaks")["coverage_kind"], "history");
+    assert!(row(&mcp_status, "semgrep").get("coverage_kind").is_none());
 
     let filters = json!({"scanner": "semgrep", "severity": "medium"});
     let mcp_findings = call(&client, "security_findings", filters).await.unwrap();
@@ -249,11 +259,11 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     server.abort();
 
     assert_eq!(f.direct(|e| e.security_status()), mcp_status, "security_status");
-    let filter = FindingsFilter::parse(Some("medium"), Some("semgrep"), None, None, None, None).unwrap();
+    let filter = FindingsFilter::parse(Some("medium"), Some("semgrep"), None, None, None, None, None).unwrap();
     assert_eq!(f.direct(|e| e.security_findings(&filter)), mcp_findings, "security_findings");
     assert_eq!(mcp_findings["findings"].as_array().unwrap().len(), 2);
     assert_eq!(contexts(&mcp_findings), BOUND_UNRESOLVED, "the graph context rides on the MCP payload");
-    let every = FindingsFilter::parse(Some("medium"), Some("semgrep"), Some("A05"), Some("app"), Some("active"), Some("2025")).unwrap();
+    let every = FindingsFilter::parse(Some("medium"), Some("semgrep"), Some("A05"), Some("app"), Some("active"), Some("2025"), None).unwrap();
     assert_eq!(f.direct(|e| e.security_findings(&every)), mcp_every, "every filter, same slots");
     assert_eq!(mcp_every["findings"].as_array().unwrap().len(), 2, "{mcp_every}");
     assert_eq!(f.direct(|e| e.security_ingest(&f.clean)), mcp_ingest, "security_ingest");
@@ -378,10 +388,205 @@ async fn a_secret_found_only_in_history_is_one_payload_on_both_surfaces() {
     let mcp = call(&client, "security_findings", json!({"scanner": "gitleaks"})).await.unwrap();
     client.cancel().await.ok();
     server.abort();
-    let filter = FindingsFilter::parse(None, Some("gitleaks"), None, None, None, None).unwrap();
+    let filter = FindingsFilter::parse(None, Some("gitleaks"), None, None, None, None, None).unwrap();
     assert_eq!(f.direct(|e| e.security_findings(&filter)), mcp, "security_findings");
     let finding = &mcp["findings"][0];
     assert_eq!(finding["binding"], "historical", "{mcp}");
     assert_eq!(finding["anchor"], json!({ "commit": commit, "short_commit": &commit[..7], "path": "app/legacy.py" }));
     assert_eq!(finding["context"]["enclosing"]["unbound_because"], "historical");
+}
+
+/// The code scope ([FR-SC-28], S-795) is one parameter on both surfaces and one
+/// payload: no scope lists production and states what it hid, `test` and `all`
+/// narrow exactly and intersect with the other filters, each finding carries
+/// its `code_scope` and reason, and a bad token is the caller's mistake.
+///
+/// [FR-SC-28]: ../../docs/specs/requirements/FR-SC-28.md
+#[tokio::test(flavor = "multi_thread")]
+async fn the_code_scope_is_one_parameter_and_one_payload_on_both_surfaces() {
+    let f = fixture();
+    let report = f.root.parent().unwrap().join("scoped.sarif");
+    let result = |uri: &str, line: i64| {
+        json!({"ruleId": "custom.rule", "level": "error", "message": {"text": "tainted"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}, "region": {"startLine": line}}}]})
+    };
+    let sarif = json!({"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Custom SAST", "version": "1", "rules": []}},
+        "results": [result("app/db.py", 12), result("tests/test_db.py", 3), result("app/testdata/seed.py", 1)]}]});
+    fs::write(&report, sarif.to_string()).unwrap();
+    f.direct(|e| e.security_ingest(&report));
+
+    let (client, server) = boot(&f).await;
+    let mut mcp = Vec::new();
+    let cases: [(Option<&str>, Option<&str>); 5] =
+        [(None, None), (Some("test"), None), (Some("all"), None), (Some("test"), Some("tests")), (None, Some("tests"))];
+    for (scope, path) in cases {
+        let mut args = json!({"scanner": "Custom SAST"});
+        if let Some(scope) = scope {
+            args["scope"] = json!(scope);
+        }
+        if let Some(path) = path {
+            args["path"] = json!(path);
+        }
+        mcp.push(call(&client, "security_findings", args).await.unwrap());
+    }
+    let Err(ServiceError::McpError(bad)) = call(&client, "security_findings", json!({"scope": "tests"})).await else {
+        panic!("an unknown scope is the caller's mistake");
+    };
+    assert_eq!(bad.code, ErrorCode::INVALID_PARAMS, "{}", bad.message);
+    assert!(bad.message.contains("production, test, all"), "{}", bad.message);
+    client.cancel().await.ok();
+    server.abort();
+
+    for ((scope, path), mcp) in cases.into_iter().zip(&mcp) {
+        let filter = FindingsFilter::parse(None, Some("Custom SAST"), None, path, None, None, scope).unwrap();
+        assert_eq!(&f.direct(|e| e.security_findings(&filter)), mcp, "scope {scope:?}, path {path:?}");
+    }
+    let listed = |payload: &Value| -> (Vec<(String, String, Value)>, u64) {
+        let rows = payload["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["report_path"].as_str().unwrap().to_string(), f["code_scope"].as_str().unwrap().to_string(), f["code_scope_reason"].clone()))
+            .collect();
+        (rows, payload["hidden_by_scope"].as_u64().unwrap())
+    };
+    let production = ("app/db.py".to_string(), "production".to_string(), Value::Null);
+    let fixture_row = ("app/testdata/seed.py".to_string(), "test".to_string(), json!("test_path"));
+    let test_row = ("tests/test_db.py".to_string(), "test".to_string(), json!("test_path"));
+    assert_eq!(listed(&mcp[0]), (vec![production.clone()], 2), "production by default, the hidden two stated");
+    assert_eq!(mcp[0]["scope"], "production");
+    assert_eq!(listed(&mcp[1]), (vec![fixture_row.clone(), test_row.clone()], 1));
+    assert_eq!(listed(&mcp[2]), (vec![production, fixture_row, test_row.clone()], 0));
+    assert_eq!(listed(&mcp[3]), (vec![test_row], 0), "scope and path intersect");
+    assert_eq!(listed(&mcp[4]), (vec![], 1), "the path kept one, the default scope hid it, and says so");
+}
+
+/// FR-SC-08, FR-SC-27: `nvd_api_key` reads `not_set`, then `set` with a key
+/// in the scanning process's environment, on the Dependency-Check row alone —
+/// the same payload on both surfaces, and never the key.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_nvd_api_key_state_is_one_payload_on_both_surfaces_and_never_the_key() {
+    let mut f = fixture();
+    for (key, state) in [(None, "not_set"), (NvdApiKey::new(PLANTED), "set")] {
+        f.env.nvd_api_key = key;
+        let cli_status = f.direct(|e| e.security_status());
+        assert_eq!(row(&cli_status, "dependency-check")["nvd_api_key"], state, "{cli_status}");
+        let carrying: Vec<&str> = cli_status["scanners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("nvd_api_key").is_some())
+            .map(|r| r["scanner"].as_str().unwrap())
+            .collect();
+        assert_eq!(carrying, ["dependency-check"]);
+        let (client, server) = boot(&f).await;
+        let mcp_status = call(&client, "security_status", json!({})).await.unwrap();
+        assert_eq!(mcp_status, cli_status);
+        assert!(!mcp_status.to_string().contains(PLANTED), "{mcp_status}");
+        client.cancel().await.ok();
+        server.abort();
+    }
+}
+
+/// Every `(category id, state.findings, production_findings)` of a payload's
+/// `categories`, covered or not.
+fn category_counts(categories: &Value) -> Vec<(String, Option<u64>, Option<u64>)> {
+    categories
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["id"].as_str().unwrap().to_string(), c["state"]["findings"].as_u64(), c["production_findings"].as_u64()))
+        .collect()
+}
+
+/// Each category's production count ([FR-SC-28], S-796 D2): one figure on the
+/// CLI payload, the MCP payload and the web page's, on one fixture holding
+/// findings in production code, in test paths, in a test symbol, and a
+/// suppressed one. `state.findings` still counts every scope; the new field is
+/// the part in production code, suppressed findings in both — what the page's
+/// OWASP list shows under its default scope — and it equals the count taken
+/// over the page's own findings list, in both editions.
+///
+/// [FR-SC-28]: ../../docs/specs/requirements/FR-SC-28.md
+#[tokio::test(flavor = "multi_thread")]
+async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_payloads() {
+    let f = fixture();
+    // A test symbol outside a test path: only the graph classifies it.
+    fs::write(f.root.join("app/checks.py"), "def test_lookup():\n    return 1\n").unwrap();
+    Engine::start(&f.root).expect("engine").index();
+
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+    let mut sarif: Value = serde_json::from_str(&fs::read_to_string(semgrep).unwrap()).unwrap();
+    let results = sarif["runs"][0]["results"].as_array_mut().unwrap();
+    let template = results[0].clone();
+    // Two production findings (db.py:12 and :18) and three more of the first
+    // one's CWE-89 rule: a test path, a fixture path and a test symbol.
+    for (n, (uri, line)) in [("tests/test_db.py", 3), ("app/testdata/seed.py", 1), ("app/checks.py", 2)].into_iter().enumerate() {
+        let mut twin = template.clone();
+        twin["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] = json!(uri);
+        twin["locations"][0]["physicalLocation"]["region"]["startLine"] = json!(line);
+        twin["locations"][0]["physicalLocation"]["region"]["endLine"] = json!(line);
+        twin["fingerprints"] = json!({"matchBasedId/v1": format!("{n:0>8}-twin-{uri}")});
+        results.push(twin);
+    }
+    let report = f.root.parent().unwrap().join("production-count.sarif");
+    fs::write(&report, sarif.to_string()).unwrap();
+    f.direct(|e| e.security_ingest(&report));
+
+    // Suppress the finding at db.py:18, a production one.
+    let all = FindingsFilter::parse(None, None, None, None, None, None, Some("all")).unwrap();
+    let before = f.direct(|e| e.security_findings(&all));
+    let listed = before["findings"].as_array().unwrap();
+    assert_eq!(listed.len(), 5, "{before}");
+    let scopes: Vec<(&str, &str)> =
+        listed.iter().map(|x| (x["report_path"].as_str().unwrap(), x["code_scope"].as_str().unwrap())).collect();
+    assert_eq!(scopes.iter().filter(|(_, s)| *s == "production").count(), 2, "{scopes:?}");
+    let suppressed = listed.iter().find(|x| x["start_line"] == 18).unwrap()["fingerprint"].as_str().unwrap().to_string();
+    fs::write(
+        f.root.join(".logos/security-ignore.toml"),
+        format!("[[ignore]]\nfingerprint = \"{suppressed}\"\nreason = \"fixture: never deployed\"\n"),
+    )
+    .unwrap();
+
+    let (client, server) = boot(&f).await;
+    let mcp = call(&client, "security_findings", json!({})).await.unwrap();
+    client.cancel().await.ok();
+    server.abort();
+    let cli = f.direct(|e| e.security_findings(&FindingsFilter::parse(None, None, None, None, None, None, None).unwrap()));
+    let page = f.direct(|e| e.security_page());
+
+    // The fixture holds a suppressed production finding: the page counts it apart, and the
+    // production figure below still includes it.
+    assert_eq!(page["counts"]["excluded"]["suppressed"], 1, "{}", page["counts"]);
+
+    // The figures are over every stored finding, whatever the other filters keep.
+    for (severity, suppression) in [(Some("critical"), None), (None, Some("active")), (None, Some("suppressed"))] {
+        let filter = FindingsFilter::parse(severity, None, None, None, suppression, None, None).unwrap();
+        let filtered = f.direct(|e| e.security_findings(&filter));
+        assert_eq!(filtered["categories"], cli["categories"], "severity {severity:?}, suppression {suppression:?}");
+    }
+
+    // The three payloads state the same categories, field for field.
+    assert_eq!(cli["categories"], mcp["categories"], "CLI and MCP");
+    assert_eq!(cli["categories"], page["findings"]["categories"], "CLI and web findings");
+    assert_eq!(cli["categories"], page["editions"][0]["categories"], "CLI and web edition 2025");
+
+    // One injection finding in each scope the fixture plants: five stored,
+    // two in production (one of them suppressed), three in test code.
+    let counts = category_counts(&cli["categories"]);
+    let injection = counts.iter().find(|(id, ..)| id == "A05:2025").unwrap();
+    assert_eq!(injection, &("A05:2025".to_string(), Some(5), Some(2)), "{counts:?}");
+    assert!(counts.iter().all(|(_, covered, production)| production.is_some() == covered.is_some()), "{counts:?}");
+    let not_covered = cli["categories"].as_array().unwrap().iter().find(|c| c["state"]["state"] == "not_covered").unwrap();
+    assert!(not_covered.get("production_findings").is_none(), "a not-covered category states no count: {not_covered}");
+
+    // The page's own figure, taken over its findings list under Production,
+    // is the field's, in each edition (the second shares the first's findings).
+    let page_findings = page["findings"]["findings"].as_array().unwrap();
+    assert_eq!(page_findings.len(), 5, "the page lists every scope");
+    let in_production = page_findings.iter().filter(|x| x["code_scope"] == "production" && x["owasp"] == json!(["A05:2025"])).count();
+    assert_eq!(in_production as u64, injection.2.unwrap());
+    let injection_2021 = category_counts(&page["editions"][1]["categories"]).into_iter().find(|(id, ..)| id == "A03:2021").unwrap();
+    assert_eq!(injection_2021, ("A03:2021".to_string(), Some(5), Some(2)));
+    assert_eq!(page["counts"]["excluded"]["test"], 3, "{}", page["counts"]);
 }

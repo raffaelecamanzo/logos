@@ -49,6 +49,7 @@ fn each_security_method_traces_under_its_own_tool() {
         user_dir: Some(tmp.path().join("user")),
         search_path: None,
         tools_dir: None,
+        nvd_api_key: None,
     });
     let absent = tmp.path().join("absent.sarif");
     let tools = Tools::default();

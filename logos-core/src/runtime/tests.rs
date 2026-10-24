@@ -337,11 +337,16 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
 /// sibling failing at 791 ms in the same run) — the cross-process CPU-ramp-up
 /// effect that harness exists to expose. Re-run it in isolation before
 /// treating a breach as a regression, the standing convention for every
-/// wall-clock assertion here. It is deliberately not scaled by
-/// `LOGOS_PERF_TOLERANCE`: that helper is local to
-/// `tests/runtime_concurrency.rs`, and duplicating it into `src` to band a
-/// diagnostic band would spread the knob without adding signal.
+/// wall-clock assertion here. The band is scaled by `LOGOS_PERF_TOLERANCE`
+/// when it is set (CI sets 3), and is the raw 200 ms otherwise: the shared
+/// GitHub runner measured 212.9 ms and 216.6 ms on two consecutive runs of the
+/// Sprint 108 pull request, with no store or pool change, so the unscaled band
+/// failed CI every time on that host.
+///
+/// Skipped under coverage instrumentation: an instrumented suite at cargo's
+/// default parallelism measured 923 ms here with no store or pool change.
 #[test]
+#[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
 fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     use std::time::Instant;
 
@@ -356,10 +361,17 @@ fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     // and opening every reader connection, not a partially-initialized shell.
     assert_eq!(runtime.db_path(), db.as_path());
 
+    // Unset (or below 1.0) keeps the raw band; CI widens it for its slower host.
+    let tolerance = std::env::var("LOGOS_PERF_TOLERANCE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v >= 1.0)
+        .unwrap_or(1.0);
+    let band = Duration::from_millis(200).mul_f64(tolerance);
     assert!(
-        elapsed < Duration::from_millis(200),
-        "Runtime::open took {elapsed:?}, over its 200 ms store-and-pool regression band \
-         (measured ~27 ms). Re-run in isolation before calling it a regression — this \
+        elapsed < band,
+        "Runtime::open took {elapsed:?}, over its {band:?} store-and-pool regression band \
+         (200 ms × LOGOS_PERF_TOLERANCE {tolerance}; measured ~27 ms). Re-run in isolation before calling it a regression — this \
          guard is known to flake under full-suite load. NOTE: this band is NOT the \
          NFR-PE-05 cold-start budget; that is \
          cold_start_to_ready_engine_is_within_pe05_budget)"

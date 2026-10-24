@@ -112,3 +112,6 @@ tokio          = { workspace = true, features = ["rt", "macros"] }
 # tests/extension_host.rs (S-644): a real, older-schema `.logos/wiki.db` a build
 # that composes no extension must leave untouched. Test-only.
 rusqlite       = { workspace = true }
+
+[lints]
+workspace = true

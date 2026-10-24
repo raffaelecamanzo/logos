@@ -44,7 +44,7 @@ fn a_refusal_names_a_cli_or_mcp_holder_without_a_job() {
     let pid = std::process::id();
     assert!(
         busy(JobKind::ToolInstall, Some("cli"))
-            .starts_with(&format!("a scanner install is already running on this project: started from the command line by Logos process {pid} ")),
+            .starts_with(&format!("a tool install is already running on this project: started from the command line by Logos process {pid} ")),
         "{}",
         busy(JobKind::ToolInstall, Some("cli"))
     );

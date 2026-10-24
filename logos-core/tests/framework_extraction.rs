@@ -750,7 +750,7 @@ fn dogfood_measures_framework_cost_against_the_index_budget() {
     // two orders of magnitude above the observed cost — a regression guard,
     // not a benchmark.
     assert!(
-        with_fw.framework.duration_ms < 3_000,
+        cfg!(coverage) || with_fw.framework.duration_ms < 3_000,
         "framework pass took {}ms — investigate against the 30s budget (OQ-07)",
         with_fw.framework.duration_ms
     );

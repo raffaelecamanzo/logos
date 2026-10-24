@@ -1497,6 +1497,10 @@ fn security_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
     }
     commit(&repo, "src/lib.rs", SECURITY_LIB_RS, "seed");
     commit(&repo, "scripts/gen.py", "print(1)\n", "script");
+    // One ignored directory on disk, so a scanner that reads it says how (FR-SC-26).
+    commit(&repo, ".gitignore", "/build/\n", "ignore");
+    std::fs::create_dir_all(repo.join("build")).unwrap();
+    std::fs::write(repo.join("build/gen.py"), "print(2)\n").unwrap();
     let stub = bin.join("bandit");
     std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' 'bandit 1.7.10'\n").unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1507,6 +1511,7 @@ fn security_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
         user_dir: Some(user),
         search_path: Some(bin.into_os_string()),
         tools_dir: None,
+        nvd_api_key: None,
     };
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
     engine.index();
@@ -1555,8 +1560,12 @@ async fn security_page_states_findings_absent_scanners_and_uncovered_categories(
     assert_eq!(scanner_row(page, "bandit")["state"], "never_run");
     assert_eq!(scanner_row(page, "trivy")["state"], "not_installed");
     // FR-SC-26: the installed scanner's row states its coverage of the ignored
-    // directories (the fixture ignores none); one not installed here states none.
-    assert_eq!(scanner_row(page, "bandit")["ignored_paths"], "excluded");
+    // directory (`build/`), with the kind the page maps to a marker and the note
+    // it shows as that marker's tooltip; one not installed here states none.
+    assert_eq!(scanner_row(page, "bandit")["ignored_paths"], "scanned");
+    assert_eq!(scanner_row(page, "bandit")["coverage_kind"], "unproven");
+    assert!(scanner_row(page, "bandit")["coverage_note"].is_string(), "{}", scanner_row(page, "bandit"));
+    assert!(scanner_row(page, "trivy").get("coverage_kind").is_none());
     assert!(scanner_row(page, "trivy").get("ignored_paths").is_none());
     assert_eq!(page["findings"]["never_run"], serde_json::json!(["bandit"]));
 
@@ -1566,7 +1575,10 @@ async fn security_page_states_findings_absent_scanners_and_uncovered_categories(
     // The page's own count: both findings sit in files nothing touched, so both
     // count, and none is left out (S-760).
     assert_eq!(page["counts"]["counted"]["total"], 2, "{}", page["counts"]);
-    assert_eq!(page["counts"]["excluded"], serde_json::json!({"not_fresh": 0, "suppressed": 0}));
+    assert_eq!(page["counts"]["excluded"], serde_json::json!({"not_fresh": 0, "suppressed": 0, "test": 0}));
+    // S-795: the page lists every code scope, each finding with its own label.
+    assert_eq!((page["findings"]["scope"].as_str(), page["findings"]["hidden_by_scope"].as_u64()), (Some("all"), Some(0)));
+    assert!(findings.iter().all(|f| f["code_scope"] == "production" && f["code_scope_reason"].is_null()), "{findings:?}");
     let sql = findings.iter().find(|f| f["rule_id"] == "rust.lang.security.formatted-sql").unwrap();
     assert_eq!(sql["context"]["enclosing"]["symbol"]["name"], "find");
     assert_eq!(sql["context"]["enclosing"]["confidence"], "resolved");
@@ -1610,6 +1622,15 @@ async fn security_page_states_findings_absent_scanners_and_uncovered_categories(
         .unwrap();
     assert_eq!(supply_chain["state"]["state"], "not_covered");
     assert!(supply_chain["state"].get("findings").is_none(), "not covered carries no count: {supply_chain}");
+    assert!(supply_chain.get("production_findings").is_none(), "nor a production count: {supply_chain}");
+
+    // Both findings sit in production code, so each covered category's production
+    // count is its all-scope count, in the findings view and in each edition.
+    for categories in [&page["findings"]["categories"], &editions[0]["categories"], &editions[1]["categories"]] {
+        let covered: Vec<_> = categories.as_array().unwrap().iter().filter(|c| c["state"]["state"] == "covered").collect();
+        assert!(!covered.is_empty());
+        assert!(covered.iter().all(|c| c["production_findings"] == c["state"]["findings"]), "{categories}");
+    }
 
     // Without a `[security]` table there is no gate band.
     assert!(page["gate"].is_null(), "no table, no band: {}", page["gate"]);
@@ -1845,4 +1866,300 @@ async fn a_path_suppression_from_the_page_covers_the_directory_and_removing_it_r
     let (status, text, _) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "{text}");
     assert_eq!(std::fs::read(&ignore).unwrap(), committed.as_bytes(), "add-then-remove restores the file byte for byte");
+}
+
+// ── The Dashboard's Security widget (S-789, [FR-UI-09]) ───────────────────────
+
+/// `GET /api/v1/overview`'s `security` field as one JSON value.
+#[cfg(unix)]
+async fn overview_security(router: &axum::Router) -> serde_json::Value {
+    let (status, body, _) = body_string(router.clone().oneshot(get("/api/v1/overview")).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "/api/v1/overview answers 200: {body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(!body.contains(PLANTED_SECRET), "the planted secret is served: {body}");
+    payload["security"].clone()
+}
+
+/// A repository with one source file, indexed, no report stored, whose consent
+/// lives in a temporary user directory — so what the widget says about consent
+/// is this fixture's, never this machine's.
+#[cfg(unix)]
+fn unscanned_security_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
+    let tmp = TempDir::new().expect("temp root");
+    let base = tmp.path().canonicalize().unwrap();
+    let (repo, user) = (base.join("project"), base.join("user"));
+    for dir in [&repo, &user] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    sh_git(&repo, &["init", "-q", "-b", "main"]);
+    if let Some(rules_toml) = rules_toml {
+        std::fs::create_dir_all(repo.join(".logos")).unwrap();
+        std::fs::write(repo.join(".logos/rules.toml"), rules_toml).unwrap();
+    }
+    commit(&repo, "src/lib.rs", SECURITY_LIB_RS, "seed");
+    let env = logos_core::security::ScanEnvironment {
+        user_dir: Some(user),
+        search_path: Some(std::ffi::OsString::new()),
+        tools_dir: None,
+        nvd_api_key: None,
+    };
+    let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
+    engine.index();
+    (tmp, Arc::new(engine))
+}
+
+/// Each figure the widget states is the one `security status` and the Security
+/// page state on the same store: the counted findings by severity, what is left
+/// out and why (here a suppression), the gate band, the scanners and the age.
+/// The load writes nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_overview_security_widget_states_the_figures_of_the_security_page() {
+    let table = "[security]\nrequired_scanners = [\"semgrep\"]\nratchet_min_severity = \"critical\"\n";
+    let (tmp, engine) = security_engine(Some(table));
+    let repo = tmp.path().canonicalize().unwrap().join("project");
+    let router = web::router(engine);
+
+    // Suppress the SQL finding, so the counted and the left-out figures differ.
+    let (_, page) = security_payload(router.clone()).await;
+    let sql = page["security"]["findings"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["rule_id"] == "rust.lang.security.formatted-sql")
+        .unwrap()
+        .clone();
+    std::fs::write(
+        repo.join(".logos/security-ignore.toml"),
+        format!("[[ignore]]\nfingerprint = \"{}\"\nreason = \"accepted\"\n", sql["fingerprint"].as_str().unwrap()),
+    )
+    .unwrap();
+
+    let history = repo.join(".logos/history.db");
+    let before = snapshot_count(&history, "security_snapshots");
+    let (_, page) = security_payload(router.clone()).await;
+    let page = &page["security"];
+    let widget = overview_security(&router).await;
+    let summary = &widget["summary"];
+
+    assert!(widget["error"].is_null(), "{widget}");
+    assert_eq!(summary["tally"]["counted"], page["counts"]["counted"], "the counted figure is the page's");
+    assert_eq!(summary["tally"]["counted"]["total"], 1, "{summary}");
+    assert_eq!(summary["tally"]["excluded"], page["counts"]["excluded"], "what is left out is the page's");
+    assert_eq!(summary["tally"]["excluded"]["suppressed"], 1, "{summary}");
+    assert_eq!(summary["scan"], "fresh");
+    assert_eq!(summary["gate"], page["gate"], "the band is the page's, one verdict");
+    assert_eq!(summary["gate"]["passed"], true, "{summary}");
+    assert!(summary["newest_scan_at"].as_i64().is_some_and(|at| at > 0), "the newest stored scan is dated: {summary}");
+
+    // Scanners: semgrep is fresh and bandit never ran; neither failed. The
+    // denominator is the status rows that could have run.
+    let rows = page["status"]["scanners"].as_array().unwrap();
+    let failed = rows.iter().filter(|r| !r["last_failure"].is_null()).count();
+    let could_run = rows.iter().filter(|r| !matches!(r["state"].as_str(), Some("disabled" | "not_applicable"))).count();
+    assert_eq!((summary["scanners_failed"].as_u64(), summary["scanners_total"].as_u64()), (Some(failed as u64), Some(could_run as u64)));
+    assert_eq!(summary["consent"], page["status"]["consent"], "the consent record is the page's");
+
+    assert_eq!(summary["scanners_failed"], 0, "no scan failed yet: {summary}");
+
+    // A failed last scan is counted, and equals the `security status` rows'.
+    std::fs::create_dir_all(repo.join(".logos/security")).unwrap();
+    std::fs::write(repo.join(".logos/security/bandit.failed.log"), "bandit: crashed\n").unwrap();
+    let (_, page) = security_payload(router.clone()).await;
+    let rows = page["security"]["status"]["scanners"].as_array().unwrap();
+    let failed = rows.iter().filter(|r| !r["last_failure"].is_null()).count();
+    assert_eq!(failed, 1, "the page states the failed scan: {rows:?}");
+    let widget = overview_security(&router).await;
+    assert_eq!(widget["summary"]["scanners_failed"], failed, "the widget counts the same scanners: {widget}");
+
+    // A load of the Dashboard stores no scan and no secret reaches the payload.
+    overview_security(&router).await;
+    assert_eq!(snapshot_count(&history, "security_snapshots"), before, "a GET stores no scan");
+}
+
+/// A project never scanned is `never_run` with no tally — never a count of
+/// zero — and its consent record tells the widget which command to name: none
+/// recorded names the consent command, one recorded the scan alone.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_never_scanned_overview_has_no_tally_and_states_its_consent() {
+    let (tmp, engine) = unscanned_security_engine(None);
+    let repo = tmp.path().canonicalize().unwrap().join("project");
+    let history = repo.join(".logos/history.db");
+    let router = web::router(engine);
+
+    let widget = overview_security(&router).await;
+    let summary = &widget["summary"];
+    assert!(widget["error"].is_null(), "{widget}");
+    assert_eq!(summary["scan"], "never_run", "{summary}");
+    assert!(summary["tally"].is_null(), "no report, no count — not zero: {summary}");
+    assert!(summary["newest_scan_at"].is_null(), "{summary}");
+    assert_eq!(summary["consent"]["consented"], serde_json::json!([]), "no consent recorded: {summary}");
+    assert!(summary["gate"].is_null(), "no table, no band: {summary}");
+    assert_eq!(snapshot_count(&history, "security_snapshots"), 0, "a load stores no scan");
+
+    logos_core::config::record_scan_consent(
+        Some(&tmp.path().canonicalize().unwrap().join("user")),
+        &repo,
+        &["semgrep"],
+    )
+    .unwrap();
+    let consented = overview_security(&router).await;
+    assert_eq!(consented["summary"]["scan"], "never_run");
+    assert_eq!(consented["summary"]["consent"]["consented"], serde_json::json!(["semgrep"]), "{consented}");
+}
+
+/// A security read that faults is stated — `error` set, `summary` absent — and
+/// the rest of the Dashboard still answers: never a `500` for the page, never
+/// an empty summary the widget would read as zero findings ([NFR-CC-04]). A
+/// malformed `.logos/security-ignore.toml` faults the widget's read alone: with
+/// no `[security]` table `check` never reads it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_faulting_security_read_is_stated_and_never_zero() {
+    let (_tmp, engine) = unscanned_security_engine(None);
+    let repo = engine.root().to_path_buf();
+    let router = web::router(engine);
+    std::fs::write(repo.join(".logos/security-ignore.toml"), "[[ignore]\nthis is not toml\n").unwrap();
+
+    let (status, body, _) = body_string(router.clone().oneshot(get("/api/v1/overview")).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "a security fault does not fail the Dashboard: {body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let security = &payload["security"];
+    assert!(security["summary"].is_null(), "a fault is not an empty summary: {security}");
+    assert!(security["error"].as_str().is_some_and(|e| !e.is_empty()), "the fault is stated: {security}");
+    assert!(payload["gate"].is_object() && payload["status"].is_object(), "the other widgets still answer");
+}
+
+/// `src/lib.rs` for the test-code fixture: `find` (production) encloses the SQL
+/// finding at line 3; the `#[test]` function in `mod tests` encloses the one at
+/// line 12 — test code by the graph's symbol, though its path is a source path.
+#[cfg(unix)]
+const LIB_WITH_A_TEST_MODULE: &str = "/// Looks a user up.\npub fn find(id: &str) -> String {\n    format!(\"SELECT * FROM users WHERE id = {id}\")\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn finds() {\n        let _q = format!(\"SELECT * FROM users WHERE id = {}\", 1);\n        assert!(!find(\"a\").is_empty());\n    }\n}\n";
+
+/// A Semgrep report with a finding in production code (`src/lib.rs:3`), one in
+/// a test path (`tests/helpers.rs`) and one in a test symbol (`src/lib.rs:12`),
+/// all `high`.
+#[cfg(unix)]
+fn production_and_test_sarif() -> String {
+    r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0","rules":[
+{"id":"rust.lang.security.formatted-sql","properties":{"tags":["CWE-89: SQL Injection","security"]}}]}},
+"results":[
+{"ruleId":"rust.lang.security.formatted-sql","level":"error","message":{"text":"Formatted SQL query."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":3}}}]},
+{"ruleId":"rust.lang.security.formatted-sql","level":"error","message":{"text":"Formatted SQL query."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"tests/helpers.rs"},"region":{"startLine":2}}}]},
+{"ruleId":"rust.lang.security.formatted-sql","level":"error","message":{"text":"Formatted SQL query."},
+"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":12}}}]}]}]}"#
+        .to_string()
+}
+
+/// A finding in test code is counted apart: the widget leaves it out of the
+/// counted figure and states how many more lie there, exactly as the Security
+/// page does (S-795, FR-UI-09). Dropping the graph's test classification from
+/// the widget's read would count it.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_overview_security_widget_counts_test_code_findings_apart() {
+    let tmp = TempDir::new().expect("temp root");
+    let base = tmp.path().canonicalize().unwrap();
+    let (repo, user) = (base.join("project"), base.join("user"));
+    for dir in [&repo, &user] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    sh_git(&repo, &["init", "-q", "-b", "main"]);
+    commit(&repo, "src/lib.rs", LIB_WITH_A_TEST_MODULE, "seed");
+    commit(&repo, "tests/helpers.rs", "pub fn helper() {\n    let _q = \"SELECT 1\";\n}\n", "test helper");
+    let report = base.join("semgrep.sarif");
+    std::fs::write(&report, production_and_test_sarif()).unwrap();
+    let env = logos_core::security::ScanEnvironment {
+        user_dir: Some(user),
+        search_path: Some(std::ffi::OsString::new()),
+        tools_dir: None,
+        nvd_api_key: None,
+    };
+    let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
+    engine.index();
+    engine.security_ingest(&report).expect("the report ingests");
+    let router = web::router(Arc::new(engine));
+
+    let (_, page) = security_payload(router.clone()).await;
+    let page = &page["security"];
+    let widget = overview_security(&router).await;
+    let tally = &widget["summary"]["tally"];
+    assert_eq!(tally["counted"]["total"], 1, "only the production finding counts: {tally}");
+    assert_eq!(tally["excluded"]["test"], 2, "the test-path and the test-symbol findings are stated apart: {tally}");
+    assert_eq!(tally["counted"], page["counts"]["counted"], "the counted figure is the page's");
+    assert_eq!(tally["excluded"], page["counts"]["excluded"], "so is what is left out");
+
+    // The newest scan is the stored snapshot's own ingest time, to the second.
+    let history = repo.join(".logos/history.db");
+    let conn = Connection::open_with_flags(&history, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("history opens");
+    let stored: i64 = conn.query_row("SELECT MAX(created_at) FROM security_snapshots", [], |r| r.get(0)).unwrap();
+    assert_eq!(widget["summary"]["newest_scan_at"], stored, "the age is the newest stored snapshot's");
+}
+
+/// A project scanned clean — a stored report holding no finding — is zero
+/// findings, never "no scan has run" ([BR-66]).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_clean_scan_reads_zero_findings_and_not_never_scanned() {
+    let (tmp, engine) = unscanned_security_engine(None);
+    let base = tmp.path().canonicalize().unwrap();
+    let report = base.join("clean.sarif");
+    std::fs::write(
+        &report,
+        r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0"}},"results":[]}]}"#,
+    )
+    .unwrap();
+    engine.security_ingest(&report).expect("the clean report ingests");
+    let router = web::router(engine);
+
+    let widget = overview_security(&router).await;
+    let summary = &widget["summary"];
+    assert_eq!(summary["scan"], "fresh", "{summary}");
+    assert_eq!(summary["tally"]["counted"]["total"], 0, "a clean scan counts nothing: {summary}");
+    assert!(!summary["tally"].is_null(), "and says so — never the absence of a scan: {summary}");
+}
+
+/// FR-SC-08, FR-SC-27: `GET /api/v1/security` carries `nvd_api_key` on the
+/// Dependency-Check row alone — `not_set`, then `set` with a key in the
+/// environment `serve` runs in — exactly as `security status` (the CLI's and
+/// MCP's payload) reads it, and never the key.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_security_page_says_whether_dependency_check_has_an_nvd_key_never_what_it_is() {
+    const NVD_KEY: &str = "LOGOSPLANTEDNVDKEY-0123-4567-89ab-cdef01234567";
+    let tmp = TempDir::new().expect("temp root");
+    let base = tmp.path().canonicalize().unwrap();
+    let (repo, user) = (base.join("project"), base.join("user"));
+    for dir in [&repo, &user] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    sh_git(&repo, &["init", "-q", "-b", "main"]);
+    commit(&repo, "requirements.txt", "Django==2.2.0\n", "seed");
+    for (key, state) in [(None, "not_set"), (logos_core::security::NvdApiKey::new(NVD_KEY), "set")] {
+        let env = logos_core::security::ScanEnvironment {
+            user_dir: Some(user.clone()),
+            search_path: None,
+            tools_dir: None,
+            nvd_api_key: key,
+        };
+        let engine = Arc::new(Engine::start(&repo).expect("engine starts").with_scan_environment(env));
+        let cli = serde_json::to_value(engine.security_status().unwrap()).unwrap();
+        let (body, payload) = security_payload(web::router(engine)).await;
+        let page = &payload["security"];
+        assert_eq!(scanner_row(page, "dependency-check")["nvd_api_key"], state, "{body}");
+        let carrying: Vec<&str> = page["status"]["scanners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row.get("nvd_api_key").is_some())
+            .map(|row| row["scanner"].as_str().unwrap())
+            .collect();
+        assert_eq!(carrying, ["dependency-check"]);
+        let cli_row = cli["scanners"].as_array().unwrap().iter().find(|row| row["scanner"] == "dependency-check").unwrap();
+        assert_eq!(scanner_row(page, "dependency-check")["nvd_api_key"], cli_row["nvd_api_key"], "the web reads as the CLI and MCP do");
+        assert!(!body.contains(NVD_KEY), "the key is served: {body}");
+    }
 }

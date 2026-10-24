@@ -4,7 +4,9 @@ Logos ships as a **single static binary with zero runtime dependencies** —
 no network access of its own, no external services, no system libraries. SQLite
 and the bundled tree-sitter grammars are compiled in. The one download is the
 optional `logos security install`, which runs the system `curl` (and `uv`) under
-your consent ([Installing scanners](security.md#installing-scanners)).
+your consent ([Installing scanners](security.md#installing-scanners)), and its
+coverage twin `logos coverage install`
+([Coverage runs on a Rust project](#coverage-runs-on-a-rust-project)).
 
 ## Supported platforms & minimum OS baseline
 
@@ -101,6 +103,58 @@ logos index
 See [The Claude Code plugin and the review loop](plugin.md) for what each part
 does, how to migrate a project that ran `init -i` before the plugin existed, and
 the off switches.
+
+## Coverage runs on a Rust project
+
+`logos coverage run` measures a Rust project with `cargo-llvm-cov`, which needs
+the `llvm-tools-preview` component on your Rust toolchain. If you have neither,
+`logos coverage status` reports `cargo-llvm-cov` as `not_installed` and names
+the command that installs both:
+
+```bash
+logos coverage install            # until you consent: names what it would download and run; changes nothing
+logos coverage install --consent  # records your consent, then installs
+logos coverage install --from <dir> --consent   # offline, from pre-downloaded archives
+```
+
+Until your consent is recorded, the first command refuses (exit 2) and lists
+each line it needs your consent for: the pinned `cargo-llvm-cov` release with its source and size, and
+`rustup component add llvm-tools-preview` on your active Rust toolchain. Nothing
+is downloaded and no `rustup` command runs until you consent. With `--consent`:
+
+- `cargo-llvm-cov` is downloaded with the system `curl`, its SHA-256 is checked
+  against the value pinned in this Logos release **before** it is unpacked or
+  run, and it is moved into the user-level tools directory
+  (`$LOGOS_DATA_HOME`, else `$XDG_DATA_HOME/logos/tools`, else
+  `~/.local/share/logos/tools`). A file that fails the check is deleted, and
+  nothing from it runs.
+- `llvm-tools-preview` is added by **your own** `rustup`, run from the
+  filesystem root so that no project's `rust-toolchain.toml` picks the
+  toolchain. Logos never downloads the component itself. A project that pins
+  another toolchain needs the component there too: the run then fails naming
+  `rustup component add llvm-tools-preview --toolchain <name>`.
+
+The consent covers that `cargo-llvm-cov` version, and the `rustup` command, in
+every project; a later Logos that pins a newer version asks again. It is recorded
+beside the scan consent, in `security-install-consent.toml` and
+`toolchain-consent.toml`.
+
+**Your own copy wins.** A user-level path override, or a `cargo-llvm-cov` on
+`PATH` at 0.6.0 or later, is used and never downloaded; `coverage install`
+reports it as kept, and `coverage status` names the copy in use: `override`,
+`path` or `managed`. A `PATH` copy below 0.6.0 is used only while there is no
+managed copy: `coverage install` installs one beside it, which runs from then on.
+
+**Without `rustup`** (a distribution's Rust packages, for example), the install
+reports `llvm-tools-preview` as `no_rustup` with the command to run by hand, and
+changes nothing on your toolchain. Install LLVM's tools your toolchain's own way,
+or point `cargo-llvm-cov` at them with `LLVM_COV` and `LLVM_PROFDATA`.
+
+A coverage run never adds the component on its own: `cargo-llvm-cov` runs with
+`CARGO_LLVM_COV_SETUP=no`, so a missing component fails the run with the
+command to run, instead of changing your toolchain without asking. MCP has no
+install tool: an agent cannot grant itself the consent, so `coverage_status`
+names the command for you to run.
 
 ## Build from source (alternative)
 

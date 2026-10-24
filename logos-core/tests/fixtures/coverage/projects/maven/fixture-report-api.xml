@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">
+<report name="calc-api">
+  <sessioninfo id="host-1" start="1760000000000" dump="1760000001000"/>
+  <package name="com/acme/api">
+    <sourcefile name="Endpoint.java">
+      <line nr="3" mi="3" ci="0" mb="0" cb="0"/>
+      <line nr="5" mi="2" ci="0" mb="0" cb="0"/>
+      <counter type="LINE" missed="2" covered="0"/>
+    </sourcefile>
+    <counter type="LINE" missed="2" covered="0"/>
+  </package>
+  <counter type="LINE" missed="2" covered="0"/>
+</report>

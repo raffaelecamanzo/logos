@@ -1,0 +1,50 @@
+{
+  "coverage": {
+    "members": [
+      {
+        "member": "covered",
+        "result": {
+          "coverage": "fresh",
+          "overall_coverage_bp": 5000,
+          "fresh_files": 1,
+          "total_files": 2,
+          "tools_ran": 1,
+          "tools_failed": 0,
+          "tools_applicable": 1,
+          "last_run": 1760000000
+        }
+      },
+      {
+        "member": "idle",
+        "result": {
+          "coverage": "never_run",
+          "overall_coverage_bp": null,
+          "fresh_files": 0,
+          "total_files": 0,
+          "tools_ran": 0,
+          "tools_failed": 1,
+          "tools_applicable": 1,
+          "last_run": 1760000100
+        }
+      },
+      {
+        "member": "broken",
+        "error": "starting the engine for workspace member \"broken\": starting the execution runtime for root /tmp/ws/broken: opening the writer store at /tmp/ws/broken/.logos/logos.db: opening graph store at /tmp/ws/broken/.logos/logos.db: unable to open database file: /tmp/ws/broken/.logos/logos.db: Error code 14: unable to open database file"
+      }
+    ],
+    "members_total": 3,
+    "members_read": 2,
+    "members_fresh": 1,
+    "members_never_run": 1
+  },
+  "complete": false,
+  "degraded_rollup": {
+    "members": 3,
+    "opened": 2,
+    "not_attempted": 0,
+    "degraded_members": [
+      "broken"
+    ],
+    "covers_all_members": false
+  }
+}

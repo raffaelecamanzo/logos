@@ -69,6 +69,7 @@ impl Fixture {
             user_dir: Some(user.clone()),
             search_path: Some(bin.clone().into_os_string()),
             tools_dir: None,
+            nvd_api_key: None,
         };
         let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
         engine.index();
@@ -202,4 +203,26 @@ async fn the_reads_that_run_check_start_no_scanner() {
         f.get(path, Some("https://attacker.example")).await;
     }
     assert_eq!((f.calls("semgrep"), f.calls("bandit")), (0, 0), "no read that runs check starts a scanner");
+}
+
+/// The Dashboard's Security widget (S-789) is read with no version probe at
+/// all: with the field populated — a consented scanner, a `[security]` table, a
+/// same-origin and a cross-site load — every stub records zero invocations,
+/// where the Security page probes the consented one. The widget's data is
+/// there, not an error that happened to start nothing.
+#[tokio::test]
+async fn the_overview_security_widget_starts_no_scanner_probe() {
+    let f = Fixture::with_rules(Some("[security]\nrequired_scanners = [\"semgrep\"]\n"));
+    f.consent(&["semgrep"]);
+    for origin in [None, Some("https://attacker.example")] {
+        let overview = f.get("/api/v1/overview", origin).await;
+        let security = &overview["security"];
+        assert!(security["error"].is_null(), "the widget's read succeeded: {security}");
+        assert_eq!(security["summary"]["scan"], "never_run", "{security}");
+        assert_eq!(security["summary"]["consent"]["consented"], serde_json::json!(["semgrep"]), "{security}");
+        assert_eq!(security["summary"]["gate"]["passed"], false, "the missing required scan: {security}");
+    }
+    assert_eq!((f.calls("semgrep"), f.calls("bandit")), (0, 0), "the widget probes no scanner, consented or not");
+    f.security(None).await;
+    assert_eq!(f.calls("semgrep"), 1, "the Security page does probe the consented scanner: the control");
 }

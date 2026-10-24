@@ -440,14 +440,78 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | | **+5** |
 ///
 /// [FR-GV-28]: ../../docs/specs/requirements/FR-GV-28.md
+///
+/// **S-795 1315→1318**: `scope` on `security_findings` ([FR-SC-28]). Measured
+/// 1313→1316 (+3); the budget rises by that delta, the 2 lines of headroom it
+/// branched with kept. Sibling sessions in Sprint 108 Iteration 1 add their own
+/// deltas to the 1315 this one branched from; the merged budget is the sum.
+/// Delegation only: the scope is parsed and applied by `FindingsFilter`, the
+/// call the CLI makes.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `SecurityFindingsParams.scope` (doc and field) | **+2** |
+/// | the `security_findings` tool: the token passed to `FindingsFilter::parse` | **+1** |
+/// | | **+3** |
+///
+/// [FR-SC-28]: ../../docs/specs/requirements/FR-SC-28.md
+///
+/// **S-798 1318→1330**: `headroom`, `subjects` and `near` on `review`
+/// ([FR-GV-29]). Measured 1316→1328 (+12); the budget rises by that delta, the
+/// 2 lines of headroom it branched with kept. Sibling sessions in Sprint 108
+/// Iteration 2 add their own deltas to the 1318 this one branched from; the
+/// merged budget is the sum. Delegation only: the listing is
+/// `Engine::review_headroom`, the call the CLI makes; the two refusals mirror
+/// the CLI's usage errors.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `ReviewParams.headroom`, `.subjects` and `.near` (doc and field each) | **+6** |
+/// | the `review` tool: the `headroom` arm and the refusal of `subjects`/`near` without it | **+6** |
+/// | | **+12** |
+///
+/// [FR-GV-29]: ../../docs/specs/requirements/FR-GV-29.md
+///
+/// **S-737 1330→1352**: the `coverage_run` tool ([FR-CV-14]). Measured
+/// 1328→1350 (+22); the budget rises by that delta, the 2 lines of headroom it
+/// branched with kept. Sibling sessions in Sprint 108 Iteration 3 add their own
+/// deltas to the 1330 this one branched from; the merged budget is the sum.
+/// Delegation only: the run is `Engine::coverage_run`, the call the CLI makes.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `CoverageRunParams` (`tool`, and the refused `repo`) | **+13** |
+/// | the `coverage_run` tool: the attribute and one `Engine::coverage_run` delegation | **+8** |
+/// | the crate doc's coverage tool count | **+1** |
+/// | | **+22** |
+///
+/// [FR-CV-14]: ../../docs/specs/requirements/FR-CV-14.md
+///
+/// **S-738 1352→1381**: `coverage_run` starts or joins a job, and the server
+/// holds the job runner ([FR-CV-15]). Measured 1350→1379 (+29); the budget
+/// rises by that delta, the 2 lines of headroom it branched with kept. Sibling
+/// sessions in Sprint 108 Iteration 4 add their own deltas to the 1352 this
+/// one branched from; the merged budget is the sum. Delegation only: the start,
+/// join and consent check are `coverage::job::start`, the call the web
+/// surface makes; what stays here is holding the runner and shutting it down.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `serve_stdio`: the runner, its shutdown once the serve ends, the warning; `serve_stdio_on`'s doc | **+8** |
+/// | `LogosMcp`: the `jobs` field (doc and field), its default, `with_jobs` | **+11** |
+/// | `coverage_status`: the job snapshot beside the status | **+5** |
+/// | `coverage_run`: resolving the default member's engine, one `coverage::job::start` delegation | **+5** |
+/// | | **+29** |
+///
+/// [FR-CV-15]: ../../docs/specs/requirements/FR-CV-15.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1315,
-        "mcp adapter exceeds the 1315 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1381,
+        "mcp adapter exceeds the 1381 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

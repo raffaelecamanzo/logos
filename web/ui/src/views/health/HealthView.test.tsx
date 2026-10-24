@@ -1517,7 +1517,7 @@ const ATTRIBUTION: SignalAttribution = {
       points: -0.66,
       drivers: [
         {
-          status: "new", name: "cancelInstall", node_id: null, file: "web/ui/src/api/client.ts", line: 10, measure: "group_size", before: null, after: 2,
+          status: "new", name: "cancelInstall", node_id: "clone_group:0123456789abcdef", file: "web/ui/src/api/client.ts", line: 10, measure: "group_size", before: null, after: 2,
           members: [
             { node_id: null, name: "cancelInstall", file: "web/ui/src/api/client.ts", line: 10 },
             { node_id: null, name: "cancelScan", file: "web/ui/src/api/client.ts", line: 30 },
@@ -1561,8 +1561,12 @@ describe("Signal change widget (FR-GV-26, S-755)", () => {
     expect(drivers(equality[2])).toEqual([["new", "admit_installnew · logos-core/src/tools/surface.rs:120"]]);
     expect(seen(equality[2])).toMatch(/and 2 more$/);
     expect(drivers(uniqueness[2])).toEqual([
-      ["new", "Near-clone group of 2: cancelInstall, cancelScannew · web/ui/src/api/client.ts:10"],
+      ["new", "Near-clone group of 2, named by cancelInstall: cancelInstall, cancelScannew · web/ui/src/api/client.ts:10"],
     ]);
+    // The group's own id, the one its where-to-start unit carries, rides on the driver.
+    expect(
+      [...uniqueness[2].querySelectorAll("[data-driver-id]")].map((d) => d.getAttribute("data-driver-id")),
+    ).toEqual(["clone_group:0123456789abcdef"]);
   });
 
   it("names why a change is not split, and the reason the baseline was saved with", async () => {
@@ -1598,5 +1602,114 @@ describe("Signal change widget (FR-GV-26, S-755)", () => {
     expect(figure).toContain("No driving symbols named: a snapshot predates recorded offender values.");
     expect(figure).not.toContain("Not split by dimension");
     expect(within(part(widget("Signal change"), "evidence")!).getAllByRole("row")).toHaveLength(3);
+  });
+});
+
+// S-785 (FR-GV-27, CR-243): under a `[review]` table the Gate states each
+// dimension in decline beside the verdict, read from the structured `trend` —
+// the CLI's warning word for word — and the verdict is as without it.
+describe("Gate trend note (FR-GV-27, S-785)", () => {
+  /** The CLI's warning for the fixture's trend, as `gate --json` carries it. */
+  const WARNING =
+    "equality declined at each of the last 2 recorded snapshots that moved it: 0.9 → 0.8 → 0.7 " +
+    "(review.trend_window = 2); a trend warning, never a failure";
+
+  function declining(): HealthModel {
+    const m = clone();
+    m.gate.trend = [{ dimension: "equality", values: [0.9, 0.8, 0.7], window: 2 }];
+    m.gate.warnings = [WARNING];
+    return m;
+  }
+
+  it("states the CLI's warning beside the verdict, leaving the verdict as without it", async () => {
+    stub(HEALTH);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const without = seen(part(widget("Gate"), "figure"));
+    const chip = within(part(widget("Gate"), "title")!).getByText("PASS").className;
+    expect(without).not.toMatch(/declined/);
+
+    cleanup();
+    stub(declining());
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const figure = part(widget("Gate"), "figure")!;
+    expect(within(figure).getByText(WARNING)).toBeInTheDocument();
+    expect(seen(figure)).toBe(`${without}${WARNING}`);
+    expect(within(part(widget("Gate"), "title")!).getByText("PASS").className).toBe(chip);
+    expectWidgetCopy(widget("Gate"), gateCopy);
+    // Only the Gate states it.
+    expect(frames().filter((w) => seen(w).includes("declined at each")).map(widgetTitle)).toEqual(["Gate"]);
+  });
+
+  it("renders from the structured trend, never from warnings", async () => {
+    const m = declining();
+    m.gate.warnings = [];
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(within(part(widget("Gate"), "figure")!).getByText(WARNING)).toBeInTheDocument();
+
+    cleanup();
+    const n = clone();
+    n.gate.warnings = [WARNING];
+    stub(n);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    expect(seen(part(widget("Gate"), "figure"))).not.toMatch(/declined/);
+  });
+
+  it("states one line per dimension, with each value as the CLI spells it", async () => {
+    const m = clone();
+    m.gate.trend = [
+      { dimension: "depth", values: [0.5, 0.25], window: 1 },
+      { dimension: "equality", values: [0.9, 0.9 - 1e-8, 1e-7], window: 2 },
+    ];
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const notes = [...part(widget("Gate"), "figure")!.querySelectorAll("[data-figure-note]")]
+      .map(seen)
+      .filter((t) => t.includes("declined"));
+    expect(notes).toEqual([
+      "depth declined at each of the last 1 recorded snapshot that moved it: 0.5 → 0.25 (review.trend_window = 1); a trend warning, never a failure",
+      "equality declined at each of the last 2 recorded snapshots that moved it: 0.9 → 0.89999999 → 0.0000001 (review.trend_window = 2); a trend warning, never a failure",
+    ]);
+  });
+
+  // The core sets `trend` on every arm of the verdict, so the note does not
+  // depend on how the gate was reached: a pass without comparing, a failure.
+  it.each([
+    ["an informational pass", (m: HealthModel) => {
+      m.gate.signal = 7000;
+      m.gate.message = "baseline thresholds differ — informational pass (re-save with `gate --save`)";
+    }, /^PASS · signal 7000 vs baseline 7800; not compared, informational pass/],
+    ["a FAIL", (m: HealthModel) => {
+      m.gate.passed = false;
+      m.gate.signal = 7700;
+    }, /^FAIL · signal 7700 vs baseline 7800/],
+  ] as const)("states the note beside %s", async (_name, arm, verdict) => {
+    const m = declining();
+    arm(m);
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const figure = part(widget("Gate"), "figure")!;
+    expect(seen(figure)).toMatch(verdict);
+    expect(within(figure).getByText(WARNING)).toBeInTheDocument();
+  });
+
+  it("sits under the not-current label on a snapshot the graph has moved past", async () => {
+    const m = declining();
+    m.evolution.snapshots[1].created_at = 1_758_240_000;
+    m.status.last_full_index_at = String(1_758_240_000 + 86_400);
+    stub(m);
+    render(<HealthView />);
+    await screen.findAllByText(/the graph has been indexed or synced since/i);
+    const gate = widget("Gate");
+    expect(within(part(gate, "title")!).getByText("MOVED PAST")).toBeInTheDocument();
+    const figure = seen(part(gate, "figure"));
+    expect(figure).toContain(WARNING);
+    expect(figure.indexOf(WARNING)).toBeLessThan(figure.indexOf("Describes the snapshot of 2025-09-19"));
   });
 });

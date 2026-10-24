@@ -29,6 +29,10 @@ use tempfile::TempDir;
 /// Printed on stderr by the failing stub: it must reach neither stream.
 const PLANTED: &str = "LOGOSPLANTEDSECRET0123456789abcdef";
 
+/// A planted NVD API key in the binary's environment: it must reach
+/// Dependency-Check's private file and neither stream (FR-SC-27).
+const NVD_KEY: &str = "LOGOSPLANTEDNVDKEY-0123-4567-89ab-cdef01234567";
+
 /// `app/db.py` with a function around each line `semgrep.sarif` names (12 and
 /// 18), so each finding binds to an enclosing symbol. Python resolves no call
 /// across files here, so reachability is `unresolved` (S-669).
@@ -116,7 +120,7 @@ impl World {
             "#!/bin/sh\n\
              case \"$1\" in --version|version|-version) printf '%s\\n' '{name} 1.2.3'; exit 0;; esac\n\
              out=''; prev=''\n\
-             for a in \"$@\"; do case \"$prev\" in --output|--report-path) out=\"$a\";; esac; prev=\"$a\"; done\n\
+             for a in \"$@\"; do case \"$prev\" in --output|--output-file|--report-path) out=\"$a\";; esac; prev=\"$a\"; done\n\
              {copy}\n\
              printf '%s\\n' '{stderr}' >&2\n\
              exit {exit}\n"
@@ -133,19 +137,30 @@ impl World {
     /// [`World::logos`] on the project at `root` — a clone of the fixture —
     /// with the same user-level directories and scanners.
     fn logos_in(&self, root: &Path, args: &[&str]) -> Output {
-        let out = Command::new(env!("CARGO_BIN_EXE_logos"))
+        self.logos_keyed(root, args, None)
+    }
+
+    /// [`World::logos_in`] with `NVD_API_KEY` set to `nvd_api_key` in the
+    /// binary's environment, or removed from it when `None` — never inherited
+    /// from this test process.
+    fn logos_keyed(&self, root: &Path, args: &[&str], nvd_api_key: Option<&str>) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_logos"));
+        command
             .arg("--project")
             .arg(root)
             .args(args)
             .env("PATH", &self.path)
             .env("LOGOS_CONFIG_HOME", &self.user)
             .env("LOGOS_DATA_HOME", &self.data)
-            .env("GIT_CEILING_DIRECTORIES", self.root.parent().unwrap())
-            .output()
-            .expect("the logos binary runs");
-        for stream in [&out.stdout, &out.stderr] {
+            .env("GIT_CEILING_DIRECTORIES", self.root.parent().unwrap());
+        match nvd_api_key {
+            Some(key) => command.env("NVD_API_KEY", key),
+            None => command.env_remove("NVD_API_KEY"),
+        };
+        let out = command.output().expect("the logos binary runs");
+        for (stream, secret) in [&out.stdout, &out.stderr].into_iter().flat_map(|s| [(s, PLANTED), (s, NVD_KEY)]) {
             assert!(
-                !String::from_utf8_lossy(stream).contains(PLANTED),
+                !String::from_utf8_lossy(stream).contains(secret),
                 "logos {args:?} printed the planted secret"
             );
         }
@@ -235,12 +250,19 @@ fn the_security_commands_scan_with_consent_and_report_every_state() {
     let findings = w.json(&["security", "findings", "--scanner", "semgrep", "--path", "app"]);
     assert_eq!(findings["findings"].as_array().unwrap().len(), 2);
     assert_eq!(contexts(&findings), BOUND_UNRESOLVED, "the graph context rides on the CLI payload");
+    // S-795: no scope is production, and says so; `app/db.py` is production code.
+    assert_eq!((findings["scope"].as_str(), findings["hidden_by_scope"].as_u64()), (Some("production"), Some(0)));
+    assert!(findings["findings"].as_array().unwrap().iter().all(|f| f["code_scope"] == "production"), "{findings}");
     // Every flag at once, each to a value only its own slot accepts.
     let every = w.json(&[
         "security", "findings", "--severity", "medium", "--scanner", "semgrep", "--category", "A05",
-        "--path", "app", "--suppression", "active", "--edition", "2025",
+        "--path", "app", "--suppression", "active", "--edition", "2025", "--scope", "all",
     ]);
     assert_eq!(every["findings"].as_array().unwrap().len(), 2, "{every}");
+    assert_eq!(every["scope"], "all", "the scope reaches its own slot");
+    let tests_only = w.json(&["security", "findings", "--scanner", "semgrep", "--scope", "test"]);
+    assert_eq!((tests_only["findings"].as_array().unwrap().len(), tests_only["hidden_by_scope"].as_u64()), (0, Some(2)), "{tests_only}");
+    assert_eq!(w.logos(&["security", "findings", "--scope", "bogus"]).status.code(), Some(2));
     let ingest = w.json(&["security", "ingest", w.clean.to_str().unwrap()]);
     assert_eq!(ingest["already_ingested"], true);
     assert_eq!(w.logos(&["security", "findings", "--severity", "bogus"]).status.code(), Some(2));
@@ -628,6 +650,52 @@ fn a_path_entry_holds_an_absolute_lockfile_finding_out_of_every_surface() {
     assert_eq!(status["suppressions"][0]["orphaned"], false, "{status}");
 }
 
+/// A finding in a fixtures directory reads `test`, is hidden from the default
+/// listing and still fails the `[security]` gate: with no `.logos/security-ignore.toml`
+/// entry for the directory, which is what this repository's own file dropped
+/// once code scope told fixtures from shipped code (S-796, FR-SC-28, BR-98).
+#[test]
+fn a_fixtures_finding_reads_test_is_hidden_by_default_and_still_reaches_the_gate() {
+    let w = World::new();
+    let fixture = w.root.join("tests/fixtures/security-context/axum");
+    fs::create_dir_all(&fixture).unwrap();
+    fs::write(fixture.join("Cargo.lock"), "# lockfile\n").unwrap();
+    let report = w.root.parent().unwrap().join("osv-fixture.sarif");
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
+        "results": [{
+            "ruleId": "CVE-2026-11111",
+            "level": "error",
+            "message": {"text": "Package 'axum@0.7.0' is vulnerable to 'CVE-2026-11111'."},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/Cargo.lock", fixture.display())}}}]
+        }]
+    }]});
+    fs::write(&report, sarif.to_string()).unwrap();
+    w.ingest(&report);
+    w.rules(Some("[security]\nmax_severity = \"info\"\n"));
+    assert!(!w.root.join(".logos/security-ignore.toml").exists(), "no entry holds the fixtures out");
+
+    let listed = |scope: &[&str]| {
+        let mut args = vec!["security", "findings"];
+        args.extend_from_slice(scope);
+        w.json(&args)
+    };
+    let default = listed(&[]);
+    assert_eq!(default["findings"].as_array().unwrap().len(), 0, "the default lists production only: {default}");
+    assert_eq!(default["hidden_by_scope"], 1, "and says it hid one: {default}");
+    let all = listed(&["--scope", "all"]);
+    let finding = &all["findings"][0];
+    assert_eq!((finding["code_scope"].as_str(), finding["code_scope_reason"].as_str()), (Some("test"), Some("test_path")), "{finding}");
+    assert_eq!(listed(&["--scope", "test"])["findings"].as_array().unwrap().len(), 1);
+
+    // The gate keeps it: the scope is not the gate's.
+    for verb in ["check", "gate"] {
+        let (code, verdict) = w.verdict(&[verb]);
+        assert_eq!(code, Some(1), "{verb} fails on the fixture finding: {verdict}");
+        assert!(verdict.to_string().contains("CVE-2026-11111"), "{verb} names it: {verdict}");
+    }
+}
+
 /// `security install|uninstall|scan --install` through the binary (S-744,
 /// FR-SC-22). The builtin manifest's real pins are used, so the stub `curl`'s
 /// bytes never verify: what is proved here is which tools are fetched, the
@@ -659,7 +727,7 @@ fn install_asks_consent_fetches_only_missing_tools_and_never_touches_a_users_own
     // The Python scanners come from the package index, and need `uv` and the
     // managed Python, each its own line (S-745).
     for line in [
-        "gitleaks 8.18.4 from github.com (", "osv-scanner 1.9.2 from github.com (", "gosec 2.21.4 from github.com (",
+        "gitleaks 8.18.4 from github.com (", "osv-scanner 2.7.0 from github.com (", "gosec 2.29.0 from github.com (",
         "semgrep 1.85.0 from pypi.org (", "bandit 1.7.10 from pypi.org (", "checkov 3.2.533 from pypi.org (",
         "uv 0.12.21 from github.com (", "python 3.12.14 from github.com (",
     ] {
@@ -1369,8 +1437,9 @@ fn lists_flag(help: &str, name: &str) -> bool {
     declared.match_indices(&flag).any(|(at, _)| !declared[at + flag.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-'))
 }
 
-/// Flags the page names that belong to a scanner, not to Logos.
-const SCANNER_FLAGS: [&str; 2] = ["metrics", "no-git"];
+/// Flags the page names that belong to a scanner, not to Logos: Dependency-Check's
+/// two that hand it an NVD API key (S-794) among them.
+const SCANNER_FLAGS: [&str; 4] = ["metrics", "no-git", "nvdApiKey", "propertyfile"];
 
 /// Every bare `--flag` span in `markdown` that no `logos security` command lists
 /// and no scanner owns, and how many were checked.
@@ -1645,16 +1714,17 @@ fn the_page_states_the_network_posture_consent_and_the_reachability_limits() {
 
 /// S-760: the manual names the one definition of a counted finding, says freshness
 /// is the finding's and not its report's, and says the roll-up states how many
-/// reports are fresh as its own field. Each needle is one sentence a rewrite would
-/// have to keep.
+/// reports are fresh as its own field. S-795 adds test code to the definition, in
+/// its order. Each needle is one sentence a rewrite would have to keep.
 #[test]
 fn the_page_names_the_one_definition_of_a_counted_finding() {
     let page = security_page().split_whitespace().collect::<Vec<_>>().join(" ");
     for needle in [
         "**One definition of a counted finding.**",
-        "it counts unless a current entry in `.logos/security-ignore.toml` suppresses it or its own file changed since the scan",
+        "it counts unless a current entry in `.logos/security-ignore.toml` suppresses it, its own file changed since the scan, or it sits in [test code](#findings-in-test-code)",
+        "A finding left out is left out for the first of those that holds, in that order.",
         "Freshness is the finding's, never its report's",
-        "reads the same count on all three",
+        "reads the same count on all of them",
         "states it as its own field, `N of M reports fresh`",
         "`N of M reports fresh` says how many of the stored reports are themselves fresh at HEAD",
         "A scanner you disable keeps its stored findings in every count until you re-scan without it.",
@@ -2050,5 +2120,103 @@ fn a_scan_stopped_by_a_signal_leaves_no_scanner_beside_the_next_one() {
         fs::write(rec.join("release"), "").unwrap();
         let status = second.0.wait().unwrap();
         assert!(status.success(), "SIG{signal}: the next scan completes: {status:?}");
+    }
+}
+
+/// FR-SC-27 through the binary: the CLI reads `NVD_API_KEY` from its own
+/// environment — an empty one sets none, a repository `.env` none — and
+/// `security status` reads `set` / `not_set`; a Dependency-Check scan is
+/// handed the key in a private file named by `--propertyfile`, never in its
+/// argv or on either stream, and the file is gone once the scan ends.
+#[test]
+fn the_cli_reads_the_nvd_key_from_its_environment_and_never_prints_it() {
+    let w = World::new();
+    let status = |key: Option<&str>| -> Value {
+        let out = w.logos_keyed(&w.root, &["--json", "security", "status"], key);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice(&out.stdout).expect("JSON on stdout")
+    };
+    assert_eq!(row(&status(None), "dependency-check")["nvd_api_key"], "not_set");
+    assert_eq!(row(&status(Some("")), "dependency-check")["nvd_api_key"], "not_set", "an empty key sets none");
+    assert_eq!(row(&status(Some(NVD_KEY)), "dependency-check")["nvd_api_key"], "set");
+    assert_eq!(row(&status(Some(NVD_KEY)), "semgrep").get("nvd_api_key"), None, "Dependency-Check's row alone");
+    fs::write(w.root.join(".env"), format!("NVD_API_KEY={NVD_KEY}\n")).unwrap();
+    assert_eq!(row(&status(None), "dependency-check")["nvd_api_key"], "not_set", "a repository .env supplies none");
+
+    let props = w.root.parent().unwrap().join("dependency-check.props");
+    let argv = w.root.parent().unwrap().join("dependency-check.argv");
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> '{argv}'\n\
+         case \"$1\" in --version) printf '%s\\n' 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n\
+         pf=''; prev=''\n\
+         for a in \"$@\"; do if [ \"$prev\" = '--propertyfile' ]; then pf=\"$a\"; fi; prev=\"$a\"; done\n\
+         if [ -f \"$pf\" ]; then /bin/cp \"$pf\" '{props}'; /bin/cat \"$pf\" >&2; fi\n\
+         exit 1\n",
+        argv = argv.display(),
+        props = props.display(),
+    );
+    let path = w.bin.join("dependency-check");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = w.logos_keyed(&w.root, &["--json", "security", "scan", "--consent", "--scanner", "dependency-check"], Some(NVD_KEY));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let scan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(row(&scan, "dependency-check")["outcome"], "failed", "{scan}");
+    assert_eq!(fs::read_to_string(&props).unwrap(), format!("nvd.api.key={NVD_KEY}\n"));
+    let argv = fs::read_to_string(&argv).unwrap();
+    assert!(argv.contains("--propertyfile") && !argv.contains(NVD_KEY), "{argv}");
+    let log = fs::read_to_string(w.root.join(".logos/security/dependency-check.failed.log")).unwrap();
+    assert!(!log.contains(NVD_KEY), "{log}");
+    assert!(fs::symlink_metadata(w.root.join(".logos/security/nvd-api-key.properties")).is_err(), "the key file outlived the scan");
+}
+
+/// FR-SC-27 AC 2 (S-794 review): a `logos security scan` stopped by SIGINT or
+/// SIGTERM while Dependency-Check runs with the key exits without unwinding
+/// the scan, and still leaves no key file: the stop's cancel removes it.
+#[test]
+fn a_keyed_scan_stopped_by_a_signal_leaves_no_key_file() {
+    for (signal, code) in [("INT", 130), ("TERM", 143)] {
+        let w = World::new();
+        let seen = w.root.parent().unwrap().join("dependency-check.seen");
+        let key_file = w.root.join(".logos/security/nvd-api-key.properties");
+        // Records that the key file is there, then waits, at most 60 s.
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1\" in --version) printf '%s\\n' 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n\
+             pf=''; prev=''\nfor a in \"$@\"; do if [ \"$prev\" = '--propertyfile' ]; then pf=\"$a\"; fi; prev=\"$a\"; done\n\
+             /bin/ls \"$pf\" > '{seen}.tmp' && /bin/mv '{seen}.tmp' '{seen}'\n\
+             /bin/sleep 60\n",
+            seen = seen.display(),
+        );
+        let stub = w.bin.join("dependency-check");
+        fs::write(&stub, script).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut scan = Reaped(
+            Command::new(env!("CARGO_BIN_EXE_logos"))
+                .arg("--project")
+                .arg(&w.root)
+                .args(["security", "scan", "--consent", "--scanner", "dependency-check"])
+                .env("PATH", &w.path)
+                .env("LOGOS_CONFIG_HOME", &w.user)
+                .env("LOGOS_DATA_HOME", &w.data)
+                .env("GIT_CEILING_DIRECTORIES", w.root.parent().unwrap())
+                .env("NVD_API_KEY", NVD_KEY)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("the logos binary runs"),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !seen.exists() {
+            assert!(std::time::Instant::now() < deadline, "SIG{signal}: Dependency-Check never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(fs::read_to_string(&seen).unwrap().trim(), key_file.display().to_string(), "SIG{signal}: the file existed during the run");
+        let sent = Command::new("kill").arg(format!("-{signal}")).arg(scan.0.id().to_string()).status().unwrap();
+        assert!(sent.success());
+        let status = scan.0.wait().unwrap();
+        assert_eq!(status.code(), Some(code), "SIG{signal}: exits 128 + the signal: {status:?}");
+        assert!(fs::symlink_metadata(&key_file).is_err(), "SIG{signal}: the key file outlived the stopped scan");
     }
 }

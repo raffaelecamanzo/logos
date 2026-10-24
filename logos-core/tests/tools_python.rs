@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use logos_core::config::INSTALL_CONSENT_FILE;
-use logos_core::jobs::{JobKind, ScanJobs};
+use logos_core::jobs::{JobKind, AnalysisJobs};
 use logos_core::security::{CopyKind, Detection, Orchestrator, ScanEnvironment, Selection};
 use logos_core::tools::surface::InstallRequest;
 use logos_core::tools::{
@@ -257,6 +257,7 @@ impl World {
             user_dir: Some(self.user()),
             search_path: Some(self.bin().into_os_string()),
             tools_dir: Some(self.tools()),
+            nvd_api_key: None,
         }
     }
 
@@ -1229,7 +1230,7 @@ fn a_shutdown_mid_pip_install_kills_uv_and_leaves_no_staging() {
     let w = World::new();
     let manifest = w.manifest(None);
     fs::write(w.rec().join("hang-pip"), "").unwrap();
-    let jobs = ScanJobs::new();
+    let jobs = AnalysisJobs::new();
     let installer = w.installer(&manifest);
     jobs.start(JobKind::ToolInstall, &w.root(), move |_| {
         installer.install(&["bandit"], &Source::Network)?;

@@ -18,8 +18,8 @@ export const memberSecurity: CopyEntry = {
 };
 
 export const workspaceOwasp: CopyEntry = {
-  what: "The fresh, unsuppressed findings of every member read, grouped by OWASP Top 10 category for the chosen edition, with how many members a fresh scan covers each category in.",
-  why: "A category no member's fresh scan can detect is a blind spot across the workspace, which a count of zero would hide.",
+  what: "The fresh, unsuppressed findings in production code of every member read, grouped by OWASP Top 10 category for the chosen edition, with how many members a fresh scan covers each category in.",
+  why: "A category no member's fresh scan can detect is a blind spot across the workspace, which a count of zero would hide, so a member's figure here can be below its own page's OWASP list under Production, which also counts suppressed findings and findings in changed files.",
 };
 
 /** The figure-row, cell and note sentences. */
@@ -40,6 +40,8 @@ export const WORKSPACE_SECURITY_TEXT = {
     `Category counts come from fresh reports only: ${fresh} of ${stored} ${plural(stored, "report", "reports")} fresh at HEAD.`,
   /** What the totals leave out, and why: the Security page's sentence. */
   excluded: FINDING_COUNT_TEXT.excluded,
+  /** The findings in test code, summed over the members read (FR-SC-28): in none of the totals. */
+  testCode: (n: number) => `${FINDING_COUNT_TEXT.testCode(n)}, left out of every total above.`,
   /** Members that could not be opened or read. */
   unread: (n: number) =>
     `${n} ${plural(n, "member", "members")} could not be read, so every total here is over fewer than all members:`,

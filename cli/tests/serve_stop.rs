@@ -27,6 +27,13 @@ use tempfile::TempDir;
 /// How long a stub, a listener or a stopping serve is waited for.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// The coverage-data path an instrumented build was given, to pass on through a
+/// cleared environment. Without it the spawned `logos` writes a
+/// `default_*.profraw` into its working directory, which is this crate.
+fn profile_file() -> Option<(&'static str, std::ffi::OsString)> {
+    std::env::var_os("LLVM_PROFILE_FILE").map(|path| ("LLVM_PROFILE_FILE", path))
+}
+
 /// One machine: a committed project, a search path holding the stubs, and the
 /// user's config and tools directories.
 struct Machine {
@@ -111,6 +118,7 @@ impl Machine {
             .env("LOGOS_CONFIG_HOME", self.config())
             .env("LOGOS_DATA_HOME", self.tools())
             .env("GIT_CEILING_DIRECTORIES", &self.base)
+            .envs(profile_file())
             // The runner logs each job its shutdown cancels.
             .env("RUST_LOG", "logos::jobs=info")
             .stdin(if mcp { Stdio::piped() } else { Stdio::null() })
@@ -370,7 +378,8 @@ fn sigterm_during_an_mcp_scan_leaves_no_scanner_running() {
                 .env("HOME", m.home())
                 .env("LOGOS_CONFIG_HOME", m.config())
                 .env("LOGOS_DATA_HOME", m.tools())
-                .env("GIT_CEILING_DIRECTORIES", &m.base);
+                .env("GIT_CEILING_DIRECTORIES", &m.base)
+                .envs(profile_file());
         };
         let version = &Manifest::builtin().tool("gitleaks").expect("gitleaks is managed").version;
         let answer = format!("case \"$1\" in version|--version) printf '%s\\n' '{version}'; exit 0 ;; esac");

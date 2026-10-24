@@ -4,24 +4,59 @@
 import { describe, expect, it } from "vitest";
 
 import reference from "../../../../../docs/howto/commands.md?raw";
-import type { SecurityCategoryCoverage, SecurityFinding, SecurityModel, SecurityScannerStatus } from "../../api/types.ts";
-import { REDACTED, selectorText, suppressionNote } from "../../copy/security.copy.ts";
+import type {
+  InstallJob,
+  ScanJob,
+  SecurityCategoryCoverage,
+  SecurityFinding,
+  SecurityInstallStep,
+  SecurityModel,
+  SecurityScannerStatus,
+} from "../../api/types.ts";
+import {
+  CONTEXT_TEXT,
+  FINDINGS_TABLE_TEXT,
+  INSTALL_JOB_TEXT,
+  INSTALL_OUTCOME_TEXT,
+  REDACTED_TEXT,
+  SCAN_JOB_TEXT,
+  SCOPE_TEXT,
+  selectorText,
+  suppressionNote,
+} from "../../copy/security.copy.ts";
 import { commandsIn, documentedCommands, isDocumented } from "../../test/commandCheck.ts";
+import installReal from "./fixtures/install-job.real.json";
+import scanReal from "./fixtures/scan-job.real.json";
 import real from "./fixtures/security.real.json";
 import {
   NO_FILTERS,
+  categoryCount,
   editionOf,
   findingLocation,
   findingMessage,
+  hiddenByScope,
+  ignoredDirsKey,
+  inScope,
+  jobProgress,
   keeps,
+  liveStates,
+  markersShown,
   normalisePath,
   notCoveredCommand,
   pathFromSearch,
+  reachabilityText,
+  reachableWord,
   scannerDrivers,
   scannerStateText,
+  scopeFromSearch,
+  scopeReasonText,
   selectorKey,
   severityTone,
   suggestedPath,
+  summaryText,
+  symbolKindWord,
+  unclassifiedCount,
+  urlWithScope,
 } from "./securityModel.ts";
 
 const MODEL = real as unknown as SecurityModel;
@@ -63,11 +98,141 @@ describe("edition", () => {
   });
 });
 
-describe("redaction (FR-SC-03)", () => {
-  it("renders a secret-class message as [redacted], whatever text it holds", () => {
-    expect(findingMessage(SECRET)).toBe(REDACTED);
-    expect(findingMessage({ ...SECRET, message: "password=hunter2" })).toBe(REDACTED);
+describe("redaction (FR-SC-03, S-796)", () => {
+  const WHY = "Redacted: the scanner's message would contain the secret itself";
+
+  it("explains a secret-class message in words and gives its location, whatever text it holds", () => {
+    expect(REDACTED_TEXT.why).toBe(WHY);
+    const at = findingLocation(SECRET);
+    expect(findingMessage(SECRET)).toBe(`${WHY}, at ${at}`);
+    expect(findingMessage({ ...SECRET, message: "password=hunter2" })).toBe(`${WHY}, at ${at}`);
     expect(findingMessage(SQL)).toBe("Formatted SQL query.");
+  });
+
+  it("states a redacted finding with no location as having none, not as being somewhere", () => {
+    const nowhere = { ...SECRET, path: null, report_path: null };
+    expect(findingMessage(nowhere)).toBe(`${WHY}, and the finding has no location`);
+  });
+
+  it("reads the report's path for a redacted finding bound to no indexed file", () => {
+    expect(findingMessage({ ...SECRET, path: null, report_path: "Cargo.lock", start_line: 7 })).toBe(`${WHY}, at Cargo.lock:7`);
+  });
+});
+
+describe("code scope (FR-SC-28, S-796)", () => {
+  const test = { ...SQL, code_scope: "test" as const, code_scope_reason: "test_symbol" as const };
+  const fixture = { ...SQL, code_scope: "test" as const, code_scope_reason: "test_path" as const, fingerprint: "f2" };
+  const none = new Map<string, string>();
+  const classify = (f: SecurityFinding) => editionOf(PAGE, "2025").classify(f);
+
+  it("lists production unless the scope says otherwise, and the control's three values are the CLI's", () => {
+    expect(NO_FILTERS.scope).toBe("production");
+    expect(inScope(SQL, "production")).toBe(true);
+    expect(inScope(test, "production")).toBe(false);
+    expect(inScope(test, "test")).toBe(true);
+    expect(inScope(SQL, "test")).toBe(false);
+    expect([SQL, test].map((f) => inScope(f, "all"))).toEqual([true, true]);
+  });
+
+  it("intersects the scope with every other filter", () => {
+    expect(keeps(test, NO_FILTERS, classify(test), none)).toBe(false);
+    expect(keeps(test, { ...NO_FILTERS, scope: "all" }, classify(test), none)).toBe(true);
+    expect(keeps(test, { ...NO_FILTERS, scope: "test", severity: "critical" }, classify(test), none)).toBe(false);
+    expect(keeps(test, { ...NO_FILTERS, scope: "test", severity: "high" }, classify(test), none)).toBe(true);
+    expect(keeps(SQL, { ...NO_FILTERS, scope: "test" }, classify(SQL), none)).toBe(false);
+  });
+
+  it("counts what the scope alone hides, of what the other filters keep", () => {
+    const all = [SQL, test, fixture, SECRET];
+    expect(hiddenByScope(all, NO_FILTERS, classify, none)).toBe(2);
+    expect(hiddenByScope(all, { ...NO_FILTERS, scope: "all" }, classify, none)).toBe(0);
+    expect(hiddenByScope(all, { ...NO_FILTERS, scope: "test" }, classify, none)).toBe(2);
+    // A finding another filter already drops is not the scope's doing.
+    expect(hiddenByScope(all, { ...NO_FILTERS, severity: "critical" }, classify, none)).toBe(0);
+  });
+
+  it("says why a finding reads test, in words, and nothing for production", () => {
+    expect(scopeReasonText(test)).toBe(SCOPE_TEXT.reason.test_symbol);
+    expect(scopeReasonText(fixture)).toBe(SCOPE_TEXT.reason.test_path);
+    expect(scopeReasonText({ ...test, code_scope_reason: null })).toBe(SCOPE_TEXT.reason.unstated);
+    expect(scopeReasonText(SQL)).toBeNull();
+  });
+
+  it("reads the scope from the query: a known value, case-insensitive, else production", () => {
+    expect(scopeFromSearch("")).toBe("production");
+    expect(scopeFromSearch("?scope=test")).toBe("test");
+    expect(scopeFromSearch("?path=src&scope=ALL")).toBe("all");
+    expect(scopeFromSearch("?scope=production")).toBe("production");
+    expect(scopeFromSearch("?scope=tests")).toBe("production");
+    expect(scopeFromSearch("?rescope=test")).toBe("production");
+  });
+
+  it("writes the scope into a URL, production naming none, every other pair kept byte-for-byte", () => {
+    expect(urlWithScope("/security", "test")).toBe("/security?scope=test");
+    expect(urlWithScope("/security?path=a%20b&repo=web", "all")).toBe("/security?path=a%20b&repo=web&scope=all");
+    expect(urlWithScope("/security?scope=all&repo=web#x", "test")).toBe("/security?repo=web&scope=test#x");
+    expect(urlWithScope("/security?scope=test", "production")).toBe("/security");
+    expect(urlWithScope("/security?path=a&scope=test", "production")).toBe("/security?path=a");
+    // A key that merely ends or starts with `scope` is somebody else's.
+    expect(urlWithScope("/security?rescope=1", "test")).toBe("/security?rescope=1&scope=test");
+    expect(urlWithScope("/security?scopes=1&scope_x=2", "all")).toBe("/security?scopes=1&scope_x=2&scope=all");
+    // A percent-encoded `scope` is the same key `scopeFromSearch` reads, and is replaced.
+    expect(urlWithScope("/security?%73cope=test", "all")).toBe("/security?scope=all");
+    expect(scopeFromSearch("?scope=all")).toBe("all");
+  });
+
+  it("takes the last scope of a repeated key, as the member scope does", () => {
+    expect(scopeFromSearch("?scope=test&scope=all")).toBe("all");
+    expect(scopeFromSearch("?scope=all&scope=bogus")).toBe("production");
+    expect(urlWithScope("/security?scope=test&scope=all", "test")).toBe("/security?scope=test");
+  });
+
+  it("counts a finding under no category once, and only in the scope it is in", () => {
+    const unclassified = { ...SQL, fingerprint: "none", code_scope: "test" as const, code_scope_reason: "test_path" as const };
+    const only = (f: SecurityFinding) =>
+      f === unclassified ? { categories: [], unclassified: "no_cwe" as const } : { categories: classify(f).categories, unclassified: null };
+    const findings = [SQL, unclassified];
+    expect(unclassifiedCount(findings, only, "production")).toBe(0);
+    expect(unclassifiedCount(findings, only, "test")).toBe(1);
+    expect(unclassifiedCount(findings, only, "all")).toBe(1);
+  });
+
+  it("words what the scope hid in either direction, and for one or many", () => {
+    expect(SCOPE_TEXT.hidden(1, "production")).toBe("No production finding matches these filters; 1 finding does in the other code: change the code scope to see it.");
+    expect(SCOPE_TEXT.hidden(2, "test-code")).toBe("No test-code finding matches these filters; 2 findings do in the other code: change the code scope to see them.");
+  });
+
+  it("states each OWASP category's count from the server's two figures, equal to a recount over the listed findings", () => {
+    // The edition's classification is keyed by scanner and fingerprint, so the planted twin shares SQL's.
+    const sqlInTest = { ...SQL, fingerprint: "twin-in-test", code_scope: "test" as const, code_scope_reason: "test_path" as const };
+    const secondInProduction = { ...SQL, fingerprint: "twin-in-production" };
+    const twins = [sqlInTest, secondInProduction];
+    const findings = [...PAGE.findings.findings, ...twins];
+    const byTwin = (f: SecurityFinding) => classify(twins.includes(f) ? SQL : f);
+    const planted = classify(SQL).categories;
+    expect(planted.length).toBeGreaterThan(0);
+    // What `security findings` states with the two planted twins stored: `findings` counts every scope,
+    // `production_findings` the production part (the second production twin in both).
+    const stated: SecurityCategoryCoverage[] = editionOf(PAGE, "2025").categories.map((c) =>
+      c.state.state === "covered" && planted.includes(c.id)
+        ? { ...c, state: { state: "covered", findings: c.state.findings + 2 }, production_findings: (c.production_findings ?? 0) + 1 }
+        : c,
+    );
+    for (const id of planted) {
+      const category = stated.find((c) => c.id === id) as SecurityCategoryCoverage;
+      const recount = (scope: "production" | "test" | "all") =>
+        findings.filter((f) => inScope(f, scope) && byTwin(f).categories.includes(id)).length;
+      for (const scope of ["production", "test", "all"] as const) {
+        expect(categoryCount(category, scope)).toBe(recount(scope));
+      }
+      // Both scopes are non-empty, so the figures differ and a count of one scope cannot pass for the other.
+      expect([categoryCount(category, "production"), categoryCount(category, "test"), categoryCount(category, "all")]).toEqual([
+        recount("all") - 1,
+        1,
+        recount("all"),
+      ]);
+    }
+    expect(categoryCount({ ...stated[0], state: { state: "not_covered" } }, "production")).toBeNull();
   });
 });
 
@@ -78,6 +243,36 @@ describe("a finding's location", () => {
     expect(findingLocation(lockfile)).toBe("Cargo.lock:7");
     expect(findingLocation({ ...lockfile, start_line: null })).toBe("Cargo.lock");
     expect(findingLocation({ ...lockfile, report_path: null })).toBe("no location");
+  });
+});
+
+describe("the Findings table's Symbol and Reachable words (S-793)", () => {
+  it("reads a symbol kind in words, from its wire token", () => {
+    expect(symbolKindWord("function")).toBe("function");
+    expect(symbolKindWord("type_alias")).toBe("type alias");
+  });
+
+  it("reads reachable / unreachable / unknown as yes / no / unknown — unknown is never no", () => {
+    expect(reachableWord("reachable")).toBe("yes");
+    expect(reachableWord("unreachable")).toBe("no");
+    expect(reachableWord("unknown")).toBe("unknown");
+    expect(reachableWord("unknown")).not.toBe(FINDINGS_TABLE_TEXT.reachable.unreachable);
+  });
+
+  it("states the sentence behind each word: the route and hops, no route reaches it, or why it is unknown", () => {
+    const route = { symbol: "r", name: "GET /users/:id", hops: 2 };
+    expect(reachabilityText({ confidence: "resolved", verdict: "reachable", route, unresolved_because: null })).toBe(
+      CONTEXT_TEXT.reachable("GET /users/:id", 2),
+    );
+    expect(reachabilityText({ confidence: "resolved", verdict: "unreachable", route: null, unresolved_because: null })).toBe(
+      CONTEXT_TEXT.unreachable,
+    );
+    expect(reachabilityText({ confidence: "unresolved", verdict: "unknown", route: null, unresolved_because: "language" })).toBe(
+      CONTEXT_TEXT.unknown("language"),
+    );
+    expect(reachabilityText({ confidence: "unresolved", verdict: "unknown", route: null, unresolved_because: null })).toBe(
+      CONTEXT_TEXT.unknown(null),
+    );
   });
 });
 
@@ -272,5 +467,113 @@ describe("path suppressions (S-770)", () => {
     expect(suppressionNote({ state: "suppressed", reason: "r", expires: "2027-01-01", by: { path: "src" } })).toBe("r (until 2027-01-01) — covers everything under src");
     expect(suppressionNote({ state: "expired", reason: "r", expires: "2026-01-01", by: { path: "src" } })).toBe("r (expired after 2026-01-01) — covers everything under src");
     expect(suppressionNote({ state: "suppressed", reason: "r", expires: null, by: { fingerprint: "f" } })).toBe("r");
+  });
+});
+
+const SCAN = scanReal as unknown as ScanJob;
+const INSTALL = installReal as unknown as InstallJob;
+const ending = (job: ScanJob | InstallJob, count: number, state: ScanJob["state"] = "running") =>
+  ({ ...job, state, result: null, events: job.events.slice(0, count) }) as ScanJob | InstallJob;
+
+describe("a job's progress and the live state of each row (S-792)", () => {
+  it("reads which scanner runs and how many finished from the events the page already polls", () => {
+    // Four not-installed scanners finished; Bandit started.
+    const progress = jobProgress(ending(SCAN, 5));
+    expect(progress.running).toEqual(["bandit"]);
+    expect(progress.finished.map((f) => f.scanner)).toEqual(["semgrep", "trivy", "gitleaks", "osv-scanner"]);
+    expect(progress.finished.some((f) => f.ran)).toBe(false);
+    // Once Bandit finished, nothing runs and it ran.
+    const after = jobProgress(ending(SCAN, 6));
+    expect(after.running).toEqual([]);
+    expect(after.finished.find((f) => f.scanner === "bandit")?.ran).toBe(true);
+    expect(jobProgress(null)).toEqual({ finished: [], running: [], installing: [], toolsDone: 0, scanning: false });
+  });
+
+  it("reads which tool installs, and when the scan after the install began", () => {
+    // Trivy landed; Gitleaks downloads.
+    const downloading = jobProgress(ending(INSTALL, 3));
+    expect(downloading).toMatchObject({ installing: ["gitleaks"], toolsDone: 1, scanning: false });
+    // Every install finished and Semgrep's skip was reported: the scan began.
+    expect(jobProgress(ending(INSTALL, 9))).toMatchObject({ installing: [], toolsDone: 4, scanning: true, running: [] });
+    expect(jobProgress(ending(INSTALL, 10)).running).toEqual(["trivy"]);
+  });
+
+  it("gives a row a live state only while its job runs", () => {
+    expect([...liveStates(ending(SCAN, 5))]).toEqual([["bandit", "running"]]);
+    expect([...liveStates(ending(INSTALL, 3))]).toEqual([["gitleaks", "installing"]]);
+    for (const state of ["completed", "cancelled", "failed"] as const) {
+      expect(liveStates(ending(SCAN, 5, state)).size, state).toBe(0);
+      expect(liveStates(ending(INSTALL, 3, state)).size, state).toBe(0);
+    }
+    expect(liveStates(null).size).toBe(0);
+  });
+
+  it("states the progress of a running job without a clock, and its outcome once it ended", () => {
+    expect(summaryText(ending(SCAN, 5))).toBe(SCAN_JOB_TEXT.running(4, ["bandit"]));
+    expect(summaryText(ending(INSTALL, 3))).toBe(INSTALL_JOB_TEXT.running(1));
+    expect(summaryText(ending(INSTALL, 12))).toBe(INSTALL_JOB_TEXT.scanning(2));
+    expect(summaryText({ ...SCAN })).toBe(SCAN_JOB_TEXT.completed(0, 1));
+    expect(summaryText({ ...SCAN, state: "failed", result: null, error: "boom" })).toBe(SCAN_JOB_TEXT.failed("boom"));
+    expect(summaryText(null)).toBe(SCAN_JOB_TEXT.idle);
+    expect(summaryText(ending(SCAN, 5))).not.toMatch(/\d+ s\b/);
+  });
+
+  it("names the findings a completed job found, not a fixed zero", () => {
+    expect(summaryText({ ...SCAN, result: { ...SCAN.result!, findings: 3 } })).toBe(SCAN_JOB_TEXT.completed(3, 1));
+    const withScan = { ...INSTALL, result: { ...INSTALL.result!, scan: { ...INSTALL.result!.scan!, findings: 5 } } };
+    expect(summaryText(withScan)).toBe(INSTALL_JOB_TEXT.completed(4, { findings: 5, ran: 4 }));
+  });
+
+  it("counts a tool already present as not installed by this job, and the scan as begun by its first scanner alone", () => {
+    const steps: SecurityInstallStep[] = [
+      { phase: "install_started", tool: "trivy", version: "0.74.0" },
+      { phase: "install_finished", tool: "trivy", version: "0.74.0", outcome: "already_present", binary: "/bin/trivy" },
+      { phase: "install_started", tool: "gosec", version: "2.21.4" },
+      { phase: "install_finished", tool: "gosec", version: "2.21.4", outcome: "installed", binary: "/bin/gosec" },
+      { phase: "started", scanner: "bandit" },
+    ];
+    const job = { ...INSTALL, state: "completed", events: steps.map((event, seq) => ({ seq, at_ms: seq, event })) } as InstallJob;
+    expect(jobProgress(job)).toMatchObject({ scanning: true, running: ["bandit"], toolsDone: 2 });
+    expect(summaryText({ ...job, result: { ...INSTALL.result!, install: { ...INSTALL.result!.install, tools: [
+      { tool: "trivy", version: "0.74.0", outcome: "already_present", binary: "/bin/trivy" },
+      { tool: "gosec", version: "2.21.4", outcome: "installed", binary: "/bin/gosec" },
+    ] }, scan: null } })).toBe(INSTALL_JOB_TEXT.completed(1, null));
+    expect(summaryText({ ...job, state: "running", result: null })).toBe(INSTALL_JOB_TEXT.scanning(0));
+  });
+
+  it("lists a tool an install left out from its events, whatever the job's own state", () => {
+    const left: SecurityInstallStep[] = [
+      { phase: "install_started", tool: "trivy", version: "0.74.0" },
+      { phase: "install_finished", tool: "trivy", version: "0.74.0", outcome: "unavailable", reason: "no build" },
+      { phase: "install_started", tool: "gitleaks", version: "8.18.4" },
+      { phase: "install_finished", tool: "gitleaks", version: "8.18.4", outcome: "failed", stage: "checksum", reason: "mismatch" },
+    ];
+    const job = { ...INSTALL, state: "failed", result: null, error: "x", events: left.map((event, seq) => ({ seq, at_ms: seq, event })) } as InstallJob;
+    expect(summaryText(job)).toBe(
+      `${INSTALL_JOB_TEXT.failed("x")}${INSTALL_JOB_TEXT.notInstalled([INSTALL_OUTCOME_TEXT.unavailable("trivy", "no build"), INSTALL_OUTCOME_TEXT.failed("gitleaks", "checksum", "mismatch")])}`,
+    );
+  });
+});
+
+describe("the Ignored dirs marker comes from the kind, never the note (S-792)", () => {
+  it("maps each state and kind to its marker", () => {
+    expect(ignoredDirsKey({})).toBe("none");
+    expect(ignoredDirsKey({ ignored_paths: "excluded" })).toBe("skipped");
+    for (const kind of ["unproven", "history", "whole_project", "partial"] as const) {
+      expect(ignoredDirsKey({ ignored_paths: "scanned", coverage_kind: kind, coverage_note: "any words at all" })).toBe(kind);
+    }
+    // A note alone — a server that sent no kind — is never parsed for one.
+    expect(ignoredDirsKey({ ignored_paths: "scanned", coverage_note: "exclusion flag not proven by the harness" })).toBe("scanned");
+  });
+
+  it("lists each marker shown once, in a fixed order, and none that is not shown", () => {
+    const rows = [
+      { ignored_paths: "scanned", coverage_kind: "history" },
+      { ignored_paths: "excluded" },
+      { ignored_paths: "scanned", coverage_kind: "history" },
+      {},
+    ] as const;
+    expect(markersShown(rows).map((m) => m.key)).toEqual(["skipped", "history", "none"]);
+    expect(markersShown([])).toEqual([]);
   });
 });

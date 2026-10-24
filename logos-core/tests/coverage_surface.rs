@@ -503,16 +503,35 @@ fn coverage_refresh_runs_the_command_and_ingests_its_output() {
     )
     .unwrap();
 
-    let engine = Engine::start(repo).expect("engine starts");
+    // The consent (S-736) is recorded in a user-level directory of the test's
+    // own, never this machine's.
+    let user = TempDir::new().expect("user-level dir");
+    let engine = Engine::start(repo).expect("engine starts").with_scan_environment(user_env(user.path()));
     engine.index();
 
-    let summary = engine.coverage_refresh().expect("coverage refresh succeeds");
-    assert_eq!(summary.artifact, "lcov.info", "the convention artifact was ingested");
-    assert_eq!(summary.ingest.matched_files, 1);
+    let summary = engine.coverage_refresh(true).expect("coverage refresh succeeds");
+    let (reports, matched) = custom_ran(&summary);
+    assert_eq!(reports, ["lcov.info"], "the convention artifact was ingested");
+    assert_eq!(matched, 1);
+    assert_eq!(summary.exit_code(), 0);
 
     let status = engine.coverage_status().expect("coverage status");
     assert_eq!(status.fresh_files, 1);
     assert_eq!(status.overall_coverage_bp, Some(10_000));
+}
+
+/// The custom entry's part in a refresh that ran: its reports and the files
+/// its ingest matched.
+fn custom_ran(summary: &logos_core::coverage::CoverageRunSummary) -> (Vec<String>, usize) {
+    match summary.tools.as_slice() {
+        [run] if run.tool == "custom" => match &run.outcome {
+            logos_core::coverage::ToolOutcome::Ran { reports, ingests } => {
+                (reports.clone(), ingests.iter().map(|i| i.matched_files).sum())
+            }
+            other => panic!("the custom entry did not run cleanly: {other:?}"),
+        },
+        other => panic!("a refresh runs the custom entry alone: {other:?}"),
+    }
 }
 
 /// [FR-CV-10]: `coverage refresh` with no configured `refresh_cmd` fails loud
@@ -526,11 +545,100 @@ fn coverage_refresh_without_a_configured_command_errs() {
     let engine = Engine::start(repo).expect("engine starts");
     engine.index();
 
-    let err = engine.coverage_refresh().expect_err("no refresh_cmd → error");
+    let err = engine.coverage_refresh(false).expect_err("no refresh_cmd → error");
     assert!(
         err.to_string().contains("refresh_cmd"),
         "the error names the missing config: {err}"
     );
+}
+
+/// A scan environment whose user-level directory is `user`: where the coverage
+/// execution consent is read and recorded (S-736).
+fn user_env(user: &Path) -> logos_core::security::ScanEnvironment {
+    logos_core::security::ScanEnvironment { user_dir: Some(user.to_path_buf()), search_path: None, tools_dir: None, nvd_api_key: None }
+}
+
+/// A `refresh_cmd` that appends `tag` to `spawned.log` — the evidence it ran —
+/// then writes a conventional `lcov.info`.
+fn tagged_refresh_cmd(tag: &str) -> String {
+    format!("printf {tag} >> spawned.log && printf 'TN:suite\\nSF:src/a.rs\\nDA:1,1\\nend_of_record\\n' > lcov.info")
+}
+
+fn write_refresh_cmd(repo: &Path, command: &str) {
+    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
+    std::fs::create_dir_all(repo.join(".logos")).unwrap();
+    std::fs::write(repo.join(".logos/config.toml"), format!("[coverage_ingest]\nrefresh_cmd = \"{escaped}\"\n")).unwrap();
+}
+
+/// The consent refusal `coverage_refresh` returned: exit 2, its message.
+fn consent_refusal(err: &anyhow::Error) -> String {
+    assert_eq!(logos_core::error::exit_code(err), 2, "a consent refusal exits 2: {err:#}");
+    match err.downcast_ref::<logos_core::config::ConfigError>() {
+        Some(logos_core::config::ConfigError::InvalidValue { key, message }) if key == "consent" => message.clone(),
+        _ => panic!("expected a consent refusal, got {err:#}"),
+    }
+}
+
+/// [FR-CV-13] / S-736: without the project's coverage execution consent,
+/// `coverage refresh` spawns nothing and exits 2 naming `--consent`, showing
+/// the command verbatim. After consent, later runs do not ask; a changed
+/// command asks again with its new text. The consent lives in the user-level
+/// directory only, and the security scan consent beside it is untouched.
+#[test]
+fn coverage_refresh_spawns_nothing_without_the_consent_that_pins_its_command() {
+    let tmp = TempDir::new().expect("temp root");
+    let (repo, user) = (tmp.path().join("project"), tmp.path().join("user"));
+    std::fs::create_dir_all(&repo).unwrap();
+    sh_git(&repo, &["init", "-q", "-b", "main"]);
+    commit(&repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
+    let first = tagged_refresh_cmd("a");
+    write_refresh_cmd(&repo, &first);
+    logos_core::config::record_scan_consent(Some(&user), &repo, &["semgrep"]).unwrap();
+    let scan_consent = user.join(logos_core::config::SCAN_CONSENT_FILE);
+    let scan_before = std::fs::read(&scan_consent).unwrap();
+    let spawned = || std::fs::read_to_string(repo.join("spawned.log")).unwrap_or_default();
+
+    let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(user_env(&user));
+    engine.index();
+
+    let message = consent_refusal(&engine.coverage_refresh(false).expect_err("no consent yet"));
+    assert!(message.contains("`logos coverage refresh --consent`"), "{message}");
+    assert!(message.contains(&format!("verbatim:\n{first}\n")), "the command, verbatim: {message}");
+    assert_eq!(spawned(), "", "nothing is spawned before consent");
+
+    let granted = engine.coverage_refresh(true).expect("consent given, the command runs");
+    assert_eq!(granted.consent_recorded, ["custom"]);
+    assert_eq!(custom_ran(&granted).1, 1);
+    let again = engine.coverage_refresh(false).expect("consent is not asked twice");
+    assert!(again.consent_recorded.is_empty());
+    assert_eq!(spawned(), "aa");
+
+    // A changed command — one character — is asked for again, by its new text.
+    let changed = tagged_refresh_cmd("b");
+    write_refresh_cmd(&repo, &changed);
+    let message = consent_refusal(&engine.coverage_refresh(false).expect_err("the command changed"));
+    assert!(message.starts_with("the [coverage_ingest].refresh_cmd text changed"), "{message}");
+    assert!(message.contains(&format!("verbatim:\n{changed}\n")), "the new text, verbatim: {message}");
+    assert_eq!(spawned(), "aa", "the changed command did not run");
+    assert_eq!(engine.coverage_refresh(true).expect("re-consented").consent_recorded, ["custom"]);
+    assert_eq!(spawned(), "aab");
+
+    // No consent record inside the repository; the security consent unchanged.
+    let mut stack = vec![repo.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            assert!(!path.to_string_lossy().contains("consent"), "a consent record in the repository: {}", path.display());
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    assert!(user.join(logos_core::config::COVERAGE_CONSENT_FILE).is_file());
+    assert_eq!(std::fs::read(&scan_consent).unwrap(), scan_before, "the security consent is untouched");
 }
 
 /// [FR-CV-06] / [FR-CV-10] / [ADR-38]: `coverage status` surfaces an
@@ -563,7 +671,7 @@ fn coverage_status_flags_artifact_vs_head_staleness() {
     );
     let prompt = stale.staleness_prompt.expect("a staleness prompt is surfaced");
     assert!(
-        prompt.contains("lags HEAD") && prompt.contains("refresh"),
+        prompt.contains("lags HEAD") && prompt.contains("`logos coverage run`"),
         "the prompt explains the lag and names the remedy: {prompt}"
     );
     // The covered file's content never changed, so it stays content-fresh — the

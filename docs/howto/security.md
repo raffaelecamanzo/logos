@@ -43,8 +43,8 @@ a secret-class finding's message is replaced before it is written.
 Logos itself makes no network connection. The default build links no HTTP client
 (a fitness check over its dependency tree keeps it so), and the slim build links
 no socket stack at all. `serve --ui` listens on `127.0.0.1` and never dials. Only
-two things reach the network, each a separate program that Logos starts, and
-neither without your consent:
+these things reach the network, each a separate program that Logos starts, and
+none without your consent:
 
 1. **A scanner you consented to** may reach the network to refresh its rules or
    vulnerability data: Semgrep's registry rules, the Trivy and OSV-Scanner
@@ -56,6 +56,13 @@ neither without your consent:
    that fetches pinned, hash-checked packages from `pypi.org` and the Python
    runtime itself from `github.com`. Consent is per user
    and per version, and names each source and download size first.
+3. **A coverage run, `logos coverage install` and a coverage dependency addition.**
+   A coverage run builds your project and runs its tests, which executes the
+   project's own code and may fetch dependencies. `logos coverage install` runs
+   your system `curl` to download the pinned `cargo-llvm-cov`, verified by its
+   SHA-256, and a dependency addition runs your own package manager. Each has a
+   consent of its own, recorded outside the repository:
+   [coverage.md](coverage.md#the-execution-consent).
 
 Nothing downloads in the background, and no scan starts except through a command,
 the Security page's **Run scan** or an MCP tool call, each after consent; the
@@ -86,9 +93,9 @@ repository may set there ([configuration.md](configuration.md#security_scan--whi
 | `semgrep` | 1.85 | 1.85.0 | Insecure code patterns | yes |
 | `trivy` | 0.74 | 0.74.0 | Vulnerable dependencies, secrets, misconfiguration | whole manifest only |
 | `gitleaks` | 8.18 | 8.18.4 | Secrets, in files and in git history | yes, in content mode |
-| `osv-scanner` | 1.9 | 1.9.2 | Known-vulnerable dependencies | whole manifest only |
+| `osv-scanner` | 1.9 | 2.7.0 | Known-vulnerable dependencies | whole manifest only |
 | `bandit` | 1.7.10 | 1.7.10 | Insecure Python code | yes |
-| `gosec` | 2.21 | 2.21.4 | Insecure Go code | yes |
+| `gosec` | 2.21 | 2.29.0 | Insecure Go code | yes |
 | `checkov` | 3.2 | 3.2.533 | Infrastructure-as-code misconfiguration | yes |
 | `codeql` | 2.19 | 2.27.2, opt-in | Semantic code analysis | whole project only |
 | `dependency-check` | 13.0 | 13.0.0, opt-in | Known-vulnerable dependencies (NVD) | whole manifest only |
@@ -106,6 +113,16 @@ runs only on JavaScript/TypeScript, Python and Ruby and never builds your
 project; for every other language ingest a report from CI ([configuration.md](configuration.md#security_scan--which-scanners-may-run)
 has the fixed command lines and the config files Logos refuses to let a repository
 use to run code).
+
+osv-scanner is pinned at 2.7.0 while its *Tested* version stays 1.9, the last
+one the harness ran. Its command line now uses the 2.x spelling of the scanner's
+output option, which 1.9.x does not know, so a 1.9.x copy reports `failed` with
+the scanner's own error until it is replaced: a managed 1.9.2 copy shows 2.7.0 as
+its update (`logos security install <scanner> --update --consent`, naming
+osv-scanner), and a copy of your own on `PATH` or named in your user-level config
+has to be upgraded or removed by you, because Logos does not replace a copy that
+meets the minimum. Findings stored from 1.9.2 keep their identity across the
+move: none reads as new, in the ratchet baseline or in an ignore entry.
 
 ## Installing scanners
 
@@ -156,8 +173,8 @@ scanners without a terminal:
   default scanners is missing. One click installs the missing ones and then runs
   the full scan, in one background job: what `logos security scan --install --consent`
   does on the command line.
-- A *not installed* row that Logos can install offers **Install**. The **Copy**
-  column says which copy runs: `managed` (installed by Logos), `path` (your own
+- A *not installed* row that Logos can install offers **Install**. The **Version**
+  cell says which copy runs: `managed` (installed by Logos), `path` (your own
   copy on `PATH`) or `override` (your user-level `path` setting). A `managed` copy
   older than this release's pin reads `update available` and offers **Update**,
   which installs the pinned version and removes the older copy.
@@ -178,9 +195,10 @@ scanners without a terminal:
   line states the Java runtime it brings and its size. CodeQL's line shows its
   licence terms, and accepting them is a checkbox of its own: CodeQL does not
   install until it is ticked. Left unticked, neither is installed.
-- The panel lists each tool as it installs, then each scanner as it runs.
+- One live line above the Scanners table counts the tools installed, then the
+  scanners finished, and the row of the tool installing reads `installing`.
   **Cancel install** stops the download in progress: no partial tool is left in
-  the tools directory, no further tool starts, and the panel names the tools that
+  the tools directory, no further tool starts, and the line names the tools that
   were installed before the cancel. While an install runs for the project, a
   second install or a scan is refused rather than joined, and an install does
   not start while a scan runs.
@@ -210,6 +228,13 @@ reports the consent state: the scanners consented to and the ones the next scan
 will ask for. To withdraw scan consent, delete the project's table from
 `security-consent.toml` (or the file). Where the files live and the exact wording
 are in [configuration.md](configuration.md#scan-consent).
+
+Coverage runs have a consent of their own. A coverage run builds your project and
+runs its tests, so it executes the project's own code, which a scan does not. It is
+recorded in a separate user-level file, per project, and it pins the exact text of a
+configured `refresh_cmd`, so that text changing in a repository asks again. Neither
+consent stands in for the other. What the coverage consent covers and what it does
+not is in [coverage.md](coverage.md#the-execution-consent).
 
 ## Running scans and reading the results
 
@@ -275,22 +300,61 @@ run that could not update its NVD data reads, for example,
 an NVD API key to update its data, and when it has none the NVD API refuses it
 (`failed`, exit 13). Its first error line says only that the update failed, so
 when the log shows the NVD client rejecting the API key (an `NvdApiException`
-naming it) the `cause` is this sentence instead: *the NVD API key is missing or
-rejected: get a free key at https://nvd.nist.gov/developers/request-an-api-key
-and set [security_scan.dependency-check] extra_args = ["--nvdApiKey", "<key>"]
-in the user config*. Request the key at that address, then put it in your
-user-level `config.toml` ([configuration.md](configuration.md#user-level-config--settings-no-repository-can-choose)),
-not in `.logos/config.toml`, which may only set `enabled`:
+naming it) the `cause` is this sentence instead: *NVD API key missing or rejected: set NVD_API_KEY where logos or `logos serve` runs, or
+[security_scan.dependency-check] extra_args = ["--nvdApiKey", "<key>"] in the user config;
+free key: https://nvd.nist.gov/developers/request-an-api-key*.
+Request the key at that address and give it to Logos in one of two ways
+([Dependency-Check's NVD API key](#dependency-checks-nvd-api-key) below). The
+cause never repeats a key value. Any other NVD failure keeps its own first error
+line as the cause.
+
+#### Dependency-Check's NVD API key
+
+**Export `NVD_API_KEY`.** Logos reads the key from the environment of the
+process that runs the scan: your shell for `logos security scan`, and the
+environment `logos serve` was started with for the MCP tools and the web page.
+Export it before you start `serve`; a `serve` already running does not see a
+variable exported later. Nothing else can supply it: no repository file, no
+`.env`, no `.logos/config.toml` key. An empty `NVD_API_KEY` sets no key.
+
+```bash
+export NVD_API_KEY=<key>
+logos security scan --scanner dependency-check
+logos serve --ui          # MCP and the Security page scan with the key
+```
+
+Dependency-Check 13 reads no environment variable itself, so Logos hands the key
+over in a properties file (`nvd.api.key`) of its own:
+`.logos/security/nvd-api-key.properties`, created new with mode 0600 (readable by
+you alone) and passed as `--propertyfile <path>`. The key is never on the command
+line, so the process list shows only the path. The file exists only while
+Dependency-Check runs and is deleted when the run ends, whether it ran, failed or
+was cancelled; one a crash left behind is deleted at the next scan's start. The
+key appears in no log, cause, job event, payload or stored row: should
+Dependency-Check print it, Logos replaces it with `[masked]` before writing the
+failure log.
+
+**Or your own `extra_args`.** In your user-level `config.toml`
+([configuration.md](configuration.md#user-level-config--settings-no-repository-can-choose)),
+never `.logos/config.toml`, which may only set `enabled`:
 
 ```toml
 [security_scan.dependency-check]
 extra_args = ["--nvdApiKey", "<key>"]
 ```
 
-The cause never repeats a key value. The flag is passed on Dependency-Check's
-command line, so the key is visible to other users of the machine in the process
-list while a scan runs, and the user config is yours alone: do not commit it.
-Any other NVD failure keeps its own first error line as the cause.
+When your `extra_args` carry `--nvdApiKey` or a properties file of your own
+(`--propertyfile`, `-P`), they win: Logos adds no file. This route passes the key
+on Dependency-Check's command line, where other users of the machine can see it
+in the process list while a scan runs, and keeps it in the user config: do not
+commit that file.
+
+**Whether a key is set.** `security status` carries `nvd_api_key: set` or
+`not_set` on the Dependency-Check row only, the same on the CLI, MCP and the web,
+and never the key itself. It reads `set` when `NVD_API_KEY` is set where Logos
+runs or your `extra_args` hand Dependency-Check a key. On the Security page the
+Dependency-Check row of the **Scanners** table reads "NVD key: set" or "NVD key:
+not set".
 
 **What a scan covers.** A scan reads the project, not what it ignores. Logos finds
 the top-most directories the project's own ignore files exclude: the `.gitignore`
@@ -316,13 +380,17 @@ scanner out of them in the way that scanner allows:
   is not a git repository. Left to themselves, Semgrep reads ignored directories
   in a copy that is not a git repository, and OSV-Scanner reads them in a linked
   worktree too: it cannot read the worktree's git ignores. Semgrep's own
-  exclude option would also skip `src/target/` when you ignore `/target/`.
+  exclude option would also skip `src/target/` when you ignore `/target/`. The
+  hand-run harness proved the target list on osv-scanner 1.9.2; its re-run on the
+  pinned 2.7.0 is the maintainer's, and until its rows are committed the evidence
+  is the 1.9.2 run.
 - **gosec** gets `-exclude-dir '^target(/|$)'` for each directory: an
   expression anchored at the project root that covers the directory and every
-  directory below it. The hand-run harness proved it on the pinned gosec
-  2.21.4, in a git checkout, a linked worktree and a copy that is not a git
-  repository: it skips `target/` and `target/nested/`, and keeps the near
-  misses `src/target/` and `targets/`. A test of gosec's matching rule also
+  directory below it. The hand-run harness proved it on gosec 2.21.4, in a git
+  checkout, a linked worktree and a copy that is not a git repository (the
+  committed rows are still that run; the pinned release is 2.29.0): it skips
+  `target/` and `target/nested/`, and keeps the near misses `src/target/` and
+  `targets/`. A test of gosec's matching rule also
   keeps `pkg/mytarget/`. gosec's simpler spellings would not do: `target` also
   drops those near misses, and `^target$` misses `target/nested/`.
 - **Gitleaks** reads committed history, so it reads a file committed inside an
@@ -335,10 +403,18 @@ Every whole-project scan says what each scanner did. Each scanner that ran reads
 `ignored_paths: excluded` (a mechanism the hand-run harness proved kept it out
 of all of them, which today means Semgrep, OSV-Scanner and gosec, or the project
 ignores none) or `ignored_paths: scanned` with a one-line `coverage_note`
-saying why. The
+saying why and a `coverage_kind` naming how: `unproven` (no exclusion is proven
+for the scanner), `history` (Gitleaks reads the committed history), `whole_project`
+(Semgrep or OSV-Scanner could not be given the list of files outside the ignored
+directories) or `partial` (some ignored directories were left out of the exclusion).
+The kind is the same on the CLI, MCP and web, and is present exactly when the note
+is. The
 fact is in each scanner's entry of `security scan` (CLI and MCP), in each
-installed scanner's row of `security status`, and in the **Ignored paths**
-column of the Security page. In `security status` and on the page it is a
+installed scanner's row of `security status`, and in the **Ignored dirs**
+column of the Security page, which shows a marker chosen from the kind
+(`skipped`, `not proven †`, `reads history ‡`, `whole project §`, `partly skipped ¶`
+or `—`) with the full note as its tooltip, and lists each marker shown in a legend
+under the table. In `security status` and on the page it is a
 forecast: what a whole-project scan of the tree as it is now would do, beside a
 stored report that may come from an older tree or from CI. A scanner the scan
 would not start (disabled, or refused because of a `.checkov.yaml`) states
@@ -403,7 +479,7 @@ coverage.
 | `never_run` | Installed, and no report is stored |
 | `not_applicable` | Installed, no fresh report is stored, and nothing it reads is in the project (gosec without Go files, Bandit without Python files; CodeQL without a language it analyses still reads `never_run` here); `reason` says which files it looked for. No readout starts it, not even for its version: its `installed` copy says `"unprobed": "nothing_to_scan"`. No scan is missing, so neither `check`, the `[security]` table nor the workspace roll-up counts it as one |
 | `stale` | A report is stored but HEAD has moved (`head_moved`), a file it anchors changed (`files_changed`), or only re-scans of some paths stand behind it (`scoped_only`) |
-| `fresh` | A report is stored at this HEAD over unchanged files; a clean scan is `fresh` with `findings: 0` |
+| `fresh` | A report is stored at this HEAD over unchanged files; a clean scan is `fresh` with `findings: 0` and nothing left out. `findings` counts fresh, unsuppressed findings in production code; `suppressed`, `not_fresh` and `test` state the rest ([test code](#findings-in-test-code)) |
 
 A scanner that has not run has looked at nothing, so its silence is never a clean
 result: `never_run` carries no count, and every list says what it was drawn from.
@@ -417,17 +493,67 @@ Whatever the state, a scanner whose last scan failed also carries
 `last_failure`, the log, and `last_failure_cause`, the
 [cause line](#running-scans-and-reading-the-results) read back from that log.
 Both stay until the scanner next runs cleanly. On the Security page the row's
-**What it means** cell shows a red *last scan failed* badge followed by the
-cause.
+**Findings** cell shows a red `LAST SCAN FAILED` label that expands to the cause
+and the log path.
+
+Dependency-Check's row alone also carries `nvd_api_key`, `set` or `not_set`:
+whether it has an NVD API key, never the key
+([Dependency-Check's NVD API key](#dependency-checks-nvd-api-key)).
+
 `security findings` returns the stored findings with their OWASP Top 10 categories
 (2025, or 2021 with `--edition`, reclassified without a re-ingest), the filters
 `--severity`, `--scanner`, `--category`, `--path` and `--suppression`, and a
 `categories` view that marks a category `not_covered`, never `0`, when no scanner
-whose report is stored can detect it. In a workspace, `--repo <MEMBER>` on
+whose report is stored can detect it. A covered category states two counts:
+`state.findings`, over every stored finding under it in every code scope, and
+`production_findings`, the part of it in production code. Suppressed findings are
+in both, whatever `--scope` and the other filters say, and the difference is the
+findings in test code ([below](#findings-in-test-code)). The Security page's OWASP
+list under Production states `production_findings`, so the page and the CLI and MCP
+payloads give the same figure per category. In a workspace, `--repo <MEMBER>` on
 `status` and `findings` answers for one member.
 
 Each finding also carries its place in the graph, described next. The payloads and
 every flag are in [commands.md](commands.md#security-findings).
+
+### Findings in test code
+
+A fake key in a test, or a Dockerfile in a test fixture, is still reported by the
+scanners. Logos tells such findings apart from the code you ship. Each finding
+reads `code_scope: "test"` or `"production"`, decided each time it is read and
+never stored:
+
+- **`test_symbol`**: the symbol around its line is test code in the graph, such
+  as a `#[test]` function in a `src/` file's test module;
+- **`test_path`**: its path is a test path (a `tests/`, `test/`, `spec/` or
+  `__tests__/` directory, or a test file name such as `*_test.go`), or it sits in
+  a `fixtures/`, `testdata/` or `__fixtures__/` directory. A report that names
+  the file by its absolute path under the project reads the same. The fixture
+  directories mark test code for security only: metrics and hotspots still count
+  `src/fixtures/x.rs` as production code.
+
+A finding with no location, or one outside the project, is production. A secret
+found only in an earlier commit, and a finding whose file changed since the scan,
+has no current symbol, so only its path decides: a secret that sat in a test
+module inside `src/` reads `production`.
+
+**Lists and counts leave test code out and say so.** `security findings` and the
+MCP `security_findings` list production code unless you pass `--scope test` or
+`--scope all` (MCP: `scope`), and state the number hidden as `hidden_by_scope`.
+`security status`, the Security page's figure, the workspace roll-up and the
+findings column of Files & Risk and `hotspots` count fresh, unsuppressed findings
+in production code. `status`, the page and the roll-up state the rest by why:
+`suppressed`, `not_fresh` and `test`, "N more in test code". Each finding falls
+in the first of those that holds, so there the counted and the excluded findings
+add up to every stored finding. The per-file cell states `stale` and `test`
+beside its `count`; a suppressed finding, and one bound to no file, joins no
+cell.
+
+**The gate keeps every finding.** The `[security]` ratchet and caps, `gate --save`,
+`security bless` and the branch delta of `review --base` treat a finding in test
+code like any other: a real secret committed in a test is still a leak. Their
+output does not change. To list what earlier releases listed by default, pass
+`--scope all`.
 
 ### Severities, and `unrated`
 
@@ -445,12 +571,11 @@ the Security page's finding detail). There are two cases:
   default `warning`. Gitleaks writes no level and no score at all, so every
   Gitleaks finding reads `unrated`;
 - the scanner writes the same level on every result. osv-scanner does this: each
-  result reads `warning` whatever the advisory says. The pinned 1.9.2 never gives
-  a score, so all its findings read `unrated`. osv-scanner 2.0.0 and later put
-  the advisory's CVSS score on the rule, where the advisory has one. If you run
-  one of those yourself, from your `PATH` or as a report you ingest, its findings
-  read the advisory's own rating, and only the advisories with no score read
-  `unrated`.
+  result reads `warning` whatever the advisory says. osv-scanner 1.x never gives
+  a score, so a 1.9.2 report you ingest from CI reads `unrated` throughout.
+  osv-scanner 2.0.0 and later put the advisory's CVSS score on the rule, where the
+  advisory has one: the pinned 2.7.0, or a 2.x report you ingest, reads the
+  advisory's own rating, and only the advisories with no score read `unrated`.
 
 `unrated` is listed with the other findings and counted on its own, never inside
 `medium`. `--severity unrated` lists the unrated findings alone. A rated
@@ -512,6 +637,24 @@ logos security scan --scanner semgrep --scanner bandit --path src/api --path src
   its place `(historical, commit <short_commit>)`. A secret still on its line in
   a file the index does not hold keeps its `unmatched` binding. No author,
   email or commit message is stored.
+- **A secret found only in history is known by its own path.** Whether it is
+  still on its line is read at the path its report gives at its commit, made
+  relative to the project (in a workspace member below the git root, the
+  member's directory is taken off), and its fingerprint is keyed by that path —
+  never by a file of today's tree that shares its name. A root `client.py`
+  holding the same text never binds a deleted `legacy/client.py` secret, and
+  adding or removing such a file never re-keys it, so its suppression and the
+  ratchet's baseline keep knowing it. A history path outside the project is
+  `historical`. Stores written before this identity (history.db migration 11)
+  are re-keyed at the next Gitleaks scan or ingest; each row keeps its old key,
+  which an ignore entry, the ratchet's baseline, a checked-in baseline and the
+  branch delta still honour. Each stored row is matched by its place (rule,
+  report path, commit and exact region), so this holds whatever files exist
+  today. In a fresh clone with no stored rows, an old key is known only through
+  the binding today's index gives: a checked-in baseline or ignore entry
+  written while an unrelated same-named file existed, since removed, names it
+  again only once re-blessed (`logos security bless`) or rewritten with the
+  finding's fingerprint.
 - **A re-scan never makes a scanner read `fresh` for the rest.** A scanner whose
   only report is from `--path` scans reads `stale` with `scoped_only`, and one
   whose full scan is from an earlier commit reads `stale` with `head_moved`, so a
@@ -622,10 +765,33 @@ To gate in CI, check the baseline in: `logos security bless` writes the findings
 `.logos/security-baseline.json`, which the ratchet then reads instead of the set in
 `history.db`, in every checkout
 ([ci-integration.md](ci-integration.md#gating-on-security-findings-in-ci-a-checked-in-baseline)).
-A finding reported by an absolute path that binds to no indexed file (OSV-Scanner
-on a lockfile) is also matched by its rule id and project-relative path, since its
-fingerprint carries the checkout's directory; a re-key waits for the osv-scanner
-2.x identity change.
+A finding reported by an absolute path under the project root that binds to no
+indexed file (OSV-Scanner on a lockfile) is keyed by its project-relative path, so
+a baseline blessed in one checkout holds it in a clone at another path.
+
+**One OSV-Scanner identity in any clone and at any scanner version.** An
+OSV-Scanner finding's fingerprint is its rule and project-relative location (plus
+region when the report gives one), never the report's own `partialFingerprints`:
+osv-scanner 2.x writes them where 1.x did not, so a scanner upgrade would otherwise
+read every finding as new. The same advisory in `Cargo.lock` and in
+`sub/Cargo.lock` is two findings with two keys. Stores written before this
+identity (history.db migration 10) are re-keyed at the next OSV-Scanner scan or
+ingest, from osv-scanner 1.x or 2.x alike: every stored row of a finding that
+report still holds, in every stored scan, and its `gate --save` baseline entry
+move to the new key, and each row keeps its old key, which every surface still
+honours. A finding the report no longer holds keeps its old key: it is fixed. An ignore entry,
+the ratchet's baseline and the branch delta written under the old key therefore
+still know the finding; the checked-in `.logos/security-baseline.json` is never
+rewritten, and the next `logos security bless` writes the new keys. A checked-in
+file blessed before migration 10 also matches such a finding by its rule id and
+project-relative path; that match is kept for one release, so re-bless before it
+goes.
+
+A path **outside** the project root keeps its report spelling in the key. A CI
+report ingested locally whose paths name the CI checkout (`/home/ci/project/…`)
+therefore gives keys that depend on that root: they match a later ingest of a
+report written under the same root, never a local scan. Ingest reports produced
+in the checkout they describe, or bless from them alone.
 
 **Exit 5 means the evidence is missing, not that a rule failed.** `check`, `gate`
 and `session-end` exit **5** when a scanner in `required_scanners` has no fresh scan
@@ -657,16 +823,19 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   finding. **`reason` is required**; a missing reason, a malformed fingerprint or
   date, or a repeated fingerprint rejects the whole file with exit 2, naming the
   line. A suppression that silently did nothing would be worse than none.
-- A suppressed finding is **never hidden**: `security findings` still returns it
-  with its reason (`--suppression active` filters it out), and it is excluded from
-  every `[security]` rule and from the counts of `status`, `hotspots` and the
-  workspace roll-up.
+- A suppressed finding is **never hidden** by its suppression: `security findings`
+  still returns it with its reason (`--suppression active` filters it out), under
+  its [code scope](#findings-in-test-code) like any other — one in test code is
+  listed with `--scope test` or `--scope all` and otherwise counted in
+  `hidden_by_scope`. It is excluded from every `[security]` rule and from the
+  counts of `status`, `hotspots` and the workspace roll-up.
 - From the day after `expires` the entry stops suppressing and is listed as
   `expired`; an entry that matches no stored finding is listed as `orphaned`.
-- An entry written for a Gitleaks finding under its earlier, per-commit
-  fingerprint is `orphaned` after the next full Gitleaks scan. Logos never rewrites
-  the file: the orphaned entry carries `should_name`, the fingerprint its
-  finding has now, for you to put in its place.
+- An entry written under a fingerprint a finding had before it was re-keyed (a
+  Gitleaks finding's earlier, per-commit fingerprint; an OSV-Scanner finding's
+  fingerprint from before history.db migration 10) still suppresses that finding.
+  Logos never rewrites the file: the entry carries `should_name`, the fingerprint
+  its finding has now, for you to put in its place.
 
 You do not have to edit the file by hand. On the Security page, **Suppress…** on a
 finding opens a dialog that asks for the reason (required) and an expiry date
@@ -699,9 +868,8 @@ reason = "planted test secrets, never deployed"
   the same findings, `*.lock` matches only a lockfile at the root, and
   `**/fixtures` matches a `fixtures` directory at any depth. A finding a scanner
   reported by an absolute path, such as osv-scanner's `Cargo.lock`, is matched
-  after the root is taken off. The same entry therefore holds in every checkout,
-  where a fingerprint taken from such a finding holds only in the checkout it
-  came from.
+  after the root is taken off, so the same entry holds in every checkout, as the
+  finding's fingerprint now does too.
 - **Narrowing.** `rule` is the finding's rule id, exactly. `scanner` is the
   scanner name findings show (`gitleaks`, `osv-scanner`, `Semgrep OSS`), in
   either case. Leave a key out to cover every rule or every scanner.
@@ -868,57 +1036,91 @@ allows for scans and suppression.
   `logos security ingest <report>`). Its **Install** and **Update** buttons, and
   **Install & scan**, install from the page itself
   ([From the Security page](#from-the-security-page)).
-  The **Copy** column says which copy runs. The page reads a scanner's version
+  The **Version** cell says which copy runs. The page reads a scanner's version
   only once the project's scan consent names it, and then once per `logos serve`
   for each binary (again after a reinstall). Until then the row's `installed`
   says `"unprobed": "not_consented"` and its version is unknown: the Version
   column reads `—` unless a stored report gives one. Without that version the
   page cannot tell whether a `PATH` copy meets the minimum, so where a managed
-  copy is installed too, the Copy column names the managed one until consent
+  copy is installed too, the Version cell names the managed one until consent
   lets the page read the `PATH` copy's version. Opening the page, from any
   site, starts no scanner process you have not consented to.
-- **Run scan** starts a scan in the background, shows each scanner as it starts and
-  finishes, and **Cancel scan** stops every scanner process at once and keeps the
+- **Run scan** sits on the Scanners widget's title row and starts a scan in the
+  background. While it runs, the running scanner's row reads `running` (an
+  installing tool's row reads `installing`) and one live line above the table counts
+  the scanners finished; when it ends the line states the outcome and the page
+  reloads. **Cancel scan** stops every scanner process at once and keeps the
   previous results. A click while a scan runs joins it; while a scan or install
   started elsewhere runs (`logos security scan`, an MCP client), Run scan is
   refused with a message naming it. The first scan asks consent
   in a dialog that names the scanners, and records it exactly as
   `security scan --consent` does.
-- **Findings**, filtered by severity, scanner, category and path; selecting one
+- **Findings**, filtered by severity, scanner, category and path, in the columns
+  **Severity** · **Rule** · **Location** · **Symbol** · **Reachable** · **Scanner** ·
+  **OWASP** · **Show** · **Triage**. No row carries the finding's message: a clipped
+  rule id or path shows in full as its tooltip, **Reachable** reads `yes`, `no` or
+  `unknown` (never `no` for unknown), and the message (or why it is redacted) and a
+  suppressed or expired finding's state, reason and expiry are in the detail. Selecting one
   opens its graph detail (enclosing symbol, route, blast radius, each with its
   confidence) and the triage actions above. **Show** brings the detail, below the
   table, into view and moves focus to its heading; with reduced motion set in the
   system, the page jumps instead of scrolling. An `unrated` finding's badge carries
   its reason, and its detail states it; *unrated only* in **Least severity**
   lists those findings alone ([Severities, and `unrated`](#severities-and-unrated)).
+- **The code scope** control above the table reads **Production**, **Test code** or
+  **All**, and starts on Production, as `security findings` does. It is kept in the
+  page's address (`?scope=test`, `?scope=all`; Production names none), so a
+  reload or a shared link opens on it, and the Files & Risk `+N test` link opens
+  the file's test-code findings. Under **All** or **Test code** a finding in test
+  code carries a muted `TEST` tag whose hover says why (`test_symbol` or
+  `test_path`, [Findings in test code](#findings-in-test-code)). The figure row
+  states `· N in test code` beside the count, the same N as `security status`.
+  When the scope hides every finding the other filters keep, the empty table says
+  so and how many.
+- **A redacted finding** reads *Redacted: the scanner's message would contain the
+  secret itself*, followed by its location, in the finding detail. The CLI and MCP
+  keep printing the stored text.
 - **OWASP Top 10**, 2025 or 2021, with each category `covered` or `not covered`.
+  Each count is of the findings in the code scope, Production by default, and the
+  figure states how many findings sit in test code. The counts are the ones
+  `security findings` states per category: Production reads `production_findings`,
+  All reads `state.findings` and Test code is the difference. A suppressed finding
+  counts here, as in those two, though the Findings figure leaves it out.
 
 In a workspace, a **Security** page at `/workspace-security` rolls up every member:
 each member's fresh scanners and its fresh, unsuppressed findings by severity,
 linked to that member's own page, and the OWASP view summed over the members read.
+The OWASP figure counts fresh, unsuppressed findings in production code, so a
+member's figure there can be below its own page's OWASP list under Production,
+which also counts suppressed findings and findings in changed files.
 Every total says how many members it counts, and `N of M reports fresh` says how
 many of the stored reports are themselves fresh at HEAD. A member never scanned
-reads `never run`, not `0`; a finding in a changed file or a suppressed one is left
-out and counted as left out, by
-[the one definition](#one-definition-of-a-counted-finding). The page starts no scan;
+reads `never run`, not `0`; a finding in a changed file, a suppressed one or one in
+test code is left out and counted as left out, by
+[the one definition](#one-definition-of-a-counted-finding); the figure row states the
+test-code remainder summed over the members. The page starts no scan;
 open a member's page, or run `logos security scan` in that member.
 
 Elsewhere, `logos hotspots --with-findings` ranks files with a fresh finding first
 and the Files & Risk Findings column links each file to its findings on the
-Security page ([commands.md](commands.md#hotspots)); both count findings by
+Security page, with `+N test` beside the count for the findings in test code
+([commands.md](commands.md#hotspots)); both count findings by
 [the one definition](#one-definition-of-a-counted-finding).
 
 ### One definition of a counted finding
 
-**One definition of a counted finding.** The Security page, Files & Risk and the
-workspace roll-up count a finding the same way: it counts unless a current entry in
-`.logos/security-ignore.toml` suppresses it or its own file changed since the scan.
+**One definition of a counted finding.** `security status`, the Security page,
+Files & Risk and the workspace roll-up count a finding the same way: it counts
+unless a current entry in `.logos/security-ignore.toml` suppresses it, its own file
+changed since the scan, or it sits in [test code](#findings-in-test-code). A
+finding left out is left out for the first of those that holds, in that order.
 Freshness is the finding's, never its report's, so a project whose only report is a
 `--path` scan (its scanner reads `stale` with `scoped_only`) reads the same count on
-all three. A finding in an edited file is left out and shown apart as `stale`; a
-suppressed one is left out and counted apart; a finding bound to no file has none to
-compare, so it counts on the page and in the roll-up, while Files & Risk, which is
-per file, has no row for it.
+all of them. A finding in an edited file is left out and shown apart as `stale`
+(`not_fresh` in `status`, on the page and in the roll-up); a suppressed one is left
+out and counted apart; one in test code is left out and counted apart as `test`; a
+finding bound to no file has none to compare, so it counts on the page and in the
+roll-up, while Files & Risk, which is per file, has no row for it.
 
 Whether the *report* is fresh is a separate figure that changes no count: the
 roll-up states it as its own field, `N of M reports fresh` (a disabled scanner's
@@ -949,10 +1151,10 @@ section ([Reviewing what a branch introduced](#reviewing-what-a-branch-introduce
 | `security install` exits 1 | Every tool you asked for failed or has no release for this platform: none ended `installed`, `already_present` or kept. Read each `outcome` and `reason` in the output; one tool in place is exit 0 |
 | `check` or `gate` exits 5 | A required scanner has no fresh scan at HEAD; run the command it names |
 | A scanner reads `stale` after you re-scanned a file | Only a full scan at HEAD makes it `fresh` (`scoped_only`, `head_moved`) |
-| A scanner is `failed` | Its `cause` names why in one line; the whole output is in its `log` (`.logos/security/<scanner>.failed.log`). One failure never stops the others |
-| Dependency-Check is `failed`, cause `the NVD API key is missing or rejected …` | Dependency-Check 13 needs an NVD API key and none was supplied (or the one given was refused). Get a free key at https://nvd.nist.gov/developers/request-an-api-key and set `extra_args = ["--nvdApiKey", "<key>"]` under `[security_scan.dependency-check]` in your **user-level** `config.toml`; the repository config may not set `extra_args` |
+| A scanner is `failed` | Its `cause` names why in one line; the whole bounded output is in its `log` (`.logos/security/<scanner>.failed.log`): past the bound (64 KiB of stdout, 16 KiB of stderr) it keeps the beginning and the end of each stream, with one line, `[… N bytes omitted …]`, between them, so a scanner's closing error survives. One failure never stops the others |
+| Dependency-Check is `failed`, cause `NVD API key missing or rejected …` | Dependency-Check 13 needs an NVD API key and none was supplied (or the one given was refused). Get a free key at https://nvd.nist.gov/developers/request-an-api-key and export `NVD_API_KEY` where Logos runs: in your shell for the CLI, before starting `logos serve` for MCP and the web. Or set `extra_args = ["--nvdApiKey", "<key>"]` under `[security_scan.dependency-check]` in your **user-level** `config.toml`; the repository config may not set `extra_args`. `security status` reads `nvd_api_key: set` once a key is there ([Dependency-Check's NVD API key](#dependency-checks-nvd-api-key)) |
 | gosec or Bandit is `not_applicable` | No Go (or Python) file outside the ignored paths: there is nothing for it to scan, and nothing is missing |
-| gosec is `failed`, cause `internal error: package "crypto/md5" without types was imported …` | The managed gosec 2.21.4 fails this way on a file that imports the standard library under some Go toolchains (seen with Go 1.27.2), and writes no report. Run gosec in CI with a toolchain it supports and ingest its SARIF |
+| gosec is `failed`, cause `gosec cannot type the standard library: gosec <version> with the local go<version> …` | gosec could not type a standard-library package the project imports (its log holds `internal error: package "…" without types was imported`) and wrote no report. The managed gosec before 2.29.0 does this under Go 1.27. Run `security install gosec --update` for the pinned 2.29.0, built for Go 1.27, or use a gosec release built for your Go, or a Go toolchain gosec supports (`go version` shows yours). Until then ingest gosec's SARIF from CI |
 | Exit 2 on a `path` or `extra_args` key in `.logos/config.toml` | A repository may only set `enabled`; set the rest in your user-level config |
 
 The troubleshooting table in [error-handling.md](error-handling.md#troubleshooting-common-errors)

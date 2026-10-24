@@ -106,9 +106,12 @@ export function hasFindingsColumn(rows: readonly FileRiskRow[]): boolean {
   return rows.some((r) => r.findings !== undefined);
 }
 
-/** The Security page filtered to one file (its `?path=` deep link, S-670). */
-export function securityHref(path: string): string {
-  return `/security?path=${encodeURIComponent(path)}`;
+/** The Security page filtered to one file (its `?path=` deep link, S-670) and,
+ *  when a code scope is named, to that scope (`?scope=`, S-796): production is
+ *  the page's default and is not named. */
+export function securityHref(path: string, scope?: "test" | "all"): string {
+  const href = `/security?path=${encodeURIComponent(path)}`;
+  return scope === undefined ? href : `${href}&scope=${scope}`;
 }
 
 /** The findings column's sort key: highest severity first, then most findings;

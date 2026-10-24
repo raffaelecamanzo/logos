@@ -25,6 +25,7 @@ import { enumerateDashboardCards } from "./cardEnumeration.ts";
  */
 const AUDITED_CONFORMANT_OR_CORRECTED = [
   "QualityCard",
+  "SecurityCard",
   "LanguagesCard",
   "GraphCard",
   "ActivityCard",
@@ -37,6 +38,11 @@ describe("Dashboard card enumeration (S-438 audit, CR-141)", () => {
     const cards = enumerateDashboardCards(dashboardSource);
     expect(cards.map((c) => c.component)).toEqual(expect.arrayContaining(AUDITED_CONFORMANT_OR_CORRECTED));
     expect(cards.find((c) => c.component === "RuleFindingsCard")?.title).toBe("Rule findings");
+  });
+
+  it("lists SecurityCard, titled Security (S-789)", () => {
+    const cards = enumerateDashboardCards(dashboardSource);
+    expect(cards.find((c) => c.component === "SecurityCard")?.title).toBe("Security");
   });
 
   it("detects a card the last audit never saw, rather than merely running clean over the current file", () => {

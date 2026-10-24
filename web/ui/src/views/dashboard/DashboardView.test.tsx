@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { OverviewModel } from "../../api/types.ts";
+import type { OverviewModel, OverviewSecurity, SecuritySummary } from "../../api/types.ts";
 import {
   DASHBOARD_ABSENCE,
   activity,
@@ -9,14 +9,54 @@ import {
   graph,
   languages,
   qualityIndex,
+  securityWidget,
 } from "../../copy/dashboard.copy.ts";
 import { expectWidgetCopy, readerText } from "../../copy/expectWidgetCopy.ts";
 import { ruleFindings } from "../../copy/ruleFindings.copy.ts";
 import type { CopyEntry } from "../../copy/types.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions, type DashboardCardProps } from "../../extensions/registry.ts";
 import { extensionsInfo, STUB_ID, stubInfo } from "../../test/extensions.tsx";
-import { expectOneWidgetStack, widgetsIn, widgetTitle } from "../../test/widgetStack.ts";
+import { expectOneWidgetStack, widgetsIn, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
 import { DashboardView } from "./DashboardView.tsx";
+
+// ── The Security widget's stored summary (S-789) ──────────────────────────────
+const NOW_UNIX = Math.floor(Date.now() / 1000);
+
+/** A scanned project: 6 counted findings, 2 of 3 scanners fine, newest scan 3 days old. */
+const SCANNED: SecuritySummary = {
+  scan: "fresh",
+  tally: {
+    counted: { critical: 0, high: 2, medium: 1, low: 3, info: 0, unrated: 0, total: 6 },
+    excluded: { not_fresh: 0, suppressed: 4, test: 2 },
+  },
+  newest_scan_at: NOW_UNIX - 3 * 86_400,
+  scanners_failed: 1,
+  scanners_total: 3,
+  consent: { consented: ["semgrep"], pending: [] },
+  gate: null,
+};
+
+const GATE_PASS = { passed: true, checked_rules: 2, required_scanners: ["semgrep"], missing_scans: [], violations: [], notes: [] };
+const GATE_FAIL = {
+  passed: false,
+  checked_rules: 2,
+  required_scanners: ["semgrep", "bandit"],
+  missing_scans: [{ scanner: "bandit", state: "never_run" as const, message: "never run" }],
+  violations: [{ rule: "security:ratchet", rule_type: "constraint", severity: "error", file: "app.py", node_id: null, message: "high" }],
+  notes: [],
+};
+
+const NEVER_SCANNED: SecuritySummary = {
+  scan: "never_run",
+  tally: null,
+  newest_scan_at: null,
+  scanners_failed: 0,
+  scanners_total: 2,
+  consent: { consented: [], pending: ["semgrep"] },
+  gate: null,
+};
+
+const read = (summary: SecuritySummary): OverviewSecurity => ({ summary, error: null });
 
 // ── A fully-populated, indexed overview read-model ────────────────────────────
 const OVERVIEW: OverviewModel = {
@@ -46,6 +86,7 @@ const OVERVIEW: OverviewModel = {
   coverage: { head_sha: "abc1234", config_hash: "cfg", formats: ["lcov"], report_count: 1, total_files: 42, fresh_files: 42, stale_files: 0, freshness_bp: 10_000, overall_coverage_bp: 7200, files: [], notice: null, current_head: "abc1234", head_stale: false, staleness_prompt: null },
   rules: { passed: true, checked_rules: 3, rules_present: true, violations: [], freshness: "fresh", warnings: [] },
   stats: { window_days: 7, calls_total: 5, calls_by_tool: [], latency_p50_ms: 3, latency_p95_ms: 9, latency_p99_ms: 12, reads_saved_estimate: 40, tokens_saved_estimate: 100, artifact_bindings: {}, activity_by_day: [], calls_by_origin: [], calls_by_tool_origin: [], calls_by_class: [], attribution_coverage: { raw_events_only: true, requested_window_days: 7, covered_window_days: 7, truncated_by_retention: false, legacy_null_origin_folds_into_main: true, notes: [] }, warnings: [] },
+  security: read(SCANNED),
 };
 
 /** Deep-clone the canned model so a test can null out a field without bleeding. */
@@ -167,15 +208,16 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     m.status.source_line_count = null;
     m.status.test_line_count = null;
     stub(m);
-    render(<DashboardView />);
+    const { container } = render(<DashboardView />);
     // The rest of the Graph card (Files/Nodes/Edges/Resolution) is unchanged.
     expect(await screen.findByText("42")).toBeInTheDocument();
     expect(screen.getByText("1,200")).toBeInTheDocument();
     expect(screen.getByText("3,400")).toBeInTheDocument();
     expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
     expect(screen.getByText(/Lines of code not yet counted/i)).toBeInTheDocument();
-    // Never a fabricated `0` LOC figure.
-    expect(screen.queryByText("0")).not.toBeInTheDocument();
+    // Never a fabricated `0` LOC figure (scoped to Graph: the Security widget's
+    // severity row states its own honest zeros).
+    expect(within(widgetTitled(container, "Graph")).queryByText("0")).not.toBeInTheDocument();
   });
 
   it("Rule findings widget — green passing state when rules pass with zero violations", async () => {
@@ -295,6 +337,7 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
 /** Each widget's catalogue entry, by title. */
 const ENTRIES: Record<string, CopyEntry> = {
   "Quality index": qualityIndex,
+  Security: securityWidget,
   Languages: languages,
   Graph: graph,
   Activity: activity,
@@ -313,11 +356,12 @@ const STATES: {
     model: clone,
     expected: [
       "Quality index",
+      "Security",
+      "Code coverage",
       "Languages",
       "Graph",
       "Activity",
       "Rule findings",
-      "Code coverage",
     ],
   },
   {
@@ -337,11 +381,12 @@ const STATES: {
     },
     expected: [
       "Quality index",
+      "Security",
+      "Code coverage",
       "Languages",
       "Graph",
       "Activity",
       "Rule findings",
-      "Code coverage",
     ],
   },
   {
@@ -362,11 +407,12 @@ const STATES: {
     },
     expected: [
       "Quality index",
+      "Security",
+      "Code coverage",
       "Languages",
       "Graph",
       "Activity",
       "Rule findings",
-      "Code coverage",
     ],
   },
   {
@@ -381,15 +427,17 @@ const STATES: {
       m.status.source_line_count = null;
       m.status.test_line_count = null;
       m.rules = { passed: null, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] };
+      m.security = read(NEVER_SCANNED);
       return m;
     },
     expected: [
       "Quality index",
+      "Security",
+      "Code coverage",
       "Languages",
       "Graph",
       "Activity",
       "Rule findings",
-      "Code coverage",
     ],
   },
 ];
@@ -419,7 +467,7 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     stub(STATES[3].model());
     const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Code coverage" });
-    expect(container.querySelectorAll("[data-widget-absence]")).toHaveLength(5);
+    expect(container.querySelectorAll("[data-widget-absence]")).toHaveLength(6);
     // The one view-level empty state is for an un-indexed root (no widget at all).
     expect(container.querySelector('[class*="empty"]')).toBeNull();
   });
@@ -432,6 +480,7 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
       readerText(widgetsIn(container).find((w) => widgetTitle(w) === title)!.querySelector('[data-widget-part="figure"], [data-widget-part="evidence"]')!);
     for (const [title, cmd] of [
       ["Quality index", "logos scan"],
+      ["Security", "logos security scan --consent"],
       ["Languages", "logos index"],
       ["Activity", "logos stats"],
       ["Rule findings", ".logos/rules.toml, then run logos check"],
@@ -463,17 +512,20 @@ function mountStubCard(): void {
 }
 
 describe("the extension card slot (S-644)", () => {
-  it("renders a mounted extension's card directly after the freshness statement, over the overview", async () => {
+  it("renders a mounted extension's card directly after the three leading widgets, over the overview", async () => {
     mountStubCard();
     stub(OVERVIEW);
     const { container } = render(<DashboardView />);
     const card = await screen.findByTestId("stub-card");
     expect(card).toHaveTextContent("Stub card: 1200 nodes");
-    // The slot sits between the freshness callout and the first built-in widget.
+    // The slot sits after the three leading widgets — Quality index, Security and
+    // Code coverage (S-789) — and ahead of Languages.
     const stack = card.parentElement!;
     const children = [...stack.children];
-    expect(children.indexOf(card)).toBe(1);
-    expect(expectOneWidgetStack(container).map(widgetTitle)[0]).toBe("Quality index");
+    expect(children.indexOf(card)).toBe(4);
+    const titles = expectOneWidgetStack(container).map(widgetTitle);
+    expect(titles.slice(0, 3)).toEqual(["Quality index", "Security", "Code coverage"]);
+    expect(titles[3]).toBe("Languages");
   });
 
   it("is empty in this build: no extension card, and every built-in widget unchanged", async () => {
@@ -483,5 +535,141 @@ describe("the extension card slot (S-644)", () => {
     expect(screen.queryByTestId("stub-card")).toBeNull();
     expect(expectOneWidgetStack(container).map(widgetTitle)).toEqual(STATES[0].expected);
     expect(screen.queryByText(/project overview|wiki/i)).toBeNull();
+  });
+});
+
+// ── S-789 (CR-244, FR-UI-09): the Dashboard leads with the Security widget ────
+
+describe("the Security widget (S-789)", () => {
+  it("states the counted findings by severity, the age of the newest scan and N of M failed scanners", async () => {
+    stub(OVERVIEW);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    const widget = widgetTitled(container, "Security");
+    // The total with its noun, and each severity with its own count — zero states, not omits.
+    expect(within(widget).getByText("6")).toBeInTheDocument();
+    expect(widget.querySelector('[data-widget-part="figure"]')!.textContent).toContain("6 findings");
+    // The findings the counts leave out because they sit in test code.
+    expect(within(widget).getByText("2 more in test code")).toBeInTheDocument();
+    const counts = Object.fromEntries(
+      [...widget.querySelectorAll("[data-severity]")].map((li) => [li.getAttribute("data-severity"), li.querySelector(".num")?.textContent]),
+    );
+    expect(counts).toEqual({ critical: "0", high: "2", medium: "1", unrated: "0", low: "3", info: "0" });
+    // Relative age and the failure ratio, each beside its own label.
+    expect(within(widget).getByText("3d ago")).toBeInTheDocument();
+    expect(within(widget).getByText("1 of 3 scanners")).toBeInTheDocument();
+    const valueOf = (label: string) => within(widget).getByText(label).nextElementSibling?.textContent;
+    expect(valueOf("Newest scan")).toBe("3d ago");
+    expect(valueOf("Last scan failed")).toBe("1 of 3 scanners");
+    expect(valueOf("Gate")).toBe(DASHBOARD_ABSENCE.noSecurityTable);
+    // A current scan carries no "not current" note.
+    expect(within(widget).queryByText(/not current/)).not.toBeInTheDocument();
+    // The detail link.
+    expect(within(widget).getByRole("link", { name: /Security/ })).toHaveAttribute("href", "/security");
+  });
+
+  it("agrees the noun with the count: 1 finding", async () => {
+    const m = clone();
+    m.security = read({ ...SCANNED, tally: { counted: { critical: 0, high: 1, medium: 0, low: 0, info: 0, unrated: 0, total: 1 }, excluded: { not_fresh: 0, suppressed: 0, test: 0 } } });
+    stub(m);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    const figure = widgetTitled(container, "Security").querySelector('[data-widget-part="figure"]')!.textContent;
+    expect(figure).toContain("1 finding");
+    expect(figure).not.toContain("1 findings");
+    // Nothing in test code: no statement about it.
+    expect(within(widgetTitled(container, "Security")).queryByText(/in test code/)).not.toBeInTheDocument();
+  });
+
+  it("states that no [security] table is configured, with no verdict badge", async () => {
+    stub(OVERVIEW);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    const widget = widgetTitled(container, "Security");
+    expect(within(widget).getByText(DASHBOARD_ABSENCE.noSecurityTable)).toBeInTheDocument();
+    expect(within(widget).queryByText("PASS")).not.toBeInTheDocument();
+    expect(within(widget).queryByText("FAIL")).not.toBeInTheDocument();
+  });
+
+  it("shows the [security] gate verdict as PASS or FAIL with its reasons", async () => {
+    const pass = clone();
+    pass.security = read({ ...SCANNED, gate: GATE_PASS });
+    stub(pass);
+    const first = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    let widget = widgetTitled(first.container, "Security");
+    expect(within(widget).getByText("PASS")).toBeInTheDocument();
+    expect(within(widget).getByText("passes 2 rules")).toBeInTheDocument();
+    // The tone follows the verdict: a passing gate is the green badge.
+    expect(within(widget).getByText("PASS").className).toMatch(/green/);
+    first.unmount();
+
+    const fail = clone();
+    fail.security = read({ ...SCANNED, gate: GATE_FAIL });
+    stub(fail);
+    const second = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    widget = widgetTitled(second.container, "Security");
+    expect(within(widget).getByText("FAIL")).toBeInTheDocument();
+    expect(within(widget).getByText("fails: 1 finding fail a rule, 1 required scan missing")).toBeInTheDocument();
+    // ... and a failing one the red badge.
+    expect(within(widget).getByText("FAIL").className).toMatch(/red/);
+  });
+
+  it("names logos security scan when never scanned, and --consent when no scanner is consented to", async () => {
+    const consented = clone();
+    consented.security = read({ ...NEVER_SCANNED, consent: { consented: ["semgrep"], pending: [] } });
+    stub(consented);
+    const first = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    let widget = widgetTitled(first.container, "Security");
+    expect(within(widget).getByText(DASHBOARD_ABSENCE.noSecurityScan).textContent).toMatch(/run logos security scan\.$/);
+    expect(within(widget).queryByText(/--consent/)).not.toBeInTheDocument();
+    // Never a count of zero where nothing was looked at.
+    expect(widget.querySelector("[data-severity-row]")).toBeNull();
+    first.unmount();
+
+    const none = clone();
+    none.security = read(NEVER_SCANNED);
+    stub(none);
+    const second = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    widget = widgetTitled(second.container, "Security");
+    expect(within(widget).getByText(DASHBOARD_ABSENCE.noSecurityConsent).textContent).toContain("logos security scan --consent");
+    expect(widget.querySelector("[data-severity-row]")).toBeNull();
+  });
+
+  it("states a read fault with its cause, never as zero findings", async () => {
+    const m = clone();
+    m.security = { summary: null, error: "invalid .logos/security-ignore.toml: expected `]`" };
+    stub(m);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    const widget = widgetTitled(container, "Security");
+    expect(within(widget).getByText(/could not be read/).textContent).toContain("invalid .logos/security-ignore.toml");
+    expect(widget.querySelector("[data-severity-row]")).toBeNull();
+    expect(within(widget).queryByText("0")).not.toBeInTheDocument();
+    // The rest of the Dashboard still renders.
+    expect(screen.getByText("Excellent")).toBeInTheDocument();
+  });
+
+  it("says when the last scan is not current", async () => {
+    const m = clone();
+    m.security = read({ ...SCANNED, scan: "stale" });
+    stub(m);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    expect(within(widgetTitled(container, "Security")).getByText(/the last scan is not current/)).toBeInTheDocument();
+  });
+
+  it("loading writes nothing: one GET of the overview and no other request", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(OVERVIEW) } as Response));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit | undefined];
+    expect(url).toBe("/api/v1/overview");
+    expect(init?.method ?? "GET").toBe("GET");
   });
 });

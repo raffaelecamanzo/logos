@@ -3,6 +3,11 @@
 //! serve process for each binary, as the member's own Security page does
 //! (HF-3, [ADR-38], [ADR-80] §4). A cross-site read starts nothing new.
 //!
+//! `GET /api/v1/workspace/security/summary`, the Workspace Dashboard's Security
+//! widget (S-790), starts no scanner process at all: the same consented stub,
+//! read same-origin and cross-site, records zero invocations until the roll-up
+//! above — the control — probes it.
+//!
 //! A workspace builds each member's engine itself, from the process
 //! environment, so this binary holds exactly one test and points that
 //! environment at stubs before anything starts: `PATH` holds only the stub
@@ -84,7 +89,7 @@ async fn get(router: &Router, path: &str, origin: Option<&str>) -> Value {
 }
 
 #[tokio::test]
-async fn the_workspace_roll_up_probes_only_consented_scanners_once_per_process() {
+async fn the_workspace_roll_up_probes_only_consented_scanners_and_the_dashboard_read_starts_none() {
     tokio::time::timeout(BOUND, async {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
@@ -114,6 +119,16 @@ async fn the_workspace_roll_up_probes_only_consented_scanners_once_per_process()
         let federation = discover(&root).expect("discovery succeeds").expect("a workspace");
         let router = web::workspace_router(EngineRegistry::<Engine>::new_serve_default(federation))
             .expect("the workspace router builds");
+
+        // The Dashboard widget's read first: stored state only, so the consented
+        // stub is not invoked by any load, and the data is there to prove the
+        // read ran (two members read, never scanned) rather than failed.
+        for origin in [None, Some("https://attacker.example"), None] {
+            let summary = get(&router, "/api/v1/workspace/security/summary", origin).await;
+            assert_eq!(summary["security"]["members_read"], 2, "both members are read: {summary}");
+            assert_eq!(summary["security"]["members"][0]["result"]["scan"], "never_run", "{summary}");
+        }
+        assert_eq!((calls(&rec, "semgrep"), calls(&rec, "bandit")), (0, 0), "the Dashboard read starts no scanner");
 
         let first = get(&router, "/api/v1/workspace/security", None).await;
         assert_eq!(first["security"]["members_read"], 2, "both members are read: {first}");

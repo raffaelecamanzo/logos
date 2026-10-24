@@ -125,6 +125,25 @@ pub use user::{
     UserSecurityScan, INSTALL_CONSENT_FILE, SCAN_CONSENT_FILE, USER_CONFIG_FILE,
     USER_CONFIG_HOME_ENV, USER_DATA_HOME_ENV,
 };
+pub use user::{
+    load_coverage_consent, record_coverage_consent, CoverageConsent, COVERAGE_CONSENT_FILE,
+};
+pub use user::{
+    load_coverage_dependency_consent, record_coverage_dependency_consent, CoverageDependencyConsent,
+    COVERAGE_DEPENDENCY_CONSENT_FILE,
+};
+pub use settings::{ToolSwitch, COVERAGE_TOOLS};
+pub use user::{CoverageToolOverride, UserCoverageIngest};
+pub use user::{load_toolchain_consent, record_toolchain_consent, ToolchainConsent, TOOLCHAIN_CONSENT_FILE};
+
+/// Whether an index that admitted `admitted` files is one the zero-admission
+/// diagnostic explains: [`ZeroAdmissionDiagnostic::admits_diagnosis`], the one
+/// predicate both the engine's cheap pre-check and [`zero_admission_diagnostic`]
+/// apply. Reached through this module so the engine's fan-out stays within
+/// `max_fan_out` (S-736 added the coverage runner as a facade dependency).
+pub(crate) const fn admits_zero_admission_diagnosis(admitted: usize) -> bool {
+    ZeroAdmissionDiagnostic::admits_diagnosis(admitted)
+}
 pub use wiki::{EffectiveWikiModel, WikiConfig};
 pub use workspace_tier::{
     read_workspace_documents, write_workspace_config, write_workspace_secret, TierConfigFile,

@@ -413,7 +413,8 @@ fn migration_9_reads_a_stored_osv_scanner_1x_or_gitleaks_medium_as_unrated_and_n
     };
     let before = columns(&Connection::open(&path).unwrap());
 
-    let migrated = crate::history::db::open(&path).unwrap();
+    // Through migration 9 alone: migration 10 marks OSV-Scanner hashes again.
+    let migrated = crate::history::db::open_at_version(&path, 9).unwrap();
     assert_eq!(crate::history::db::current_version(&migrated).unwrap(), 9);
     assert_eq!(columns(&migrated), before, "every other column of every row is copied as it was");
     let severities: Vec<(String, String)> = migrated
@@ -1351,21 +1352,26 @@ fn a_scoped_ingest_replaces_only_the_scanned_files_findings_and_every_other_row_
 ///
 /// [FR-SC-14]: ../../../../docs/specs/requirements/FR-SC-14.md
 /// [S-760]: ../../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
+/// Every stored finding in production code: the overlay with no classifier.
+fn production(stored: &[&super::SecurityFinding]) -> anyhow::Result<Vec<super::CodeScope>> {
+    Ok(vec![super::CodeScope::Production; stored.len()])
+}
+
 #[test]
 fn a_store_of_scoped_scans_alone_counts_its_findings_per_file() {
     let (_t, r) = repo();
     let one = |name: &str, uri: &str| write(&r, name, &semgrep_report(&[(uri, "r.one", 1)]));
     let today = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-    assert_eq!(super::path_findings(&r, today).unwrap(), None, "nothing stored: no column, not a column of 0");
+    assert_eq!(super::path_findings(&r, today, production).unwrap(), None, "nothing stored: no column, not a column of 0");
 
     let db = vec!["app/db.py".to_string()];
     super::ingest_scoped(&r, &one("a.sarif", "app/db.py"), &indexed(), Some(super::IngestScope::replacing(&db))).unwrap();
-    let cells = super::path_findings(&r, today).unwrap().expect("a stored report has a column");
+    let cells = super::path_findings(&r, today, production).unwrap().expect("a stored report has a column");
     assert_eq!(cells["app/db.py"].count, 1, "its finding is in an untouched file: fresh");
     assert!(!cells.contains_key("app/views.py"), "a file with no finding has no cell");
 
     ingest(&r, &one("full.sarif", "app/views.py"), &indexed()).unwrap();
-    let cells = super::path_findings(&r, today).unwrap().expect("a full scan stands behind the report");
+    let cells = super::path_findings(&r, today, production).unwrap().expect("a full scan stands behind the report");
     assert_eq!(cells["app/views.py"].count, 1);
 }
 
@@ -1512,6 +1518,7 @@ fn secret_row(fingerprint: &str, line: i64, start: i64, end: i64) -> super::stor
         anchor_commit: None,
         commits: Vec::new(),
         legacy_fingerprints: Vec::new(),
+        places: Vec::new(),
     }
 }
 

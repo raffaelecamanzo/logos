@@ -20,7 +20,7 @@ const CASES: Record<string, ViewCase> = {
   "/graph": { ready: "Query the whole graph" },
   "/files": { ready: "Files ranked by risk" },
   "/gaps": { ready: "Rule findings" },
-  "/coverage": { ready: "Per-file coverage" },
+  "/coverage": { ready: "Coverage tools" },
   "/security": { ready: "Scanners" },
   "/statistics": { ready: "Tool attribution by class" },
   "/config": { ready: "rules.toml" },

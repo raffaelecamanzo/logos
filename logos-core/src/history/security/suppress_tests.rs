@@ -676,25 +676,34 @@ fn concurrent_suppressions_keep_every_entry() {
     assert_eq!(file.len(), 32, "every concurrent suppression is in the file");
 }
 
-/// An orphaned entry naming a key a finding had before history.db migration 7
-/// names that finding's fingerprint — the lowest when two carry the old key —
-/// and still suppresses nothing; an entry that matches, or an orphan no finding
-/// knows, names none.
+/// An entry naming a key a finding had before a re-key (history.db migrations
+/// 7 and 10) still names, and so suppresses, that finding, and names its
+/// fingerprint as the one to write — the lowest when two carry the old key. An
+/// entry naming a key some finding has now names none, even when another
+/// finding lists that key as an old one; an orphan no finding knows names none.
 #[test]
-fn an_orphaned_entry_under_an_old_key_names_the_fingerprint_it_should_name() {
+fn an_entry_under_an_old_key_still_suppresses_and_names_the_fingerprint_it_should_name() {
     let mut rekeyed = finding(FP_B);
     rekeyed.legacy_fingerprints = vec![FP_A.to_string()];
     let mut twin = finding(FP_C);
     twin.legacy_fingerprints = vec![FP_A.to_string()];
+    let mut later = finding(FP_MID);
+    later.legacy_fingerprints = vec![FP_B.to_string()];
     let typo = "e".repeat(64);
     let text = [entry(FP_A, "reason = \"old key\"\n"), entry(FP_B, "reason = \"current\"\n"), entry(&typo, "reason = \"typo\"\n")].join("\n");
     let ignore = IgnoreFile::parse(&text).unwrap();
-    let labelled = label(&[twin, rekeyed], &ignore, Path::new(ROOT), day(2026, 10, 18));
-    let named: Vec<(&str, bool, Option<&str>)> = labelled
+    let labelled = label(&[twin, rekeyed, later], &ignore, Path::new(ROOT), day(2026, 10, 18));
+    let named: Vec<(&str, bool, usize, Option<&str>)> = labelled
         .entries
         .iter()
-        .map(|e| (e.entry.selector.fingerprint().unwrap(), e.orphaned, e.should_name.as_deref()))
+        .map(|e| (e.entry.selector.fingerprint().unwrap(), e.orphaned, e.suppressed, e.should_name.as_deref()))
         .collect();
-    assert_eq!(named, [(FP_A, true, Some(FP_B)), (FP_B, false, None), (typo.as_str(), true, None)]);
-    assert!(labelled.findings.iter().find(|f| f.finding.fingerprint == FP_C).is_some_and(|f| f.suppression.is_none()), "the old key suppresses nothing");
+    assert_eq!(named, [(FP_A, false, 2, Some(FP_B)), (FP_B, false, 1, None), (typo.as_str(), true, 0, None)]);
+    let by = |fp: &str| match &labelled.findings.iter().find(|f| f.finding.fingerprint == fp).unwrap().suppression {
+        Some(Suppression::Suppressed { by, .. }) => by.fingerprint().map(str::to_string),
+        other => panic!("{fp} is not suppressed: {other:?}"),
+    };
+    assert_eq!(by(FP_C).as_deref(), Some(FP_A), "the old key still suppresses the finding re-keyed off it");
+    assert_eq!(by(FP_B).as_deref(), Some(FP_A), "the first entry naming it labels it");
+    assert_eq!(by(FP_MID).as_deref(), Some(FP_B), "an entry under a current key also names a finding re-keyed off it");
 }

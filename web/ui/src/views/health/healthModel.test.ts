@@ -14,6 +14,7 @@ import {
   aggregateSignal,
   applicableCount,
   dimensionDetails,
+  exactDecimal,
   gateFigure,
   isInformationalPass,
   lowestDimension,
@@ -24,6 +25,7 @@ import {
   shortSha,
   signedPoints,
   snapshotStaleness,
+  trendLines,
   unitLocation,
   whereToStart,
   type DimensionDetail,
@@ -722,5 +724,42 @@ describe("signedPoints (FR-GV-26)", () => {
     [null, "—"],
   ] as const)("states %s as %s", (value, text) => {
     expect(signedPoints(value)).toBe(text);
+  });
+});
+
+// FR-GV-27 (S-785): the Gate's trend note spells each value as the CLI's warning
+// does — Rust's `f64` display: the shortest exact digits, never an exponent.
+describe("exactDecimal (FR-GV-27)", () => {
+  it.each([
+    [0.9, "0.9"],
+    [1, "1"],
+    [0, "0"],
+    [0.9692721336662187, "0.9692721336662187"],
+    [0.9 - 1e-8, "0.89999999"],
+    [1e-7, "0.0000001"],
+    [1.5e-7, "0.00000015"],
+    [-2.5e-7, "-0.00000025"],
+    [1e21, "1000000000000000000000"],
+    [1.2345e22, "12345000000000000000000"],
+  ] as const)("spells %s as %s", (value, text) => {
+    expect(exactDecimal(value)).toBe(text);
+  });
+});
+
+describe("trendLines (FR-GV-27)", () => {
+  it("reads the structured trend in its own order, and nothing without one", () => {
+    expect(trendLines({})).toEqual([]);
+    expect(trendLines({ trend: [] })).toEqual([]);
+    expect(
+      trendLines({
+        trend: [
+          { dimension: "depth", values: [0.5, 1e-7], window: 1 },
+          { dimension: "equality", values: [0.9, 0.8, 0.7], window: 2 },
+        ],
+      }),
+    ).toEqual([
+      { dimension: "depth", values: ["0.5", "0.0000001"], window: 1 },
+      { dimension: "equality", values: ["0.9", "0.8", "0.7"], window: 2 },
+    ]);
   });
 });

@@ -20,6 +20,11 @@
 #   - the formula and announce jobs cannot run after host refused or failed;
 #   - build-spa's web-ui-dist bundle is fetched into web/ui/dist before every local
 #     `dist build`, so an archive embeds the real web UI, not the placeholder;
+#   - dist is installed in `plan` and `build-local-artifacts` by scripts/install-dist.sh
+#     (checked, after the release pipeline checkout and before any `dist` line), no
+#     `run:` line pipes a download into a shell or runs the matrix's own install
+#     command, and a container matrix entry is refused by a step that ends in
+#     `exit 1` (HF-4);
 #   - no `dist` invocation selects cargo features;
 #   - no `${{ }}` expression in a `run:` line reads the dispatch input, the event
 #     payload, the triggering ref or `env.`, however it is spelled.
@@ -55,7 +60,7 @@ echo
 
 # shellcheck disable=SC2016  # the python program is single-quoted on purpose.
 printf '%s' "$JSON" | python3 -c '
-import json, sys
+import json, re, sys
 
 wf = json.load(sys.stdin)
 passed = failed = 0
@@ -210,6 +215,45 @@ local_dist = index("build-local-artifacts", lambda s: any(l.strip().startswith("
 check("build-local-artifacts fetches web-ui-dist into web/ui/dist before dist builds",
       0 <= fetch < local_dist, "fetch %d, dist build %d" % (fetch, local_dist))
 
+# --- dist is installed verified, and no run: pipes a download into a shell (HF-4) ---
+# Every job that runs `dist` installs it with scripts/install-dist.sh, taken from the
+# `.release-pipeline` checkout and run before the first `dist` line, as one command.
+# A job that gets dist from the cached artifact (`host`, `build-global-artifacts`) runs
+# no installer and is not asked for one.
+def release_pipeline_checkout(s):
+    return uses(s, "actions/checkout") and (s.get("with") or {}).get("path") == ".release-pipeline"
+
+def runs_dist(s):
+    return any(l.strip().startswith("dist ") for l in (s.get("run") or "").splitlines())
+
+for job in ("plan", "build-local-artifacts"):
+    co = index(job, release_pipeline_checkout)
+    ins = index(job, lambda s: (s.get("name") or "") == "Install dist")
+    first = index(job, runs_dist)
+    step = steps(job)[ins] if ins >= 0 else {}
+    body = [l.strip() for l in (step.get("run") or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+    check("%s installs dist with scripts/install-dist.sh, as the one command of its `Install dist` step" % job,
+          body == ["bash .release-pipeline/scripts/install-dist.sh"] and "continue-on-error" not in step and "if" not in step,
+          str(step))
+    check("%s installs dist after the release pipeline is checked out and before it runs dist" % job,
+          0 <= co < ins < first, "checkout %d, install %d, first dist %d" % (co, ins, first))
+
+pipe = re.compile(r"\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(\S*/)?(ba|z|da)?sh\b|\b(ba|z|da)?sh\b\s+-c\s+[\"\x27]?\$\(\s*(curl|wget)\b")
+piped = [(j, s.get("name") or s.get("id") or "?", l.strip()) for j in jobs for s in steps(j)
+         for l in (s.get("run") or "").splitlines() if not l.strip().startswith("#") and pipe.search(l)]
+check("no run: line pipes a download into a shell", not piped, str(piped))
+matrix_cmd = [(j, s.get("name") or "?") for j in jobs for s in steps(j) if "matrix.install_dist" in (s.get("run") or "")]
+check("no run: line executes the matrix\x27s own dist install command, which pipes a download into `sh`", not matrix_cmd, str(matrix_cmd))
+
+# A matrix entry that runs in a container would build without Rust: the step that
+# once piped rustup into a shell is a refusal, under the same `if:`, that fails.
+ref = [s for s in steps("build-local-artifacts") if "matrix.container" in str(s.get("if", ""))]
+ref_body = [l.strip() for l in ((ref[0].get("run") or "") if ref else "").splitlines() if l.strip() and not l.strip().startswith("#")]
+check("build-local-artifacts refuses a container matrix entry: exactly one step under `if: matrix.container`, which ends in `exit 1`",
+      len(ref) == 1 and str(ref[0]["if"]).replace(" ", "") == "${{matrix.container}}"
+      and bool(ref_body) and ref_body[-1] == "exit 1" and not any("||" in l for l in ref_body)
+      and "continue-on-error" not in ref[0] and "rustup" not in " ".join(ref_body), str(ref))
+
 # --- features come only from [package.metadata.dist] ------------------------------
 feat = [(j, l.strip()) for j in jobs for s in steps(j) for l in (s.get("run") or "").splitlines()
         if l.strip().startswith("dist ")
@@ -220,7 +264,6 @@ check("no dist invocation selects cargo features (they come from [package.metada
 # Every ${{ ... }} expression in every run:, however it is spelled or composed:
 # none may read the dispatch input, the event payload or the ref, nor `env.`, which
 # can carry any of them in from the env: of a step (read it as $VAR in the shell instead).
-import re
 untrusted = re.compile(r"\binputs\.|github\.event\.|github\.ref\b|github\.ref_name|github\.head_ref|\benv\.")
 bad = [(j, s.get("name") or s.get("id") or "?", e) for j in jobs for s in steps(j)
        for e in re.findall(r"\$\{\{(.*?)\}\}", s.get("run") or "", re.S) if untrusted.search(e)]

@@ -117,7 +117,7 @@ fn yes_returns_promptly_without_blocking_on_indexing() {
 
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(
-        elapsed.as_secs() < 10,
+        cfg!(coverage) || elapsed.as_secs() < 10,
         "init --workspace must return promptly, not block on indexing N members: {elapsed:?}"
     );
 

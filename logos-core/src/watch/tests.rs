@@ -604,9 +604,16 @@ fn wake_after_worker_shutdown_is_a_noop() {
 // ── No-suite-in-serve posture (ADR-38, NFR-SE-01) ────────────────────────────
 
 /// The load-bearing boundary: the watcher/serve path NEVER spawns a subprocess.
-/// Auto-ingest is a local read+parse+store; only the explicit `coverage refresh`
-/// (which lives in the engine, not here) ever runs a command. A structural guard
-/// over the module source so a future edit can't silently re-introduce a spawn.
+/// Auto-ingest is a local read+parse+store; only the explicit `coverage run`
+/// and its custom entry `coverage refresh` (which live in the engine and the
+/// coverage runner, not here) ever run a command. A structural guard over the
+/// module source so a future edit can't silently re-introduce a spawn.
+///
+/// The coverage runner half (S-737, ADR-87 §4): the watcher names neither the
+/// runner nor its engine entries, the engine's coverage auto-ingest path
+/// reaches the ingest body alone, and the runner itself starts every tool
+/// through the shared spawner — a process group, a deadline and a cancel —
+/// never a `Command` of its own.
 ///
 /// The security half (FR-SC-06, S-667): the watcher's SARIF auto-ingest reaches
 /// the security ingest module, never the scanner orchestrator, and no file of
@@ -667,6 +674,36 @@ fn the_watch_module_spawns_no_subprocess() {
     assert!(!spawns(entry), "the engine's ingest path must spawn nothing");
     for scanner_path in ["Orchestrator", "crate::security::", "security::scan"] {
         assert!(!entry.contains(scanner_path), "the engine's ingest path names `{scanner_path}`");
+    }
+
+    // The coverage runner (S-737): never reachable from the watcher.
+    for runner_path in ["coverage_run", "coverage_refresh", "crate::coverage", "CoverageRunner", "run_tool", "runner_status"] {
+        assert!(!src.contains(runner_path), "the watcher names `{runner_path}`: a coverage run starts only on request");
+    }
+    let start = engine.find("pub fn coverage_ingest_auto").expect("the watcher's coverage entry");
+    let end = start + engine[start..].find("/// `logos coverage refresh`").expect("the explicit runs follow it");
+    let auto = &engine[start..end];
+    assert!(auto.contains("coverage_ingest_with"), "the auto-ingest reaches the ingest body");
+    assert!(!spawns(auto), "the engine's coverage auto-ingest must spawn nothing");
+    for runner_path in ["crate::coverage::", "coverage_run", "refresh_cmd"] {
+        assert!(!auto.contains(runner_path), "the coverage auto-ingest names `{runner_path}`");
+    }
+    // Every production file of the coverage module — read from the directory,
+    // not named, so a file a later story adds is held too — and the rustup
+    // step of the coverage install (S-748): each starts a process through
+    // jobs::spawn, so a cancel or a stopping `serve` kills its group.
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = fs::read_dir(src_dir.join("coverage"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs") && !path.to_string_lossy().ends_with("tests.rs"))
+        .collect();
+    files.push(src_dir.join("tools/rustup.rs"));
+    assert!(files.len() >= 8, "the coverage module's files are read: {files:?}");
+    for file in files {
+        let text = fs::read_to_string(&file).unwrap();
+        let production = text.split("#[cfg(test)]\nmod tests {").next().unwrap_or(&text);
+        assert!(!spawns(production), "{} starts a tool through jobs::spawn, never a Command of its own", file.display());
     }
 }
 

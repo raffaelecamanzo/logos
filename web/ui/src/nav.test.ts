@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   isAppLevelPath,
@@ -17,6 +17,16 @@ import type { ExtensionNavEntry } from "./api/extensionsClient.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "./extensions/registry.ts";
 import { extensionsInfo, STUB_ID, StubAppView, StubView, stubInfo } from "./test/extensions.tsx";
 import { removeHiddenWidgetEntry } from "./test/hiddenWidgets.ts";
+import { viewForPath } from "./views/index.ts";
+
+/** Routes a test withdraws the view from, over the real route list: since S-740
+ *  registered the last built-in view, no built-in entry reaches S-788's "an entry
+ *  no view owns is not offered" filters, so a test makes one. Cleared after each. */
+const { UNREGISTERED } = vi.hoisted(() => ({ UNREGISTERED: new Set<string>() }));
+vi.mock("./views/routes.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./views/routes.ts")>();
+  return { ...real, hasViewFor: (pathname: string) => !UNREGISTERED.has(pathname) && real.hasViewFor(pathname) };
+});
 
 /** A member-scoped tab that owns client sub-routes, declared here because the
  *  route-ownership rule is the subject, not which entry is registered. */
@@ -51,30 +61,125 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
     expect(navItemsFor(false).some((i) => i.id === "workspace")).toBe(false);
   });
 
-  it("appends the workspace-only tabs — and only those — in workspace mode", () => {
-    // Less the Architecture view, which the register hides (CR-208).
-    expect(navItemsFor(true)).toEqual([
-      ...NAV_ITEMS.filter((i) => i.id !== "architecture"),
-      ...WORKSPACE_NAV_ITEMS,
-    ]);
+  it("offers the workspace-only tabs — and only those — in workspace mode", () => {
+    // Less the Architecture view, which the register hides (CR-208). The Coverage
+    // entry is offered since S-740 registered its view (S-788).
+    expect(navItemsFor(true)).toEqual([...NAV_ITEMS.filter((i) => i.id !== "architecture"), ...WORKSPACE_NAV_ITEMS]);
   });
 
-  it("pins the workspace sidebar as the literal roster, both sections", () => {
+  it("pins both sections as literal rosters, in the order and groups they render (S-788)", () => {
     // Pinned as literals rather than derived from the lists: sessions append to these
     // ONE lists, and a parallel append to a single list is a known entry-DROPPING
     // merge. A derived expectation agrees with whatever survived the merge and
-    // reports nothing. Architecture is absent while the register hides it (CR-208).
-    const member = navItemsFor(true).filter((i) => i.scope === "member").map((i) => i.id);
-    expect(member).toEqual(["overview", "health", "graph", "files", "gaps", "coverage", "security", "statistics", "config"]);
-    const added = navItemsFor(true).filter((i) => !NAV_ITEMS.includes(i));
-    expect(added.map((i) => [i.id, i.path])).toEqual([
-      ["workspace-dashboard", "/workspace-dashboard"],
-      ["workspace-health", "/workspace-health"],
-      ["workspace", "/workspace"],
-      ["workspace-security", "/workspace-security"],
-      ["workspace-statistics", "/workspace-statistics"],
-      ["workspace-config", "/workspace-config"],
+    // reports nothing. Architecture is absent while the register hides it (CR-208);
+    // the workspace Coverage entry is offered since S-740 registered its view (S-788).
+    const member = navItemsFor(true).filter((i) => i.scope === "member");
+    expect(member.map((i) => [i.id, i.group])).toEqual([
+      ["overview", "A"],
+      ["health", "A"],
+      ["security", "A"],
+      ["coverage", "A"],
+      ["graph", "B"],
+      ["gaps", "B"],
+      ["files", "B"],
+      ["statistics", "C"],
+      ["config", "C"],
     ]);
+    const app = navItemsFor(true).filter((i) => i.scope === "app");
+    expect(app.map((i) => [i.id, i.path, i.group])).toEqual([
+      ["workspace-dashboard", "/workspace-dashboard", "A"],
+      ["workspace", "/workspace", "A"],
+      ["workspace-health", "/workspace-health", "A"],
+      ["workspace-security", "/workspace-security", "B"],
+      ["workspace-coverage", "/workspace-coverage", "B"],
+      ["workspace-statistics", "/workspace-statistics", "C"],
+      ["workspace-config", "/workspace-config", "C"],
+    ]);
+    expect(navItemsFor(false).map((i) => i.id)).toEqual(member.map((i) => i.id));
+  });
+
+  it("files the hidden Architecture entry in group B directly after Graph (S-788)", () => {
+    const ids = NAV_ITEMS.map((i) => i.id);
+    expect(ids.indexOf("architecture")).toBe(ids.indexOf("graph") + 1);
+    expect(NAV_ITEMS.find((i) => i.id === "architecture")?.group).toBe("B");
+  });
+
+  it("keeps every id, label, route and scope the member sidebar always had (S-788)", () => {
+    expect(NAV_ITEMS.map((i) => [i.id, i.label, i.path, i.scope]).sort()).toEqual(
+      [
+        ["overview", "Dashboard", "/", "member"],
+        ["health", "Health", "/health", "member"],
+        ["security", "Security", "/security", "member"],
+        ["coverage", "Coverage", "/coverage", "member"],
+        ["graph", "Graph", "/graph", "member"],
+        ["architecture", "Architecture", "/architecture", "member"],
+        ["gaps", "Rule findings", "/gaps", "member"],
+        ["files", "Files & Risk", "/files", "member"],
+        ["statistics", "Statistics", "/statistics", "member"],
+        ["config", "Config", "/config", "member"],
+      ].sort(),
+    );
+  });
+});
+
+describe("the workspace Coverage entry (S-788, CR-244)", () => {
+  afterEach(() => {
+    clearExtensions();
+    UNREGISTERED.clear();
+  });
+
+  it("is not offered while no view owns its route", () => {
+    UNREGISTERED.add("/workspace-coverage");
+    expect(navItemsFor(true).some((i) => i.path === "/workspace-coverage")).toBe(false);
+    expect(navItemsFor(true).filter((i) => i.scope === "app").map((i) => i.id)).toEqual([
+      "workspace-dashboard",
+      "workspace",
+      "workspace-health",
+      "workspace-security",
+      "workspace-statistics",
+      "workspace-config",
+    ]);
+  });
+
+  it("is registered once, app-scoped, and offered once in a workspace only, now S-740 registers its view", () => {
+    expect(WORKSPACE_NAV_ITEMS.filter((i) => i.id === "workspace-coverage")).toHaveLength(1);
+    expect(WORKSPACE_NAV_ITEMS.filter((i) => i.label === "Coverage")).toHaveLength(1);
+    expect(navItemsFor(true).filter((i) => i.path === "/workspace-coverage")).toHaveLength(1);
+    expect(navItemsFor(false).some((i) => i.path === "/workspace-coverage")).toBe(false);
+  });
+
+  it("sits between Security and Statistics with its view registered", () => {
+    // The built-in view S-740 registers (views/index.ts), not a mounted stand-in.
+    // The literal workspace section: a SECOND Coverage entry — S-740 adding its own
+    // beside this one — fails this roster.
+    expect(navItemsFor(true).filter((i) => i.scope === "app").map((i) => [i.id, i.group])).toEqual([
+      ["workspace-dashboard", "A"],
+      ["workspace", "A"],
+      ["workspace-health", "A"],
+      ["workspace-security", "B"],
+      ["workspace-coverage", "B"],
+      ["workspace-statistics", "C"],
+      ["workspace-config", "C"],
+    ]);
+    // Workspace-mode only: a single-root sidebar offers no workspace entry.
+    expect(navItemsFor(false).some((i) => i.scope === "app")).toBe(false);
+  });
+});
+
+describe("every offered entry has a registered view (S-788)", () => {
+  it("resolves each entry offered in either mode to a view, built-in or mounted", () => {
+    // The other half — an entry whose route owns no view is not offered — is "is
+    // not offered while no view owns its route" above, which withdraws the Coverage
+    // view (`UNREGISTERED`) and fails if the filter is dropped.
+    for (const isWorkspace of [false, true]) {
+      expect(navItemsFor(isWorkspace).length).toBeGreaterThan(0);
+      for (const item of navItemsFor(isWorkspace)) {
+        expect({ path: item.path, view: viewForPath(item.path) !== null }).toEqual({
+          path: item.path,
+          view: true,
+        });
+      }
+    }
   });
 });
 
@@ -171,9 +276,10 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     expect(NAV_ITEMS.map((i) => i.scope)).toEqual(NAV_ITEMS.map(() => "member"));
     expect(WORKSPACE_NAV_ITEMS.map((i) => [i.id, i.scope])).toEqual([
       ["workspace-dashboard", "app"],
-      ["workspace-health", "app"],
       ["workspace", "app"],
+      ["workspace-health", "app"],
       ["workspace-security", "app"],
+      ["workspace-coverage", "app"],
       ["workspace-statistics", "app"],
       ["workspace-config", "app"],
     ]);
@@ -204,11 +310,12 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
       "workspace-dashboard",
       "workspace-health",
       "workspace-security",
+      "workspace-coverage",
       "workspace-statistics",
       "workspace-config",
     ];
     const appLabels = WORKSPACE_NAV_ITEMS.filter((i) => twinned.includes(i.id)).map((i) => i.label);
-    expect(appLabels).toEqual(["Dashboard", "Health", "Security", "Statistics", "Config"]);
+    expect(appLabels).toEqual(["Dashboard", "Health", "Security", "Coverage", "Statistics", "Config"]);
     for (const label of appLabels) {
       expect(NAV_ITEMS.map((i) => i.label)).toContain(label);
     }
@@ -256,17 +363,17 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     expect(ids.indexOf("workspace-config")).toBeGreaterThan(ids.indexOf("workspace-statistics"));
   });
 
-  it("files the app-scoped Security tab in its member-scoped twin's group, after Workspace (S-674)", () => {
-    // frontend-design §3 (CR-217): the Workspace section gains Security after
-    // Workspace. Asserted as the group equality, like the two pairs above, so the
-    // day the member Security tab moves group the two move together.
-    const member = NAV_ITEMS.find((i) => i.id === "security") as NavItem;
-    const app = WORKSPACE_NAV_ITEMS.find((i) => i.id === "workspace-security") as NavItem;
-    expect(member).toBeDefined();
-    expect(app).toBeDefined();
-    expect(app.group).toBe(member.group);
+  it("files the app-scoped Security and Coverage tabs in group B, after Health (S-674, S-788, FR-UI-55)", () => {
+    // frontend-design §3 (CR-217, CR-244): the Workspace section reads Dashboard,
+    // Workspace, Health | Security, Coverage | Statistics, Config. Unlike Statistics
+    // and Config these two are NOT filed with their member twins (group A): FR-UI-55
+    // files them in the Workspace section's group B, so the group is pinned literally.
+    const group = (id: string) => WORKSPACE_NAV_ITEMS.find((i) => i.id === id)?.group;
+    expect(group("workspace-security")).toBe("B");
+    expect(group("workspace-coverage")).toBe("B");
     const ids = WORKSPACE_NAV_ITEMS.map((i) => i.id);
-    expect(ids.indexOf("workspace-security")).toBe(ids.indexOf("workspace") + 1);
+    expect(ids.indexOf("workspace-security")).toBe(ids.indexOf("workspace-health") + 1);
+    expect(ids.indexOf("workspace-coverage")).toBe(ids.indexOf("workspace-security") + 1);
   });
 
   it("keeps every app-scoped route a SIBLING of /workspace, never a child of it", () => {
@@ -459,7 +566,11 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
   // registration is the same component registry for the views IT mounts, keyed by
   // path by construction and holding no scope; this build composes none.) Any other
   // file is re-deriving the level from the route spelling, which ADR-66 §1 forbids.
-  const ROUTE_REGISTRIES = ["nav.ts", "views/index.ts"];
+  // `views/routes.ts` (S-788) is the component registry's route list without the
+  // components, so `nav.ts` can ask whether a view owns a route without importing
+  // stylesheets; it holds routes and no scope, and `views/index.ts` cannot compile
+  // without exactly its routes.
+  const ROUTE_REGISTRIES = ["nav.ts", "views/index.ts", "views/routes.ts"];
 
   it("has app-scoped routes to check at all", () => {
     // `it.each([])` registers ZERO tests and raises nothing, so without this floor
@@ -470,7 +581,7 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
   });
 
   it.each(appPaths)(
-    "spells the app-scoped route %s in the two registries and nowhere else",
+    "spells the app-scoped route %s in the route registries and nowhere else",
     (path) => {
       // Quote-agnostic, and matched as a PREFIX. An exact `"${path}"` search was
       // evaded three ways, all reproduced in review: `"/workspace/"` (a trailing

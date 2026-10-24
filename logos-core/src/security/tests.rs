@@ -24,7 +24,7 @@ use tempfile::TempDir;
 
 use super::registry::{parse_version, Fill, Ignores, ScopedPath, Targets, REGISTRY};
 use super::{
-    scanner, Coverage, CopyKind, Detection, IgnoredPaths, Orchestrator, Outcome, ScanEnvironment, ScanReport,
+    scanner, Coverage, CoverageKind, CopyKind, Detection, IgnoredPaths, Orchestrator, Outcome, ScanEnvironment, ScanReport,
     ScannerOutcome, Selection, OUTPUT_DIR, REQUIRES_BUILD,
 };
 use crate::config::{parse_config, parse_user_config, ConfigError, SECURITY_SCANNERS};
@@ -50,7 +50,7 @@ const OUTPUTS: &[(&str, &str, Option<&str>)] = &[
     ("semgrep", "--output", None),
     ("trivy", "--output", None),
     ("gitleaks", "--report-path", None),
-    ("osv-scanner", "--output", None),
+    ("osv-scanner", "--output-file", None),
     ("bandit", "--output", None),
     ("gosec", "-out", None),
     ("checkov", "--output-file-path", Some("results_sarif.sarif")),
@@ -256,7 +256,7 @@ fn expected_runs(w: &World) -> Vec<(&'static str, Vec<Vec<String>>)> {
         (
             "osv-scanner",
             vec![strings(&[
-                "--format", "sarif", "--output", &w.out("osv-scanner.sarif"), "--recursive", ".",
+                "--format", "sarif", "--output-file", &w.out("osv-scanner.sarif"), "--recursive", ".",
             ])],
         ),
         (
@@ -540,6 +540,7 @@ fn a_scanner_is_the_override_then_the_path_copy_then_the_managed_copy() {
         user_dir: Some(w.user.clone()),
         search_path: Some(w.bin.clone().into_os_string()),
         tools_dir: Some(tools.clone()),
+        nvd_api_key: None,
     };
     let states = Orchestrator::open_in(&w.root, &env).unwrap().detect();
     let copy = |name: &str| match &states.iter().find(|s| s.scanner == name).unwrap().detection {
@@ -578,6 +579,7 @@ fn a_tools_directory_inside_the_project_supplies_no_managed_copy() {
             user_dir: Some(w.user.clone()),
             search_path: Some(w.bin.clone().into_os_string()),
             tools_dir: Some(tools_dir.clone()),
+            nvd_api_key: None,
         };
         let states = Orchestrator::open_in(&w.root, &env).unwrap().detect();
         assert_eq!(states[3].scanner, "osv-scanner");
@@ -818,6 +820,7 @@ fn captured_output_is_bounded_and_a_flooding_scanner_never_blocks() {
     assert_eq!(*exit_code, Some(3));
     assert!(stderr.len() <= crate::jobs::spawn::STDERR_CAP, "{} bytes kept", stderr.len());
     assert!(stderr.ends_with("END"), "the tail is kept");
+    assert!(stderr.contains("bytes omitted"), "the cut is stated");
 }
 
 #[test]
@@ -889,6 +892,7 @@ fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
             ignored: &[],
             targets: &Targets::Root,
             root: None,
+            nvd_key_file: None,
         };
         let full = s.render(s.run, &fill);
         let Some(slot) = s.path_slot else {
@@ -1332,11 +1336,12 @@ fn a_deadline_and_an_exit_end_the_whole_process_group() {
     std::thread::sleep(Duration::from_secs(3));
     assert!(!marker.exists(), "the leftover process outlived the scanner");
 
-    // Stdout keeps its head, to the cap.
-    let flood = script("flood", "printf 'HEAD'; /bin/dd if=/dev/zero bs=1024 count=1024 2>/dev/null | /usr/bin/tr '\\0' 'x'");
+    // Stdout keeps its head and its tail, within the cap (HF-8).
+    let flood = script("flood", "printf 'HEAD'; /bin/dd if=/dev/zero bs=1024 count=1024 2>/dev/null | /usr/bin/tr '\\0' 'x'; printf 'TAIL'");
     let f = run(&flood, &[], &launch(None)).unwrap();
-    assert_eq!(f.stdout.len(), crate::jobs::spawn::STDOUT_CAP);
-    assert!(f.stdout.starts_with("HEAD"));
+    assert!(f.stdout.len() <= crate::jobs::spawn::STDOUT_CAP, "{} bytes kept", f.stdout.len());
+    assert!(f.stdout.starts_with("HEAD") && f.stdout.ends_with("TAIL"), "head and tail kept");
+    assert!(f.stdout.contains("bytes omitted"), "the cut is stated");
 }
 
 #[test]
@@ -1402,8 +1407,18 @@ fn the_gate_reads_every_stale_state_stale_with_its_reason() {
         version: "1".to_string(),
         findings: 1,
         suppressed: 0,
+        not_fresh: 0,
+        test: 2,
     };
-    let fresh = ScanState::Fresh { snapshot_head: "h".to_string(), version: "1".to_string(), findings: 0, suppressed: 0 };
+    // Its counts never move the gate: test code reads as any other (BR-98).
+    let fresh = ScanState::Fresh {
+        snapshot_head: "h".to_string(),
+        version: "1".to_string(),
+        findings: 0,
+        suppressed: 0,
+        not_fresh: 0,
+        test: 3,
+    };
     let cases = [
         (fresh, ScanFreshness::Fresh),
         (stale(StaleBecause::HeadMoved), ScanFreshness::Stale("HEAD moved since 0123456789ab".to_string())),
@@ -1438,6 +1453,7 @@ fn two_files_of_one_go_package_name_the_package_once() {
         ignored: &[],
         targets: &Targets::Root,
         root: None,
+        nvd_key_file: None,
     };
     let argv = gosec.render(gosec.run, &fill);
     let at = argv.iter().position(|a| a == "-quiet").unwrap() + 1;
@@ -1464,6 +1480,7 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
         ignored: &[],
         targets: &Targets::Root,
         root: Some("/r"),
+        nvd_key_file: None,
     };
     let with = Fill { ignored: &ignored, ..base };
     let expected: &[(&str, &[&str])] = &[
@@ -1543,6 +1560,7 @@ fn checkovs_skip_expression_matches_the_directory_and_not_its_near_misses() {
         ignored: &ignored,
         targets: &Targets::Root,
         root: Some("/srv/my.app"),
+        nvd_key_file: None,
     };
     let argv = checkov.render(checkov.run, &fill);
     let patterns: Vec<regex::Regex> = argv
@@ -1602,6 +1620,7 @@ fn gosecs_tree_expression_skips_the_directory_and_below_and_not_its_near_misses(
         ignored: &ignored,
         targets: &Targets::Root,
         root: Some("/srv/project"),
+        nvd_key_file: None,
     };
     let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let values = exclude_dirs(&argv);
@@ -1644,14 +1663,15 @@ fn gosec_reads_excluded_only_when_every_ignored_directory_fits_the_budget() {
             ignored: &dirs,
             targets: &Targets::Root,
             root: Some("/srv/project"),
+            nvd_key_file: None,
         };
         let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(exclude_dirs(&argv).len(), n - cut, "{n} ignored: what the argv carries");
         let ignores = Ignores { dirs, misread: 0, targets: Targets::Paths(strings(&["src"])) };
         let want = match cut {
             0 => Coverage::EXCLUDED,
-            1 => Coverage::scanned("it is not given 1 ignored directory past the 64 KiB argument budget".to_string()),
-            n => Coverage::scanned(format!("it is not given {n} ignored directories past the 64 KiB argument budget")),
+            1 => Coverage::scanned(CoverageKind::Partial, "it is not given 1 ignored directory past the 64 KiB argument budget".to_string()),
+            n => Coverage::scanned(CoverageKind::Partial, format!("it is not given {n} ignored directories past the 64 KiB argument budget")),
         };
         assert_eq!(gosec.coverage(&ignores), want, "{n} ignored");
     }
@@ -1723,7 +1743,7 @@ fn codeql_takes_no_unproven_exclusion_writes_no_config_and_says_it_read_the_igno
     assert!(matches!(o.outcome, Outcome::Ran { .. }), "{o:?}");
     let codeql = scanner("codeql").unwrap();
     let note = "no exclusion is proven for it, so its database holds the ignored directories' files";
-    assert_eq!(o.coverage, Some(Coverage::scanned(note.to_string())), "the disclosure, word for word");
+    assert_eq!(o.coverage, Some(Coverage::scanned(CoverageKind::Unproven, note.to_string())), "the disclosure, word for word");
     assert_eq!(codeql.exclusion_evidence, None);
     let runs = w.runs("codeql");
     assert_eq!(runs.len(), 2, "database create, then analyze: {runs:?}");
@@ -1740,25 +1760,46 @@ fn codeql_takes_no_unproven_exclusion_writes_no_config_and_says_it_read_the_igno
     assert_eq!(tree_outside_logos(&w.root), before, "nothing is written into the project");
 }
 
-/// Every exclusion flag the registry calls proven is the argv its committed
-/// harness rows ran, on the version the tool manifest pins, and those rows
-/// show it skipping the ignored directory — `target/nested/` included — and
-/// keeping both near misses in all three checkout shapes ([FR-SC-26] AC 1,
-/// BR-97). A change to the template, the spelling or the pin that the
-/// harness has not re-run fails here.
-///
-/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
-#[test]
-fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
+/// The committed harness evidence, as the guards below read it.
+fn harness_evidence() -> String {
     let evidence = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/tests/fixtures/scanner-exclusions/verdicts.tsv");
-    let tsv = fs::read_to_string(&evidence).expect("the committed harness evidence");
+    fs::read_to_string(&evidence).expect("the committed harness evidence")
+}
+
+/// The rows of [`harness_evidence`], split on tabs, after the header that
+/// names the columns every guard indexes by position.
+fn harness_rows(tsv: &str) -> Vec<Vec<&str>> {
     let mut lines = tsv.lines();
     assert_eq!(
         lines.next(),
         Some("scanner\tversion\tfixture\tmechanism\tstatus\tignored\tnear_miss\thits\tnote\targv"),
         "the columns read below"
     );
-    let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    lines.map(|l| l.split('\t').collect()).collect()
+}
+
+/// The version of gosec's committed harness rows while the owner's re-run on
+/// the manifest's pin is pending (S-782): the pin moved to the release built
+/// for Go 1.27, and the harness is the owner's to run at Phase 5, so the rows
+/// still read the version it last ran. Only gosec rows at exactly this version
+/// are let through — the argv and the verdict are still checked on them — and
+/// the test fails once the re-run writes rows at the pin, until this constant
+/// and its allowance are deleted with that commit.
+const HARNESS_RERUN_PENDING_FROM: &str = "2.21.4";
+
+/// Every exclusion flag the registry calls proven is the argv its committed
+/// harness rows ran, on the version the tool manifest pins, and those rows
+/// show it skipping the ignored directory — `target/nested/` included — and
+/// keeping both near misses in all three checkout shapes ([FR-SC-26] AC 1,
+/// BR-97). A change to the template, the spelling or the pin that the
+/// harness has not re-run fails here, except the pin move
+/// [`HARNESS_RERUN_PENDING_FROM`] names.
+///
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+#[test]
+fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
+    let tsv = harness_evidence();
+    let rows = harness_rows(&tsv);
     let proven: Vec<_> = REGISTRY.iter().filter(|s| s.exclusion_evidence.is_some()).collect();
     assert_eq!(proven.iter().map(|s| s.name).collect::<Vec<_>>(), ["gosec"]);
     let ignored = strings(&["target"]);
@@ -1775,18 +1816,127 @@ fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
             ignored: &ignored,
             targets: &Targets::Root,
             root: None,
+            nvd_key_file: None,
         };
         let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let argv = argv.join(" ");
         let mine: Vec<&Vec<&str>> = rows.iter().filter(|r| r[0] == s.name && r[3] == mechanism).collect();
         assert_eq!(mine.iter().map(|r| r[2]).collect::<Vec<_>>(), ["git", "worktree", "non-git"], "{}: {mechanism}", s.name);
+        let versions: std::collections::BTreeSet<&str> = mine.iter().map(|r| r[1]).collect();
+        assert_eq!(versions.len(), 1, "{}: one run's rows, one version: {versions:?}", s.name);
+        let mut pending = 0;
         for r in mine {
-            assert_eq!(r[1], pin, "{}: the row ran the pin", s.name);
+            assert!(
+                r[1] == pin || (s.name == "gosec" && r[1] == HARNESS_RERUN_PENDING_FROM),
+                "{}: the row ran the pin ({pin}), or the version whose re-run is pending: {r:?}",
+                s.name
+            );
+            pending += usize::from(r[1] != pin);
             assert!(r[4].starts_with("ran (exit "), "{}: {r:?}", s.name);
             assert_eq!((r[5], r[6]), ("ignored skipped", "near miss kept"), "{}: {r:?}", s.name);
             assert_eq!(r[9], argv, "{}: the row ran this template's argv", s.name);
         }
+        assert!(
+            pending > 0,
+            "{}: the committed rows are at the pin {pin}: delete HARNESS_RERUN_PENDING_FROM and its allowance",
+            s.name
+        );
     }
+}
+
+/// The version of OSV-Scanner's committed harness rows while the owner's re-run
+/// on the manifest's pin is pending (S-779): the pin moved to 2.7.0, whose
+/// dependency extraction (osv-scalibr) the 1.9.2 evidence does not cover, and
+/// the harness is the owner's to run at Phase 5, so its six rows still read the
+/// version it last ran. Only rows at exactly this version are let through, the
+/// argv tail and the verdicts are still checked on them, and the test fails
+/// once the re-run writes rows at the pin, until this constant, its allowance
+/// and the `--experimental-*` probe branch are deleted with that commit. If
+/// that run does not prove the six legs the manifest commit is reverted instead.
+const OSV_RERUN_PENDING_FROM: &str = "1.9.2";
+
+/// OSV-Scanner is given the unignored paths as targets ([`Arg::Unignored`]),
+/// and the committed harness rows of that mechanism show it skipping the
+/// ignored directory and keeping both near misses in all three checkout shapes
+/// ([FR-SC-26] AC 1, BR-97). The registry's tail after `--recursive` is the one
+/// each `explicit-targets` row ran, the probe's own flags are the spelling of
+/// the version that row ran (the `--experimental-*` pair before 2.0, `--offline`
+/// and `--all-packages` from it), and the rows are at the manifest's pin or at
+/// the version whose re-run is pending ([`OSV_RERUN_PENDING_FROM`]) — the rows
+/// that await the owner's run are counted and named in the output, never made
+/// to pass by editing them.
+///
+/// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
+#[test]
+fn osv_scanners_unignored_targets_are_the_argv_tail_its_committed_harness_rows_ran() {
+    let tsv = harness_evidence();
+    let rows: Vec<Vec<&str>> = harness_rows(&tsv).into_iter().filter(|r| r[0] == "osv-scanner").collect();
+    let s = scanner("osv-scanner").unwrap();
+    let pin = &crate::tools::Manifest::builtin().tool("osv-scanner").expect("a managed scanner").version;
+    let paths = strings(&[".gitignore", "app", "go.mod", "src", "targets"]);
+    let fill = Fill {
+        out: Path::new("<run>/out.sarif"),
+        extra: &strings(&["--user-extra"]),
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new(""),
+        ignored: &strings(&["target"]),
+        targets: &Targets::Paths(paths.clone()),
+        root: None,
+        nvd_key_file: None,
+    };
+    let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let tail = argv[argv.iter().position(|a| a == "--recursive").expect("the template recurses")..].join(" ");
+    assert_eq!(tail, "--recursive .gitignore app go.mod src targets");
+    assert_eq!(
+        argv,
+        strings(&[
+            "--format", "sarif", "--output-file", "<run>/out.sarif", "--user-extra", "--recursive", ".gitignore", "app", "go.mod", "src",
+            "targets"
+        ]),
+        "the 2.x spelling, the user's extra arguments before the positionals"
+    );
+
+    let legs: Vec<(&str, &str)> = rows.iter().map(|r| (r[3], r[2])).collect();
+    assert_eq!(
+        legs,
+        [
+            ("template", "git"),
+            ("explicit-targets", "git"),
+            ("template", "worktree"),
+            ("explicit-targets", "worktree"),
+            ("template", "non-git"),
+            ("explicit-targets", "non-git")
+        ],
+        "the six legs: two mechanisms in each of three checkout shapes"
+    );
+    let versions: std::collections::BTreeSet<&str> = rows.iter().map(|r| r[1]).collect();
+    assert_eq!(versions.len(), 1, "one run's rows, one version: {versions:?}");
+    let version = *versions.iter().next().unwrap();
+    assert!(
+        version == pin || version == OSV_RERUN_PENDING_FROM,
+        "the rows ran the pin ({pin}), or the version whose re-run is pending ({OSV_RERUN_PENDING_FROM}): {version}"
+    );
+    let probe = if version.starts_with("1.") {
+        "--format json --experimental-offline --experimental-all-packages"
+    } else {
+        "--format json --offline --all-packages"
+    };
+    for r in rows.iter().filter(|r| r[3] == "explicit-targets") {
+        assert!(r[4].starts_with("ran (exit "), "{r:?}");
+        assert_eq!((r[5], r[6]), ("ignored skipped", "near miss kept"), "{r:?}");
+        assert_eq!(r[9], format!("{probe} {tail}"), "the row ran this template's targets: {r:?}");
+    }
+    for r in rows.iter().filter(|r| r[3] == "template") {
+        assert_eq!(r[9], format!("{probe} --recursive ."), "{r:?}");
+    }
+    let pending = rows.iter().filter(|r| r[1] != pin.as_str()).count();
+    eprintln!("OWNER-PENDING: {pending} of {} osv-scanner harness rows read {version}, the pin is {pin}", rows.len());
+    assert!(
+        pending > 0,
+        "osv-scanner: the committed rows are at the pin {pin}: delete OSV_RERUN_PENDING_FROM and its allowance"
+    );
 }
 
 /// Every file under `root` but `.logos/`, with its bytes, sorted.
@@ -2020,6 +2170,7 @@ fn a_huge_ignored_set_is_cut_to_the_argument_budget_keeping_the_shallowest() {
         ignored: &ignored,
         targets: &Targets::Root,
         root: Some("/srv/project"),
+        nvd_key_file: None,
     };
     let none = Fill { ignored: &[], ..fill };
     for s in REGISTRY.iter().filter(|s| s.takes_exclusion_flag()) {
@@ -2131,7 +2282,7 @@ fn semgrep_and_osv_scanner_are_given_the_unignored_paths_in_every_checkout_shape
         assert_eq!(
             rooted_runs(&w, "osv-scanner"),
             vec![[
-                strings(&["--format", "sarif", "--output", "<root>/.logos/security/osv-scanner.sarif", "--recursive"]),
+                strings(&["--format", "sarif", "--output-file", "<root>/.logos/security/osv-scanner.sarif", "--recursive"]),
                 targets.clone(),
             ]
             .concat()],
@@ -2153,9 +2304,12 @@ fn semgrep_and_osv_scanner_are_given_the_unignored_paths_in_every_checkout_shape
             let want = match o.scanner {
                 "semgrep" | "osv-scanner" | "gosec" => Coverage::EXCLUDED,
                 "trivy" | "bandit" | "checkov" | "dependency-check" => {
-                    Coverage::scanned(super::registry::FLAG_UNPROVEN.to_string())
+                    Coverage::scanned(CoverageKind::Unproven, super::registry::FLAG_UNPROVEN.to_string())
                 }
-                _ => Coverage::scanned(scanner(o.scanner).unwrap().reads_ignored.unwrap().to_string()),
+                _ => {
+                    let (kind, note) = scanner(o.scanner).unwrap().reads_ignored.unwrap();
+                    Coverage::scanned(kind, note.to_string())
+                }
             };
             let coverage = o.coverage.clone().unwrap_or_else(|| panic!("{shape:?}: {} states its coverage", o.scanner));
             assert_eq!(coverage, want, "{shape:?}: {}", o.scanner);
@@ -2199,6 +2353,7 @@ fn unignored_paths_that_cannot_be_passed_fall_back_to_the_root_and_say_so() {
         for name in ["semgrep", "osv-scanner"] {
             let coverage = outcome(&report, name).coverage.clone().unwrap();
             assert_eq!(coverage.ignored_paths, IgnoredPaths::Scanned, "{why}: {name}");
+            assert_eq!(coverage.coverage_kind, Some(CoverageKind::WholeProject), "{why}: {name}");
             let note = coverage.coverage_note.unwrap();
             assert!(note.starts_with("it is given the whole project, because ") && note.contains(why), "{why}: {note}");
         }
@@ -2241,12 +2396,13 @@ fn each_scanner_states_its_coverage_from_the_mechanism_its_template_has() {
                     (cut, "past the 64 KiB argument budget"),
                 ] {
                     assert_eq!(c.ignored_paths, IgnoredPaths::Scanned, "{}: {why}", s.name);
+                    assert_eq!(c.coverage_kind, Some(CoverageKind::Partial), "{}: {why}", s.name);
                     assert!(c.coverage_note.as_deref().is_some_and(|n| n.contains(why)), "{}: {c:?}", s.name);
                 }
             }
             (true, _) => {
                 for c in [clean, misread, cut, only] {
-                    assert_eq!(c, Coverage::scanned(FLAG_UNPROVEN.to_string()), "{}: an unproven flag", s.name);
+                    assert_eq!(c, Coverage::scanned(CoverageKind::Unproven, FLAG_UNPROVEN.to_string()), "{}: an unproven flag", s.name);
                 }
             }
             (_, true) => {
@@ -2254,10 +2410,12 @@ fn each_scanner_states_its_coverage_from_the_mechanism_its_template_has() {
                 assert_eq!(misread, Coverage::EXCLUDED, "{}: a target list names no ignored directory", s.name);
                 assert_eq!(only, Coverage::EXCLUDED, "{}", s.name);
                 assert_eq!(cut.ignored_paths, IgnoredPaths::Scanned, "{}: an unpassable list", s.name);
+                assert_eq!(cut.coverage_kind, Some(CoverageKind::WholeProject), "{}: an unpassable list", s.name);
             }
             _ => {
                 for c in [clean, misread, cut, only] {
-                    assert_eq!(c, Coverage::scanned(s.reads_ignored.unwrap().to_string()), "{}", s.name);
+                    let (kind, note) = s.reads_ignored.unwrap();
+                    assert_eq!(c, Coverage::scanned(kind, note.to_string()), "{}", s.name);
                 }
             }
         }
@@ -2280,6 +2438,7 @@ fn unignored_targets_render_only_in_a_whole_project_run_of_a_path_capable_scanne
         ignored: &[],
         targets: &targets,
         root: None,
+        nvd_key_file: None,
     };
     let render = |name: &str, fill: &Fill<'_>| -> Vec<String> {
         let s = scanner(name).unwrap();
@@ -2329,4 +2488,312 @@ fn only_a_scanner_process_that_started_states_its_coverage() {
     assert!(matches!(gitleaks.outcome, Outcome::Failed { exit_code: None, .. }), "{gitleaks:?}");
     assert!(w.runs("gitleaks").is_empty(), "gitleaks never started");
     assert_eq!(gitleaks.coverage, None, "{gitleaks:?}");
+}
+
+// ── the NVD API key (FR-SC-27, S-794) ────────────────────────────────────────
+
+/// A planted NVD API key: it must reach Dependency-Check's private file and
+/// nothing else.
+const NVD_KEY: &str = "LOGOSPLANTEDNVDKEY-0123-4567-89ab-cdef01234567";
+
+fn nvd_key() -> Option<super::NvdApiKey> {
+    super::NvdApiKey::new(NVD_KEY)
+}
+
+/// Shell for a Dependency-Check stub that, while it runs, records the mode and
+/// the content of the file its `--propertyfile` names, when that file exists.
+fn nvd_probe(w: &World) -> String {
+    format!(
+        "pf=''; prev=''\n\
+         for a in \"$@\"; do if [ \"$prev\" = '--propertyfile' ]; then pf=\"$a\"; fi; prev=\"$a\"; done\n\
+         if [ -f \"$pf\" ]; then /bin/ls -l \"$pf\" | /usr/bin/cut -c1-10 > '{mode}'; /bin/cat \"$pf\" > '{props}'; fi",
+        mode = w.rec.join("nvd.mode").display(),
+        props = w.rec.join("nvd.props").display(),
+    )
+}
+
+fn dependency_check_stub(w: &World, exit: i32, extra: &str) {
+    let script = format!("{}\n{extra}", nvd_probe(w));
+    w.stub_at(&w.bin.join("dependency-check"), "dependency-check", "dependency-check", exit, &script);
+}
+
+fn scan_dependency_check(w: &World, key: Option<super::NvdApiKey>) -> ScanReport {
+    w.open()
+        .expect("config loads")
+        .with_nvd_api_key(key)
+        .scan(&Selection::Only(strings(&["dependency-check"])))
+        .expect("scan runs")
+}
+
+/// FR-SC-27 AC 1: with a key set, Dependency-Check's argv carries
+/// `--propertyfile` and the private file's path, and no key; the file holds
+/// `nvd.api.key` with mode 0600 while the run lasts, and is gone once it ends.
+#[test]
+fn dependency_check_takes_the_nvd_api_key_in_a_private_file_and_never_in_its_argv() {
+    let w = World::new(PROJECT);
+    dependency_check_stub(&w, 0, "");
+    let report = scan_dependency_check(&w, nvd_key());
+    assert!(matches!(outcome(&report, "dependency-check").outcome, Outcome::Ran { .. }), "{report:?}");
+
+    let runs = w.runs("dependency-check");
+    let [argv] = runs.as_slice() else { panic!("one run: {runs:?}") };
+    let file = w.out(super::NVD_KEY_FILE);
+    let at = argv.iter().position(|a| a == "--propertyfile").unwrap_or_else(|| panic!("no --propertyfile: {argv:?}"));
+    assert_eq!(argv[at + 1], file, "{argv:?}");
+    assert!(argv.iter().all(|a| !a.contains(NVD_KEY)), "the key is in argv: {argv:?}");
+    assert_eq!(fs::read_to_string(w.rec.join("nvd.props")).unwrap(), format!("nvd.api.key={NVD_KEY}\n"));
+    assert_eq!(fs::read_to_string(w.rec.join("nvd.mode")).unwrap(), "-rw-------\n", "the file is the owner's only");
+    assert!(fs::symlink_metadata(&file).is_err(), "the key file outlived the run");
+}
+
+/// Without a key, Dependency-Check's argv is its template's alone, and no file
+/// is written; no other scanner is ever handed the key.
+#[test]
+fn no_key_adds_nothing_and_no_other_scanner_is_handed_one() {
+    let w = World::new(PROJECT);
+    dependency_check_stub(&w, 0, "");
+    scan_dependency_check(&w, None);
+    let runs = w.runs("dependency-check");
+    assert!(runs.iter().flatten().all(|a| a != "--propertyfile"), "{runs:?}");
+    assert!(!w.rec.join("nvd.props").exists());
+
+    let orchestrator = w.open().unwrap().with_nvd_api_key(nvd_key());
+    let takers: Vec<&str> = REGISTRY.iter().filter(|s| orchestrator.nvd_api_key_set(s).is_some()).map(|s| s.name).collect();
+    assert_eq!(takers, ["dependency-check"]);
+    let fill = Fill {
+        out: Path::new("/out"),
+        extra: &[],
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new("/pinned"),
+        ignored: &[],
+        targets: &Targets::Root,
+        root: None,
+        nvd_key_file: Some(Path::new("/key")),
+    };
+    for s in REGISTRY.iter().filter(|s| s.name != "dependency-check") {
+        let argv = s.render(s.run, &fill);
+        assert!(argv.iter().all(|a| a != "--propertyfile" && a != "/key"), "{} is handed the key file: {argv:?}", s.name);
+    }
+}
+
+/// FR-SC-27, owner decision: the user's own `--nvdApiKey` or properties file in
+/// `extra_args` wins — Logos adds no file — and the key reads `set` even with
+/// no `NVD_API_KEY`.
+#[test]
+fn the_users_own_nvd_key_or_properties_file_wins_and_logos_adds_no_file() {
+    let own = [
+        r#"["--nvdApiKey", "users-own"]"#,
+        r#"["--nvdApiKey=users-own"]"#,
+        r#"["--propertyfile", "/home/u/dc.properties"]"#,
+        r#"["--propertyfile=/home/u/dc.properties"]"#,
+        r#"["-P", "/home/u/dc.properties"]"#,
+        r#"["-P/home/u/dc.properties"]"#,
+    ];
+    for extra in own {
+        let w = World::new(PROJECT);
+        dependency_check_stub(&w, 0, "");
+        w.user_config(&format!("[security_scan.dependency-check]\nextra_args = {extra}\n"));
+        for key in [nvd_key(), None] {
+            let orchestrator = w.open().unwrap().with_nvd_api_key(key);
+            assert_eq!(orchestrator.nvd_api_key_set(scanner("dependency-check").unwrap()), Some(true), "{extra}");
+        }
+        scan_dependency_check(&w, nvd_key());
+        let runs = w.runs("dependency-check");
+        let [argv] = runs.as_slice() else { panic!("one run: {runs:?}") };
+        assert!(!argv.contains(&w.out(super::NVD_KEY_FILE)), "{extra}: Logos added its file: {argv:?}");
+        assert!(argv.iter().all(|a| !a.contains(NVD_KEY)), "{extra}: {argv:?}");
+        assert!(!w.rec.join("nvd.props").exists(), "{extra}");
+    }
+}
+
+/// The `extra_args` that hand the key are matched exactly, and their near
+/// misses are not: another NVD flag, a longer flag name, a lowercase `-p`, a
+/// `--P` and a value that merely contains a flag.
+#[test]
+fn only_a_flag_that_hands_the_key_counts_as_the_users_own() {
+    use super::registry::supplies_nvd_key;
+    let owns = |args: &[&str]| supplies_nvd_key(&strings(args));
+    for args in [
+        &["--nvdApiKey", "k"][..],
+        &["--nvdApiKey=k"],
+        &["--propertyfile", "f"],
+        &["--propertyfile=f"],
+        &["-P", "f"],
+        &["-Pf"],
+        &["--disableAssembly", "--nvdApiKey", "k"],
+    ] {
+        assert!(owns(args), "{args:?}");
+    }
+    for args in [
+        &[][..],
+        &["--nvdApiEndpoint", "https://example.test"],
+        &["--nvdApiDelay", "8000"],
+        &["--nvdApiKeyX", "k"],
+        &["--propertyfiles", "f"],
+        &["-p", "f"],
+        &["--P", "f"],
+        &["--project", "nvdApiKey"],
+        &["--exclude", "x--nvdApiKey"],
+    ] {
+        assert!(!owns(args), "{args:?}");
+    }
+}
+
+/// FR-SC-27 AC 2: no key file remains after a run that failed, or that wrote
+/// no report; one a crashed run left is removed at the next scan's start,
+/// whichever scanners it runs.
+#[test]
+fn no_key_file_outlives_a_failed_run_and_a_stale_one_is_swept_at_the_next_scan() {
+    let w = World::new(PROJECT);
+    let file = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
+    dependency_check_stub(&w, 3, "");
+    let report = scan_dependency_check(&w, nvd_key());
+    assert!(matches!(outcome(&report, "dependency-check").outcome, Outcome::Failed { exit_code: Some(3), .. }), "{report:?}");
+    assert!(w.rec.join("nvd.props").exists(), "the file existed during the run");
+    assert!(fs::symlink_metadata(&file).is_err(), "the key file outlived a failed run");
+
+    // Exits 0 but writes no report.
+    write_executable(
+        &w.bin.join("dependency-check"),
+        &format!("#!/bin/sh\ncase \"$1\" in --version) echo 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n{}\nexit 0\n", nvd_probe(&w)),
+    );
+    let report = scan_dependency_check(&w, nvd_key());
+    assert!(matches!(outcome(&report, "dependency-check").outcome, Outcome::Failed { .. }), "{report:?}");
+    assert!(fs::symlink_metadata(&file).is_err(), "the key file outlived a run that wrote no report");
+
+    // A crash leaves one; a scan of another scanner sweeps it.
+    fs::write(&file, "nvd.api.key=stale\n").unwrap();
+    w.stub("semgrep", 0);
+    w.scan(&Selection::Only(strings(&["semgrep"])));
+    assert!(fs::symlink_metadata(&file).is_err(), "a stale key file survived the next scan's start");
+}
+
+/// A symbolic link committed or planted in the key file's place is removed,
+/// never written through: the key never lands outside `.logos/security`.
+#[test]
+fn a_symlink_in_the_key_files_place_is_replaced_never_written_through() {
+    let w = World::new(PROJECT);
+    dependency_check_stub(&w, 0, "");
+    let outside = w.rec.join("outside.txt");
+    fs::write(&outside, "untouched\n").unwrap();
+    let out_dir = w.root.join(OUTPUT_DIR);
+    fs::create_dir_all(&out_dir).unwrap();
+    // `scan_in` sweeps it at its start; plant it again where only the run's
+    // own create can meet it, by planting it after the sweep through the
+    // version probe, which runs between the two.
+    let file = out_dir.join(super::NVD_KEY_FILE);
+    write_executable(
+        &w.bin.join("dependency-check"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in --version) /bin/ln -sf '{}' '{}'; echo 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n{}\nexit 0\n",
+            outside.display(),
+            file.display(),
+            nvd_probe(&w)
+        ),
+    );
+    scan_dependency_check(&w, nvd_key());
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched\n", "the key was written through the link");
+    assert_eq!(fs::read_to_string(w.rec.join("nvd.props")).unwrap(), format!("nvd.api.key={NVD_KEY}\n"));
+    assert!(fs::symlink_metadata(&file).is_err());
+}
+
+/// FR-SC-27 AC 3: a Dependency-Check that echoes the key it was handed, on
+/// stderr or on stdout and more than once, carries it into no outcome.
+#[test]
+fn a_scanner_echoing_the_key_carries_it_into_no_outcome() {
+    for echo in ["/bin/cat \"$pf\" \"$pf\" >&2", "/bin/cat \"$pf\" \"$pf\""] {
+        let w = World::new(PROJECT);
+        dependency_check_stub(&w, 2, echo);
+        let report = scan_dependency_check(&w, nvd_key());
+        let Outcome::Failed { stderr, .. } = &outcome(&report, "dependency-check").outcome else {
+            panic!("{report:?}")
+        };
+        assert!(!stderr.contains(NVD_KEY), "{echo}: {stderr}");
+        assert_eq!(stderr.matches(&format!("nvd.api.key={}", super::mask::MASK)).count(), 2, "{echo}: the output is kept, each echo masked: {stderr}");
+    }
+}
+
+/// FR-SC-27 AC 3, NFR-SE-08: no repository file supplies the key — a `.env`
+/// naming it changes nothing, and a repository config naming it is refused
+/// before anything starts.
+#[test]
+fn a_repository_env_file_or_config_never_supplies_the_key() {
+    let w = World::new(PROJECT);
+    dependency_check_stub(&w, 0, "");
+    fs::write(w.root.join(".env"), format!("{}={NVD_KEY}\n", super::NVD_API_KEY_ENV)).unwrap();
+    let orchestrator = w.open().unwrap();
+    assert_eq!(orchestrator.nvd_api_key_set(scanner("dependency-check").unwrap()), Some(false));
+    scan_dependency_check(&w, None);
+    assert!(w.runs("dependency-check").iter().flatten().all(|a| a != "--propertyfile"));
+
+    // The repository's own value, not the user's: a config error may quote the
+    // repository's line, which is the repository's content, never the user's key.
+    for config in [
+        "[security_scan.dependency-check]\nextra_args = [\"--nvdApiKey\", \"repo-key\"]\n",
+        "[security_scan.dependency-check]\nnvd_api_key = \"repo-key\"\n",
+    ] {
+        w.repo_config(config);
+        let runs = w.runs("dependency-check").len();
+        assert!(matches!(w.open(), Err(ConfigError::Parse { .. } | ConfigError::InvalidValue { .. })), "{config}");
+        assert_eq!(w.runs("dependency-check").len(), runs, "nothing started");
+    }
+}
+
+/// The properties file escapes the key as `java.util.Properties` reads it
+/// back, so no character of a key ends its line or sets another property.
+#[test]
+fn the_key_file_escapes_every_character_a_properties_reader_would_misread() {
+    let props = |key: &str| super::NvdApiKey::new(key).unwrap().properties();
+    assert_eq!(props("0123-abcd"), "nvd.api.key=0123-abcd\n");
+    assert_eq!(props("k\nanalyzer.x.enabled=true"), "nvd.api.key=k\\nanalyzer.x.enabled\\=true\n");
+    assert_eq!(props("a=b:c#d!e\\f"), "nvd.api.key=a\\=b\\:c\\#d\\!e\\\\f\n");
+    assert_eq!(props(" lead\tin\r"), "nvd.api.key=\\ lead\\tin\\r\n");
+    assert_eq!(props("é😀"), "nvd.api.key=\\u00E9\\uD83D\\uDE00\n");
+    assert_eq!(props("in side"), "nvd.api.key=in side\n", "only a leading space is escaped");
+}
+
+/// An empty `NVD_API_KEY` sets no key, and a key is never shown: not by
+/// `Debug`, and so not by any `Debug` of the environment that carries it.
+#[test]
+fn an_empty_key_sets_none_and_a_key_never_prints() {
+    assert_eq!(super::NvdApiKey::new(""), None);
+    let env = ScanEnvironment { user_dir: None, search_path: None, tools_dir: None, nvd_api_key: nvd_key() };
+    let shown = format!("{env:?} {:#?}", env.nvd_api_key);
+    assert!(!shown.contains(NVD_KEY) && shown.contains(super::mask::MASK), "{shown}");
+}
+
+/// The key file exists only while Dependency-Check runs: with a key set, no
+/// other scanner's run ever has one beside it.
+#[test]
+fn no_key_file_exists_while_another_scanner_runs() {
+    let w = World::new(PROJECT);
+    let file = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
+    let seen = w.rec.join("keyfile.seen");
+    let check = format!("if [ -e '{}' ]; then : > '{}'; fi", file.display(), seen.display());
+    w.stub_at(&w.bin.join("semgrep"), "semgrep", "semgrep", 0, &check);
+    let report = w.open().unwrap().with_nvd_api_key(nvd_key()).scan(&Selection::Only(strings(&["semgrep"]))).unwrap();
+    assert!(matches!(outcome(&report, "semgrep").outcome, Outcome::Ran { .. }), "{report:?}");
+    assert_eq!(w.runs("semgrep").len(), 1, "semgrep ran, so the check ran");
+    assert!(!seen.exists(), "the key file existed while semgrep ran");
+}
+
+/// A key file Logos cannot write fails Dependency-Check before it starts,
+/// naming the file: it never runs without the key the user set.
+#[test]
+fn a_key_file_that_cannot_be_written_fails_dependency_check_before_it_starts() {
+    let w = World::new(PROJECT);
+    dependency_check_stub(&w, 0, "");
+    // A directory in the file's place, with an entry, so neither the sweep nor
+    // the run can remove it.
+    let file = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
+    fs::create_dir_all(file.join("kept")).unwrap();
+    let report = scan_dependency_check(&w, nvd_key());
+    let Outcome::Failed { exit_code: None, stderr } = &outcome(&report, "dependency-check").outcome else {
+        panic!("{report:?}")
+    };
+    assert!(stderr.starts_with("could not write the NVD API key file") && stderr.contains(super::NVD_KEY_FILE), "{stderr}");
+    assert!(!stderr.contains(NVD_KEY), "{stderr}");
+    assert!(w.runs("dependency-check").is_empty(), "Dependency-Check started without its key");
 }

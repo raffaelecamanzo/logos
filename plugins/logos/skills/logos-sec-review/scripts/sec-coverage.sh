@@ -5,7 +5,8 @@
 #
 #   sec-coverage.sh --out FILE [--paths A,B] [--project DIR]
 #
-# Reads `logos security findings --json` and keeps only what the report needs: the
+# Reads `logos security findings --json` (`--scope all` where the logos has the
+# scope filter, so test code is listed too) and keeps only what the report needs: the
 # stored reports (scanner, version) and the categories no enabled scanner covers.
 # Prints the report's `SCANNED` and `COVERAGE` lines ready to paste; --paths names
 # the paths the report speaks of (default: the whole project). The findings
@@ -39,11 +40,12 @@ case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 
 rv_need_python
 rv_need_logos "$PROJECT"
+sr_scope_args
 
 FINDINGS="$OUT.findings.$$"
 trap 'rm -f "$FINDINGS"' EXIT
 RC=0
-(cd "$PROJECT" && "$LOGOS_BIN" security findings --json >"$FINDINGS" 2>/dev/null) || RC=$?
+(cd "$PROJECT" && "$LOGOS_BIN" security findings --json ${SR_SCOPE_ARGS[@]+"${SR_SCOPE_ARGS[@]}"} >"$FINDINGS" 2>/dev/null) || RC=$?
 [ "$RC" -eq 0 ] || sr_die 3 "\`logos security findings --json\` failed with exit $RC and no answer"
 
 sr_py coverage --findings "$FINDINGS" --out "$OUT" --paths "$PATHS"

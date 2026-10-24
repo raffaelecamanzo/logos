@@ -365,8 +365,12 @@ def cmd_proof(args):
             if key not in answers:
                 answers[key] = {}
             if e["path"] not in answers[key]:
+                # args.scope is "all" when the shell found a logos with the scope filter, "" on 1.20.x.
+                scope = ["--scope", args.scope] if args.scope else []
                 answers[key][e["path"]] = logos_json(
-                    args.logos, args.project, ["security", "findings", "--json", "--scanner", e["scanner"], "--path", e["path"]]
+                    args.logos,
+                    args.project,
+                    ["security", "findings", "--json", *scope, "--scanner", e["scanner"], "--path", e["path"]],
                 )
             answer = answers[key][e["path"]]
             if answer is None:
@@ -741,6 +745,7 @@ def build():
         entry={"action": "append", "required": True},
         logos=req,
         project=req,
+        scope={"default": "", "choices": ["", "all"]},
     )
     add("coverage", cmd_coverage, findings=req, out=req, paths={"default": ""})
     add("draft", cmd_draft, fingerprint=req, reason=req, expires={"default": ""})
