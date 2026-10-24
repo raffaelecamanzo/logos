@@ -18,6 +18,7 @@
 import type { ComponentType } from "react";
 
 import { mountedViews } from "../extensions/registry.ts";
+import type { BuiltInViewRoute } from "./routes.ts";
 
 import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { ConfigView } from "./config/ConfigView.tsx";
@@ -31,6 +32,7 @@ import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.ts
 import { CoverageView } from "./analytics/CoverageView.tsx";
 import { FilesView } from "./analytics/FilesView.tsx";
 import { WorkspaceConfigView } from "./workspace/WorkspaceConfigView.tsx";
+import { WorkspaceCoverageView } from "./workspace/WorkspaceCoverageView.tsx";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
 import { WorkspaceSecurityView } from "./workspace/WorkspaceSecurityView.tsx";
@@ -39,7 +41,8 @@ import { WorkspaceView } from "./workspace/WorkspaceView.tsx";
 /** A view is a plain, prop-less component mounted in the shell content slot. */
 export type ViewComponent = ComponentType;
 
-/** Path → React view. Mirrors the route paths in `nav.ts`. */
+/** Path → React view. Mirrors the route paths in `nav.ts`; `BUILT_IN_VIEW_ROUTES`
+ *  (`routes.ts`) lists the same keys and `satisfies` keeps the two in step. */
 export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // S-194: Dashboard lives at `/`; `/overview` issues a client-side redirect.
   "/": DashboardView,
@@ -51,7 +54,7 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // S-189 — the Architecture/Cycles and Rule-findings tabs.
   "/architecture": ArchitectureView,
   "/gaps": GapsView,
-  // S-670 — the Security page over GET /api/v1/security (FR-SC-09), in group B.
+  // S-670 — the Security page over GET /api/v1/security (FR-SC-09), in group A.
   "/security": SecurityView,
   // S-235 — the read-only Statistics view over GET /api/v1/statistics (CR-058),
   // sitting directly above Config in the last sidebar group.
@@ -87,9 +90,13 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // Registered unconditionally like the views above; its nav item is
   // workspace-mode-only (nav.ts).
   "/workspace-security": WorkspaceSecurityView,
+  // S-740 — the app-level Coverage roll-up (FR-CV-16) over `workspace/coverage`.
+  // Registered unconditionally like the views above. It registers the view only:
+  // its nav entry is S-788's (nav.ts), offered once a view owns this route.
+  "/workspace-coverage": WorkspaceCoverageView,
   // An extension's views are mounted from its registration when the server reports
   // it active, through `mountedViews()` below.
-};
+} satisfies Record<BuiltInViewRoute, ViewComponent>;
 
 /**
  * The React view for a client pathname, or `null` when the path owns no view.

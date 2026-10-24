@@ -27,7 +27,11 @@
 //!   [`SECURITY_INSTALL_POST_ROUTES`] that start and cancel a scanner install
 //!   (S-747, FR-SC-24), or one of the enumerated
 //!   [`SECURITY_TRIAGE_POST_ROUTES`] that add and remove a suppression (S-672,
-//!   FR-SC-12). Those `POST`s must additionally clear the
+//!   FR-SC-12), or one of the enumerated [`COVERAGE_RUN_POST_ROUTES`] that start
+//!   and cancel a coverage run (S-738, FR-CV-15), or one of the enumerated
+//!   [`COVERAGE_PREPARE_POST_ROUTES`] that install a missing coverage tool, or
+//!   add a missing coverage dev dependency, before one (S-750, FR-CV-17,
+//!   FR-CV-18). Those `POST`s must additionally clear the
 //!   same-origin + per-session intent (CSRF) guard ([`intent_guard`]) or they
 //!   are answered `403`.
 //! - **DNS-rebinding defense.** A request whose `Host` is not a loopback host
@@ -57,7 +61,7 @@ use axum::{
 };
 use logos_core::config::{ConfigError, PolicyFile};
 use logos_core::federation::{discover, Backing, BuildDependencies, ContractBridge, EngineRegistry};
-use logos_core::jobs::ScanJobs;
+use logos_core::jobs::AnalysisJobs;
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::observability::{in_surface, Surface};
@@ -107,10 +111,9 @@ pub const DEFAULT_PORT: u16 = 4983;
 const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
                    frame-ancestors 'none'; object-src 'none'";
 
-/// How long a stopping `serve` waits for its cancelled jobs to end (S-759).
-/// Their children are killed at once, so this bounds only each job's own
-/// cleanup, such as an install removing its partial download.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// How long a stopping `serve` waits for its cancelled jobs to end (S-759):
+/// the core's bound, which an MCP-only serve shares (S-738).
+const SHUTDOWN_GRACE: Duration = logos_core::jobs::SHUTDOWN_GRACE;
 
 // ── Surface orchestration (FR-UI-01) ───────────────────────────────────────
 
@@ -219,10 +222,12 @@ pub fn serve_surfaces_with_assets(
         .enable_all()
         .build()
         .context("building the serve I/O runtime")?;
-    // The web surface's detached jobs, held here so that they are stopped
-    // however the serve loops end.
-    let jobs = Arc::new(ScanJobs::new());
+    // The detached jobs of both surfaces, held here so that they are stopped
+    // however the serve loops end. One runner for both, so a coverage run
+    // started over MCP is the one the web UI follows and joins (S-738).
+    let jobs = Arc::new(AnalysisJobs::new());
     let web_jobs = Arc::clone(&jobs);
+    let mcp_jobs = Arc::clone(&jobs);
     // `signalled` is whether a stop signal, rather than a serve loop, ended
     // the serve.
     let (served, signalled) = runtime.block_on(async move {
@@ -231,7 +236,7 @@ pub fn serve_surfaces_with_assets(
             // keeps stdout; the web surface is stderr-only).
             (true, true) => tokio::select! {
                 r = serve_web(Arc::clone(&backing), port, host, assets, web_jobs) => (r, false),
-                r = mcp::serve_stdio_on(Arc::clone(&backing), host) => (r, false),
+                r = mcp::serve_stdio_on(Arc::clone(&backing), host, mcp_jobs) => (r, false),
                 () = stop_signal() => (Ok(()), true),
             },
             (false, true) => tokio::select! {
@@ -239,7 +244,7 @@ pub fn serve_surfaces_with_assets(
                 () = stop_signal() => (Ok(()), true),
             },
             (true, false) => tokio::select! {
-                r = mcp::serve_stdio_on(backing, host) => (r, false),
+                r = mcp::serve_stdio_on(backing, host, mcp_jobs) => (r, false),
                 () = stop_signal() => (Ok(()), true),
             },
             // clap guarantees at least one of --mcp/--ui; defend anyway.
@@ -288,7 +293,7 @@ async fn stop_signal() {
 /// — what a stopping serve does last ([S-759]).
 ///
 /// [S-759]: ../../../docs/planning/journal.md#s-759-stopping-serve-cancels-its-running-scan-and-install-jobs
-fn stop_jobs(jobs: &ScanJobs, grace: Duration) {
+fn stop_jobs(jobs: &AnalysisJobs, grace: Duration) {
     if !jobs.shutdown(grace) {
         tracing::warn!(
             target: "logos::web",
@@ -341,7 +346,7 @@ async fn serve_web(
     port: u16,
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
-    jobs: Arc<ScanJobs>,
+    jobs: Arc<AnalysisJobs>,
 ) -> Result<()> {
     let listener = bind(port)?;
     let addr = listener
@@ -383,7 +388,7 @@ fn serving_router(
     backing: Arc<Backing<Engine>>,
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
-    jobs: Arc<ScanJobs>,
+    jobs: Arc<AnalysisJobs>,
 ) -> Result<Router> {
     hosted_router_with_jobs(backing, IntentToken::generate(), host, assets, jobs)
 }
@@ -516,6 +521,36 @@ pub const SECURITY_INSTALL_POST_ROUTES: &[&str] = &["/api/v1/security/install", 
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 pub const SECURITY_TRIAGE_POST_ROUTES: &[&str] = &["/api/v1/security/suppress", "/api/v1/security/unsuppress"];
 
+/// The enumerated coverage-run `POST` routes (S-738, [FR-CV-15], [ADR-87] §5):
+/// start (or join) the member's `coverage-run` job on the core's runner
+/// ([`logos_core::jobs`]), and cancel it. A start builds the project and runs
+/// its tests under the project's execution consent, and a cancel kills them,
+/// so each carries the same-origin + per-session intent-token proof
+/// [`intent_guard`] enforces ([NFR-SE-06]): a cross-origin page can neither
+/// run the project's code nor stop a run. Kept in lock-step with
+/// [`method_guard`], which consults it.
+///
+/// [FR-CV-15]: ../../../docs/specs/requirements/FR-CV-15.md
+/// [ADR-87]: ../../../docs/specs/architecture/decisions/ADR-87.md
+/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
+pub const COVERAGE_RUN_POST_ROUTES: &[&str] = &["/api/v1/coverage/run", "/api/v1/coverage/run/cancel"];
+
+/// The enumerated prepared-coverage-run `POST` routes (S-750, [FR-CV-17],
+/// [FR-CV-18]): the Coverage page's **Install** — the missing managed coverage
+/// tools and `llvm-tools-preview` — and **Add dependency** — a tool's missing
+/// coverage dev dependency, by the project's own package manager — each then
+/// the run, as the member's `coverage-run` job. A start downloads and runs
+/// binaries, or runs a package manager that may run lifecycle scripts, under
+/// the user's consent, so each carries the same-origin + per-session
+/// intent-token proof [`intent_guard`] enforces ([NFR-SE-06]). The job is
+/// followed and cancelled on [`COVERAGE_RUN_POST_ROUTES`]' routes. Kept in
+/// lock-step with [`method_guard`], which consults it.
+///
+/// [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
+/// [FR-CV-18]: ../../../docs/specs/requirements/FR-CV-18.md
+/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
+pub const COVERAGE_PREPARE_POST_ROUTES: &[&str] = &["/api/v1/coverage/dependency", "/api/v1/coverage/install"];
+
 /// The request header carrying the per-session intent (CSRF) token on a mutating
 /// `POST` (NFR-SE-06, ADR-31). A **custom** header is deliberate: a cross-origin
 /// page cannot set it without a CORS preflight the surface never grants, so it is
@@ -605,12 +640,13 @@ pub(crate) struct WebState {
     /// [FR-UI-51]: ../../../docs/specs/requirements/FR-UI-51.md
     /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
     spa: Arc<dyn SpaAssets>,
-    /// The detached jobs this serve runs (S-673): the Security page's scan and
-    /// its scanner install (S-747), one of each kind per member at a time. A
+    /// The detached jobs this serve runs (S-673): the Security page's scan,
+    /// its scanner install (S-747) and the Coverage page's run (S-738), one of
+    /// each kind per member at a time. A
     /// stopping [`serve_surfaces`] cancels whatever still runs and waits for
     /// it to end (S-759); a router dropped elsewhere cancels it on drop
-    /// ([`logos_core::jobs::ScanJobs`]).
-    jobs: Arc<ScanJobs>,
+    /// ([`logos_core::jobs::AnalysisJobs`]).
+    jobs: Arc<AnalysisJobs>,
 }
 
 impl FromRef<WebState> for Arc<Engine> {
@@ -649,7 +685,7 @@ impl FromRef<WebState> for Arc<dyn SpaAssets> {
     }
 }
 
-impl FromRef<WebState> for Arc<ScanJobs> {
+impl FromRef<WebState> for Arc<AnalysisJobs> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.jobs)
     }
@@ -718,7 +754,7 @@ pub fn hosted_router_with_assets(
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
 ) -> Result<Router> {
-    hosted_router_with_jobs(backing, intent, host, assets, Arc::new(ScanJobs::new()))
+    hosted_router_with_jobs(backing, intent, host, assets, Arc::new(AnalysisJobs::new()))
 }
 
 /// [`hosted_router_with_assets`] running its detached jobs on `jobs`, which
@@ -731,7 +767,7 @@ fn hosted_router_with_jobs(
     intent: IntentToken,
     host: &ExtensionHost,
     assets: Arc<dyn SpaAssets>,
-    jobs: Arc<ScanJobs>,
+    jobs: Arc<AnalysisJobs>,
 ) -> Result<Router> {
     let engine = backing.default_engine()?;
     let mut state = make_state(engine, backing, intent, host);
@@ -785,7 +821,7 @@ fn make_state(
         intent,
         host: host.clone(),
         spa: Arc::new(EmbeddedSpa),
-        jobs: Arc::new(ScanJobs::new()),
+        jobs: Arc::new(AnalysisJobs::new()),
     }
 }
 
@@ -866,6 +902,18 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/gaps", get(api_v1::gaps))
         .route("/api/v1/files", get(api_v1::files))
         .route("/api/v1/coverage", get(api_v1::coverage))
+        // The Run coverage job (S-738, FR-CV-15): GET answers — or streams, to
+        // an `Accept: text/event-stream` client — the member's `coverage-run`
+        // job; the two POSTs start/join and cancel it. Listed in
+        // `COVERAGE_RUN_POST_ROUTES`, which `method_guard` consults.
+        .route("/api/v1/coverage/run", get(api_v1::coverage_run_job).post(api_v1::coverage_run_start))
+        .route("/api/v1/coverage/run/cancel", post(api_v1::coverage_run_cancel))
+        // Install and Add dependency (S-750, FR-CV-17, FR-CV-18): each starts
+        // the member's `coverage-run` job with its install or addition first,
+        // followed and cancelled on the run's routes. Listed in
+        // `COVERAGE_PREPARE_POST_ROUTES`, which `method_guard` consults.
+        .route("/api/v1/coverage/install", post(api_v1::coverage_install_start))
+        .route("/api/v1/coverage/dependency", post(api_v1::coverage_dependency_start))
         // The Security page (S-670, FR-SC-09): scanner matrix, findings in graph
         // context, both OWASP editions and the `[security]` gate band in one GET.
         .route("/api/v1/security", get(api_v1::security))
@@ -967,6 +1015,14 @@ fn build_router(state: WebState) -> Router {
         // denominators — the `app`-scoped twin of `/api/v1/security`. A GET over
         // the member fan-out; single-root answers the family's `404`.
         .route("/api/v1/workspace/security", get(api_v1::workspace_security))
+        // The Workspace Dashboard's Security widget (S-790, [FR-UI-36]): the same
+        // per-member states and counts from stored state only — no version probe.
+        .route("/api/v1/workspace/security/summary", get(api_v1::workspace_security_summary))
+        // ── The workspace coverage roll-up (S-740, [FR-CV-16]): every member's
+        // coverage state, fresh files and tool outcomes, read as each member's own
+        // Coverage page reads it — no version probe, no run. A GET over the member
+        // fan-out; single-root answers the family's `404`.
+        .route("/api/v1/workspace/coverage", get(api_v1::workspace_coverage))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof
@@ -1053,13 +1109,16 @@ async fn host_guard(req: Request, next: Next) -> Response {
 /// **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`], the
 /// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check) or the
 /// [`SECURITY_SCAN_POST_ROUTES`] (S-673), the [`SECURITY_INSTALL_POST_ROUTES`]
-/// (S-747) or the [`SECURITY_TRIAGE_POST_ROUTES`] (S-672), or a `POST` route an
+/// (S-747), the [`SECURITY_TRIAGE_POST_ROUTES`] (S-672) or the
+/// [`COVERAGE_RUN_POST_ROUTES`] (S-738), the [`COVERAGE_PREPARE_POST_ROUTES`]
+/// (S-750), or a `POST` route an
 /// active extension mounted ([`ExtensionPosts`], FR-DS-04) — the `chat`
 /// extension's two turns and their per-thread writes (S-643) and the `wiki`
 /// extension's generation trigger (S-644) among them. Every other method — and a
 /// `POST` to any other path — is answered `405` before any handler runs, so
 /// relaxing the read-only posture stays bounded to exactly the config-write/apply
-/// seam, the verify route, the security scan, install and triage routes, and the
+/// seam, the verify route, the security scan, install and triage routes, the
+/// coverage run's routes and its install and dependency routes, and the
 /// extensions' declared writes (NFR-SE-06).
 /// The admitted `POST`s are gated again by [`intent_guard`] for same-origin +
 /// intent-token defense.
@@ -1089,14 +1148,18 @@ async fn method_guard(
 /// [`ExtensionPosts`])? The config-write/apply seam ([`CONFIG_POST_ROUTES`]),
 /// the deep-`verify` route ([`VERIFY_POST_ROUTE`]), the security scan's start
 /// and cancel ([`SECURITY_SCAN_POST_ROUTES`]), the scanner install's start and
-/// cancel ([`SECURITY_INSTALL_POST_ROUTES`]) and the triage writes
-/// ([`SECURITY_TRIAGE_POST_ROUTES`]), in every build.
+/// cancel ([`SECURITY_INSTALL_POST_ROUTES`]), the triage writes
+/// ([`SECURITY_TRIAGE_POST_ROUTES`]), the coverage run's start and cancel
+/// ([`COVERAGE_RUN_POST_ROUTES`]) and its install and dependency starts
+/// ([`COVERAGE_PREPARE_POST_ROUTES`]), in every build.
 fn post_route_admitted(path: &str) -> bool {
     CONFIG_POST_ROUTES.contains(&path)
         || path == VERIFY_POST_ROUTE
         || SECURITY_SCAN_POST_ROUTES.contains(&path)
         || SECURITY_INSTALL_POST_ROUTES.contains(&path)
         || SECURITY_TRIAGE_POST_ROUTES.contains(&path)
+        || COVERAGE_RUN_POST_ROUTES.contains(&path)
+        || COVERAGE_PREPARE_POST_ROUTES.contains(&path)
 }
 
 /// The `POST` routes the active extensions mounted ([FR-DS-04], [ADR-74]) — their
@@ -2218,6 +2281,37 @@ mod tests {
             "the Overview handler still reads the standalone verdict"
         );
         assert_eq!(snapshot_reads(fn_body(&code, "async fn overview(")), Vec::<&str>::new());
+
+        // The Security widget's data is the stored summary, read through
+        // `OverviewSecurity::read` — never the page's `security_page()` or a
+        // `security_status()` readout, which probe scanner versions: a
+        // Dashboard load is a read a cross-site page can trigger (S-789).
+        let widget = fn_body(&code, "fn read(e: &Engine) -> Self {");
+        assert!(widget.contains("security_summary("), "the widget reads the stored summary");
+        for probing in ["security_page(", "security_status(", "security_scan("] {
+            assert!(!widget.contains(probing), "the widget must not call {probing}");
+        }
+        assert!(
+            fn_body(&code, "fn read_overview(").contains("OverviewSecurity::read("),
+            "the overview composes the widget through its one reader"
+        );
+    }
+
+    /// Neither web read of coverage runs a tool's version command (S-737,
+    /// ADR-38): the Dashboard reads the evidence alone, and the Coverage page
+    /// reads the runner state with no probe — a page load is a read a
+    /// cross-site page can trigger, and the serve path starts no tool process.
+    #[test]
+    fn the_coverage_reads_probe_no_tool() {
+        let code = production_code(include_str!("api_v1.rs"));
+        let overview = fn_body(&code, "fn read_overview(");
+        assert!(overview.contains("coverage_evidence("), "the Dashboard reads the evidence alone");
+        let page = fn_body(&code, "async fn coverage(");
+        assert!(page.contains("coverage_status_probing(logos_core::coverage::Probes::Never)"), "the page reads unprobed");
+        for body in [overview, page] {
+            assert!(!body.contains("coverage_status("), "a web read must not call the probing coverage_status()");
+            assert!(!body.contains("Probes::Every"), "a web read must not probe");
+        }
     }
 
     /// Every route mounted with `post(` is admitted by [`method_guard`]'s own
@@ -2295,11 +2389,13 @@ mod tests {
             .chain(SECURITY_SCAN_POST_ROUTES)
             .chain(SECURITY_INSTALL_POST_ROUTES)
             .chain(SECURITY_TRIAGE_POST_ROUTES)
+            .chain(COVERAGE_RUN_POST_ROUTES)
+            .chain(COVERAGE_PREPARE_POST_ROUTES)
         {
             assert!(
                 posts.contains(listed),
-                "`{listed}` is in CONFIG_POST_ROUTES, SECURITY_SCAN_POST_ROUTES, SECURITY_INSTALL_POST_ROUTES or \
-                 SECURITY_TRIAGE_POST_ROUTES but no `post(` \
+                "`{listed}` is in CONFIG_POST_ROUTES, SECURITY_SCAN_POST_ROUTES, SECURITY_INSTALL_POST_ROUTES, \
+                 SECURITY_TRIAGE_POST_ROUTES, COVERAGE_RUN_POST_ROUTES or COVERAGE_PREPARE_POST_ROUTES but no `post(` \
                  route mounts it — the allowance admits a POST that nothing handles"
             );
         }
@@ -2459,7 +2555,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let engine = Arc::new(Engine::start(tmp.path()).expect("engine"));
         let backing = Arc::new(Backing::Single(engine));
-        let router = serving_router(backing, &ExtensionHost::new(), Arc::new(Injected), Arc::new(ScanJobs::new()))
+        let router = serving_router(backing, &ExtensionHost::new(), Arc::new(Injected), Arc::new(AnalysisJobs::new()))
             .expect("the serving router builds");
         let response = router
             .oneshot(
@@ -2474,6 +2570,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("a body");
         assert!(String::from_utf8_lossy(&body).contains("private-bundle-marker-7f3a"), "the injected shell is served");
+    }
+
+    /// The serve loop's router runs its jobs on the runner it was handed — the
+    /// one `serve_surfaces_with_assets` shares with the MCP surface (S-738) —
+    /// so a run started on that runner is the one the web surface answers.
+    #[tokio::test]
+    async fn the_serve_loops_router_runs_its_jobs_on_the_runner_it_is_handed() {
+        use logos_core::jobs::JobKind;
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(Engine::start(tmp.path()).expect("engine"));
+        let root = engine.root().to_path_buf();
+        let shared = Arc::new(AnalysisJobs::new());
+        let started = shared.start(JobKind::CoverageRun, &root, |_| Ok(serde_json::json!("ran elsewhere"))).expect("a job");
+        let router = serving_router(Arc::new(Backing::Single(engine)), &ExtensionHost::new(), Arc::new(EmbeddedSpa), Arc::clone(&shared))
+            .expect("the serving router builds");
+        let response = router
+            .oneshot(
+                Request::get("/api/v1/coverage/run")
+                    .header(header::HOST, "127.0.0.1:4983")
+                    .body(axum::body::Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("a body");
+        let answer: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        assert_eq!(answer["job"]["id"], serde_json::json!(started.job.id), "the web surface answers the shared runner's job: {answer}");
     }
 
     /// The extensions' `POST` allow-list admits a request only when the router

@@ -373,8 +373,8 @@ describe("FilesView (S-188, FR-UI-11)", () => {
   describe("findings column (S-671, FR-SC-14)", () => {
     const scanned = (over: Partial<FilesModel["hotspots"]> = {}): FilesModel => {
       const m = model(over);
-      m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0 };
-      m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2 };
+      m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 0 };
+      m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2, test: 0 };
       return m;
     };
 
@@ -393,7 +393,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     it("reads a scoped-only project's file at the same count as its Security page and roll-up (S-760)", async () => {
       stubFetch(() => {
         const m = model();
-        m.hotspots.files[0].findings = { count: SCOPED_ONLY_COUNTED.total, highest: "medium", stale: 0 };
+        m.hotspots.files[0].findings = { count: SCOPED_ONLY_COUNTED.total, highest: "medium", stale: 0, test: 0 };
         return m;
       });
       render(<FilesView />);
@@ -422,6 +422,45 @@ describe("FilesView (S-188, FR-UI-11)", () => {
       expect(link).toHaveTextContent("2 stale");
       expect(link).toHaveTextContent("0");
       expect(link).not.toHaveTextContent("high");
+    });
+
+    it("shows +N test beside a file's production count, linking to its test-code findings (S-796)", async () => {
+      stubFetch(() => {
+        const m = scanned();
+        m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 2 };
+        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 0, test: 4 };
+        return m;
+      });
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const hot = within(within(table).getByText("src/hot.rs").closest("tr")!);
+      expect(hot.getByRole("link", { name: /^3/ })).toHaveTextContent("3 high");
+      expect(hot.getByRole("link", { name: "+2 test" })).toHaveAttribute("href", "/security?path=src%2Fhot.rs&scope=test");
+      // A file with test-code findings only reads 0 and +N test: the 0 is the production count.
+      const cold = within(within(table).getByText("src/cold.rs").closest("tr")!);
+      expect(cold.getByRole("link", { name: "0" })).toHaveAttribute("href", "/security?path=src%2Fcold.rs");
+      expect(cold.getByRole("link", { name: "+4 test" })).toHaveAttribute("href", "/security?path=src%2Fcold.rs&scope=test");
+    });
+
+    it("shows +N test beside a stale label too, each in its own place (S-796)", async () => {
+      stubFetch(() => {
+        const m = scanned();
+        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2, test: 5 };
+        return m;
+      });
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const cold = within(within(table).getByText("src/cold.rs").closest("tr")!);
+      expect(cold.getByRole("link", { name: /2 stale/ })).toHaveAttribute("href", "/security?path=src%2Fcold.rs");
+      expect(cold.getByRole("link", { name: "+5 test" })).toHaveAttribute("href", "/security?path=src%2Fcold.rs&scope=test");
+    });
+
+    it("says nothing of test code for a file with none, and leaves it out of the count (S-796)", async () => {
+      stubFetch(() => scanned());
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      expect(within(table).queryByText(/\+\d+ test/)).toBeNull();
+      expect(filesFindingsNote).toContain("+N test");
     });
 
     it("sorts by the column — a file with no cell below a scanned zero, the most severe last when ascending", async () => {

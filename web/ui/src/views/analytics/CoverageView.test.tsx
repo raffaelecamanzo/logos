@@ -1,11 +1,34 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CoverageModel } from "../../api/types.ts";
-import { COVERAGE_VIEW_ABSENCE, perFileCoverage, untestedHotspots } from "../../copy/coverageView.copy.ts";
+import type { CoverageJob, CoverageModel, CoverageToolStatus } from "../../api/types.ts";
+import {
+  COVERAGE_CONSENT_TEXT,
+  COVERAGE_OFFER_TEXT,
+  COVERAGE_PREPARE_CONSENT_TEXT,
+  COVERAGE_RUN_TEXT,
+  COVERAGE_VIEW_ABSENCE,
+  coverageTools,
+  perFileCoverage,
+  untestedHotspots,
+} from "../../copy/coverageView.copy.ts";
 import { expectWidgetCopy } from "../../copy/expectWidgetCopy.ts";
+import { installEventSources } from "../../test/eventSource.ts";
 import { expectOneWidgetStack, widgetTitle } from "../../test/widgetStack.ts";
 import { CoverageView } from "./CoverageView.tsx";
+import {
+  CANCELLED_END,
+  COMPLETED_END,
+  CONSENT_FIRST,
+  DEPENDENCY_FIRST,
+  EVENTS,
+  GO_CANCELLED,
+  PREPARABLE_TOOLS,
+  RUNNING,
+  TOOLS,
+  TOOLS_AFTER,
+} from "./fixtures/coverageRun.ts";
 
 const STATUS = { indexed: true, file_count: 9, node_count: 99, edge_count: 80, db_path: ".logos/graph.db", db_size_bytes: 12288, last_full_index_at: "1719600000", last_sync_at: null, graph_revision: 7, refs_total: 120, refs_resolved: 118, refs_unresolved: 2, resolution_coverage: 0.983, total_line_count: null, source_line_count: null, test_line_count: null, freshness: "fresh", warnings: [] };
 
@@ -204,4 +227,335 @@ it("states the read-model's notice alone when nothing was ranked: a degraded his
   // Not a git repository: re-running `logos hotspots` returns the same degraded
   // answer, so the absence names no command (R3; FR-UI-39).
   expect(widget.querySelector("[data-widget-absence]")?.textContent).toBe("not a git repository: churn unavailable");
+});
+
+// ── S-739 (FR-CV-15, FR-CV-13, FR-UI-05 as modified): Run coverage ───────────
+
+/** `model` as the page reads it: the status carries the coverage runner. */
+function withRunner(model: CoverageModel, tools: CoverageToolStatus[] = TOOLS, consented: string[] = []): CoverageModel {
+  return { ...model, coverage: { ...model.coverage, runner: { consent: { consented, pending: [], command_changed: false }, tools } } };
+}
+
+interface Call {
+  method: string;
+  url: string;
+  body: string | null;
+  intent: string | null;
+}
+
+interface Reply {
+  status?: number;
+  body: unknown;
+}
+
+/** Stubs fetch: `GET /api/v1/coverage` answers `pages` in turn (the last one
+ *  again; every read after the first waits for `hold` when one is given),
+ *  `GET /api/v1/coverage/run` answers `{ job: current }`, and each POST answers
+ *  the next of `posts`. Every call is recorded. */
+function stubRun({
+  pages,
+  current = null,
+  posts = [],
+  hold,
+}: {
+  pages: CoverageModel[];
+  current?: CoverageJob | null;
+  posts?: Reply[];
+  hold?: Promise<void>;
+}): Call[] {
+  const calls: Call[] = [];
+  let page = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit = {}) => {
+      const call: Call = {
+        method: init.method ?? "GET",
+        url,
+        body: typeof init.body === "string" ? init.body : null,
+        intent: new Headers(init.headers).get("x-logos-intent"),
+      };
+      calls.push(call);
+      let reply: Reply;
+      if (call.method === "POST") reply = posts.shift() ?? { status: 500, body: { error: "no reply staged" } };
+      else if (url.startsWith("/api/v1/coverage/run")) reply = { body: { job: current } };
+      else {
+        const read = page++;
+        reply = { body: pages[Math.min(read, pages.length - 1)] };
+        if (read > 0) await hold;
+      }
+      const status = reply.status ?? 200;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: () => Promise.resolve(structuredClone(reply.body)),
+        text: () => Promise.resolve(JSON.stringify(reply.body)),
+      } as Response;
+    }),
+  );
+  return calls;
+}
+
+const pageReads = (calls: Call[]) => calls.filter((c) => c.method === "GET" && c.url === "/api/v1/coverage").length;
+const progressList = () =>
+  within(screen.getByRole("list", { name: "Coverage run progress" }))
+    .getAllByRole("listitem")
+    .map((li) => li.textContent?.replace(/ \d+ s$/, ""));
+const liveLine = (container: HTMLElement) => container.querySelector('[aria-live="polite"]')?.textContent ?? "";
+const toolsWidget = () => screen.getByRole("heading", { name: "Coverage tools" }).closest("[data-widget]") as HTMLElement;
+
+describe("Run coverage on the Coverage page (S-739)", () => {
+  it("leads with the Coverage tools widget, which explains itself", async () => {
+    stubRun({ pages: [withRunner(populated())] });
+    const { container } = render(<CoverageView />);
+    await screen.findByRole("heading", { name: "Coverage tools" });
+    const widgets = expectOneWidgetStack(container);
+    expect(widgets.map(widgetTitle)).toEqual(["Coverage tools", "Untested hotspots", "Per-file coverage"]);
+    expectWidgetCopy(widgets[0], coverageTools);
+  });
+
+  it("asks the execution consent on first use, then starts with exactly what it showed and streams each tool", async () => {
+    const sources = installEventSources();
+    const calls = stubRun({
+      pages: [withRunner(populated())],
+      posts: [{ status: 409, body: CONSENT_FIRST }, { body: { joined: false, job: { ...RUNNING, events: [] } } }],
+    });
+    const { container } = render(<CoverageView />);
+    await userEvent.click(await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.run }));
+
+    // The dialog names the tools that will run and the command as shown; nothing started.
+    const dialog = await screen.findByRole("dialog", { name: COVERAGE_CONSENT_TEXT.title });
+    expect(within(dialog).getByRole("list", { name: COVERAGE_CONSENT_TEXT.tools })).toHaveTextContent("vitestgo");
+    expect(within(dialog).getByLabelText(COVERAGE_CONSENT_TEXT.command).textContent).toBe("make cov\\u{202e}");
+    expect(sources).toHaveLength(0);
+
+    await userEvent.click(within(dialog).getByRole("button", { name: COVERAGE_CONSENT_TEXT.accept }));
+    const posts = calls.filter((c) => c.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(posts.every((p) => p.url === "/api/v1/coverage/run" && p.intent === "test-intent-token")).toBe(true);
+    expect(JSON.parse(posts[0].body ?? "")).toEqual({ consent: [] });
+    // The accepted start echoes the exact command text, never the escaped display.
+    expect(JSON.parse(posts[1].body ?? "")).toEqual({ consent: ["vitest", "go", "custom"], refresh_cmd: "make cov‮" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    await waitFor(() => expect(sources).toHaveLength(1));
+    expect(progressList()).toEqual(["vitest queued", "go queued", "custom queued"]);
+    expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.cancel })).toBeInTheDocument();
+    act(() => {
+      for (const step of EVENTS.slice(0, 3)) sources[0].emit("step", step);
+    });
+    expect(progressList()).toEqual(["vitest ran — tests failed", "go queued", "custom queued"]);
+    expect(liveLine(container)).toContain("vitest: ran — tests failed.");
+    act(() => sources[0].emit("step", EVENTS[7]));
+    expect(progressList()).toEqual(["vitest ran — tests failed", "go running", "custom queued"]);
+  });
+
+  it("starts nothing and records nothing when the dialog is cancelled", async () => {
+    const sources = installEventSources();
+    const calls = stubRun({ pages: [withRunner(populated())], posts: [{ status: 409, body: CONSENT_FIRST }] });
+    render(<CoverageView />);
+    await userEvent.click(await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.run }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: COVERAGE_CONSENT_TEXT.decline }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+    expect(sources).toHaveLength(0);
+  });
+
+  it("follows a run started in another tab from the moment the page opens", async () => {
+    const sources = installEventSources();
+    stubRun({ pages: [withRunner(populated())], current: RUNNING });
+    render(<CoverageView />);
+    await waitFor(() => expect(sources).toHaveLength(1));
+    expect(sources[0].url).toBe("/api/v1/coverage/run");
+    expect(progressList()).toEqual(["vitest ran — tests failed", "maven not installed", "go running", "custom queued"]);
+    expect(within(toolsWidget()).queryByRole("button", { name: COVERAGE_RUN_TEXT.run })).toBeNull();
+  });
+
+  it("joins the run going on a second click from a tab that had not seen it", async () => {
+    const sources = installEventSources();
+    stubRun({ pages: [withRunner(populated())], posts: [{ body: { joined: true, job: RUNNING } }] });
+    const { container } = render(<CoverageView />);
+    await userEvent.click(await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.run }));
+    await waitFor(() => expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.joined));
+    expect(sources).toHaveLength(1);
+    expect(progressList()).toContain("go running");
+  });
+
+  it("cancels the run: the list reads cancelled, the live line says so, and the page reloads", async () => {
+    const sources = installEventSources();
+    const calls = stubRun({ pages: [withRunner(populated())], current: RUNNING, posts: [{ body: { job: RUNNING } }] });
+    const { container } = render(<CoverageView />);
+    await waitFor(() => expect(sources).toHaveLength(1));
+    await userEvent.click(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.cancel }));
+    const cancel = calls.find((c) => c.method === "POST");
+    expect(cancel).toMatchObject({ url: "/api/v1/coverage/run/cancel", intent: "test-intent-token" });
+    act(() => {
+      sources[0].emit("step", GO_CANCELLED);
+      sources[0].emit("end", { job: CANCELLED_END });
+    });
+    await waitFor(() =>
+      expect(progressList()).toEqual(["vitest ran — tests failed", "maven not installed", "go cancelled", "custom cancelled"]),
+    );
+    expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.cancelled(["vitest"]));
+    expect(sources[0].closed).toBe(true);
+    await waitFor(() => expect(pageReads(calls)).toBe(2));
+    expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.run })).toBeInTheDocument();
+  });
+
+  it("refreshes its figures when the run ends, and reads each tool's new state in words", async () => {
+    const sources = installEventSources();
+    const before = withRunner(empty());
+    const after = withRunner(populated(), TOOLS_AFTER, ["vitest", "go", "custom"]);
+    const calls = stubRun({ pages: [before, after], current: RUNNING });
+    const { container } = render(<CoverageView />);
+    await waitFor(() => expect(sources).toHaveLength(1));
+    expect(screen.getAllByText(/No coverage ingested/)).toHaveLength(2);
+    act(() => {
+      for (const step of EVENTS.slice(8)) sources[0].emit("step", step);
+      sources[0].emit("end", { job: COMPLETED_END });
+    });
+    await screen.findByText("2/3 files fresh", { exact: false });
+    expect(pageReads(calls)).toBe(2);
+    expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.completed(2, 1, 1));
+    const table = within(toolsWidget()).getByRole("table", { name: "Coverage tools" });
+    const stateOf = (tool: string) => within(table).getByText(tool, { selector: "td" }).closest("tr")?.querySelectorAll("td")[2].textContent;
+    expect(stateOf("vitest")).toBe("ran — tests failed");
+    expect(stateOf("maven")).toBe("not installed");
+    expect(stateOf("custom")).toMatch(/^failed/);
+    // A not-installed tool and a failing suite never render as a percentage.
+    for (const tool of ["vitest", "maven"]) expect(stateOf(tool)).not.toMatch(/%/);
+  });
+
+  it("shows the run ended only once the reload has answered, never over the figures read before it (HF-6)", async () => {
+    const sources = installEventSources();
+    let release = () => undefined as void;
+    const hold = new Promise<void>((done) => {
+      release = done;
+    });
+    const before = withRunner(empty());
+    const after = withRunner(populated(), TOOLS_AFTER, ["vitest", "go", "custom"]);
+    const calls = stubRun({ pages: [before, after], current: RUNNING, hold });
+    const { container } = render(<CoverageView />);
+    await waitFor(() => expect(sources).toHaveLength(1));
+    act(() => {
+      for (const step of EVENTS.slice(8)) sources[0].emit("step", step);
+      sources[0].emit("end", { job: COMPLETED_END });
+    });
+    await waitFor(() => expect(pageReads(calls)).toBe(2));
+    await new Promise((done) => setTimeout(done, 50));
+    // The second read is asked for and unanswered: the run still reads running,
+    // not finished over the page's pre-run figures.
+    expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.cancel })).toBeInTheDocument();
+    expect(liveLine(container)).not.toContain(COVERAGE_RUN_TEXT.completed(2, 1, 1));
+    expect(screen.getAllByText(/No coverage ingested/)).toHaveLength(2);
+    act(() => release());
+    await screen.findByText("2/3 files fresh", { exact: false });
+    await waitFor(() => expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.completed(2, 1, 1)));
+    expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.run })).toBeInTheDocument();
+    expect(pageReads(calls)).toBe(2);
+  });
+
+  it("offers Run coverage in the empty state, beside the ingest command", async () => {
+    installEventSources();
+    stubRun({ pages: [withRunner(empty())], posts: [{ status: 409, body: CONSENT_FIRST }] });
+    render(<CoverageView />);
+    const callout = (await screen.findByText(COVERAGE_RUN_TEXT.emptyRun, { exact: false })).closest("section") as HTMLElement;
+    expect(callout).toHaveTextContent("no data ingested");
+    const absences = [...document.querySelectorAll("[data-widget-absence]")].map((a) => a.textContent);
+    expect(absences).toEqual([COVERAGE_VIEW_ABSENCE.notIngested, COVERAGE_VIEW_ABSENCE.notIngested]);
+    await userEvent.click(within(callout).getByRole("button", { name: COVERAGE_RUN_TEXT.run }));
+    expect(await screen.findByRole("dialog", { name: COVERAGE_CONSENT_TEXT.title })).toBeInTheDocument();
+  });
+
+  it("says which tools would apply when none is installed, and offers no Run", async () => {
+    const missing = TOOLS.map((t) => (t.state === "not_applicable" ? t : { ...t, state: "not_installed" as const }));
+    stubRun({ pages: [withRunner(empty(), missing)] });
+    render(<CoverageView />);
+    const sentence = await screen.findByText(COVERAGE_RUN_TEXT.noneInstalled(["vitest", "maven", "go", "custom"], false));
+    expect(sentence).toHaveTextContent("Logos cannot set these up for you: install them yourself.");
+    expect(within(sentence.closest("section") as HTMLElement).queryByRole("button")).toBeNull();
+    expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.run })).toBeDisabled();
+  });
+
+  it("states a refused start with the server's reason", async () => {
+    installEventSources();
+    stubRun({ pages: [withRunner(populated())], posts: [{ status: 403, body: { error: "the request carries no valid intent token" } }] });
+    render(<CoverageView />);
+    await userEvent.click(await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.run }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      COVERAGE_RUN_TEXT.requestFailed("the request carries no valid intent token"),
+    );
+  });
+});
+
+describe("a refused request's alert (review)", () => {
+  it("is cleared by the next start that is answered", async () => {
+    installEventSources();
+    stubRun({
+      pages: [withRunner(populated())],
+      posts: [{ status: 403, body: { error: "the request carries no valid intent token" } }, { body: { joined: false, job: RUNNING } }],
+    });
+    render(<CoverageView />);
+    const run = await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.run });
+    await userEvent.click(run);
+    await screen.findByRole("alert");
+    await userEvent.click(run);
+    await waitFor(() => expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.cancel })).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("is cleared by the next cancel that is answered", async () => {
+    installEventSources();
+    stubRun({
+      pages: [withRunner(populated())],
+      current: RUNNING,
+      posts: [{ status: 500, body: { error: "the runner is gone" } }, { body: { job: RUNNING } }],
+    });
+    render(<CoverageView />);
+    const cancel = await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.cancel });
+    await userEvent.click(cancel);
+    expect(await screen.findByRole("alert")).toHaveTextContent("the runner is gone");
+    await userEvent.click(cancel);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+});
+
+async function findToolsWidget(): Promise<HTMLElement> {
+  return (await screen.findByRole("heading", { name: "Coverage tools" })).closest("[data-widget]") as HTMLElement;
+}
+
+describe("Install and Add dependency on the Coverage page (S-750, FR-CV-17, FR-CV-18)", () => {
+  it("shows a vitest consent with the exact command and files before anything changes, then starts the job on Accept", async () => {
+    installEventSources();
+    const calls = stubRun({
+      pages: [withRunner(empty(), PREPARABLE_TOOLS)],
+      posts: [{ status: 409, body: DEPENDENCY_FIRST }, { body: { joined: false, job: RUNNING } }],
+    });
+    render(<CoverageView />);
+    await userEvent.click(await screen.findByRole("button", { name: COVERAGE_OFFER_TEXT.addDependencyLabel("vitest") }));
+    const dialog = await screen.findByRole("dialog", { name: COVERAGE_PREPARE_CONSENT_TEXT.dependencyTitle });
+    expect(within(dialog).getByLabelText(COVERAGE_PREPARE_CONSENT_TEXT.command).textContent).toBe("pnpm add -D @vitest/coverage-v8@3");
+    expect(dialog).toHaveTextContent("It changes package.json, pnpm-lock.yaml.");
+    // Before the answer the one POST asked and carried no acceptance.
+    const posts = () => calls.filter((c) => c.method === "POST");
+    expect(posts().map((c) => [c.url, JSON.parse(c.body ?? "")])).toEqual([["/api/v1/coverage/dependency", { consent: [], tool: "vitest" }]]);
+    expect(posts()[0].intent).toBe("test-intent-token");
+    await userEvent.click(within(dialog).getByRole("button", { name: COVERAGE_PREPARE_CONSENT_TEXT.acceptDependency }));
+    await waitFor(() => expect(posts()).toHaveLength(2));
+    expect(JSON.parse(posts()[1].body ?? "")).toEqual({
+      consent: ["vitest"],
+      install: [],
+      dependency: ["pnpm add -D @vitest/coverage-v8@3"],
+      tool: "vitest",
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("says the widget can set some tools up when none is installed and Logos offers to", async () => {
+    stubRun({ pages: [withRunner(empty(), PREPARABLE_TOOLS)] });
+    render(<CoverageView />);
+    const sentence = await screen.findByText(COVERAGE_RUN_TEXT.noneInstalled(["cargo-llvm-cov", "vitest", "maven"], true));
+    expect(sentence).toHaveTextContent("Install or Add dependency in the Coverage tools widget");
+    expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_OFFER_TEXT.installLabel("cargo-llvm-cov") })).toBeEnabled();
+  });
 });

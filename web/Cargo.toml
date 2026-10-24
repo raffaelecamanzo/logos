@@ -56,6 +56,10 @@ axum       = "0.7"
 # `serve --ui` stop on SIGINT/SIGTERM and cancel its jobs first (S-759).
 tokio      = { workspace = true, features = ["rt", "net", "time", "macros", "sync", "signal"] }
 tracing    = { workspace = true }
+# The coverage job's event stream (S-738): `stream::unfold` builds the stream
+# axum's `Sse` sends. Already in this crate's tree through axum, with the same
+# features; no I/O of its own (NFR-SE-01).
+futures-util = { version = "0.3", default-features = false }
 # OS-entropy source for the per-session intent (CSRF) token on the mutating
 # config-write/apply endpoints (NFR-SE-06, ADR-31). A thin FFI shim over the
 # platform RNG (getrandom/BCryptGenRandom/arc4random) — no socket/HTTP surface
@@ -94,3 +98,6 @@ rusqlite       = { workspace = true }
 # build only; the library build stays default-features = false. Test-only: never
 # enters the shipped no-network tree (NFR-SE-01).
 logos-core     = { path = "../logos-core", features = ["lang-rust"] }
+
+[lints]
+workspace = true

@@ -99,10 +99,12 @@
 //!
 //! # The denominator
 //!
-//! **2026-10-17 — 71 registered tools enumerated, 4 classified, 67 excluded
+//! **2026-10-22 — 72 registered tools enumerated, 4 classified, 68 excluded
 //! with a reason**, pinned by
 //! [`the_census_reports_its_denominator`], which prints the three counts. It was
-//! 70/4/66 on 2026-10-16; S-677 registered the branch delta (`review`),
+//! 71/4/67 on 2026-10-17; S-737 registered `coverage run` (`coverage_run`),
+//! unclassified and excluded under the engine-internal reason, as
+//! `coverage_refresh` is. It was 70/4/66 on 2026-10-16; S-677 registered the branch delta (`review`),
 //! unclassified and excluded under the quality-gate reason. It was 69/4/65
 //! earlier that day; S-505 registered the "where to start" list
 //! (`improvements`), unclassified and excluded under the quality-gate reason. It
@@ -137,7 +139,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 /// The date the figures in this module's header were taken.
-const AUDITED_ON: &str = "2026-10-17";
+const AUDITED_ON: &str = "2026-10-22";
 
 /// The registry file, and the production tree the classification is read
 /// from, both relative to `logos-core` (`env!("CARGO_MANIFEST_DIR")`).
@@ -257,6 +259,7 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("CoverageIngest", REASON_ENGINE_INTERNAL),
     ("CoverageIngestAuto", REASON_ENGINE_INTERNAL),
     ("CoverageRefresh", REASON_ENGINE_INTERNAL),
+    ("CoverageRun", REASON_ENGINE_INTERNAL),
     // ── Engine-internal: security scan and ingestion ────────────────────────
     ("SecurityIngest", REASON_ENGINE_INTERNAL),
     ("SecurityIngestAuto", REASON_ENGINE_INTERNAL),
@@ -657,8 +660,8 @@ fn the_census_reports_its_denominator() {
     );
     assert_eq!(
         (enumerated, classified_count, excluded_count),
-        (71, 4, 67),
-        "traced-tool classification census as of {AUDITED_ON}: expected 71 enumerated tools, \
-         4 classified via traced_with, 67 excluded with a reason"
+        (72, 4, 68),
+        "traced-tool classification census as of {AUDITED_ON}: expected 72 enumerated tools, \
+         4 classified via traced_with, 68 excluded with a reason"
     );
 }

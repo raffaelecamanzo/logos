@@ -19,7 +19,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 /// A git repo with identity configured, plus a PATH dir holding the stub
-/// `logos` that appends `sync <args>` lines to a log beside itself.
+/// `logos` that records each invocation's exact argv in its own file under
+/// `calls/` beside itself.
 struct HookedRepo {
     root: TempDir,
     bin_dir: TempDir,
@@ -35,12 +36,21 @@ impl HookedRepo {
         repo.git(&["config", "user.email", "test@example.invalid"]);
         repo.git(&["config", "user.name", "Logos Test"]);
 
-        // The recording stub: every invocation logs its argv tail.
-        let log = repo.bin_dir.path().join("logos-calls.log");
+        // The recording stub: every invocation writes its argv — NUL-terminated
+        // per argument, so a tab, a quote or a non-ASCII byte arrives exactly as
+        // the hook passed it — to its own numbered file under `calls/`.
+        let calls = repo.bin_dir.path().join("calls");
+        fs::create_dir(&calls).expect("calls dir");
         let stub = repo.bin_dir.path().join("logos");
         fs::write(
             &stub,
-            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+            format!(
+                "#!/bin/sh\n\
+                 dir={dir}\n\
+                 n=$(ls \"$dir\" | wc -l | tr -d ' ')\n\
+                 printf '%s\\0' \"$@\" > \"$dir/call-$(printf %04d \"$n\")\"\n",
+                dir = calls.display()
+            ),
         )
         .expect("write stub");
         #[cfg(unix)]
@@ -84,13 +94,73 @@ impl HookedRepo {
         fs::write(path, contents).expect("write");
     }
 
-    /// The `logos` invocations the hooks made so far, one per line.
-    fn calls(&self) -> Vec<String> {
-        match fs::read_to_string(self.bin_dir.path().join("logos-calls.log")) {
-            Ok(text) => text.lines().map(str::to_owned).collect(),
-            Err(_) => Vec::new(),
-        }
+    /// The `logos` invocations the hooks made so far, each as its exact argv
+    /// (bytes, in call order).
+    fn argvs(&self) -> Vec<Vec<Vec<u8>>> {
+        let dir = self.bin_dir.path().join("calls");
+        let mut files: Vec<_> = fs::read_dir(dir)
+            .expect("calls dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        files.sort();
+        files
+            .into_iter()
+            .map(|file| {
+                let raw = fs::read(file).expect("call record");
+                raw.split_inclusive(|byte| *byte == 0)
+                    .map(|arg| arg[..arg.len() - 1].to_vec())
+                    .collect()
+            })
+            .collect()
     }
+
+    /// The `logos` invocations the hooks made so far, one lossy line each —
+    /// enough for the assertions that do not care about exact bytes.
+    fn calls(&self) -> Vec<String> {
+        self.argvs()
+            .iter()
+            .map(|argv| {
+                argv.iter()
+                    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    /// Run git in the repo and return its stdout bytes — what git itself says,
+    /// for the tests that compare the hook's argv against it.
+    fn git_out(&self, args: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(self.root.path())
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}");
+        output.stdout
+    }
+
+    /// The paths of the `sync` invocations recorded after the first `before`
+    /// calls, flattened in order: each argv minus `sync --quiet` and the `--`
+    /// that ends option parsing, which [`Self::argvs`] callers assert themselves.
+    fn synced_since(&self, before: usize) -> Vec<Vec<u8>> {
+        self.argvs()
+            .into_iter()
+            .skip(before)
+            .flat_map(|argv| {
+                assert_eq!(argv[..2], [b"sync".to_vec(), b"--quiet".to_vec()]);
+                argv[2..].iter().filter(|arg| *arg != b"--").cloned().collect::<Vec<_>>()
+            })
+            .collect()
+    }
+}
+
+/// `git`'s NUL-separated path list, split into the paths themselves.
+fn nul_split(raw: &[u8]) -> Vec<Vec<u8>> {
+    raw.split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
 }
 
 /// FR-SY-05 acceptance (commit): committing a file triggers
@@ -99,7 +169,7 @@ impl HookedRepo {
 fn a_commit_triggers_a_targeted_sync() {
     let repo = HookedRepo::new();
     repo.write("src/lib.rs", "pub fn hello() {}\n");
-    // A path with a space exercises the NUL-delimited xargs handoff.
+    // A path with a space exercises the NUL-delimited handoff.
     repo.write("src/with space.rs", "pub fn spaced() {}\n");
     repo.git(&["add", "."]);
     repo.git(&["commit", "--quiet", "-m", "add lib"]);
@@ -183,6 +253,293 @@ fn a_merge_triggers_a_sync_of_the_incoming_files() {
         merge_calls.iter().any(|c| c.contains("src/merged_in.rs")),
         "{calls:?}"
     );
+}
+
+/// A path git records with a quote, a tab or non-ASCII bytes reaches `logos
+/// sync` exactly as git stores it. Without `-z` git C-quotes all three
+/// (`"caf\303\251.rs"`, `"a\"b.rs"`, `"tab\there.rs"`), so the sync is handed a
+/// path that names no file and the symbol never enters the index.
+#[test]
+fn a_commit_hands_over_each_path_exactly_as_git_records_it() {
+    let repo = HookedRepo::new();
+    for name in ["café.rs", "a\"b.rs", "tab\there.rs"] {
+        repo.write(name, "pub fn f() {}\n");
+    }
+    repo.git(&["add", "."]);
+    let before = repo.calls().len();
+    repo.git(&["commit", "--quiet", "-m", "awkward names"]);
+
+    let recorded = nul_split(&repo.git_out(&[
+        "diff-tree", "-r", "--root", "--name-only", "--no-renames", "-z", "--no-commit-id", "HEAD",
+    ]));
+    // The installed hooks sit in the same commit (`git add .`); git's list is
+    // the oracle, and the three awkward names are in it.
+    for name in ["a\"b.rs", "tab\there.rs"] {
+        assert!(recorded.contains(&name.as_bytes().to_vec()), "{recorded:?}");
+    }
+    for argv in &repo.argvs()[before..] {
+        assert_eq!(
+            argv[..3],
+            [b"sync".to_vec(), b"--quiet".to_vec(), b"--".to_vec()],
+            "paths follow `--`, so a leading `-` is never read as an option"
+        );
+    }
+    assert!(recorded.contains(&"caf\u{e9}.rs".as_bytes().to_vec()), "{recorded:?}");
+    assert_eq!(
+        repo.synced_since(before),
+        recorded,
+        "the stub must receive git's own bytes, one argument per path"
+    );
+}
+
+/// Sort a synced-path list for comparison with the expected set.
+fn sorted(paths: &[&str]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = paths.iter().map(|p| p.as_bytes().to_vec()).collect();
+    out.sort();
+    out
+}
+
+/// A repo whose `feature` branch adds `café.rs` and renames `old.rs` to
+/// `new.rs`, left checked out on `feature`.
+fn repo_with_a_feature_branch_that_renames() -> HookedRepo {
+    let repo = HookedRepo::new();
+    repo.write("old.rs", "pub fn renamed_thing() { /* enough body to detect a rename */ }\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.git(&["mv", "old.rs", "new.rs"]);
+    repo.write("café.rs", "pub fn cafe() {}\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "rename and add"]);
+    repo
+}
+
+/// A branch checkout syncs a non-ASCII path — git C-quotes it without `-z`.
+#[test]
+fn a_checkout_syncs_a_non_ascii_path() {
+    let repo = repo_with_a_feature_branch_that_renames();
+    let before = repo.calls().len();
+    repo.git(&["checkout", "--quiet", "main"]);
+
+    assert!(
+        repo.synced_since(before).contains(&"caf\u{e9}.rs".as_bytes().to_vec()),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+/// A merge syncs a non-ASCII path it brought in.
+#[test]
+fn a_merge_syncs_a_non_ascii_path() {
+    let repo = repo_with_a_feature_branch_that_renames();
+    repo.git(&["checkout", "--quiet", "main"]);
+    let before = repo.calls().len();
+    repo.git(&["merge", "--quiet", "--no-edit", "feature"]);
+
+    assert!(
+        repo.synced_since(before).contains(&"caf\u{e9}.rs".as_bytes().to_vec()),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+/// A rename on a checkout syncs **both** sides: `git diff --name-only` collapses
+/// a rename to its new path by default, so the old path's nodes would never be
+/// removed from the index.
+#[test]
+fn a_checkout_syncs_both_sides_of_a_rename() {
+    let repo = repo_with_a_feature_branch_that_renames();
+    let before = repo.calls().len();
+    repo.git(&["checkout", "--quiet", "main"]);
+
+    let mut synced = repo.synced_since(before);
+    synced.sort();
+    assert_eq!(synced, sorted(&["caf\u{e9}.rs", "new.rs", "old.rs"]), "{:?}", repo.calls());
+}
+
+/// The same for what a merge brought in.
+#[test]
+fn a_merge_syncs_both_sides_of_a_rename() {
+    let repo = repo_with_a_feature_branch_that_renames();
+    repo.git(&["checkout", "--quiet", "main"]);
+    let before = repo.calls().len();
+    repo.git(&["merge", "--quiet", "--no-edit", "feature"]);
+
+    let mut synced = repo.synced_since(before);
+    synced.sort();
+    assert_eq!(synced, sorted(&["caf\u{e9}.rs", "new.rs", "old.rs"]), "{:?}", repo.calls());
+}
+
+/// A commit that renames syncs both paths too — the post-commit command never
+/// detected renames, and `--no-renames` keeps it that way on purpose.
+#[test]
+fn a_renaming_commit_syncs_both_sides() {
+    let repo = HookedRepo::new();
+    repo.write("old.rs", "pub fn renamed_thing() { /* enough body to detect a rename */ }\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+    repo.git(&["mv", "old.rs", "new.rs"]);
+
+    let before = repo.calls().len();
+    repo.git(&["commit", "--quiet", "-m", "rename"]);
+
+    let mut synced = repo.synced_since(before);
+    synced.sort();
+    assert_eq!(synced, sorted(&["new.rs", "old.rs"]));
+}
+
+/// An empty change set runs no sync: an empty commit, a checkout that lands on
+/// a different commit with the same tree, and a checkout to the commit already
+/// checked out.
+#[test]
+fn an_empty_change_set_runs_no_sync() {
+    let repo = HookedRepo::new();
+    repo.write("src/lib.rs", "pub fn base() {}\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+
+    let before = repo.calls().len();
+    repo.git(&["commit", "--quiet", "--allow-empty", "-m", "empty"]);
+    repo.git(&["checkout", "--quiet", "-b", "same-tree"]);
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.git(&["checkout", "--quiet", "HEAD~1"]);
+
+    assert_eq!(
+        repo.calls().len(),
+        before,
+        "an empty set must not call `logos sync`: {:?}",
+        repo.calls()
+    );
+}
+
+/// The empty-set guard lives in the hook's own shell. A `xargs` that — like
+/// GNU's without `-r` — runs its command once even on empty input must still
+/// produce no sync, so the guard cannot be borrowed from the `xargs` flavour on
+/// the machine.
+#[test]
+fn the_empty_set_guard_does_not_rely_on_xargs() {
+    let repo = HookedRepo::new();
+    repo.write("src/lib.rs", "pub fn base() {}\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+
+    // A `xargs` that always runs its command, exactly once, and reads nothing.
+    let fake_xargs = repo.bin_dir.path().join("xargs");
+    fs::write(&fake_xargs, "#!/bin/sh\ncat >/dev/null\nshift\nexec \"$@\"\n").expect("xargs stub");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_xargs, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let before = repo.calls().len();
+    repo.git(&["commit", "--quiet", "--allow-empty", "-m", "empty"]);
+
+    assert_eq!(
+        repo.calls().len(),
+        before,
+        "the guard must live in the hook: {:?}",
+        repo.calls()
+    );
+}
+
+/// A hook whose listing fails stays silent and exits 0, and syncs nothing:
+/// `post-merge` run with no `ORIG_HEAD` makes git print a fatal ambiguity error,
+/// which must never reach the terminal of the user whose git operation fired it.
+#[test]
+fn a_failing_listing_is_silent_and_syncs_nothing() {
+    let repo = HookedRepo::new();
+    repo.write("src/lib.rs", "pub fn base() {}\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+    let before = repo.calls().len();
+
+    // A fresh repository has no ORIG_HEAD; run the installed hook directly.
+    let path = format!(
+        "{}:{}",
+        repo.bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new("sh")
+        .arg(repo.root.path().join(".logos/hooks/post-merge"))
+        .env("PATH", path)
+        .current_dir(repo.root.path())
+        .output()
+        .expect("hook runs");
+
+    assert!(output.status.success(), "a freshness hook always exits 0");
+    assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(repo.calls().len(), before, "{:?}", repo.calls());
+}
+
+/// A merge of a diverged branch — a real merge commit, not a fast-forward —
+/// syncs the incoming non-ASCII path and both sides of the rename.
+#[test]
+fn a_true_merge_commit_syncs_what_it_brought_in() {
+    let repo = repo_with_a_feature_branch_that_renames();
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.write("main_only.rs", "pub fn main_only() {}\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "main moves on"]);
+
+    let before = repo.calls().len();
+    repo.git(&["merge", "--quiet", "--no-edit", "--no-ff", "feature"]);
+
+    let mut synced = repo.synced_since(before);
+    synced.sort();
+    assert_eq!(
+        synced,
+        sorted(&["caf\u{e9}.rs", "new.rs", "old.rs"]),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+/// A name beginning with `-` and a name holding a newline reach the sync as
+/// single, intact arguments. (That `--` precedes them is pinned by the exact-argv
+/// assertions elsewhere: the recording stub does not parse options, so this test
+/// alone cannot tell the `--` is missing.)
+#[test]
+fn a_dash_name_and_a_newline_name_arrive_intact() {
+    let repo = HookedRepo::new();
+    repo.write("-dash.rs", "pub fn dash() {}\n");
+    repo.write("new\nline.rs", "pub fn newline() {}\n");
+    repo.git(&["add", "--", "-dash.rs", "new\nline.rs"]);
+    let before = repo.calls().len();
+    repo.git(&["commit", "--quiet", "-m", "dash and newline"]);
+
+    let mut synced = repo.synced_since(before);
+    synced.sort();
+    assert_eq!(synced, sorted(&["-dash.rs", "new\nline.rs"]));
+}
+
+/// A change set larger than one `xargs` batch is synced in full, every batch
+/// carrying `sync --quiet --`. The stub `xargs` forces two paths per batch.
+#[test]
+fn a_change_set_split_across_batches_is_synced_in_full() {
+    let repo = HookedRepo::new();
+    let batching_xargs = repo.bin_dir.path().join("xargs");
+    fs::write(&batching_xargs, "#!/bin/sh\nexec /usr/bin/xargs -n 2 \"$@\"\n").expect("xargs stub");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&batching_xargs, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    for n in 0..5 {
+        repo.write(&format!("f{n}.rs"), "pub fn f() {}\n");
+    }
+    repo.git(&["add", "--", "f0.rs", "f1.rs", "f2.rs", "f3.rs", "f4.rs"]);
+    let before = repo.calls().len();
+    repo.git(&["commit", "--quiet", "-m", "five files"]);
+
+    let argvs = repo.argvs();
+    let batches = &argvs[before..];
+    assert!(batches.len() >= 3, "five paths at two per batch: {:?}", repo.calls());
+    let mut synced = repo.synced_since(before);
+    synced.sort();
+    assert_eq!(synced, sorted(&["f0.rs", "f1.rs", "f2.rs", "f3.rs", "f4.rs"]));
+    for argv in batches {
+        assert_eq!(argv[..3], [b"sync".to_vec(), b"--quiet".to_vec(), b"--".to_vec()]);
+    }
 }
 
 /// FR-SY-06 posture: with `logos` NOT on PATH the hooks are silent no-ops —

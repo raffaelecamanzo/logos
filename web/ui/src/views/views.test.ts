@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import { CoverageView } from "./analytics/CoverageView.tsx";
 import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { SecurityView } from "./security/SecurityView.tsx";
@@ -8,10 +9,12 @@ import { clearExtensions, registerExtensionUi, setActiveExtensions } from "../ex
 import { extensionsInfo, STUB_UI, StubView, stubInfo } from "../test/extensions.tsx";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
+import { WorkspaceCoverageView } from "./workspace/WorkspaceCoverageView.tsx";
 import { WorkspaceSecurityView } from "./workspace/WorkspaceSecurityView.tsx";
 import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.tsx";
 import { NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { viewForPath, VIEW_REGISTRY } from "./index.ts";
+import { BUILT_IN_VIEW_ROUTES, hasViewFor } from "./routes.ts";
 
 afterEach(clearExtensions);
 
@@ -38,10 +41,10 @@ describe("VIEW_REGISTRY", () => {
     expect(VIEW_REGISTRY["/statistics"]).toBe(StatisticsView);
   });
 
-  it("registers the member-scoped Security view at /security, in group B (S-670, FR-SC-09)", () => {
+  it("registers the member-scoped Security view at /security, in group A (S-670, FR-SC-09, S-788)", () => {
     expect(VIEW_REGISTRY["/security"]).toBe(SecurityView);
     expect(viewForPath("/security")).toBe(SecurityView);
-    expect(NAV_ITEMS.find((i) => i.path === "/security")).toMatchObject({ id: "security", group: "B", scope: "member" });
+    expect(NAV_ITEMS.find((i) => i.path === "/security")).toMatchObject({ id: "security", group: "A", scope: "member" });
   });
 
   it("does NOT register /overview (that route is retired)", () => {
@@ -95,6 +98,9 @@ describe("the app-level workspace views (S-428 FR-UI-36, S-429 FR-UI-37)", () =>
    *  S-429's `/workspace-statistics` escaped both of them in silence — a hand-kept
    *  roster in a test is a roster that stops covering the surface the moment the
    *  surface grows. Derived, it cannot. */
+  //
+  // Every one: S-788's `workspace-coverage` entry resolves since S-740 registered
+  // its view.
   const appRoutes = WORKSPACE_NAV_ITEMS.filter((i) => i.scope === "app").map((i) => i.path);
 
   it("has app-scoped routes to check at all", () => {
@@ -133,9 +139,47 @@ describe("the app-level workspace views (S-428 FR-UI-36, S-429 FR-UI-37)", () =>
     // S-674: the app-level Security roll-up, never the member-scoped Security page.
     expect(VIEW_REGISTRY["/workspace-security"]).toBe(WorkspaceSecurityView);
     expect(VIEW_REGISTRY["/workspace-security"]).not.toBe(SecurityView);
+    // S-740: the app-level Coverage roll-up, never the member-scoped Coverage page.
+    expect(VIEW_REGISTRY["/workspace-coverage"]).toBe(WorkspaceCoverageView);
+    expect(VIEW_REGISTRY["/workspace-coverage"]).not.toBe(CoverageView);
     // …and none of them is the member-scoped Statistics view, which stays at
     // `/statistics` (FR-UI-37: the member-scoped view is unchanged).
     expect(VIEW_REGISTRY["/statistics"]).toBe(StatisticsView);
     expect(VIEW_REGISTRY["/workspace-statistics"]).not.toBe(StatisticsView);
+  });
+});
+
+describe("the component-free route list (S-788)", () => {
+  it("names exactly the routes VIEW_REGISTRY maps — `tsc -b` guards it, this guards a stripped type", () => {
+    expect([...BUILT_IN_VIEW_ROUTES].sort()).toEqual(Object.keys(VIEW_REGISTRY).sort());
+  });
+
+  it("answers as viewForPath does, near misses included", () => {
+    for (const path of [
+      "/",
+      "/health",
+      "/health/sub/page",
+      "/workspace",
+      "/workspace-security",
+      "/workspace-coverage",
+      "/workspace-coveragex",
+      "/healthz",
+      "/overview",
+      "/stub",
+      "/stub/page",
+    ]) {
+      expect({ path, owned: hasViewFor(path) }).toEqual({ path, owned: viewForPath(path) !== null });
+    }
+    expect(hasViewFor("/workspace-coverage")).toBe(true);
+    expect(hasViewFor("/workspace-coveragex")).toBe(false);
+    expect(hasViewFor("/healthz")).toBe(false);
+  });
+
+  it("counts a mounted extension's route as owned, exactly or as a sub-route", () => {
+    registerExtensionUi(STUB_UI);
+    setActiveExtensions(extensionsInfo(stubInfo()));
+    expect(hasViewFor("/stub")).toBe(true);
+    expect(hasViewFor("/stub/page")).toBe(true);
+    expect(hasViewFor("/stubby")).toBe(false);
   });
 });

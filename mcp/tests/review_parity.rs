@@ -189,3 +189,56 @@ async fn cli_and_mcp_return_the_same_branch_projection() {
     client.cancel().await.expect("client cancel");
     server.await.expect("server task");
 }
+
+/// `review` with `headroom: true` ([FR-GV-29], S-798) answers what
+/// `logos review --headroom --json` does, through `Engine::review_headroom`,
+/// and refuses the parameters that only mean something beside it.
+///
+/// [FR-GV-29]: ../../docs/specs/requirements/FR-GV-29.md
+#[tokio::test]
+async fn cli_and_mcp_return_the_same_headroom() {
+    let tmp = branches_fixture();
+    let root = tmp.path();
+    let subjects = ["src/engine.rs".to_string(), "src/missing.rs".to_string()];
+    let cli = {
+        let engine = Engine::start(root).expect("engine");
+        serde_json::to_string(&engine.review_headroom(Some("main"), &subjects, None).expect("headroom runs")).unwrap()
+    };
+
+    let (client, server) = boot(root).await;
+    let arguments = json!({"base": "main", "headroom": true, "subjects": ["src/engine.rs", "src/missing.rs"]});
+    let first = mcp_call(&client, arguments.clone()).await;
+    assert_eq!(mcp_call(&client, arguments).await, first, "the MCP payload is byte-stable");
+    assert_eq!(first, cli, "the same bytes on both surfaces");
+    let mcp: Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(mcp["measured"], true, "{mcp}");
+    assert_eq!(mcp["rules"][0]["rule"], "max_fan_out", "{mcp}");
+    assert_eq!(mcp["rules"][0]["subjects"][0]["headroom"], 1, "{mcp}");
+    assert_eq!(mcp["unresolved"][0]["entry"], "src/missing.rs", "{mcp}");
+
+    let near = json!({"base": "main", "headroom": true, "near": 0});
+    let cli_near = {
+        let engine = Engine::start(root).expect("engine");
+        serde_json::to_string(&engine.review_headroom(Some("main"), &[], Some(0)).unwrap()).unwrap()
+    };
+    assert_eq!(mcp_call(&client, near).await, cli_near, "`near` reaches the engine");
+
+    let missing: Value =
+        serde_json::from_str(&mcp_call(&client, json!({"base": "no-such-ref", "headroom": true})).await).unwrap();
+    assert_eq!(missing["measured"], false, "{missing}");
+
+    for refused in [
+        json!({"base": "main", "headroom": true, "branches": ["b1"]}),
+        json!({"base": "main", "subjects": ["src/engine.rs"]}),
+        json!({"base": "main", "near": 1}),
+    ] {
+        let params = CallToolRequestParams::new("review").with_arguments(refused.as_object().cloned().unwrap());
+        assert!(client.call_tool(params).await.is_err(), "{refused} is refused as invalid parameters");
+    }
+    let off = json!({"base": "main", "headroom": false});
+    let delta: Value = serde_json::from_str(&mcp_call(&client, off).await).unwrap();
+    assert!(delta.get("rules").is_none() && delta.get("offenders").is_some(), "headroom: false is the delta: {delta}");
+
+    client.cancel().await.expect("client cancel");
+    server.await.expect("server task");
+}

@@ -589,15 +589,28 @@ exclude = ["**/package-lock.json", "**/Cargo.lock", "**/yarn.lock", "**/pnpm-loc
 # filter as an explicit allow-list exception. Default: [] (conventions alone).
 artifact_glob = ["coverage/custom-lcov.info"]
 # Format for the auto-ingest / refresh path: "auto" (default, content-detected),
-# "lcov", or "cobertura". The manual `coverage ingest --format` flag is unaffected.
+# "lcov", "cobertura", "jacoco", or "gocover". The manual `coverage ingest --format` flag is unaffected.
 format = "auto"
 # Optional command `logos coverage refresh` runs (via `sh -c`, cwd = project root)
-# to regenerate the artifact before ingesting it. This is the ONLY place Logos
-# ever spawns a coverage subprocess, and only on explicit `coverage refresh` —
-# NEVER on the serve/watcher path (ADR-38/NFR-SE-01). Omit it and `coverage
-# refresh` errors loudly rather than guessing a command.
+# to regenerate the artifact before ingesting it; `coverage run` runs it last, as the
+# `custom` entry. It runs only on an explicit `coverage refresh` or `coverage run`,
+# NEVER on the serve/watcher path (ADR-38/NFR-SE-01), and only under the project's
+# coverage execution consent, which pins this exact text: the first run, and the first
+# after the text changes, needs `--consent`. Omit it and `coverage refresh` errors
+# loudly rather than guessing a command.
 refresh_cmd = "cargo llvm-cov --lcov --output-path target/coverage/lcov.info"
+# Which registry tools may run: a repository can only switch one off. What a tool runs
+# as (binary path, extra arguments, timeout) is set in the user-level config.
+tools = { gradle = false, jest = false }
 ```
+
+The `refresh_cmd` runs through a shell and is committed with the repository, so
+a run asks for your consent before it starts it and again whenever its text
+changes: [coverage.md](coverage.md#the-execution-consent) says what that consent
+covers and what it does not. The seven built-in coverage tools, the user-level
+overrides and the whole of `coverage run` are in [coverage.md](coverage.md);
+[Coverage tools](#coverage-tools--which-may-run-and-as-what) below has the
+configuration reference.
 
 ### Minified JavaScript and vendored copies
 
@@ -870,12 +883,15 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   `suppressions`, with `suppressed`, the number of findings it suppresses now.
 - **Orphans.** An entry that matches no stored finding is listed as `orphaned`
   (the finding was fixed, its scanner has not run here, or its glob matches
-  nothing). An orphaned entry
-  naming a Gitleaks finding's earlier, per-commit fingerprint also carries
-  `should_name`: the fingerprint that finding has now. The file is never
-  rewritten.
+  nothing). An entry
+  naming a fingerprint a finding had before it was re-keyed (a Gitleaks finding's
+  earlier, per-commit one, or an OSV-Scanner one from before history.db
+  migration 10) still suppresses it and carries `should_name`: the fingerprint
+  that finding has now. The file is never rewritten.
 - **Visible, never silent.** A suppressed finding is still returned by
-  `security findings`, with its reason; `--suppression active` hides it.
+  `security findings`, with its reason, under its code scope (one in test code
+  with `--scope test` or `--scope all`, else counted in `hidden_by_scope`);
+  `--suppression active` hides it.
 - **Written from the Security page.** Its Suppress… and Unsuppress write the
   file in one canonical spelling: one `[[ignore]]` table per entry, the
   fingerprint entries sorted by fingerprint and then the path entries sorted by
@@ -932,6 +948,20 @@ installed, without falling back to `PATH`. An empty `extra_args` entry, a
 scanner name that is not registered, and an `enabled` key (switching scanners is
 the repository's call) all fail with exit 2.
 
+**`NVD_API_KEY` — Dependency-Check's NVD API key.** Not a config key: an
+environment variable, read from the process that runs the scan — your shell for
+`logos security scan`, the environment `logos serve` was started with for MCP and
+the web (export it before starting `serve`). No repository file, `.env` or config
+key can supply it, and an empty value sets none. Logos hands it to
+Dependency-Check in a properties file of its own,
+`.logos/security/nvd-api-key.properties` (mode 0600, passed as `--propertyfile`,
+deleted when the run ends), so the key is never on the command line. The
+alternative is your own `extra_args = ["--nvdApiKey", "<key>"]` (or
+`--propertyfile`/`-P` with a file of yours) under
+`[security_scan.dependency-check]` here; when they carry one, Logos adds no file.
+`security status` says `nvd_api_key: set` or `not_set` on the Dependency-Check
+row, never the key ([security.md](security.md#dependency-checks-nvd-api-key)).
+
 **How a scanner is found and run.** Without a `path` override, Logos takes the
 first match on `PATH`, using only the entries that are absolute and outside the
 project: an empty or relative entry (`.`, `bin`) and an absolute one inside the
@@ -944,7 +974,8 @@ installed in the user-level tools directory (`$LOGOS_DATA_HOME`, else
 directory inside the project is ignored. A scanner is started directly
 with its argument list, never through a shell, with the project root as its
 working directory, and its stdout and stderr are captured up to a bound (64 KiB
-and 16 KiB). On Linux and macOS it runs in a process group of its own, and when
+and 16 KiB): past it, each stream keeps its beginning and its end, with one line naming the
+bytes left out between them. On Linux and macOS it runs in a process group of its own, and when
 it exits the group is killed, so nothing it started outlives the run. Each
 command line is fixed in Logos:
 
@@ -953,12 +984,12 @@ command line is fixed in Logos:
 | Semgrep | `semgrep` | `--version` | `scan --config p/default --sarif --output OUT --metrics off --disable-version-check --quiet --exclude .logos` *extra* *unignored* |
 | Trivy | `trivy` | `--version` | `fs --scanners vuln,secret,misconfig --format sarif --output OUT --skip-dirs .logos` *ignored* `--config .logos/security/empty-config.yaml` *extra* `.` |
 | Gitleaks | `gitleaks` | `version` | `detect --redact --no-banner --exit-code 0 --report-format sarif --report-path OUT` *extra* `--source .` |
-| OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output OUT` *extra* `--recursive` *unignored* |
+| OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output-file OUT` *extra* `--recursive` *unignored* |
 | Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos`(`,`*ignored*) *extra* `.` |
 | gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *ignored* *extra* `./...` (with `GOTOOLCHAIN=local`) |
 | Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet --skip-path .logos` *ignored* *extra* `--directory .` |
 | CodeQL | `codeql` | `version --format=terse` | per language: `database create DB --language=L --build-mode=none --source-root=. --overwrite`, then `database analyze DB --format=sarif-latest --output OUT` *extra*, with `OUT` in `.logos/security/codeql/`; Logos then merges every language's runs into one `codeql.sarif`, so a project's languages are one snapshot |
-| Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/**` *ignored* `--disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` *extra* |
+| Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/**` *ignored* `--disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` [`--propertyfile .logos/security/nvd-api-key.properties`, with `NVD_API_KEY` set and no key in *extra*] *extra* |
 
 *ignored* is the top-most directories the project's own ignore files exclude
 (`.gitignore` and `.ignore` at any depth, and `.git/info/exclude`), each passed
@@ -990,7 +1021,8 @@ and how each scan states what it did with ignored directories.
 The commands were written against Semgrep 1.85, Trivy 0.74, Gitleaks 8.18,
 OSV-Scanner 1.9, Bandit 1.7.10, gosec 2.21, Checkov 3.2, CodeQL 2.19 and
 Dependency-Check 10.0; the Dependency-Check Logos installs, 13.0.0, still takes
-every flag above. A release whose flags have since changed fails, and the
+every flag above; OSV-Scanner's output flag is the 2.x spelling, so a 1.9.x copy
+fails until it is replaced. A release whose flags have since changed fails, and the
 scanner's own error is reported. Logos treats a Dependency-Check on `PATH` below
 13.0.0 as below its minimum, as it does any scanner below the version it pins
 as tested: older releases broke on changes to the NVD data they read. Detecting a scanner runs only its version
@@ -1059,6 +1091,75 @@ so each checkout (and each worktree) has its own consent, and no repository can
 claim another's. To withdraw consent, delete the project's table from the file,
 or the file. `logos security status` reports the consent state: the scanners
 consented to, and the ones the next scan will ask for.
+
+### Coverage tools — which may run, and as what
+
+Logos has a built-in registry of seven coverage tools. Each is selected by a
+marker file at the project root and has a fixed command line:
+
+| Tool | Selected by | Found at | Report |
+|---|---|---|---|
+| `cargo-llvm-cov` | `Cargo.toml` | `PATH` at 0.6.0 or later, else the copy `logos coverage install` manages; a `PATH` copy below 0.6.0 runs only while there is no managed copy ([Installation](installation.md#coverage-runs-on-a-rust-project)) | Cobertura, `.logos/coverage/rust.xml` |
+| `vitest` | `package.json` declaring `vitest` | `node_modules/.bin` only, with a coverage provider (`@vitest/coverage-v8` or `@vitest/coverage-istanbul`) | Cobertura, `.logos/coverage/vitest/` |
+| `jest` | `package.json` declaring `jest` | `node_modules/.bin` only | Cobertura, `.logos/coverage/jest/` |
+| `pytest-cov` | `pyproject.toml`, `setup.cfg` or `pytest.ini` | the project's `.venv`, else `PATH`; pytest-cov must be installed beside it | Cobertura, `.logos/coverage/python.xml` |
+| `maven` | `pom.xml` | `./mvnw`, else `mvn` on `PATH` | JaCoCo XML, each module's `target/site/jacoco/jacoco.xml` |
+| `gradle` | `build.gradle` or `build.gradle.kts` | `./gradlew`, else `gradle` on `PATH` | JaCoCo XML, each project's `build/reports/jacoco/test/jacocoTestReport.xml` |
+| `go` | `go.mod` | `PATH` | Go coverprofile, `.logos/coverage/go.out` |
+
+Each tool's full command line and tested version are in
+[coverage.md](coverage.md#the-registry-seven-tools).
+
+Maven gets the JaCoCo plugin (0.8.13) on its command line. Gradle gets it from an
+init script Logos writes to `.logos/coverage/jacoco-init.gradle` and passes with
+`--init-script`, and it runs with `--no-daemon`. Neither build file is edited.
+A `package.json` declares a tool only in its `dependencies` or `devDependencies`.
+
+**The repository only switches tools on or off.** In `.logos/config.toml`:
+
+```toml
+[coverage_ingest]
+tools = { gradle = false, jest = false }
+```
+
+Every tool is enabled unless it is switched off here. A value other than `true`
+or `false`, such as a path, a command or a list of flags, fails the load with
+exit 2. So does any other key, or a tool name that is not registered. Nothing
+has started by then.
+
+**What a tool runs as is set at user level.** In the [user-level
+config](#user-level-config--settings-no-repository-can-choose):
+
+```toml
+[coverage_ingest.tools.maven]
+# Run this binary instead of the one the registry finds. Must be absolute.
+path = "/opt/maven/bin/mvn"
+# Extra arguments, one argument per entry (no shell splitting), inserted at a
+# fixed place in the tool's command line.
+extra_args = ["-Pcoverage"]
+# Seconds before the tool's whole process group is killed. Default: 1800.
+timeout_secs = 3600
+```
+
+A `path` override is the only copy used while it is set. If it is not an
+executable file the tool reports *not installed*. A relative `path`, an empty
+`extra_args` entry, a `timeout_secs` of 0 and a name that is not registered all
+fail with exit 2.
+
+**What the user-level directory also keeps for coverage.** Beside `security-consent.toml`, in
+the same directory, these records are written by Logos and never by a repository (the download
+consent for the managed `cargo-llvm-cov` is in `security-install-consent.toml`, beside the scanners'):
+
+| File | Records | Keyed by |
+|---|---|---|
+| `coverage-consent.toml` | The execution consent: the coverage tools you allowed to build the project and run its tests, and the SHA-256 of the `refresh_cmd` text you saw | The project's canonical root path |
+| `coverage-dependency-consent.toml` | The exact package-manager commands you allowed Logos to run to add a missing coverage dev dependency | The project's canonical root path |
+| `toolchain-consent.toml` | The Rust toolchain component (`llvm-tools-preview`) you allowed Logos to add with your own `rustup` | Your user, for every project |
+
+To withdraw a consent, delete the project's table from its file, or the file (for
+`toolchain-consent.toml`, which has no project table, the file);
+`logos coverage status` reports the execution consent. What each consent covers, and
+what it does not, is in [coverage.md](coverage.md#the-execution-consent).
 
 ## Documentation — indexing markdown
 
@@ -1628,6 +1729,12 @@ It never changes a verdict or an exit code. The snapshots are the ones
 as a decline. A rise ends the run, and so does a snapshot the dimension did
 not apply on, an empty graph, or a change of metric semantics or thresholds,
 since values across those do not measure the same thing.
+
+`gate --json` and `session-end` also carry the warning as a structured `trend`
+list (`dimension`, `values` oldest first, `window`). The Health page shows the
+same warning beside the Gate verdict, read from the snapshots up to the one it
+displays, and records nothing. Without the table, or with a `rules.toml` that does not load, the
+page shows no warning and its verdict is unchanged.
 
 **Which entries gate.** An entry gates when it is `new` or `worsened`, its
 dimension is in `gate_dimensions`, and its trust label is `resolved`. An entry in

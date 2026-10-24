@@ -88,11 +88,13 @@ impl SecretDigests {
 
     /// Whether the secret a history-mode result reports at `region` of `path`
     /// in `commit` is still on its line ([S-767]): the working tree's
-    /// `tree_path` holds the exact text the commit matched there, on the same
-    /// line or lines — anywhere along them, so an edit elsewhere on the line
-    /// keeps it. `None` when the commit's text cannot be read ([`digest`]
-    /// reads nothing either); `Some(false)` when the file is gone or its line
-    /// holds other text now.
+    /// `tree_path` — the same file, spelled relative to the project rather
+    /// than to the git root ([`project_prefix`]) — holds the exact text the
+    /// commit matched there, on the same line or lines — anywhere along them,
+    /// so an edit elsewhere on the line keeps it. `None` when the commit's
+    /// text cannot be read ([`digest`] reads nothing either); `Some(false)`
+    /// when the file is gone, lies outside the project or its line holds
+    /// other text now.
     ///
     /// [S-767]: ../../../../docs/planning/journal.md#s-767-a-secret-found-only-in-history-is-anchored-to-its-commit
     /// [`digest`]: Self::digest
@@ -224,6 +226,17 @@ fn repository_key(root: &Path) -> Option<[u8; 32]> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let first = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(blake3::derive_key(KEY_CONTEXT, first.as_bytes()))
+}
+
+/// The project's prefix below the git root — `services/api/` for a workspace
+/// member there, empty at the git root — as `git rev-parse --show-prefix`
+/// gives it. Gitleaks' history mode names a file relative to the git root
+/// (it reads `git log -p`), and the blob and hunk reads above take that
+/// spelling as it is; only the project's own spelling of the file drops this
+/// prefix. `None` when git cannot tell.
+pub(crate) fn project_prefix(root: &Path) -> Option<String> {
+    let out = crate::history::miner::git(root, &["rev-parse", "--show-prefix"]).ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// `path` names a file inside the project: relative, no `..`, no root or drive.

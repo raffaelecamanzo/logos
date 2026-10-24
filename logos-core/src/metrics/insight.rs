@@ -181,9 +181,14 @@ struct GroupKey {
 /// stream; 64 bits of BLAKE3 make a collision among one snapshot's groups
 /// negligible.
 ///
+/// The attribution's near-clone group driver ([FR-GV-26], S-787) takes its
+/// `node_id` from here, over the same members' identities, so one group has one
+/// id on every surface.
+///
 /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+/// [FR-GV-26]: ../../../docs/specs/requirements/FR-GV-26.md
 /// [CR-238]: ../../../docs/requests/CR-238-sprint-106-review-follow-ups.md
-fn group_identity(kind: FixUnitKind, members: &[&str]) -> String {
+pub(crate) fn group_identity(kind: FixUnitKind, members: &[&str]) -> String {
     let mut sorted = members.to_vec();
     sorted.sort_unstable();
     let mut hasher = blake3::Hasher::new();

@@ -146,12 +146,20 @@ pub(crate) const HOOKS_RELDIR: &str = ".logos/hooks";
 /// hook files during `logos init --hooks`, ensuring cross-recognition.
 pub(crate) const MANAGED_MARKER: &str = "# logos-managed-hook";
 
-/// The three hook events FR-SY-05 names, each with the `git diff` invocation
-/// that computes exactly what the event changed.
+/// The three hook events FR-SY-05 names, each with the `git` invocation that
+/// lists exactly what the event changed.
+///
+/// Every list command writes **NUL-separated** paths to stdout and takes the
+/// same two flags: `-z`, because without it git C-quotes any path holding a
+/// quote, a control character or a non-ASCII byte (`"caf\303\251.rs"`) and the
+/// sync is handed a name that is no file; and `--no-renames`, because `git diff`
+/// otherwise reports a rename as its new path alone and the old path's nodes
+/// are never reconciled away. [`script_body`] pipes the list straight into the
+/// sync — never through a shell variable, which cannot hold a NUL.
 ///
 /// Every script follows the same skeleton: bail out silently unless `logos`
-/// is on PATH, compute the changed set, sync it quietly, and exit 0 no
-/// matter what — a hook must never block or fail the git operation.
+/// is on PATH, list the changed set, sync it quietly, and exit 0 no matter what
+/// — a hook must never block or fail the git operation.
 ///
 /// Exported so [`crate::init`] can iterate the same hook set without a
 /// separate constant that risks drifting out of sync.
@@ -160,19 +168,19 @@ pub(crate) const HOOKS: &[(&str, &str)] = &[
         "post-commit",
         // The files the commit just recorded (`--root` so the repository's
         // very first commit diffs against the empty tree instead of nothing).
-        "changed=$(git diff-tree -r --root --name-only --no-commit-id HEAD 2>/dev/null) || exit 0",
+        "git diff-tree -r --root --name-only --no-renames -z --no-commit-id HEAD --",
     ),
     (
         "post-checkout",
         // $1=previous HEAD, $2=new HEAD, $3=1 for a branch checkout (0 is a
-        // file checkout — nothing moved that the index doesn't already know).
-        "[ \"$3\" = \"1\" ] || exit 0\n\
-         changed=$(git diff --name-only \"$1\" \"$2\" 2>/dev/null) || exit 0",
+        // file checkout — nothing moved that the index doesn't already know,
+        // so the `&&` lists nothing and the empty-set guard ends the hook).
+        "[ \"$3\" = \"1\" ] && git diff --name-only --no-renames -z \"$1\" \"$2\" --",
     ),
     (
         "post-merge",
         // Everything the merge brought in relative to where we were.
-        "changed=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null) || exit 0",
+        "git diff --name-only --no-renames -z ORIG_HEAD HEAD --",
     ),
 ];
 
@@ -213,7 +221,7 @@ pub(crate) fn all_hook_names() -> impl Iterator<Item = &'static str> {
 pub(crate) fn managed_scripts() -> Vec<(&'static str, String)> {
     let mut scripts: Vec<(&'static str, String)> = HOOKS
         .iter()
-        .map(|(name, changed_cmd)| (*name, script_body(name, changed_cmd)))
+        .map(|(name, list_cmd)| (*name, script_body(name, list_cmd)))
         .collect();
     scripts.push((PRE_PUSH_HOOK, blocking_script_body()));
     scripts
@@ -1012,22 +1020,31 @@ fn copy_fallback_findings(dir: &Path) -> Vec<String> {
     }
 }
 
-/// The full script for one hook: marker, PATH guard, changed-set computation,
-/// quiet best-effort sync, unconditional success.
+/// The full script for one hook: marker, PATH guard, NUL-separated changed-set
+/// listing, quiet best-effort sync, unconditional success.
+///
+/// The listing is piped into `xargs -0`, which batches it into `logos sync`
+/// calls under the platform's argument limit. The **empty-set guard is the
+/// shell's own** (`[ "$#" -gt 0 ]` inside the command `xargs` runs): GNU `xargs`
+/// runs its command once on empty input unless given `-r`, BSD `xargs` does not
+/// and has no `-r`, so a guard borrowed from either would behave differently
+/// per machine. `--` ends option parsing, so a path beginning with `-` is a path.
 ///
 /// Exported so [`crate::init`] can generate the canonical body rather than
 /// maintaining a separate (and divergence-prone) hook template.
-pub(crate) fn script_body(name: &str, changed_cmd: &str) -> String {
+pub(crate) fn script_body(name: &str, list_cmd: &str) -> String {
     format!(
         "#!/bin/sh\n\
          {MANAGED_MARKER}: {name} (S-022, FR-SY-05)\n\
          # Best-effort navigation freshness — never blocks or fails the git\n\
          # operation; reconcile is the correctness backstop (FR-SY-06).\n\
          command -v logos >/dev/null 2>&1 || exit 0\n\
-         {changed_cmd}\n\
-         [ -n \"$changed\" ] || exit 0\n\
-         # NUL-delimited so paths with spaces survive xargs (BSD + GNU).\n\
-         printf '%s\\n' \"$changed\" | tr '\\n' '\\0' | xargs -0 logos sync --quiet >/dev/null 2>&1 || true\n\
+         # Paths stay NUL-separated end to end (`-z`, `--no-renames`): exactly as\n\
+         # git records them, a rename as both of its sides. The empty-set guard\n\
+         # is this shell's, not GNU's or BSD's xargs behaviour.\n\
+         {{ {list_cmd}; }} 2>/dev/null |\n\
+         xargs -0 sh -c '[ \"$#\" -gt 0 ] || exit 0; exec logos sync --quiet -- \"$@\"' logos-sync \\\n\
+         >/dev/null 2>&1 || true\n\
          exit 0\n"
     )
 }

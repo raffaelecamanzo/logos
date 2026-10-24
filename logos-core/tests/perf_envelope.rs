@@ -53,6 +53,12 @@
 //! tens of milliseconds, ~99% of its budget unused, so it is not load-sensitive
 //! and skipping it would cost coverage for nothing.
 //!
+//! A coverage run (`--cfg coverage`) is the exception: an instrumented binary at
+//! cargo's default parallelism measures the instrumentation, so the two tests
+//! that are nothing but a clock (the config-and-binding delta and the
+//! cold-start comparison) are `#[ignore]`d there, and the single-key re-resolution
+//! test keeps running with only its time assertion skipped.
+//!
 //! Two env knobs keep the budgets honest without editing them:
 //! - `LOGOS_PERF_TOLERANCE` (f64 ≥ 1.0, default 1.15 since 2026-09-21) widens every wall-clock band
 //!   for a slow/loaded CI host — the tolerance-banding the sprint mandates;
@@ -1079,6 +1085,7 @@ mod configuration_envelope {
     ///
     /// [CR-121]: ../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
     #[test]
+    #[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
     fn the_configuration_and_binding_phases_stay_inside_the_three_second_delta() {
         let bare_tmp = TempDir::new().expect("temp root");
         let bare = bare_tmp.path().canonicalize().expect("canonical temp root");
@@ -1249,8 +1256,10 @@ mod configuration_envelope {
             SOURCES + BINDING_CLASSES + 1,
             budget(250),
         );
+        // The re-resolution assertions above run under coverage; only the wall
+        // clock is meaningless there.
         assert!(
-            elapsed <= budget(250),
+            cfg!(coverage) || elapsed <= budget(250),
             "{}",
             amendment_request(
                 "NFR-PE-03 single-file sync",
@@ -1320,6 +1329,7 @@ mod configuration_envelope {
     ///
     /// [NFR-PE-05]: ../../docs/specs/requirements/NFR-PE-05.md
     #[test]
+    #[cfg_attr(coverage, ignore = "wall-clock bound: meaningless under coverage instrumentation")]
     fn cold_start_is_unchanged_by_a_configuration_corpus_within_the_pe05_budget() {
         let full_tmp = TempDir::new().expect("temp root");
         let full = full_tmp.path().canonicalize().expect("canonical temp root");

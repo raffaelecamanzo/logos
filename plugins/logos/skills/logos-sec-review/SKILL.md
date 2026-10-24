@@ -137,6 +137,10 @@ entry, that:
 - the entry's fingerprint is absent from that scanner's stored findings for the file;
 - no finding at or above the entry's severity is there that the delta did not already know.
 
+Both scripts read `logos security findings` in every scope (`--scope all` on a Logos
+that has the filter, nothing on 1.20.x), so a finding in a test file reads as present
+until it is really gone.
+
 `PROVEN` prints the evidence a `FIXED` line cites. `NOT PROVEN` prints why: the
 fingerprint is still listed, or the offence moved into a new finding. Report `UNPROVEN`
 with that reason and undo your edit.

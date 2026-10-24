@@ -188,8 +188,8 @@ def listed(var):
 
 VERSIONS = {
     "semgrep": ["/stub/semgrep/lib/dependencies.py:4: UserWarning: pkg_resources is deprecated 1.2.3", "1.85.0"],
-    "osv-scanner": ["osv-scanner version: 1.9.2", "commit: 0000000"],
-    "gosec": ["Version: 2.21.4", "Git tag: v2.21.4"],
+    "osv-scanner": ["osv-scanner version: 2.7.0", "commit: 0000000"],
+    "gosec": ["Version: 2.29.0", "Git tag: v2.29.0"],
     "codeql": ["2.27.2"],
 }
 if args and args[0] in ("--version", "-version", "version"):
@@ -296,6 +296,16 @@ elif name == "osv-scanner":
     sys.exit(127)
 elif name == "gosec":
     v, patterns = parse({"-fmt", "-out", "-exclude-dir"})
+    if listed("STUB_UNTYPED"):
+        # A gosec built for an older Go than the local one cannot type a package
+        # that imports the standard library: it exits 1 with no report (S-782).
+        for pat in patterns:
+            base = pat[:-4] if pat.endswith("/...") else pat
+            for p in walk(base, lambda p: p.endswith(".go")):
+                with open(p) as src:
+                    if re.search(r'^import "', src.read(), re.M):
+                        sys.stderr.write('internal error: package "strings" without types was imported from "command-line-arguments"\n')
+                        sys.exit(1)
     excl = v.get("-exclude-dir", [])
     uris = []
     for pat in patterns:
@@ -353,8 +363,8 @@ install_stubs() {
 # below the minimum, a gosec directory without an executable, and one whose
 # name is not a version.
 stub_tools() {
-    install_stubs "$1" semgrep:1.85.0 semgrep:1.90.0 semgrep:1.80.0 osv-scanner:1.9.2 \
-        gosec:2.21.4 gosec:current codeql:2.27.2
+    install_stubs "$1" semgrep:1.85.0 semgrep:1.90.0 semgrep:1.80.0 osv-scanner:2.7.0 \
+        gosec:2.29.0 gosec:current codeql:2.27.2
     mkdir -p "$1/gosec/9.9.9"
 }
 
@@ -466,7 +476,7 @@ else
     bad "osv-scanner worktree note" "$r"
 fi
 r="$(row "$TSV" gosec git exclude-dir-anchored)"
-if [ "$(field "$r" 2)" = 2.21.4 ]; then ok "a row names the version run"; else bad "gosec row version" "$r"; fi
+if [ "$(field "$r" 2)" = 2.29.0 ]; then ok "a row names the version run"; else bad "gosec row version" "$r"; fi
 r="$(row "$TSV" osv-scanner git explicit-targets)"
 if [ "$(field "$r" 8)" = "app=1 target=0 src/target=1 targets=1 other=1 unrooted=0" ]; then
     ok "OSV-Scanner's explicit targets still read the root go.mod"
@@ -477,7 +487,7 @@ fi
 # Every mechanism's recorded argv, pinned: the evidence is only as good as the
 # command it names (the network and metrics switches among them).
 SG='scan --config <run>/rule.yml --sarif --output <run>/out.sarif --metrics off --disable-version-check --quiet --exclude .logos'
-OSV='--format json --experimental-offline --experimental-all-packages --recursive'
+OSV='--format json --offline --all-packages --recursive'
 GS='-fmt sarif -out <run>/out.sarif -no-fail -quiet'
 CQ='database create <run>/db --language=python --build-mode=none --source-root=. --overwrite'
 n_argv=0
@@ -519,7 +529,7 @@ if [ "$n_sg" = 12 ] && [ "$n_gs" = 18 ] && [ "$n_cqf" = 3 ] && [ "$n_cq" = 6 ]; 
 else
     bad "run environments: semgrep $n_sg/12, gosec $n_gs/18, codeql filtered $n_cqf/3, plain $n_cq/6" "$(sort "$STUB_ENV_LOG" | uniq -c)"
 fi
-if grep -q '^| semgrep | 1.85.0 | 1.85.0 | `1.85.0` |$' "$MD" && grep -q '^| gosec | 2.21.4 | 2.21.4 | `Version: 2.21.4` |$' "$MD"; then
+if grep -q '^| semgrep | 1.85.0 | 1.85.0 | `1.85.0` |$' "$MD" && grep -q '^| gosec | 2.29.0 | 2.29.0 | `Version: 2.29.0` |$' "$MD"; then
     ok "evidence.md names the pinned version run, the pin, and its version line, past a warning"
 else
     bad "evidence.md versions" "$(grep '^| ' "$MD" | head -8)"
@@ -559,7 +569,7 @@ if [ "$RC" -eq 0 ] && [ "$(field "$r" 2)" = 2.22.0 ] && [ "$(field "$r" 6)" = "i
 else
     bad "off-pin gosec row (exit $RC)" "$r"
 fi
-if grep -q '^| gosec | 2.22.0 — \*\*not the pin\*\* | 2.21.4 | ' "$MD_E"; then
+if grep -q '^| gosec | 2.22.0 — \*\*not the pin\*\* | 2.29.0 | ' "$MD_E"; then
     ok "evidence.md marks a run off the pin and names the pin"
 else
     bad "evidence.md does not mark the off-pin gosec run" "$(grep '^| ' "$MD_E" | head -8)"
@@ -608,6 +618,27 @@ if grep -q -F "$WORK" "$TSV" "$WORK/c/out/evidence.md"; then
     bad "a failed leg's stderr leaks the work directory into the evidence" "$(grep -n -F "$WORK" "$TSV" | head -3)"
 else
     ok "a failed leg's stderr does not name the work directory"
+fi
+
+# S-782: every planted Go file imports the standard library, so a gosec that
+# cannot type it under the local Go fails each leg — never reads a clean control.
+n_go=0 n_std=0
+while IFS= read -r f; do
+    n_go=$((n_go + 1))
+    if grep -q -x 'import "strings"' "$f"; then n_std=$((n_std + 1)); fi
+done < <(find "$WORK/c/work/fixtures" -name 'planted_*.go' -not -path '*/.git/*')
+if [ "$n_go" -gt 0 ] && [ "$n_go" = "$n_std" ]; then
+    ok "every planted Go file imports the standard library: $n_std of $n_go"
+else
+    bad "planted Go files importing the standard library: $n_std of $n_go" "$(find "$WORK/c/work/fixtures" -name "planted_*.go" 2>&1 | head -3)"
+fi
+STUB_UNTYPED=gosec harness "$WORK/u/out" "$WORK/u/work" --scanners gosec
+TSV_U="$WORK/u/out/verdicts.tsv"
+n_untyped="$(awk -F '\t' 'NR > 1 && $1 == "gosec" && $6 == "failed" && $5 ~ /^failed \(exit 1\): .*without types was imported/' "$TSV_U" | wc -l | tr -d ' ')"
+if [ "$RC" -eq 0 ] && [ "$n_untyped" = 18 ]; then
+    ok "a gosec that cannot type the standard library is 'failed' with its line on all 18 legs, never a pass"
+else
+    bad "wanted 18 untyped gosec legs failed, got $n_untyped (exit $RC)" "$(cat "$TSV_U" 2>/dev/null)"
 fi
 
 # A clean exit with no report, and a run the --timeout bound kills after its

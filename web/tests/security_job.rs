@@ -62,6 +62,22 @@ impl Fixture {
     /// keeps its consent in `user`. Stubs are written into `bin` afterwards: a
     /// scanner is looked up when a scan starts.
     fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// [`new`](Self::new), with the repository indexed before the router
+    /// takes the engine, so a finding binds to its file and is anchored.
+    fn indexed() -> Self {
+        Self::build(true)
+    }
+
+    /// The engine the CLI and MCP `security status` read through: another one
+    /// over the same repository and scanner environment.
+    fn direct_engine(&self) -> Engine {
+        Engine::start(&self.repo).expect("engine starts").with_scan_environment(scan_env(&self.user, &self.bin))
+    }
+
+    fn build(index: bool) -> Self {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let [repo, bin, user, rec] = ["project", "bin", "user", "rec"].map(|d| base.join(d));
@@ -72,12 +88,10 @@ impl Fixture {
         std::fs::write(repo.join("app.py"), "import sqlite3\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "seed"]);
-        let env = logos_core::security::ScanEnvironment {
-            user_dir: Some(user.clone()),
-            search_path: Some(bin.clone().into_os_string()),
-            tools_dir: None,
-        };
-        let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
+        let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(scan_env(&user, &bin));
+        if index {
+            engine.index();
+        }
         let intent = IntentToken::generate();
         let router = web::router_with_intent(Arc::new(engine), intent.clone());
         Self { _tmp: tmp, repo, bin, user, rec, intent, router }
@@ -139,6 +153,16 @@ impl Fixture {
         std::fs::read_to_string(self.rec.join(format!("{name}.runs")))
             .map(|s| s.lines().count())
             .unwrap_or(0)
+    }
+}
+
+/// Scanners found in `bin` alone, consent kept in `user`.
+fn scan_env(user: &Path, bin: &Path) -> logos_core::security::ScanEnvironment {
+    logos_core::security::ScanEnvironment {
+        user_dir: Some(user.to_path_buf()),
+        search_path: Some(bin.as_os_str().to_os_string()),
+        tools_dir: None,
+        nvd_api_key: None,
     }
 }
 
@@ -323,8 +347,9 @@ async fn serve_answers_other_api_requests_during_a_scan() {
 }
 
 /// A scanner that floods both pipes and fails: what is kept is bounded — the
-/// failure log holds the last part of stderr, at most the capture bound, and
-/// the job's payload carries only a short excerpt.
+/// failure log holds the first and the last part of stderr with a note
+/// between them, at most the capture bound, and the job's payload carries
+/// only a short excerpt.
 #[tokio::test]
 async fn scanner_output_capture_is_bounded() {
     bounded(async {
@@ -350,7 +375,8 @@ async fn scanner_output_capture_is_bounded() {
         let log = std::fs::read_to_string(f.repo.join(".logos/security/bandit.failed.log")).unwrap();
         assert!(log.len() <= STDERR_CAP, "the failure log holds {} bytes", log.len());
         assert!(log.contains("END-OF-STDERR"), "the tail of stderr is kept");
-        assert!(!log.contains("START-OF-OUTPUT"), "the head of a flood is dropped");
+        assert!(log.starts_with("START-OF-OUTPUT"), "the head of stderr is kept");
+        assert_eq!(log.matches("bytes omitted").count(), 1, "the cut is stated once");
         assert!(bandit["stderr"].as_str().unwrap().len() <= 1024, "{bandit}");
         assert!(job.to_string().len() < 64 * 1024, "the job payload is bounded: {} bytes", job.to_string().len());
     })
@@ -481,6 +507,72 @@ async fn a_completed_scan_replays_its_progress_and_stores_its_report() {
         assert_eq!(row["state"], "fresh", "{row}");
     })
     .await;
+}
+
+/// A Bandit report with one finding on `app.py`'s first line.
+const BANDIT_ON_APP: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Bandit","semanticVersion":"1.7.10","rules":[]}},"results":[{"ruleId":"B608","level":"warning","message":{"text":"possible SQL injection"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"app.py"},"region":{"startLine":1}}}]}]}]}"#;
+
+/// `(state, because, snapshot_head, findings)` of `scanner`'s row in `status`.
+fn freshness(status: &Value, scanner: &str) -> (Value, Value, Value, Value) {
+    let row = status["scanners"].as_array().unwrap().iter().find(|s| s["scanner"] == scanner).unwrap();
+    (row["state"].clone(), row["because"].clone(), row["snapshot_head"].clone(), row["findings"].clone())
+}
+
+/// HF-2: a scanner made stale by a new HEAD reads `fresh` on the very next
+/// page read after a Run scan job ends — no later read, no wait — and the
+/// CLI and MCP `security status` (`Engine::security_status`) agree with the
+/// page row for row. A source file changed after that scan still makes it
+/// stale. That the page shows this read, and nothing older, once the job
+/// ended is the SPA's half: `SecurityView.test.tsx`.
+#[tokio::test]
+async fn the_read_after_a_scan_job_ends_shows_the_scanned_scanner_fresh() {
+    bounded(async {
+        let f = Fixture::indexed();
+        stub(&f.bin, &f.rec, "bandit", &format!("printf '%s' '{BANDIT_ON_APP}' > \"$out\""));
+        f.consent(&["bandit"]);
+        let page_status = |page: &Value| page["security"]["status"].clone();
+
+        f.post("/api/v1/security/scan", "").await;
+        assert_eq!(f.ended().await["state"], "completed");
+        let first_head = head(&f.repo);
+        let (_, page) = f.get("/api/v1/security").await;
+        assert_eq!(freshness(&page_status(&page), "bandit"), (json!("fresh"), Value::Null, json!(first_head), json!(1)), "{page}");
+
+        // The build moves HEAD: the stored scan predates it.
+        std::fs::write(f.repo.join("VERSION"), "1.21.0\n").unwrap();
+        git(&f.repo, &["add", "."]);
+        git(&f.repo, &["commit", "-q", "-m", "release"]);
+        let (_, page) = f.get("/api/v1/security").await;
+        assert_eq!(freshness(&page_status(&page), "bandit").0, json!("stale"), "{page}");
+        assert_eq!(freshness(&page_status(&page), "bandit").1, json!("head_moved"), "{page}");
+
+        f.post("/api/v1/security/scan", "").await;
+        assert_eq!(f.ended().await["state"], "completed");
+        let (_, page) = f.get("/api/v1/security").await;
+        let release = head(&f.repo);
+        assert_ne!(release, first_head);
+        assert_eq!(freshness(&page_status(&page), "bandit"), (json!("fresh"), Value::Null, json!(release), json!(1)), "{page}");
+
+        // One freshness model: the CLI and MCP readout states every row as the page does.
+        let direct = serde_json::to_value(f.direct_engine().security_status().unwrap()).unwrap();
+        for scanner in ["semgrep", "trivy", "gitleaks", "osv-scanner", "bandit", "gosec", "checkov", "codeql", "dependency-check"] {
+            assert_eq!(freshness(&direct, scanner), freshness(&page_status(&page), scanner), "{scanner}: {direct}");
+        }
+
+        // Freshness never lies: the file it anchors changes, and the row is stale again.
+        std::fs::write(f.repo.join("app.py"), "import sqlite3\nimport os\n").unwrap();
+        let (_, page) = f.get("/api/v1/security").await;
+        assert_eq!(freshness(&page_status(&page), "bandit").1, json!("files_changed"), "{page}");
+        let direct = serde_json::to_value(f.direct_engine().security_status().unwrap()).unwrap();
+        assert_eq!(freshness(&direct, "bandit"), freshness(&page_status(&page), "bandit"));
+    })
+    .await;
+}
+
+/// The full HEAD SHA of `repo`.
+fn head(repo: &Path) -> String {
+    let out = Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output().expect("git runs");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
 /// A cancel with no scan answers `{job: null}` and starts nothing; one after

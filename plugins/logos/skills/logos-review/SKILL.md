@@ -136,12 +136,25 @@ When asked for debt, or "where to start", not for the branch:
 (at most ten units, ranked by estimated points). Cross-rank it with churn: run
 `logos hotspots --json`, and put a unit in a hot file ahead of one in a cold file of equal
 rank; a unit in a cold file is a `no-action-warranted` (cold file) candidate. Then the same
-steps 3 and 4, the same verdicts, editing and proof. A unit has no `resolved` label of its own, so the script
-derives one (dirty file reads `stale`; a language the graph binds within files only
-reads its cause). The points are an estimate and decide nothing. A fix is proven by the
-delta against the merge-base: `remeasure.sh` matches the unit to the offender of the
-same name, file and dimension. An offender that is simply not listed afterwards is
-unchanged, not fixed. A list that is `not recorded` is "no scan yet": run `logos scan`.
+steps 3 and 4, the same verdicts, editing and proof. A unit has no `resolved` label of its
+own, so the script derives one (dirty file reads `stale`; a language the graph binds within
+files only reads its cause). The points are an estimate and decide nothing.
+
+**How a unit is named and matched.** A function or class is known by its `node_id` when that
+is a string: the entry's `symbol` is that id and its `name` is the bare name, kept for
+reading. The coverage lookup asks for the id first. A fix is proven by the delta against the
+merge-base: `remeasure.sh` matches the unit to the offender with the same `node_id` and
+dimension, so a symbol of the same name and another id (a rename, a second one in the same
+file) is never the unit. A duplicate or near-clone group (`duplicate_group:`, `clone_group:`)
+names no single symbol: its entry has no `symbol`, carries its own `group_reason`, reads
+`no-symbol` and `no-action-warranted` (`untrusted` first when its file is stale), and is
+matched to no offender, so it is reported and never edited.
+Against Logos 1.20.0-1.20.2 a unit's id is an integer or null: that unit falls back to name,
+file and dimension, and two entries of the re-run with that name, file and dimension are not
+proven. The denominators of `debt-list.sh`, `coverage-lookup.sh`, `trust-gate.sh` and
+`remeasure.sh` state how many units were known by id, how many were groups and how many
+fell back: quote them. An offender that is simply not listed afterwards is unchanged, not
+fixed. A list that is `not recorded` is "no scan yet": run `logos scan`.
 
 ## What this skill does not do
 

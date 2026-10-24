@@ -24,7 +24,12 @@ async function stackWith(scope: Locator, title: string): Promise<Locator> {
 test("the Workspace Dashboard stacks its widgets at one gap, left-aligned, in one body size", async ({ page }) => {
   await page.goto("/workspace-dashboard");
   const stack = await stackWith(page.locator("main#view-root"), "Members");
+  // Security is a read of its own (`workspace/security/summary`), so "Members"
+  // rendering says nothing about it: wait for it too, or a slower fan-out — another
+  // view's, read by the other worker — drops it from the titles below.
+  await expect(stack.getByRole("heading", { name: "Security", exact: true })).toBeVisible();
   expect(await widgetTitles(stack)).toEqual([
+    "Security",
     "Resolved cross-service edges",
     "Spec conformance (declared endpoints vs controllers)",
     "Coverage by intake",
@@ -32,9 +37,46 @@ test("the Workspace Dashboard stacks its widgets at one gap, left-aligned, in on
     "Members",
   ]);
   const m = await expectWidgetStackLayout(stack);
-  // The workspace callout and the five widgets: five gaps, all the stack's one.
-  expect(m.gaps).toHaveLength(5);
-  expect(m.bodySizes).toHaveLength(5);
+  // The workspace callout and the six widgets (Security leads, S-790): six gaps,
+  // all the stack's one.
+  expect(m.gaps).toHaveLength(6);
+  expect(m.bodySizes).toHaveLength(6);
+});
+
+// S-790 (FR-UI-36): the Security widget leads the Workspace Dashboard with one row
+// per member, each linking to that member's own Security page. The fixture stores
+// one report in `api` (one finding, in production code) and none in `web`, so `api`
+// reads fresh with that one finding and `web` reads "never run" — not a row of
+// zeros — and the figure row counts members, one of two.
+test("the Workspace Dashboard's Security widget leads with one row per member", async ({ page }) => {
+  await page.goto("/workspace-dashboard");
+  const stack = await stackWith(page.locator("main#view-root"), "Security");
+  const widget = stack.locator("section").filter({ has: page.getByRole("heading", { name: "Security", exact: true }) });
+  await expect(widget.locator('[data-widget-part="figure"]')).toHaveText("1 of 2 members have a fresh scan");
+  // The header row and one row per member.
+  await expect(widget.getByRole("row")).toHaveCount(3);
+  for (const member of ["api", "web"]) {
+    const row = widget.getByRole("row", { name: new RegExp(`^${member}\\b`) });
+    await expect(row.getByRole("link", { name: member })).toHaveAttribute("href", `/security?repo=${member}`);
+  }
+  const api = widget.getByRole("row", { name: /^api\b/ });
+  await expect(api.getByText("fresh", { exact: true })).toBeVisible();
+  const counts = await api.locator("[data-severity] .num").allTextContents();
+  expect(counts, "the severity row states every severity").toHaveLength(6);
+  expect(counts.map(Number).reduce((a, b) => a + b, 0), "the fixture's one finding").toBe(1);
+  const web = widget.getByRole("row", { name: /^web\b/ });
+  await expect(web.getByText("never run")).toHaveCount(2);
+  await expect(web.locator("[data-severity-row]")).toHaveCount(0);
+  // No composite across members: the figure row is the one count of members.
+  await expect(widget).not.toContainText(/\b(total|mean|overall)\b/i);
+});
+
+// S-796 (FR-SC-16, FR-SC-28): the Workspace Security figure row states the
+// findings in test code, which no total counts; the fixture has none.
+test("Workspace Security's figure row states the test-code remainder", async ({ page }) => {
+  await page.goto("/workspace-security");
+  const members = page.locator("section").filter({ has: page.getByRole("heading", { name: "Members", exact: true }) });
+  await expect(members.locator('[data-widget-part="figure"]')).toContainText("· 0 in test code, left out of every total above.");
 });
 
 test("Workspace Health stacks its widgets at one gap, every one laid out as a widget", async ({ page }) => {

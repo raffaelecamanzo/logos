@@ -12,7 +12,7 @@
   <a href="https://github.com/raffaelecamanzo/logos/releases/latest"><img src="https://img.shields.io/github/v/release/raffaelecamanzo/logos?color=da291c&label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3d3935" alt="Apache-2.0 license"></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-3d3935" alt="macOS and Linux">
-  <img src="https://img.shields.io/badge/MCP-33%20tools-3d3935" alt="33 MCP tools">
+  <img src="https://img.shields.io/badge/MCP-34%20tools-3d3935" alt="34 MCP tools">
   <img src="https://img.shields.io/badge/built%20with-Rust-3d3935" alt="Built with Rust">
 </p>
 
@@ -265,6 +265,7 @@ invalid value is rejected before it is saved. Full reference:
 | [Usage](docs/howto/usage.md) | Indexing, navigation, MCP setup, the dashboard, worktrees |
 | [Commands](docs/howto/commands.md) | Every subcommand, with its flags and JSON shape |
 | [Configuration](docs/howto/configuration.md) | `config.toml`, `rules.toml`, workspaces |
+| [Coverage runs](docs/howto/coverage.md) | The coverage tools, the execution consent, `coverage run`, the Coverage page |
 | [Metrics](docs/howto/metrics.md) | The ten dimensions behind the quality signal |
 | [CI integration](docs/howto/ci-integration.md) | The freshen → enforce → report → bless loop |
 | [Error handling](docs/howto/error-handling.md) | Exit codes and troubleshooting |

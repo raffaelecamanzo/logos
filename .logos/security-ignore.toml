@@ -1,4 +1,24 @@
 [[ignore]]
+fingerprint = "1d255ccffb5aae51988978411621aebf7ca29c6671bc3e4b06b53c36930e78f7"
+reason = "Semgrep detect-non-literal-regexp (CWE-1333) on web/ui/src/views/config/toml.ts: the pattern is built from escapeRe() of a TOML table or key name, and escapeRe escapes every regex metacharacter (. * + ? ^ $ { } ( ) | [ ] \\), so the name matches only itself and cannot add a repeat, an alternation or a group; no text reaches RegExp unescaped. Pinned by the escapeRe cases in web/ui/src/views/config/toml.test.ts, which also read web/assets/config-editor.js's copy."
+
+[[ignore]]
+fingerprint = "5fe1f196cf0c80ad3198faee7db10cc853acc2e75ddbab53fbb321b9ff7635f8"
+reason = "Semgrep detect-non-literal-regexp (CWE-1333) on web/ui/src/views/config/toml.ts: the pattern is built from escapeRe() of a TOML table or key name, and escapeRe escapes every regex metacharacter (. * + ? ^ $ { } ( ) | [ ] \\), so the name matches only itself and cannot add a repeat, an alternation or a group; no text reaches RegExp unescaped. Pinned by the escapeRe cases in web/ui/src/views/config/toml.test.ts, which also read web/assets/config-editor.js's copy."
+
+[[ignore]]
+fingerprint = "7928022fdbb6636ef5e0c7d26d4a9eb0d8f81ab1329230479b6891c35a487a4f"
+reason = "Checkov CKV_GHA_7 on the workflow_dispatch `tag` input of .github/workflows/release.yml: the input only selects an existing release tag. scripts/release-tag-guard.sh runs in `plan` before dist is installed or anything is built, and refuses a tag that is not vMAJOR.MINOR.PATCH[-SUFFIX], that the checkout does not hold, whose commit is not HEAD, or that already has a GitHub Release; every later job reads the tag only from the guard's output, and `host` runs the guard again with the validated commit. The build output is therefore decided by the tag's commit, not by free text in the input. Checkov keys this finding by its line range in release.yml (84-92 at HF-4), so an edit above the `tag` input moves it and the entry then needs the new fingerprint."
+
+[[ignore]]
+fingerprint = "babf052e1c560dfbe6a74f53a52ba4989e6028dfb07dbd7da7af5fcd539e34f9"
+reason = "Semgrep detect-non-literal-regexp (CWE-1333) on web/assets/config-editor.js: the pattern is built from escapeRe() of a TOML table or key name, and escapeRe escapes every regex metacharacter (. * + ? ^ $ { } ( ) | [ ] \\), so the name matches only itself and cannot add a repeat, an alternation or a group; no text reaches RegExp unescaped. Pinned by the escapeRe cases in web/ui/src/views/config/toml.test.ts, which also read web/assets/config-editor.js's copy."
+
+[[ignore]]
+fingerprint = "e0c9bfb72d916c8de0399fd7e9cf1d2d3d6b553c71fefa6d7981c833c3f467c9"
+reason = "Semgrep detect-non-literal-regexp (CWE-1333) on web/assets/config-editor.js: the pattern is built from escapeRe() of a TOML table or key name, and escapeRe escapes every regex metacharacter (. * + ? ^ $ { } ( ) | [ ] \\), so the name matches only itself and cannot add a repeat, an alternation or a group; no text reaches RegExp unescaped. Pinned by the escapeRe cases in web/ui/src/views/config/toml.test.ts, which also read web/assets/config-editor.js's copy."
+
+[[ignore]]
 path = "Cargo.lock"
 rule = "CVE-2026-63127"
 reason = "rmcp 1.7.0 advisory CVE-2026-63127 (GHSA-33f5-2c5q-wgwj) is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
@@ -21,7 +41,3 @@ path = "Cargo.lock"
 rule = "GHSA-c9xm-49cp-xcr9"
 reason = "rmcp 1.7.0 advisory GHSA-c9xm-49cp-xcr9 is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
 expires = 2027-04-19
-
-[[ignore]]
-path = "logos-core/tests/fixtures"
-reason = "Test fixtures: projects and planted secrets that exercise Logos's own scanners, security context and masking (for example security-context/axum's Dockerfile and Cargo.lock). Never built, shipped or deployed. Owner-approved stopgap until CR-246 tells findings in test code from shipped code."

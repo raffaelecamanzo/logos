@@ -469,8 +469,10 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         registry.shared_worker_threads(),
         resident.len(),
     );
+    // The thread and connection counts hold under coverage; only the
+    // point-query wall-clock budget is skipped there.
     assert!(
-        worst < POINT_QUERY_MS,
+        cfg!(coverage) || worst < POINT_QUERY_MS,
         "a member's search took {worst} ms over {} resident members on a budgeted \
          {} read connections each — the budget is starving members \
          ([NFR-PE-01]); full distribution: {latencies_ms:?}",

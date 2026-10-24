@@ -265,6 +265,9 @@ registered_tools! {
     CoverageIngest => "coverage_ingest",
     CoverageIngestAuto => "coverage_ingest_auto",
     CoverageRefresh => "coverage_refresh",
+    /// `logos coverage run` (FR-CV-14, S-737): runs the project's coverage
+    /// tools, then ingests each report.
+    CoverageRun => "coverage_run",
     CoverageStatus => "coverage_status",
     /// The security evidence tier (FR-SC-01, FR-SC-06..08, S-667).
     SecurityIngest => "security_ingest",
@@ -412,6 +415,7 @@ impl Tool {
             | Tool::CoverageIngest
             | Tool::CoverageIngestAuto
             | Tool::CoverageRefresh
+            | Tool::CoverageRun
             | Tool::CoverageStatus
             | Tool::SecurityIngest
             | Tool::SecurityIngestAuto
@@ -555,6 +559,7 @@ impl Tool {
             | Tool::CoverageIngest
             | Tool::CoverageIngestAuto
             | Tool::CoverageRefresh
+            | Tool::CoverageRun
             // Security ingestion and the scan that produces what it ingests.
             | Tool::SecurityIngest
             | Tool::SecurityIngestAuto

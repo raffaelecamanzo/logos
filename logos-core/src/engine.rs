@@ -2089,10 +2089,13 @@ impl Engine {
                 .collect()
         });
         // Findings axis ([FR-SC-14]): counted findings per path (fresh per finding,
-        // unsuppressed: `history::security::counts`) from the security read model
-        // and the suppression labeller. `None` = no report stored → no findings
-        // column.
-        let findings = crate::history::path_findings(&self.root, today_utc())?;
+        // unsuppressed, production code: `history::security::counts`) from the
+        // security read model and the suppression labeller, each finding's code
+        // scope by this graph ([FR-SC-28]). `None` = no report stored → no
+        // findings column.
+        let findings = crate::history::path_findings(&self.root, today_utc(), |stored| {
+            crate::security::context::code_scopes(self, stored)
+        })?;
         Ok(crate::history::rank_with_findings(
             temporal,
             &complexity,
@@ -2275,6 +2278,34 @@ impl Engine {
         crate::observability::traced(Tool::Review, || crate::governance::branches_review(self, base, branches))
     }
 
+    /// The room left under every budget [`review_branches`](Self::review_branches)
+    /// projects ([FR-GV-29], S-798): each subject's value on the base commit,
+    /// its allowance and its headroom, and the margin under a numeric `[review]
+    /// drift_budget`. The single entry point behind `logos review --headroom`
+    /// and the MCP `review` tool's `headroom` ([NFR-CC-01]).
+    ///
+    /// The base and its measurement are `review_branches`'s — the same commit,
+    /// the same cache entry — and neither the working tree nor `HEAD` is
+    /// measured, so a rerun is byte-identical ([NFR-RA-06]). `subjects` are
+    /// project-relative paths and symbol names; `near` keeps the subjects
+    /// whose headroom is at most that.
+    ///
+    /// # Errors
+    /// Returns an error on a transient engine, a store fault or an invalid
+    /// `rules.toml`.
+    ///
+    /// [FR-GV-29]: ../../../docs/specs/requirements/FR-GV-29.md
+    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub fn review_headroom(
+        &self,
+        base: Option<&str>,
+        subjects: &[String],
+        near: Option<u64>,
+    ) -> Result<crate::models::quality::HeadroomReport> {
+        crate::observability::traced(Tool::Review, || crate::governance::headroom_review(self, base, subjects, near))
+    }
+
     /// The security evidence the branch review classifies ([FR-SC-18], S-686):
     /// every stored finding of each scanner's latest report as
     /// [`security_findings`](Self::security_findings) lists it unfiltered (its
@@ -2285,6 +2316,8 @@ impl Engine {
     ///
     /// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
     fn review_security_evidence(&self, merge_base: &str) -> Result<crate::governance::SecurityEvidence> {
+        // Every code scope, and no scope asked for: the delta keeps test code
+        // as any other finding ([BR-98]).
         let filter = crate::security::FindingsFilter::default();
         let current = crate::security::findings(
             &self.root,
@@ -2292,6 +2325,7 @@ impl Engine {
             self.tools_manifest(),
             &filter,
             today_utc(),
+            crate::security::no_test_symbols,
             |listed| crate::security::context::contexts(self, listed),
         )?;
         let latest = crate::history::security::latest_snapshots(&self.root)?;
@@ -2501,7 +2535,7 @@ impl Engine {
     /// [FR-CV-04]): the `logos coverage ingest <report>` subcommand and the MCP
     /// `coverage_ingest` twin behind this one `api` entrypoint ([NFR-CC-01]).
     ///
-    /// `format` is the `--format` flag (`"lcov"`/`"cobertura"`); `None`
+    /// `format` is the `--format` flag (`"lcov"`/`"cobertura"`/`"jacoco"`/`"gocover"`); `None`
     /// auto-detects from content. Supplies the indexed-file set the report-path
     /// mapper binds against from a `logos.db` graph read **here at the `api`
     /// layer** — the evidence store is never `ATTACH`-ed to the canonical graph
@@ -2534,7 +2568,7 @@ impl Engine {
         })
     }
 
-    /// Resolve a `--format`-style token (`"lcov"`/`"cobertura"`) into a
+    /// Resolve a `--format`-style token (`"lcov"`/`"cobertura"`/`"jacoco"`/`"gocover"`) into a
     /// [`CoverageFormat`](crate::history::CoverageFormat); `None` means content
     /// auto-detection. Shared by the manual, automatic, and refresh ingest paths so
     /// the unknown-token error is identical across all three ([NFR-CC-01]).
@@ -2546,7 +2580,7 @@ impl Engine {
     ) -> Result<Option<crate::history::CoverageFormat>> {
         match token {
             Some(token) => Ok(Some(crate::history::CoverageFormat::from_flag(token).ok_or_else(
-                || anyhow!("unknown coverage --format {token:?} (expected lcov or cobertura)"),
+                || anyhow!("unknown coverage --format {token:?} (expected lcov, cobertura, jacoco or gocover)"),
             )?)),
             None => Ok(None),
         }
@@ -2805,11 +2839,7 @@ impl Engine {
         &self,
         request: &surface::InstallRequest,
     ) -> Result<surface::SecurityInstall> {
-        let install = || surface::install(&self.root, &self.scan_environment(), self.tools_manifest(), request);
-        if !std::fs::symlink_metadata(self.root.join(".logos")).is_ok_and(|m| m.is_dir()) {
-            return crate::security::unlocked(install);
-        }
-        self.security_exclusively(crate::security::RunKind::ToolInstall, install)
+        self.tool_install_locked(|| surface::install(&self.root, &self.scan_environment(), self.tools_manifest(), request))
     }
 
     /// `logos security uninstall` ([FR-SC-22]): remove the managed copies of
@@ -2876,7 +2906,8 @@ impl Engine {
     /// `logos security status` / `security_status` ([FR-SC-08]): each
     /// registered scanner's one state — not installed, disabled, never run,
     /// not applicable (nothing for it to scan here, S-769), stale, or fresh
-    /// with its unsuppressed finding count — the copy in use with its version
+    /// with its count of fresh, unsuppressed findings in production code and
+    /// the rest by why, test code among them (S-795) — the copy in use with its version
     /// and any `update_available`, the install command for a missing scanner,
     /// a failed last scan's log and one-line cause, and the consent state
     /// ([`crate::security::status`]). Runs no scanner beyond its version
@@ -2906,7 +2937,9 @@ impl Engine {
         coverage: bool,
     ) -> Result<crate::security::SecurityStatus> {
         crate::observability::traced(Tool::SecurityStatus, || {
-            crate::security::status(&self.root, &self.scan_environment(), self.tools_manifest(), today_utc(), probes, coverage)
+            crate::security::status(&self.root, &self.scan_environment(), self.tools_manifest(), today_utc(), probes, coverage, |f| {
+                crate::security::context::in_test_symbols(self, f)
+            })
         })
     }
 
@@ -2915,7 +2948,10 @@ impl Engine {
     /// ([S-666]), narrowed by `filter` ([`crate::security::findings`]), each in
     /// the graph context this engine computes from logos.db — enclosing
     /// symbol, route reachability and blast radius, each labelled
-    /// ([FR-SC-13], [`crate::security::context`]). Starts no scanner.
+    /// ([FR-SC-13], [`crate::security::context`]) — and with its code scope by
+    /// this graph ([`crate::security::ScopeFilter`], S-795): `filter`'s scope keeps
+    /// production code unless it names another, and the payload states how
+    /// many the scope hid. Starts no scanner.
     ///
     /// # Errors
     /// Exit 2 for an invalid config or ignore file; otherwise only a store
@@ -2930,15 +2966,22 @@ impl Engine {
         filter: &crate::security::FindingsFilter,
     ) -> Result<crate::security::SecurityFindings> {
         crate::observability::traced(Tool::SecurityFindings, || {
-            crate::security::findings(&self.root, &self.scan_environment(), self.tools_manifest(), filter, today_utc(), |listed| {
-                crate::security::context::contexts(self, listed)
-            })
+            crate::security::findings(
+                &self.root,
+                &self.scan_environment(),
+                self.tools_manifest(),
+                filter,
+                today_utc(),
+                |stored| crate::security::context::in_test_symbols(self, stored),
+                |listed| crate::security::context::contexts(self, listed),
+            )
         })
     }
 
     /// The web UI's Security page ([FR-SC-09]): the
     /// [status](Self::security_status) matrix, every stored finding in graph
-    /// context ([`security_findings`](Self::security_findings), unfiltered),
+    /// context ([`security_findings`](Self::security_findings), unfiltered,
+    /// every code scope, each finding labelled with its own),
     /// the same findings classified under both OWASP editions so the page
     /// switches edition without a refetch ([FR-SC-04]), and — only with a
     /// `rules.toml [security]` table — the verdict `check` reaches on it
@@ -2963,10 +3006,46 @@ impl Engine {
         Ok(crate::security::SecurityPage {
             counts: crate::security::FindingTally::of(&findings.findings),
             findings,
-            editions: crate::security::editions(&self.root, &self.scan_environment(), self.tools_manifest(), today_utc())?,
+            editions: crate::security::editions(
+                &self.root,
+                &self.scan_environment(),
+                self.tools_manifest(),
+                today_utc(),
+                |stored| crate::security::context::in_test_symbols(self, stored),
+            )?,
             status,
             gate,
         })
+    }
+
+    /// The Dashboard's Security widget ([FR-UI-09], S-789): the stored security
+    /// state in a handful of figures ([`SecuritySummary`](crate::security::SecuritySummary)) —
+    /// the counted and left-out findings as the Security page states them, the
+    /// `[security]` gate band, the newest stored scan, the scanners whose last
+    /// scan failed, and the consent record. **Stored-only**: the status is read
+    /// with [`VersionProbes::Never`](crate::security::VersionProbes::Never), so
+    /// no scanner process starts — not even a version probe — and nothing is
+    /// written ([ADR-28]); a Dashboard load is a read a cross-site page can
+    /// trigger. Test code is classified by this graph, as the page does.
+    ///
+    /// # Errors
+    /// As [`security_page`](Self::security_page): an invalid config, consent
+    /// record, ignore file or `.logos/rules.toml`, or a store failure.
+    ///
+    /// [FR-UI-09]: ../../../docs/specs/requirements/FR-UI-09.md
+    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+    pub fn security_summary(&self) -> Result<crate::security::SecuritySummary> {
+        let status = self.security_status_probing(crate::security::VersionProbes::Never, false)?;
+        let gate = crate::security::SecurityGateEvidence(self).band(&status)?;
+        crate::security::summary(
+            &self.root,
+            &self.scan_environment(),
+            self.tools_manifest(),
+            today_utc(),
+            status,
+            gate,
+            |stored| crate::security::context::in_test_symbols(self, stored),
+        )
     }
 
     /// Suppress from the Security page ([FR-SC-12]): add an entry for
@@ -3031,8 +3110,9 @@ impl Engine {
 
     /// This engine with the security surfaces looking in `env` instead of the
     /// process environment: the user-level directory (overrides and consent)
-    /// and the scanner search path. For an embedder, and for tests that must
-    /// not change the process environment.
+    /// and the scanner search path. The coverage execution consent (S-736) is
+    /// read from and recorded in the same user-level directory. For an
+    /// embedder, and for tests that must not change the process environment.
     #[must_use]
     pub fn with_scan_environment(mut self, env: crate::security::ScanEnvironment) -> Self {
         self.scan_env = Some(env);
@@ -3063,7 +3143,7 @@ impl Engine {
 
     /// This project's scan-or-install lock file (S-758), its directory
     /// created: what the web UI's jobs hold for as long as they run
-    /// (`ScanJobs::start_exclusive`) and peek at before a start records
+    /// (`AnalysisJobs::start_exclusive`) and peek at before a start records
     /// anything.
     ///
     /// # Errors
@@ -3115,90 +3195,217 @@ impl Engine {
         })
     }
 
-    /// The opt-in `logos coverage refresh` / `coverage_refresh` ([FR-CV-10],
-    /// [ADR-38]): run the configured `[coverage_ingest].refresh_cmd` as an
-    /// explicit, user-invoked subprocess (via `sh -c`, cwd = project root), then
-    /// ingest the artifact it produced. This is the **single** place Logos ever
-    /// spawns a coverage subprocess, and only on explicit invocation — never on the
-    /// serve/watcher path ([ADR-38]'s load-bearing boundary, [NFR-SE-01]).
-    ///
-    /// After the command succeeds, the produced artifact is discovered among the
-    /// built-in conventions and any literal configured `artifact_glob` (newest
-    /// existing file) and ingested through [`Engine::coverage_ingest`].
+    /// `logos coverage refresh` / `coverage_refresh` ([FR-CV-10] as modified
+    /// by CR-234): the custom entry of [`coverage_run`](Self::coverage_run) —
+    /// `coverage run --tool custom` — run under its own name. The configured
+    /// `[coverage_ingest].refresh_cmd` runs through `sh -c` in the project
+    /// root, only under the project's coverage execution consent, which pins
+    /// its exact text ([FR-CV-13]); then the artifact it wrote or rewrote is
+    /// ingested.
     ///
     /// # Errors
-    /// Returns an error (non-zero exit) when no `refresh_cmd` is configured, the
-    /// command cannot be spawned or exits non-zero, no recognizable artifact exists
-    /// after it ran, or the ensuing ingest fails.
+    /// An error when no `refresh_cmd` is configured; exit 2 — naming
+    /// `--consent` and showing the command verbatim — when its consent is
+    /// missing or its text changed and `consent` is false. Nothing is spawned
+    /// then. The command's own failure is its outcome in the payload.
     ///
     /// [FR-CV-10]: ../../../docs/specs/requirements/FR-CV-10.md
-    /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    pub fn coverage_refresh(&self) -> Result<crate::history::CoverageRefreshSummary> {
+    /// [FR-CV-13]: ../../../docs/specs/requirements/FR-CV-13.md
+    pub fn coverage_refresh(&self, consent: bool) -> Result<crate::coverage::CoverageRunSummary> {
         crate::observability::traced(Tool::CoverageRefresh, || {
-            let config = crate::config::load_config_from_root(&self.root)?;
-            let ingest_cfg = config.coverage_ingest.effective();
-            let command = ingest_cfg.refresh_cmd.clone().ok_or_else(|| {
-                anyhow!(
-                    "no [coverage_ingest].refresh_cmd configured in .logos/config.toml — \
-                     set it (e.g. refresh_cmd = \"cargo llvm-cov --cobertura --output-path \
-                     target/llvm-cov/cobertura.xml\") or run `logos coverage ingest <report>`"
-                )
-            })?;
-
-            // The lone explicit coverage subprocess (off the serve/watcher path,
-            // [ADR-38]). `sh -c` runs the free-form command rooted at the project.
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .current_dir(&self.root)
-                .output()
-                .with_context(|| format!("running coverage refresh command: {command}"))?;
-            if !output.status.success() {
-                // Surface BOTH streams: coverage tools (cargo-llvm-cov, pytest-cov,
-                // nyc) often write their primary error to stdout, not stderr, so a
-                // stderr-only diagnostic would drop the actual cause.
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let diagnostic = match (stderr.trim(), stdout.trim()) {
-                    ("", out) => out.to_string(),
-                    (err, "") => err.to_string(),
-                    (err, out) => format!("stderr: {err}\nstdout: {out}"),
-                };
-                return Err(anyhow!(
-                    "coverage refresh command failed (exit {}): {}\n{}",
-                    output
-                        .status
-                        .code()
-                        .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-                    command,
-                    diagnostic
-                ));
-            }
-
-            let artifact = crate::history::coverage::discover_artifact(&self.root, &ingest_cfg)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "`{command}` ran successfully but produced no recognizable coverage \
-                         artifact in a conventional or configured location — check the command's \
-                         output path or set [coverage_ingest].artifact_glob"
-                    )
-                })?;
-            // Reuse the already-loaded `ingest_cfg` (one config read for the whole
-            // refresh) rather than re-reading config through the public entrypoint.
-            let format_override = Self::parse_coverage_format(ingest_cfg.format_override())?;
-            let ingest = self.coverage_ingest_with(&artifact, format_override, &ingest_cfg)?;
-            let artifact_rel = artifact
-                .strip_prefix(&self.root)
-                .unwrap_or(&artifact)
-                .to_string_lossy()
-                .into_owned();
-            Ok(crate::history::CoverageRefreshSummary {
-                command,
-                artifact: artifact_rel,
-                ingest,
-            })
+            let request = crate::coverage::RunRequest {
+                tool: Some(crate::coverage::consent::CUSTOM_TOOL),
+                consent,
+                entry: "logos coverage refresh",
+                dependency_consent: false,
+            };
+            self.coverage_run_untraced(&request)
         })
+    }
+
+    /// The coverage run ([FR-CV-14], S-737) with no dependency consent —
+    /// `logos coverage run` is [`coverage_run_adding`](Self::coverage_run_adding),
+    /// and MCP `coverage_run` the job's [`coverage_run_reporting`](Self::coverage_run_reporting):
+    /// run every enabled, installed coverage tool in registry order,
+    /// then the custom entry when a `refresh_cmd` is configured — or only
+    /// `tool` — and ingest each report into the HEAD snapshot as its tool
+    /// ends ([`crate::coverage::run`]). With `consent`, what the project's
+    /// execution consent does not cover yet is recorded first. Explicit only:
+    /// the watcher, timers and read paths never start a run ([ADR-87] §4).
+    /// Advisory: a run never moves the gate ([BR-28]).
+    ///
+    /// # Errors
+    /// Exit 2, with nothing started, for an invalid config, an unregistered
+    /// tool, or a missing consent without `consent`; an error, also with
+    /// nothing started, for `custom` with no `refresh_cmd`. One tool's failure
+    /// is its outcome, never an error.
+    ///
+    /// [FR-CV-14]: ../../../docs/specs/requirements/FR-CV-14.md
+    /// [ADR-87]: ../../../docs/specs/architecture/decisions/ADR-87.md
+    /// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
+    pub fn coverage_run(&self, tool: Option<&str>, consent: bool) -> Result<crate::coverage::CoverageRunSummary> {
+        self.coverage_run_adding(tool, consent, false)
+    }
+
+    /// [`coverage_run`](Self::coverage_run), and with `dependency_consent`
+    /// (`logos coverage run --dependency-consent`, S-749) the project's
+    /// dependency consent recorded for each missing coverage dev dependency's
+    /// command before the project's own package manager adds it
+    /// ([FR-CV-18]). Without it, a dependency the consent does not name yet is
+    /// reported in the summary with the consent statement, and nothing is
+    /// added. Logos never commits the change.
+    ///
+    /// # Errors
+    /// As [`coverage_run`](Self::coverage_run). A refused or failed addition
+    /// is its outcome in the payload, never an error.
+    ///
+    /// [FR-CV-18]: ../../../docs/specs/requirements/FR-CV-18.md
+    pub fn coverage_run_adding(
+        &self,
+        tool: Option<&str>,
+        consent: bool,
+        dependency_consent: bool,
+    ) -> Result<crate::coverage::CoverageRunSummary> {
+        crate::observability::traced(Tool::CoverageRun, || {
+            let entry = crate::coverage::RUN_ENTRY;
+            self.coverage_run_untraced(&crate::coverage::RunRequest { tool, consent, entry, dependency_consent })
+        })
+    }
+
+    /// The run behind [`coverage_run`](Self::coverage_run) and
+    /// [`coverage_refresh`](Self::coverage_refresh): each report goes through
+    /// the one ingest body, with the `[coverage_ingest]` table the run loaded
+    /// — one config read for the whole run. Not `traced`: each caller owns
+    /// the span.
+    fn coverage_run_untraced(&self, request: &crate::coverage::RunRequest<'_>) -> Result<crate::coverage::CoverageRunSummary> {
+        self.coverage_run_progress(request, |_| {})
+    }
+
+    /// [`coverage_run_untraced`](Self::coverage_run_untraced), each tool's
+    /// start and settled part handed to `progress` as it happens.
+    fn coverage_run_progress(
+        &self,
+        request: &crate::coverage::RunRequest<'_>,
+        progress: impl FnMut(&crate::coverage::RunProgress),
+    ) -> Result<crate::coverage::CoverageRunSummary> {
+        crate::coverage::run(&self.root, &self.scan_environment(), request, progress, |report, format, ingest_cfg| {
+            self.coverage_ingest_with(report, format, ingest_cfg)
+        })
+    }
+
+    /// [`coverage_run`](Self::coverage_run) with each tool's start and
+    /// settled outcome handed to `progress` as it happens: what the
+    /// `coverage-run` job runs ([`crate::coverage::job`], S-738), on a job
+    /// thread, so a cancel kills the tool running and starts nothing after it.
+    /// Never records consent: [`coverage_run_admit`](Self::coverage_run_admit)
+    /// does, before the job starts. The dependency consent only a terminal
+    /// records, so a missing coverage dev dependency is added here only when
+    /// an earlier `--dependency-consent` named its command (S-749).
+    ///
+    /// # Errors
+    /// As [`coverage_run`](Self::coverage_run) without `consent`.
+    pub(crate) fn coverage_run_reporting(
+        &self,
+        tool: Option<&str>,
+        progress: impl FnMut(&crate::coverage::RunProgress),
+    ) -> Result<crate::coverage::CoverageRunSummary> {
+        crate::observability::traced(Tool::CoverageRun, || {
+            let request =
+                crate::coverage::RunRequest { tool, consent: false, entry: crate::coverage::RUN_ENTRY, dependency_consent: false };
+            self.coverage_run_progress(&request, progress)
+        })
+    }
+
+    /// `logos coverage install` ([FR-CV-17], S-748): install the managed
+    /// coverage tools that are missing — `cargo-llvm-cov` — and add
+    /// `llvm-tools-preview` to the user's toolchain with their own `rustup`,
+    /// under the install consent ([`crate::tools::surface::coverage_install`]).
+    /// CLI only: no MCP tool installs.
+    ///
+    /// # Errors
+    /// Exit 2 for a missing consent (naming each line; nothing is downloaded
+    /// and no `rustup` runs), a platform without managed installs or no tools
+    /// directory. The lock's `Busy` while another scan or install of the
+    /// project holds it.
+    ///
+    /// [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
+    pub fn coverage_install(
+        &self,
+        request: &crate::tools::surface::CoverageInstallRequest,
+    ) -> Result<crate::tools::surface::CoverageInstall> {
+        self.tool_install_locked(|| {
+            crate::tools::surface::coverage_install(&self.root, &self.scan_environment(), self.tools_manifest(), request)
+        })
+    }
+
+    /// The install a Coverage page **Install** readies before its run
+    /// ([FR-CV-17], S-750): [`coverage_install`](Self::coverage_install)
+    /// without consent — the page's dialog recorded it
+    /// ([`crate::coverage::job::admit_prepared`]), so a line it did not
+    /// accept is refused — each step handed to `progress`. Run on the
+    /// `coverage-run` job's thread, a cancel kills the download, unpack or
+    /// `rustup` going and leaves no partial tool.
+    ///
+    /// # Errors
+    /// As [`coverage_install`](Self::coverage_install).
+    ///
+    /// [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
+    pub fn coverage_install_job(
+        &self,
+        mut progress: impl FnMut(&crate::tools::surface::CoverageInstallStep<'_>),
+    ) -> Result<crate::tools::surface::CoverageInstall> {
+        let request = crate::tools::surface::CoverageInstallRequest { from: None, consent: false };
+        self.tool_install_locked(|| {
+            let (root, env) = (&self.root, self.scan_environment());
+            crate::tools::surface::coverage_install_reporting(root, &env, self.tools_manifest(), &request, &mut progress)
+        })
+    }
+
+    /// Run a per-user `install` — `security install`, `coverage install` —
+    /// holding the project's scan-or-install lock as a tool install, or
+    /// unlocked in a project with no `.logos` yet: a per-user install needs no
+    /// index, and the lock file lives under it.
+    fn tool_install_locked<T>(&self, install: impl FnOnce() -> Result<T>) -> Result<T> {
+        if !std::fs::symlink_metadata(self.root.join(".logos")).is_ok_and(|m| m.is_dir()) {
+            return crate::security::unlocked(install);
+        }
+        self.security_exclusively(crate::security::RunKind::ToolInstall, install)
+    }
+
+    /// Admit a run of `tool` — every tool when `None` — against this
+    /// project's coverage execution consent before a `coverage-run` job starts
+    /// it ([FR-CV-13], S-738). `answer` is the web UI's consent dialog: when it
+    /// accepts everything the consent lacks — every tool, and the custom
+    /// command's exact current text — exactly that is recorded and the run may
+    /// start (`None`); when it accepts less, nothing is recorded and what is
+    /// pending is returned, to be asked again. `answer` `None` is a surface
+    /// that cannot give the consent (MCP): a run the consent does not cover is
+    /// refused as `coverage run` without `--consent` refuses it. Starts no
+    /// process.
+    ///
+    /// # Errors
+    /// Exit 2, naming `logos coverage run --consent`, for a refused run;
+    /// otherwise as [`coverage_run`](Self::coverage_run), the consent aside,
+    /// and an I/O error recording the consent.
+    ///
+    /// [FR-CV-13]: ../../../docs/specs/requirements/FR-CV-13.md
+    pub(crate) fn coverage_run_admit(
+        &self,
+        tool: Option<&str>,
+        answer: Option<&crate::coverage::consent::ConsentAnswer<'_>>,
+    ) -> Result<Option<crate::coverage::consent::PendingConsent>> {
+        use crate::coverage::consent;
+        let env = self.scan_environment();
+        let pending = crate::coverage::consent_pending(&self.root, &env, tool)?;
+        match answer {
+            _ if pending.is_empty() => Ok(None),
+            None => Err(consent::refused(&pending, crate::coverage::RUN_ENTRY).into()),
+            Some(answer) if !pending.accepted_by(answer) => Ok(Some(pending)),
+            Some(_) => {
+                consent::record(env.user_dir.as_deref(), &self.root, &pending)?;
+                Ok(None)
+            }
+        }
     }
 
     /// The coverage status surface ([FR-CV-05], [FR-CV-06]): per-file freshness
@@ -3207,19 +3414,51 @@ impl Engine {
     /// `logos coverage status` subcommand and the MCP `coverage_status` twin share
     /// this one `api` entrypoint byte-for-byte ([NFR-CC-01]).
     ///
-    /// With no coverage ingested, returns an `n/a` status carrying a one-line
-    /// notice — never an error, so the surface exits 0 ([FR-CV-06]). Reads only
-    /// `history.db` ([BR-28]); advisory, never moves the gate.
+    /// With no coverage ingested, the evidence reads `n/a` with a one-line
+    /// notice — never an error ([FR-CV-06]). The evidence comes from
+    /// `history.db` alone ([BR-28]); advisory, never moves the gate.
+    ///
+    /// The payload also carries the coverage runner's state (S-737): each
+    /// tool's one state — detected, else its last run, else never run — and
+    /// the execution consent ([`crate::coverage::runner_status`]). Detection
+    /// asks a tool outside the project for its version; it runs nothing the
+    /// project supplies.
     ///
     /// # Errors
-    /// Returns an error only on an unexpected store failure.
+    /// Exit 2 for an invalid repository or user-level config or consent
+    /// record; otherwise only an unexpected store failure.
     ///
     /// [FR-CV-05]: ../../../docs/specs/requirements/FR-CV-05.md
     /// [FR-CV-06]: ../../../docs/specs/requirements/FR-CV-06.md
     pub fn coverage_status(&self) -> Result<crate::history::CoverageStatus> {
+        self.coverage_status_probing(crate::coverage::Probes::Every)
+    }
+
+    /// [`coverage_status`](Self::coverage_status) with the version probes
+    /// `probes` allows: the web Coverage page reads with
+    /// [`Probes::Never`](crate::coverage::Probes::Never), since a page read is
+    /// on the serve path, which starts no tool process ([ADR-38]).
+    ///
+    /// # Errors
+    /// As [`coverage_status`](Self::coverage_status).
+    ///
+    /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
+    pub fn coverage_status_probing(&self, probes: crate::coverage::Probes) -> Result<crate::history::CoverageStatus> {
         crate::observability::traced(Tool::CoverageStatus, || {
-            crate::history::coverage::status(&self.root)
+            let mut status = crate::history::coverage::status(&self.root)?;
+            status.runner = Some(crate::coverage::runner_status(&self.root, &self.scan_environment(), probes)?);
+            Ok(status)
         })
+    }
+
+    /// [`coverage_status`](Self::coverage_status)'s evidence without the
+    /// runner state: the Dashboard's read, which probes no tool — a JVM
+    /// build tool's version command takes seconds.
+    ///
+    /// # Errors
+    /// Only an unexpected store failure.
+    pub fn coverage_evidence(&self) -> Result<crate::history::CoverageStatus> {
+        crate::observability::traced(Tool::CoverageStatus, || crate::history::coverage::status(&self.root))
     }
 
     /// The per-language call residue `status` reports ([FR-RS-09]), walked at
@@ -3664,7 +3903,7 @@ impl Engine {
         // A count beyond `usize` cannot be zero, so saturating is exact here:
         // `admits_diagnosis` rejects it either way.
         let admitted = usize::try_from(admitted).unwrap_or(usize::MAX);
-        if !crate::config::ZeroAdmissionDiagnostic::admits_diagnosis(admitted) {
+        if !crate::config::admits_zero_admission_diagnosis(admitted) {
             return None;
         }
         if !self.has_completed_an_index() {
@@ -4043,7 +4282,7 @@ mod tests {
         // Coverage (S-051): the ingest summary and status read-models.
         assert_serialize::<crate::history::IngestSummary>();
         assert_serialize::<crate::history::CoverageStatus>();
-        assert_serialize::<crate::history::CoverageRefreshSummary>();
+        assert_serialize::<crate::coverage::CoverageRunSummary>();
         // Config write-back (S-096): the read-model + write outcome.
         assert_serialize::<crate::config::ConfigReadModel>();
         assert_serialize::<crate::config::ConfigWriteOutcome>();

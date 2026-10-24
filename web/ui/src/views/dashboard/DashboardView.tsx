@@ -5,8 +5,10 @@
  * AppShell content slot, rendering exclusively through the S-193 design system.
  *
  * It keeps the server-rendered Dashboard's verdict-first order (frontend-design
- * §4.1): a freshness statement leads, then the cards the mounted extensions add
- * (S-644), Quality index, Languages, Graph, Activity, Rule findings and Code coverage — and its honest
+ * §4.1): a freshness statement leads, then the three figures the product is for —
+ * Quality index, Security and Code coverage (S-789, CR-244) — then the cards the
+ * mounted extensions add (S-644), then Languages, Graph, Activity and Rule
+ * findings — and its honest
  * empty states (an un-indexed root is one empty state naming `logos index`; every
  * figure traces to a read-model field, none fabricated; NFR-RA-05, NFR-CC-04).
  *
@@ -30,6 +32,7 @@ import type {
   LanguageComposition,
   LanguagesInfo,
   OverviewModel,
+  OverviewSecurity,
   RulesReport,
   StatsInfo,
   StatusInfo,
@@ -42,15 +45,22 @@ import {
   graph as graphCopy,
   languages as languagesCopy,
   qualityIndex,
+  securityWidget,
 } from "../../copy/dashboard.copy.ts";
 import { RULE_FINDINGS_TEXT, ruleFindings, ruleFindingsState } from "../../copy/ruleFindings.copy.ts";
 import { plural } from "../../copy/types.ts";
+import { SeverityRow } from "../security/SeverityRow.tsx";
 import {
   bandOf,
   fmtInt,
   freshnessStatement,
+  gateStatement,
+  newestScanStatement,
   pctBp,
   resolutionStatement,
+  scannersFailedStatement,
+  securityState,
+  testCodeStatement,
 } from "./dashboardModel.ts";
 import styles from "./Dashboard.module.css";
 
@@ -77,8 +87,9 @@ export function DashboardView() {
 }
 
 /** The verdict-first Dashboard over a loaded, indexed overview read-model. The
- *  mounted extensions' cards (S-644) sit in one slot directly after the freshness
- *  statement — where the Project Overview card stood while it was built in. */
+ *  freshness statement leads, then Quality index, Security and Code coverage
+ *  (S-789). The mounted extensions' cards (S-644) sit in one slot directly after
+ *  those three, ahead of the project-shape widgets. */
 function Dashboard({ data }: { data: OverviewModel }) {
   // Subscribe, so the cards appear when the boot read of the active set settles.
   useExtensions();
@@ -87,15 +98,16 @@ function Dashboard({ data }: { data: OverviewModel }) {
       <Callout label="Index" tone="signal">
         <span>{freshnessStatement(data.status, nowUnix())}</span>
       </Callout>
+      <QualityCard gate={data.gate} />
+      <SecurityCard security={data.security} />
+      <CodeCoverageCard coverage={data.coverage} />
       {mountedDashboardCards().map(({ card, Component }) => (
         <Component key={card.id} card={card} overview={data} />
       ))}
-      <QualityCard gate={data.gate} />
       <LanguagesCard composition={data.composition} languages={data.languages} />
       <GraphCard status={data.status} />
       <ActivityCard stats={data.stats} />
       <RuleFindingsCard rules={data.rules} />
-      <CodeCoverageCard coverage={data.coverage} />
     </WidgetStack>
   );
 }
@@ -154,6 +166,77 @@ function QualityCard({ gate }: { gate: GateResult }) {
       {link}
     </Widget>
   );
+}
+
+/** *Security* — the stored security state (S-789, FR-UI-09), read with no scanner
+ *  started and nothing written. Four honest states (NFR-CC-04), decided by
+ *  `securityState`: a read fault is stated with its cause and never shown as zero
+ *  findings; never scanned names `logos security scan`, and with no scanner
+ *  consented to yet `logos security scan --consent`; otherwise the counted
+ *  findings by severity — each the figure `security status` and `security
+ *  findings` state on the same store — with the `[security]` gate verdict (or
+ *  the statement that no table is configured), the newest scan's age and *N of M*
+ *  scanners whose last scan failed. */
+function SecurityCard({ security }: { security: OverviewSecurity }) {
+  const state = securityState(security);
+  const link = <DetailLink href="/security" label="Security" />;
+  switch (state.kind) {
+    case "fault":
+      return (
+        <Widget title="Security" copy={securityWidget} absence={DASHBOARD_ABSENCE.securityFault(state.error)}>
+          {link}
+        </Widget>
+      );
+    case "no_consent":
+      return (
+        <Widget title="Security" copy={securityWidget} absence={DASHBOARD_ABSENCE.noSecurityConsent}>
+          {link}
+        </Widget>
+      );
+    case "never_scanned":
+      return (
+        <Widget title="Security" copy={securityWidget} absence={DASHBOARD_ABSENCE.noSecurityScan}>
+          {link}
+        </Widget>
+      );
+    case "scanned": {
+      const { summary, counted } = state;
+      const gate = gateStatement(summary.gate);
+      const inTests = summary.tally === null ? null : testCodeStatement(summary.tally);
+      return (
+        <Widget
+          title="Security"
+          badge={
+            summary.gate === null ? undefined : (
+              <Badge tone={summary.gate.passed ? "green" : "red"}>{summary.gate.passed ? "PASS" : "FAIL"}</Badge>
+            )
+          }
+          copy={securityWidget}
+          figure={
+            <span>
+              <span className="num">{fmtInt(counted.total)}</span>{" "}
+              <FigureNote>
+                {plural(counted.total, "finding", "findings")}
+                {summary.scan === "stale" ? " — the last scan is not current" : ""}
+              </FigureNote>
+            </span>
+          }
+        >
+          <SeverityRow counts={counted} />
+          {inTests !== null && <FigureNote block>{inTests}</FigureNote>}
+          <dl className={styles.statList}>
+            <dt>Gate</dt>
+            <dd>{gate === null ? DASHBOARD_ABSENCE.noSecurityTable : gate}</dd>
+            <dt>Newest scan</dt>
+            <dd className="mono">{newestScanStatement(summary, nowUnix())}</dd>
+            <dt>Last scan failed</dt>
+            <dd className="mono num">{scannersFailedStatement(summary)}</dd>
+          </dl>
+          {link}
+        </Widget>
+      );
+    }
+  }
 }
 
 /** *Code coverage* — the overall line-% as a green (never banded) bar. */

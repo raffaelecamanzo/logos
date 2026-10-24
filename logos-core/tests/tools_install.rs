@@ -50,14 +50,14 @@ const FIXTURES: [(&str, &str, &str, &str); 4] = [
     (
         "osv-scanner",
         "osv-scanner",
-        "2d37c34aca620fa304014e7910c99638982bfa94c88eeedea5aa249058415458",
-        "1.9.2",
+        "2e3b29ec02f47474da838f7db433924559c3bb2ce72a3b30c293ddf78069091e",
+        "2.7.0",
     ),
     (
         "gosec",
         "gosec.tar.gz",
-        "95be88c7a8c5e9f66981e1394f495cf1ae4890fb3cb252fee1026c5a8b1e5f22",
-        "2.21.4",
+        "90362facebe767be6fdea61a323ad1ffa7644815324edac748d9a14a7752475a",
+        "2.29.0",
     ),
 ];
 const TRIVY_SHA: &str = FIXTURES[0].2;
@@ -259,6 +259,7 @@ impl Rig {
             user_dir: Some(self.user()),
             search_path: Some(self.scanners().into_os_string()),
             tools_dir: Some(self.tools()),
+            nvd_api_key: None,
         };
         Orchestrator::open_in(&self.root(), &env)
             .unwrap()
@@ -349,11 +350,11 @@ fn the_four_scanners_install_from_fixture_artifacts_and_detection_reports_them_m
             "gitleaks/8.18.4",
             "gitleaks/8.18.4/gitleaks",
             "gosec",
-            "gosec/2.21.4",
-            "gosec/2.21.4/gosec",
+            "gosec/2.29.0",
+            "gosec/2.29.0/gosec",
             "osv-scanner",
-            "osv-scanner/1.9.2",
-            "osv-scanner/1.9.2/osv-scanner",
+            "osv-scanner/2.7.0",
+            "osv-scanner/2.7.0/osv-scanner",
             "trivy",
             "trivy/0.74.0",
             "trivy/0.74.0/trivy",
@@ -774,10 +775,10 @@ exit 22
 fn an_install_never_deletes_or_writes_through_a_symlinked_tool_or_staging_directory() {
     let rig = Rig::new();
     let outside = rig.base.join("outside");
-    fs::create_dir_all(outside.join("2.21.4")).unwrap();
-    fs::create_dir_all(outside.join("gosec-2.21.4")).unwrap();
-    fs::write(outside.join("2.21.4/precious.txt"), "keep").unwrap();
-    fs::write(outside.join("gosec-2.21.4/precious.txt"), "keep").unwrap();
+    fs::create_dir_all(outside.join("2.29.0")).unwrap();
+    fs::create_dir_all(outside.join("gosec-2.29.0")).unwrap();
+    fs::write(outside.join("2.29.0/precious.txt"), "keep").unwrap();
+    fs::write(outside.join("gosec-2.29.0/precious.txt"), "keep").unwrap();
     fs::create_dir_all(rig.tools()).unwrap();
     std::os::unix::fs::symlink(&outside, rig.tools().join("gosec")).unwrap();
     std::os::unix::fs::symlink(&outside, rig.tools().join(STAGING_DIR)).unwrap();
@@ -795,16 +796,16 @@ fn an_install_never_deletes_or_writes_through_a_symlinked_tool_or_staging_direct
     assert_eq!(
         rig.tree(&outside),
         [
-            "2.21.4",
-            "2.21.4/precious.txt",
-            "gosec-2.21.4",
-            "gosec-2.21.4/precious.txt"
+            "2.29.0",
+            "2.29.0/precious.txt",
+            "gosec-2.29.0",
+            "gosec-2.29.0/precious.txt"
         ],
         "nothing outside was touched"
     );
     assert_eq!(
         rig.tree(&rig.tools()),
-        ["gosec", "gosec/2.21.4", "gosec/2.21.4/gosec"]
+        ["gosec", "gosec/2.29.0", "gosec/2.29.0/gosec"]
     );
 }
 
@@ -819,7 +820,7 @@ fn an_install_never_creates_a_file_through_a_symlinked_lock_file() {
     let staging = rig.tools().join(STAGING_DIR);
     fs::create_dir_all(&staging).unwrap();
     std::os::unix::fs::symlink(outside.join("own"), staging.join("trivy-0.74.0.lock")).unwrap();
-    std::os::unix::fs::symlink(outside.join("swept"), staging.join("gosec-2.21.4.lock")).unwrap();
+    std::os::unix::fs::symlink(outside.join("swept"), staging.join("gosec-2.29.0.lock")).unwrap();
 
     let report = rig
         .installer(manifest(None))
@@ -872,12 +873,12 @@ fn an_offline_artifact_that_is_not_a_regular_file_fails_without_blocking() {
 fn the_next_install_discards_the_staging_no_running_install_holds() {
     let rig = Rig::new();
     let staging = rig.tools().join(STAGING_DIR);
-    for leftover in ["trivy-0.73.0", "gosec-2.21.4"] {
+    for leftover in ["trivy-0.73.0", "gosec-2.29.0"] {
         fs::create_dir_all(staging.join(leftover)).unwrap();
         fs::write(staging.join(leftover).join("partial"), "x").unwrap();
     }
-    fs::write(staging.join("gosec-2.21.4.lock"), "").unwrap();
-    fs::write(staging.join("osv-scanner-1.9.2.lock"), "").unwrap();
+    fs::write(staging.join("gosec-2.29.0.lock"), "").unwrap();
+    fs::write(staging.join("osv-scanner-2.7.0.lock"), "").unwrap();
     rig.installer(manifest(None))
         .install(&["trivy"], &Source::Network)
         .unwrap();
@@ -915,7 +916,7 @@ fn an_install_of_another_tool_clears_the_staging_a_killed_install_left() {
     );
     assert_eq!(
         rig.tree(&rig.tools()),
-        ["gosec", "gosec/2.21.4", "gosec/2.21.4/gosec"],
+        ["gosec", "gosec/2.29.0", "gosec/2.29.0/gosec"],
         "the killed install's staging is gone"
     );
 }

@@ -17,7 +17,17 @@
 //! - [`findings`] lists the stored findings, classified ([S-664]'s
 //!   [`classify`]) and labelled ([S-666]'s [`label`]), with filters that
 //!   intersect, each in the graph context the engine computes for it
-//!   ([`super::context`], S-669).
+//!   ([`super::context`], S-669) and with its code scope ([`super::scope`],
+//!   S-795).
+//!
+//! # Test code ([FR-SC-28])
+//! Every finding is `test` or `production`, classified when it is read
+//! ([`super::scope`]). A list keeps production code unless its scope says
+//! otherwise and states how many findings the scope hid
+//! ([`SecurityFindings::hidden_by_scope`]); `status` counts a report's fresh,
+//! unsuppressed, production findings by [`counts`](crate::history::security::counts)
+//! and states the rest by why ([`ScanState::Fresh`]). The gate reads each
+//! scanner's state alone, never these counts ([BR-98]).
 //!
 //! # Consent ([FR-SC-07])
 //! Every installed, enabled scanner may reach the network to refresh its rules
@@ -80,7 +90,9 @@
 //! [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
 //! [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
 //! [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+//! [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
 //! [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
+//! [BR-98]: ../../../docs/specs/software-spec.md#328-security-findings
 //! [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
 //! [CR-217]: ../../../docs/requests/CR-217-security-findings-in-graph-context.md
 //! [S-664]: ../../../docs/planning/journal.md#s-664-findings-are-classified-by-owasp-top-10-2025-and-2021
@@ -97,14 +109,17 @@ use serde::Serialize;
 use super::context::FindingContext;
 use super::mask;
 use super::registry::{Scanner, ScopedPath, REGISTRY};
+use super::scope::{scopes, ScopeFilter, ScopeLabel};
+use super::Excluded;
 use super::{
     is_symlink, project_ignores, remove_file_if_present, resolve_scope, write_new, Availability, Coverage,
     InstalledCopy, Orchestrator, Outcome, Probe, ScanEnvironment, ScanRequest, Selection, Unprobed, OUTPUT_DIR,
 };
 use crate::config::{load_install_consent, load_scan_consent, record_scan_consent, ConfigError};
-use crate::history::security::owasp::{CategoryCoverage, Unclassified};
+use crate::history::security::owasp::{count_production, CategoryCoverage, Unclassified};
 use crate::history::security::{
-    classify, label, read_latest, EntryStatus, IgnoreFile, IngestScope, OwaspEdition, Suppression,
+    classify, counts, label, left_out, read_latest, CodeScope, EntryStatus, IgnoreFile, IngestScope, LeftOut, OwaspEdition,
+    Suppression,
 };
 use crate::history::{SecurityFinding, SecurityIngestSummary, Severity, FRESHNESS_STALE};
 use crate::tools::Manifest;
@@ -156,7 +171,8 @@ pub struct ScannerRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<RunScope>,
     /// What its whole-project run did with the project's ignored directories
-    /// ([FR-SC-26]): `ignored_paths` and, when it read them, `coverage_note`.
+    /// ([FR-SC-26]): `ignored_paths` and, when it read them, `coverage_kind` and
+    /// `coverage_note`.
     /// Absent when it did not run, or ran on the paths a scoped scan named.
     ///
     /// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
@@ -282,6 +298,12 @@ pub fn scan(
     }
     if !missing.is_empty() {
         record_scan_consent(env.user_dir.as_deref(), root, &missing)?;
+    }
+    // At the scan's start, whatever it then starts: a scan whose scanners are
+    // all absent still removes a key file a crash left (FR-SC-27). A refused
+    // `.logos` is the first scanner's failure to report.
+    if let Ok(out_dir) = super::output_dir(root) {
+        super::sweep_stale_key_file(&out_dir);
     }
 
     let mut scanners = Vec::with_capacity(plan.len());
@@ -499,9 +521,12 @@ pub(crate) const CAUSE_CHARS: usize = 240;
 /// with secrets [masked](mask::mask_secrets) (S-769): the first line holding
 /// the word `error`, `fatal` or `panic` (any case, a whole word, so `0 errors`
 /// is none), else the last line that is not blank, else [`NO_OUTPUT`].
-/// Trimmed, and cut to [`CAUSE_CHARS`] with a closing `…`. One failure is
-/// named whole instead: the NVD API rejecting a missing or invalid key
-/// ([`NVD_KEY_CAUSE`]), whose first error line says only that the update failed.
+/// Trimmed, and cut to [`CAUSE_CHARS`] with a closing `…`. Two failures are
+/// named by a sentence of Logos's instead: the NVD API rejecting a missing or
+/// invalid key ([`NVD_KEY_CAUSE`], returned whole), whose first error line says
+/// only that the update failed, and gosec unable to type the standard library
+/// ([`untyped_stdlib_cause`], S-782, the line the orchestrator adds, preferred
+/// to gosec's own, which names neither version nor remedy).
 pub(crate) fn failure_cause(output: &str) -> String {
     let masked = mask::mask_secrets(output);
     if masked.lines().any(rejects_nvd_api_key) {
@@ -512,7 +537,13 @@ pub(crate) fn failure_cause(output: &str) -> String {
         line.split(|c: char| !c.is_ascii_alphanumeric())
             .any(|word| ["error", "fatal", "panic"].iter().any(|w| word.eq_ignore_ascii_case(w)))
     };
-    let Some(line) = lines().find(reports_error).or_else(|| lines().next_back()) else {
+    let has_marker = masked.contains(UNTYPED_STDLIB);
+    let names_untyped_stdlib = |line: &&str| has_marker && line.starts_with(UNTYPED_STDLIB_CAUSE);
+    let Some(line) = lines()
+        .find(names_untyped_stdlib)
+        .or_else(|| lines().find(reports_error))
+        .or_else(|| lines().next_back())
+    else {
         return NO_OUTPUT.to_string();
     };
     if line.chars().count() <= CAUSE_CHARS {
@@ -525,12 +556,37 @@ pub(crate) fn failure_cause(output: &str) -> String {
 
 /// The cause of a Dependency-Check run the NVD API refused for want of a key:
 /// Dependency-Check 13 needs one and its own first error line does not say so.
-/// The route is the user-level `config.toml`, the only tier whose
-/// `[security_scan.<scanner>]` may set `extra_args`. A fixed sentence: the
-/// value of a rejected key is never echoed.
-pub(crate) const NVD_KEY_CAUSE: &str = "the NVD API key is missing or rejected: get a free key at \
-     https://nvd.nist.gov/developers/request-an-api-key and set [security_scan.dependency-check] \
-     extra_args = [\"--nvdApiKey\", \"<key>\"] in the user config";
+/// It names [`NVD_API_KEY_ENV`](super::NVD_API_KEY_ENV) first ([FR-SC-27]),
+/// then the user-level `config.toml`'s `extra_args`, the only tier whose
+/// `[security_scan.<scanner>]` may set them; within [`CAUSE_CHARS`]. A fixed
+/// sentence: the value of a rejected key is never echoed.
+///
+/// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
+pub(crate) const NVD_KEY_CAUSE: &str = "NVD API key missing or rejected: set NVD_API_KEY where logos \
+     or `logos serve` runs, or [security_scan.dependency-check] extra_args = [\"--nvdApiKey\", \"<key>\"] \
+     in the user config; free key: https://nvd.nist.gov/developers/request-an-api-key";
+
+/// What gosec prints when the Go toolchain it runs under cannot give it the
+/// export data of a standard-library package it imports: it exits 1 and
+/// writes no report, so the run is `failed`, never a project with nothing to
+/// scan (S-782).
+pub(crate) const UNTYPED_STDLIB: &str = "without types was imported";
+
+/// How the line the orchestrator adds after gosec's own begins
+/// ([`untyped_stdlib_cause`]); [`failure_cause`] reads the cause from it.
+const UNTYPED_STDLIB_CAUSE: &str = "gosec cannot type the standard library:";
+
+/// The cause of a gosec run that printed [`UNTYPED_STDLIB`]: the gosec version
+/// and the local Go it ran under (each as read, or `unknown`) and the remedy.
+/// A fixed sentence around two version tokens: nothing else of gosec's output
+/// is repeated.
+pub(crate) fn untyped_stdlib_cause(gosec: Option<&str>, go: Option<&str>) -> String {
+    format!(
+        "{UNTYPED_STDLIB_CAUSE} gosec {} with the local {} ({UNTYPED_STDLIB}); use a gosec release built for that Go, or a Go toolchain gosec supports",
+        gosec.unwrap_or("unknown"),
+        go.unwrap_or("go unknown"),
+    )
+}
 
 /// Whether `line` is the NVD client's exception for a key it will not take:
 /// an `NvdApiException` that names the API key.
@@ -635,6 +691,15 @@ pub struct ScannerStatus {
     /// a page does not offer `scan --install` for it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub opt_in: bool,
+    /// For Dependency-Check alone, whether it has an NVD API key
+    /// ([FR-SC-27]): `set` when the process that runs the scan has
+    /// [`NVD_API_KEY_ENV`](super::NVD_API_KEY_ENV) or the user's own
+    /// `extra_args` hand it one, else `not_set` — never the key; absent from
+    /// every other row.
+    ///
+    /// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvd_api_key: Option<NvdKeyState>,
     /// The failure log, when its last scan failed.
     pub last_failure: Option<String>,
     /// Why that scan failed, in one masked line read back from the log
@@ -644,7 +709,7 @@ pub struct ScannerStatus {
     /// What a whole-project scan of the tree as it is now would do with the
     /// project's ignored directories ([FR-SC-26]) — a forecast, not the stored
     /// report's — for an installed, enabled scanner: `ignored_paths` and, when
-    /// it would read them, `coverage_note`. Absent for any other row, for a
+    /// it would read them, `coverage_kind` and `coverage_note`. Absent for any other row, for a
     /// scanner the repository's config refuses or that has nothing to scan
     /// ([`ScanState::NotApplicable`]), and from a readout that did
     /// not ask for it ([`status`]'s `coverage`). CodeQL's row states it even
@@ -653,6 +718,24 @@ pub struct ScannerStatus {
     /// [FR-SC-26]: ../../../docs/specs/requirements/FR-SC-26.md
     #[serde(flatten)]
     pub coverage: Option<Coverage>,
+}
+
+/// Whether Dependency-Check has an NVD API key ([`ScannerStatus::nvd_api_key`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NvdKeyState {
+    Set,
+    NotSet,
+}
+
+impl NvdKeyState {
+    fn of(set: bool) -> Self {
+        if set {
+            NvdKeyState::Set
+        } else {
+            NvdKeyState::NotSet
+        }
+    }
 }
 
 /// A licensed scanner's acknowledgement, as recorded per user with the install
@@ -688,18 +771,52 @@ pub enum ScanState {
         because: StaleBecause,
         snapshot_head: String,
         version: String,
-        /// Unsuppressed findings in it.
+        /// Its counted findings, as [`Fresh`](Self::Fresh)'s.
         findings: usize,
         suppressed: usize,
+        not_fresh: usize,
+        test: usize,
     },
     /// A report is stored at this HEAD over unchanged files.
     Fresh {
         snapshot_head: String,
         version: String,
-        /// Unsuppressed findings in it; `0` is a clean scan.
+        /// Its counted findings — fresh, unsuppressed and in production code
+        /// ([`counts`]); `0` with nothing left out is a clean scan.
         findings: usize,
+        /// Findings left out because a current entry suppresses them.
         suppressed: usize,
+        /// Unsuppressed findings left out because their file changed since
+        /// the scan.
+        not_fresh: usize,
+        /// Fresh, unsuppressed findings left out because they sit in test code
+        /// ([FR-SC-28]): "N more in test code". With the three above, every
+        /// finding of the report, each once.
+        ///
+        /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+        test: usize,
     },
+}
+
+/// One report's findings counted and, for those left out, by the first
+/// reason ([`left_out`]): what [`ScanState::Fresh`] and [`ScanState::Stale`]
+/// state.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReportTally {
+    counted: usize,
+    excluded: Excluded,
+    /// Whether a file it anchors moved since the scan, suppressed or not.
+    moved: bool,
+}
+
+impl ReportTally {
+    fn add(&mut self, finding: &SecurityFinding, suppression: Option<&Suppression>, scope: CodeScope) {
+        self.moved |= finding.freshness == FRESHNESS_STALE;
+        match left_out(finding, suppression, scope) {
+            None => self.counted += 1,
+            Some(why) => self.excluded.add(why),
+        }
+    }
 }
 
 /// Why a stored report is stale.
@@ -746,10 +863,14 @@ pub enum VersionProbes {
 /// those two included, walks it for an installed single-language scanner with
 /// no stored report or a stale one, stopping at the first file it reads:
 /// whether it is `not_applicable` decides what they count as missing (S-769).
+/// Each stored report's findings are counted by [`counts`], each with its code
+/// scope: `in_test_symbols` is the graph's answer for every stored finding at
+/// once ([`super::scope::scopes`]).
 ///
 /// # Errors
 /// A [`ConfigError`] (exit 2) for an invalid config, consent record or
-/// `.logos/security-ignore.toml`, or a store failure.
+/// `.logos/security-ignore.toml`, a store failure, or `in_test_symbols`' own
+/// error.
 ///
 /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
 /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
@@ -762,6 +883,7 @@ pub fn status(
     today: NaiveDate,
     probes: VersionProbes,
     coverage: bool,
+    in_test_symbols: impl FnOnce(&[&SecurityFinding]) -> Result<Vec<bool>>,
 ) -> Result<SecurityStatus> {
     let orchestrator = Orchestrator::open_in(root, env)?.with_manifest(manifest.clone());
     let availability = orchestrator.availability();
@@ -770,22 +892,19 @@ pub fn status(
     let ignore = IgnoreFile::load(root)?;
     let view = read_latest(root)?;
     let labelled = label(&view.findings, &ignore, root, today);
+    let scoped = scopes(root, &view.findings.iter().collect::<Vec<_>>(), in_test_symbols)?;
     let head_sha = crate::history::head_sha(root);
 
-    // Per driver: unsuppressed and suppressed counts, and whether a file moved.
-    let mut tally: BTreeMap<&str, (usize, usize, bool)> = BTreeMap::new();
-    for item in &labelled.findings {
+    // Per driver: each finding counted or left out, and whether a file moved.
+    let mut tally: BTreeMap<&str, ReportTally> = BTreeMap::new();
+    for (item, scope) in labelled.findings.iter().zip(&scoped) {
         let t = tally.entry(item.finding.scanner_name.as_str()).or_default();
-        if item.is_suppressed() {
-            t.1 += 1;
-        } else {
-            t.0 += 1;
-        }
-        t.2 |= item.finding.freshness == FRESHNESS_STALE;
+        t.add(&item.finding, item.suppression.as_ref(), scope.code_scope);
     }
     let state_of = |driver: &str| {
         view.snapshots.iter().find(|s| s.scanner_name == driver).map(|snap| {
-            let (findings, suppressed, moved) = tally.get(driver).copied().unwrap_or_default();
+            let ReportTally { counted: findings, excluded, moved } = tally.get(driver).copied().unwrap_or_default();
+            let Excluded { suppressed, not_fresh, test } = excluded;
             // A scoped run carries rows a full scan wrote, at its own HEAD or an
             // earlier one: freshness is that full scan's (S-685).
             let because = match snap.full_head_sha.as_deref() {
@@ -796,8 +915,10 @@ pub fn status(
             let snapshot_head = snap.full_head_sha.clone().unwrap_or_else(|| snap.head_sha.clone());
             let version = snap.scanner_version.clone();
             match because {
-                Some(because) => ScanState::Stale { because, snapshot_head, version, findings, suppressed },
-                None => ScanState::Fresh { snapshot_head, version, findings, suppressed },
+                Some(because) => {
+                    ScanState::Stale { because, snapshot_head, version, findings, suppressed, not_fresh, test }
+                }
+                None => ScanState::Fresh { snapshot_head, version, findings, suppressed, not_fresh, test },
             }
         })
     };
@@ -879,6 +1000,7 @@ pub fn status(
                 install,
                 licence,
                 opt_in: entry.is_some_and(|e| !e.is_default()),
+                nvd_api_key: orchestrator.nvd_api_key_set(s).map(NvdKeyState::of),
                 last_failure: log.as_deref().map(|log| relative(root, log)),
                 last_failure_cause: log.as_deref().and_then(read_cause),
                 // A scan would start nothing for a scanner with nothing to scan.
@@ -904,6 +1026,7 @@ pub fn status(
                 install: None,
                 licence: None,
                 opt_in: false,
+                nvd_api_key: None,
                 last_failure: None,
                 last_failure_cause: None,
                 coverage: None,
@@ -960,6 +1083,11 @@ pub struct FindingsFilter {
     pub suppression: Option<SuppressionFilter>,
     /// The OWASP edition findings are classified under.
     pub edition: OwaspEdition,
+    /// The code scope listed ([FR-SC-28]): `production` when a surface names
+    /// none ([`parse`](Self::parse)), every scope in this type's default.
+    ///
+    /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+    pub scope: ScopeFilter,
 }
 
 /// Which findings the suppression filter keeps.
@@ -975,8 +1103,8 @@ impl FindingsFilter {
     /// A filter from the tokens a surface was given.
     ///
     /// # Errors
-    /// [`ConfigError::InvalidValue`] (exit 2) naming a severity, edition or
-    /// suppression token that is not one Logos knows.
+    /// [`ConfigError::InvalidValue`] (exit 2) naming a severity, edition,
+    /// suppression or scope token that is not one Logos knows.
     pub fn parse(
         severity: Option<&str>,
         scanner: Option<&str>,
@@ -984,6 +1112,7 @@ impl FindingsFilter {
         path: Option<&str>,
         suppression: Option<&str>,
         edition: Option<&str>,
+        scope: Option<&str>,
     ) -> Result<Self, ConfigError> {
         let bad = |key: &str, token: &str, expected: &str| ConfigError::InvalidValue {
             key: key.to_string(),
@@ -1016,6 +1145,7 @@ impl FindingsFilter {
             path,
             suppression,
             edition,
+            scope: ScopeFilter::parse(scope)?,
         })
     }
 }
@@ -1039,12 +1169,20 @@ pub struct SecurityFindings {
     pub notice: Option<&'static str>,
     /// Stored findings before filtering.
     pub total: usize,
+    /// The code scope listed: `production` unless the caller named one.
+    pub scope: ScopeFilter,
+    /// Findings every other filter kept and the scope left out: what the
+    /// listing states it hid, so a hidden finding is never silent.
+    pub hidden_by_scope: usize,
     /// The findings the filters kept, in store order.
     pub findings: Vec<ListedFinding>,
     /// Every category of the edition over all stored findings: covered with a
     /// count when an enabled scanner's stored report could detect it, else not
     /// covered. A not-covered category can still hold findings, listed per
-    /// finding above; it never reads as a count.
+    /// finding above; it never reads as a count. A covered category's
+    /// `state.findings` counts every code scope; its `production_findings`
+    /// counts the production-code findings alone (suppressed ones in both),
+    /// the figure the Security page states under its default scope.
     pub categories: Vec<CategoryCoverage>,
     /// Every suppression entry, expired and orphaned flagged.
     pub suppressions: Vec<EntryStatus>,
@@ -1075,6 +1213,12 @@ pub struct ListedFinding {
     pub unclassified: Option<Unclassified>,
     /// Its suppression, current or expired; `None` when no entry names it.
     pub suppression: Option<Suppression>,
+    /// Its `code_scope`, `test` or `production`, and the reason it reads
+    /// `test` ([FR-SC-28]).
+    ///
+    /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+    #[serde(flatten)]
+    pub scope: ScopeLabel,
     /// Its enclosing symbol, route reachability and blast radius, each with a
     /// confidence label ([FR-SC-13]).
     ///
@@ -1088,10 +1232,15 @@ impl ListedFinding {
         matches!(self.suppression, Some(Suppression::Suppressed { .. }))
     }
 
-    /// Whether it counts, by [`counts`](crate::history::security::counts): the
-    /// one definition every security surface shares.
+    /// Whether it counts, by [`counts`]: the one definition every security
+    /// surface shares.
     pub fn is_counted(&self) -> bool {
-        crate::history::security::counts(&self.finding, self.suppression.as_ref())
+        counts(&self.finding, self.suppression.as_ref(), self.scope.code_scope)
+    }
+
+    /// Why it is left out of every count, `None` when it counts ([`left_out`]).
+    pub fn left_out(&self) -> Option<LeftOut> {
+        left_out(&self.finding, self.suppression.as_ref(), self.scope.code_scope)
     }
 }
 
@@ -1099,23 +1248,28 @@ impl ListedFinding {
 const NOTHING_SCANNED: &str =
     "no security report is stored: run `logos security scan`, or `logos security ingest <report>`";
 
-/// The stored findings, classified, labelled and filtered ([FR-SC-08]), each
-/// with the graph context `context` returns for it ([FR-SC-13]). `context` is
-/// called once, with the findings the filters kept, and answers one context
-/// per finding in the same order. Starts no process.
+/// The stored findings, classified, labelled, scoped and filtered
+/// ([FR-SC-08], [FR-SC-28]), each with the graph context `context` returns for
+/// it ([FR-SC-13]). `in_test_symbols` is called once, with every stored
+/// finding, and answers whether each sits in a test symbol
+/// ([`super::scope::scopes`]); `context` is called once, with the findings the
+/// filters kept, and answers one context per finding in the same order.
+/// Starts no process.
 ///
 /// # Errors
 /// A [`ConfigError`] (exit 2) for an invalid config or ignore file, a store
-/// failure, or `context`'s own error.
+/// failure, or `in_test_symbols`' or `context`'s own error.
 ///
 /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
 /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
+/// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
 pub fn findings(
     root: &Path,
     env: &ScanEnvironment,
     manifest: &Manifest,
     filter: &FindingsFilter,
     today: NaiveDate,
+    in_test_symbols: impl FnOnce(&[&SecurityFinding]) -> Result<Vec<bool>>,
     context: impl FnOnce(&[&SecurityFinding]) -> Result<Vec<FindingContext>>,
 ) -> Result<SecurityFindings> {
     let orchestrator = Orchestrator::open_in(root, env)?.with_manifest(manifest.clone());
@@ -1131,18 +1285,32 @@ pub fn findings(
         .filter(|(s, a)| *a != Availability::Disabled && stored.contains(s.driver))
         .map(|(s, _)| s.name)
         .collect();
-    let owasp = classify(&view.findings, filter.edition, &looking);
+    let mut owasp = classify(&view.findings, filter.edition, &looking);
     let labelled = label(&view.findings, &ignore, root, today);
+    let scoped = scopes(root, &view.findings.iter().collect::<Vec<_>>(), in_test_symbols)?;
+    // Each category's production count, over every stored finding: the scope
+    // classifier's own verdict, suppression ignored, as the page's OWASP list
+    // reads it.
+    let production: Vec<bool> = scoped.iter().map(|s| ScopeFilter::Production.keeps(s.code_scope)).collect();
+    count_production(&mut owasp.categories, &owasp.findings, &production);
 
     let total = labelled.findings.len();
+    let mut hidden_by_scope = 0;
     let kept: Vec<_> = labelled
         .findings
         .into_iter()
         .zip(owasp.findings)
-        .filter(|(item, class)| keeps(filter, &item.finding, &class.categories, item.suppression.as_ref()))
+        .zip(scoped)
+        .filter(|((item, class), _)| keeps(filter, &item.finding, &class.categories, item.suppression.as_ref()))
+        // Every other filter first, so the hidden count is of what they kept.
+        .filter(|(_, scope)| {
+            let kept = filter.scope.keeps(scope.code_scope);
+            hidden_by_scope += usize::from(!kept);
+            kept
+        })
         .collect();
     // The graph is asked only about what is listed.
-    let contexts = context(&kept.iter().map(|(item, _)| &item.finding).collect::<Vec<_>>())?;
+    let contexts = context(&kept.iter().map(|((item, _), _)| &item.finding).collect::<Vec<_>>())?;
     anyhow::ensure!(
         contexts.len() == kept.len(),
         "the graph context answered {} findings for {} listed",
@@ -1152,12 +1320,13 @@ pub fn findings(
     let findings = kept
         .into_iter()
         .zip(contexts)
-        .map(|((item, class), context)| ListedFinding {
+        .map(|(((item, class), scope), context)| ListedFinding {
             severity_reason: item.finding.severity.reason(),
             finding: item.finding,
             owasp: class.categories,
             unclassified: class.unclassified,
             suppression: item.suppression,
+            scope,
             context,
         })
         .collect();
@@ -1185,6 +1354,8 @@ pub fn findings(
             .collect(),
         notice: view.snapshots.is_empty().then_some(NOTHING_SCANNED),
         total,
+        scope: filter.scope,
+        hidden_by_scope,
         findings,
         categories: owasp.categories,
         suppressions: labelled.entries,

@@ -59,7 +59,7 @@ fn each_install_emits_one_event_with_the_host_and_never_the_url_path_or_query() 
         .unwrap();
     artifact.url = "https://fixtures.invalid/secret/path/osv-scanner?token=SEKRIT".to_string();
     artifact.sha256 =
-        "2d37c34aca620fa304014e7910c99638982bfa94c88eeedea5aa249058415458".to_string();
+        "2e3b29ec02f47474da838f7db433924559c3bb2ce72a3b30c293ddf78069091e".to_string();
     assert_eq!(artifact.layout, Layout::Binary);
 
     let captured = Captured(Arc::new(Mutex::new(Vec::new())));
@@ -88,7 +88,7 @@ fn each_install_emits_one_event_with_the_host_and_never_the_url_path_or_query() 
     for field in [
         "logos::tools",
         "tool=\"osv-scanner\"",
-        "version=\"1.9.2\"",
+        "version=\"2.7.0\"",
         "host=\"fixtures.invalid\"",
         "bytes=104",
         "duration_ms=",

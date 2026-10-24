@@ -10,14 +10,14 @@
 //! — what runs, the surface that started it, the web job's id, its process and
 //! when — so a refused start names the running one ([`Busy`]).
 //!
-//! A web job takes the lock when [`ScanJobs::start_exclusive`] starts it and
+//! A web job takes the lock when [`AnalysisJobs::start_exclusive`] starts it and
 //! holds it until its work returns; the work's own scan or install, on the
 //! job's thread, finds the lock [held here](held_here) and takes nothing more.
 //! A second web start of the same kind joins the running job before any lock
 //! is looked at.
 //!
 //! [analysis-jobs]: ../../../docs/specs/architecture/components/analysis-jobs.md
-//! [`ScanJobs::start_exclusive`]: super::ScanJobs::start_exclusive
+//! [`AnalysisJobs::start_exclusive`]: super::AnalysisJobs::start_exclusive
 
 use std::cell::RefCell;
 use std::fmt;
@@ -76,7 +76,11 @@ impl Holder {
     fn what(&self) -> &'static str {
         match self.kind {
             JobKind::SecurityScan => "a security scan",
-            JobKind::ToolInstall => "a scanner install",
+            // A scanner install, or a coverage tool install (S-748, S-750).
+            JobKind::ToolInstall => "a tool install",
+            // A coverage run takes no project lock (S-738); named for a
+            // holder file that says otherwise.
+            JobKind::CoverageRun => "a coverage run",
         }
     }
 

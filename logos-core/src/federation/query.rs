@@ -2050,30 +2050,110 @@ pub struct WorkspaceCategory {
 /// scan consent names, once per process for each binary, as the Security page
 /// does; writes nothing, and computes no graph context.
 pub fn workspace_security(registry: &EngineRegistry<Engine>) -> WorkspaceSecurity {
-    let members = registry
-        .answer()
-        .fan_out(|_, engine| member_security(engine))
-        .into_iter()
-        // A member that would not open and one whose read failed both land in
-        // `error`: either way there is nothing to count.
-        .map(flatten_read)
-        .collect();
-    roll_up_security(members)
+    roll_up_security(read_member_security(registry, crate::security::VersionProbes::Consented))
+}
+
+/// Every member's [`MemberSecurity`], read through its own engine with the
+/// version probes `probes` allows, in roster order. A member that would not
+/// open and one whose read failed both land in `error`: either way there is
+/// nothing to count.
+fn read_member_security(
+    registry: &EngineRegistry<Engine>,
+    probes: crate::security::VersionProbes,
+) -> Vec<MemberResult<MemberSecurity>> {
+    registry.answer().fan_out(|_, engine| member_security(engine, probes)).into_iter().map(flatten_read).collect()
 }
 
 /// One member's [`MemberSecurity`] off its engine.
-fn member_security(engine: &Engine) -> anyhow::Result<MemberSecurity> {
+fn member_security(engine: &Engine, probes: crate::security::VersionProbes) -> anyhow::Result<MemberSecurity> {
     // The roll-up never reads a row's coverage, so no member's tree is walked
     // for it; only an installed gosec or Bandit with no stored report walks
     // it, to decide whether it is `not_applicable` (S-769).
-    let status = engine.security_status_probing(crate::security::VersionProbes::Consented, false)?;
+    let status = engine.security_status_probing(probes, false)?;
+    // Test code is classified by this member's own graph (FR-SC-16).
     let listings = crate::security::listings(
         engine.root(),
         &engine.scan_environment(),
         engine.tools_manifest(),
         crate::engine::today_utc(),
+        |findings| crate::security::context::in_test_symbols(engine, findings),
     )?;
     Ok(MemberSecurity::from_reads(status, &listings))
+}
+
+/// The workspace Dashboard's security widget ([FR-UI-36], [S-790]): one row per
+/// member — its scan state and its fresh, unsuppressed production severity
+/// counts — and how many members have a fresh scan out of all of them.
+///
+/// **Stored-only**: each member is read with
+/// [`VersionProbes::Never`](crate::security::VersionProbes::Never), so no scanner
+/// process starts, not even a version probe, and nothing is written; a
+/// Dashboard load is a read a cross-site page can trigger ([ADR-80]). Each row
+/// is the [`MemberSecurity`] row [`WorkspaceSecurity`] holds for that member,
+/// narrowed to the two things the widget states, so a count and a state cannot
+/// differ between the two reads. **No figure is summed, averaged or weighted
+/// across members** ([BR-56]): the one workspace figure is a count of members.
+/// A member that could not be opened or read is a row with its `error`
+/// ([NFR-CC-04]).
+///
+/// [FR-UI-36]: ../../../docs/specs/requirements/FR-UI-36.md
+/// [S-790]: ../../../docs/planning/journal.md#s-790-the-workspace-dashboard-rolls-security-up-per-member
+/// [ADR-80]: ../../../docs/specs/architecture/decisions/ADR-80.md
+/// [BR-56]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Serialize)]
+pub struct WorkspaceSecurityState {
+    /// One row per member, in roster order.
+    pub members: Vec<MemberResult<MemberSecurityState>>,
+    /// Every member of the roster.
+    pub members_total: usize,
+    /// The members whose security state was read.
+    pub members_read: usize,
+    /// The members whose scan is fresh at HEAD: "N of `members_total`".
+    pub members_fresh: usize,
+}
+
+/// One member's row of the [`WorkspaceSecurityState`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemberSecurityState {
+    /// Fresh, stale or never run.
+    pub scan: MemberScan,
+    /// Fresh, unsuppressed production findings by severity; `None` only for a
+    /// member never scanned — nothing to count from, which is not a zero.
+    pub findings: Option<SeverityCounts>,
+}
+
+impl From<&MemberSecurity> for MemberSecurityState {
+    fn from(row: &MemberSecurity) -> Self {
+        Self { scan: row.scan, findings: row.findings }
+    }
+}
+
+/// The stored-only workspace security read ([`WorkspaceSecurityState`]): each
+/// member's `security status` and stored findings read through its own engine
+/// with no version probe, narrowed to its row. Starts no scanner, writes
+/// nothing, and computes no graph context beyond classifying test code.
+pub fn workspace_security_state(registry: &EngineRegistry<Engine>) -> WorkspaceSecurityState {
+    roll_up_security_state(read_member_security(registry, crate::security::VersionProbes::Never))
+}
+
+/// Narrow the member rows into a [`WorkspaceSecurityState`]. Pure.
+fn roll_up_security_state(members: Vec<MemberResult<MemberSecurity>>) -> WorkspaceSecurityState {
+    let rows: Vec<MemberResult<MemberSecurityState>> = members
+        .into_iter()
+        .map(|m| MemberResult {
+            member: m.member,
+            result: m.result.as_ref().map(MemberSecurityState::from),
+            error: m.error,
+        })
+        .collect();
+    let states = || rows.iter().filter_map(|m| m.result.as_ref());
+    WorkspaceSecurityState {
+        members_total: rows.len(),
+        members_read: states().count(),
+        members_fresh: states().filter(|s| s.scan == MemberScan::Fresh).count(),
+        members: rows,
+    }
 }
 
 /// Sum the member rows into a [`WorkspaceSecurity`]. Pure, so every
@@ -2132,6 +2212,136 @@ fn roll_up_security(members: Vec<MemberResult<MemberSecurity>>) -> WorkspaceSecu
         excluded,
         owasp,
         members,
+    }
+}
+
+/// The workspace coverage roll-up ([FR-CV-16]): one row per member — its
+/// coverage state, overall line coverage over its fresh files, fresh files of
+/// total, its tools' outcomes and when one last ran — and how many members
+/// have fresh coverage out of all of them ([NFR-CC-04]).
+///
+/// Each row is read through the member's own engine with the read its own
+/// Coverage page makes ([`Engine::coverage_status_probing`] under
+/// [`Probes::Never`](crate::coverage::Probes::Never)), so no tool process
+/// starts, nothing is written, and a figure here cannot differ from the
+/// member's page. **No figure is summed, averaged or weighted across members**
+/// ([BR-56]): each member's line coverage is over its own files, so the one
+/// workspace figure is a count of members. A member with nothing ingested reads
+/// `never_run` with no percentage — never 0 % — and a member that could not be
+/// opened or read is a row with its `error`, which hides no other ([ADR-53]).
+///
+/// [FR-CV-16]: ../../../docs/specs/requirements/FR-CV-16.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [BR-56]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+#[derive(Debug, Serialize)]
+pub struct WorkspaceCoverage {
+    /// One row per member, in roster order.
+    pub members: Vec<MemberResult<MemberCoverage>>,
+    /// Every member of the roster.
+    pub members_total: usize,
+    /// The members whose coverage state was read.
+    pub members_read: usize,
+    /// The members with fresh coverage: "m of `members_total`".
+    pub members_fresh: usize,
+    /// Members read with no coverage ingested at all.
+    pub members_never_run: usize,
+}
+
+/// Whether a member has coverage evidence, and whether any of it still holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberCoverageState {
+    /// Nothing is ingested: no tool's report reached the store ([FR-CV-06]).
+    ///
+    /// [FR-CV-06]: ../../../docs/specs/requirements/FR-CV-06.md
+    NeverRun,
+    /// A snapshot is stored, and it covers no indexed file: its reports matched
+    /// none of the member's files — nothing changed, and nothing is measured.
+    Unmatched,
+    /// A snapshot is stored, and every file it covers has changed since.
+    Stale,
+    /// A snapshot is stored, and at least one file it covers is unchanged.
+    Fresh,
+}
+
+/// One member's row of the [`WorkspaceCoverage`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemberCoverage {
+    /// Fresh, stale, unmatched or never run.
+    pub coverage: MemberCoverageState,
+    /// Covered ÷ instrumented lines over the fresh files, in basis points, as the
+    /// member's own `coverage status` states it: `None` (`n/a`, [FR-CV-06]) when
+    /// no line of a fresh file is covered, and for a member never run — never 0 %.
+    pub overall_coverage_bp: Option<i64>,
+    /// Covered files whose content still matches the snapshot.
+    pub fresh_files: usize,
+    /// Covered files in the snapshot, fresh and stale.
+    pub total_files: usize,
+    /// Tools whose state reads `ran` or `tests_failed`: a report was produced.
+    pub tools_ran: usize,
+    /// Tools whose state reads `failed` or `timed_out`.
+    pub tools_failed: usize,
+    /// Tools that apply to the member and are not disabled — the denominator
+    /// of the two counts above.
+    pub tools_applicable: usize,
+    /// When any tool's last run ended, in Unix seconds; `None` before any run.
+    pub last_run: Option<u64>,
+}
+
+impl From<&crate::history::CoverageStatus> for MemberCoverage {
+    fn from(status: &crate::history::CoverageStatus) -> Self {
+        let coverage = if status.report_count == 0 {
+            MemberCoverageState::NeverRun
+        } else if status.total_files == 0 {
+            MemberCoverageState::Unmatched
+        } else if status.fresh_files == 0 {
+            MemberCoverageState::Stale
+        } else {
+            MemberCoverageState::Fresh
+        };
+        let tools = status.runner.as_ref().map_or(&[][..], |r| r.tools.as_slice());
+        let in_state = |states: &[&str]| tools.iter().filter(|t| states.contains(&t.state)).count();
+        Self {
+            coverage,
+            overall_coverage_bp: status.overall_coverage_bp,
+            fresh_files: status.fresh_files,
+            total_files: status.total_files,
+            tools_ran: in_state(&["ran", "tests_failed"]),
+            tools_failed: in_state(&["failed", "timed_out"]),
+            tools_applicable: tools.len() - in_state(&["not_applicable", "disabled"]),
+            last_run: tools.iter().filter_map(|t| t.last_run.as_ref().map(|r| r.finished_at)).max(),
+        }
+    }
+}
+
+/// The workspace coverage roll-up ([`WorkspaceCoverage`]): each member's
+/// coverage status read through its own engine with no version probe, narrowed
+/// to its row. Starts no tool, runs no coverage, writes nothing.
+pub fn workspace_coverage(registry: &EngineRegistry<Engine>) -> WorkspaceCoverage {
+    roll_up_coverage(
+        registry
+            .answer()
+            .fan_out(|_, engine| engine.coverage_status_probing(crate::coverage::Probes::Never))
+            .into_iter()
+            .map(flatten_read)
+            .collect(),
+    )
+}
+
+/// Narrow the member reads into a [`WorkspaceCoverage`]. Pure.
+fn roll_up_coverage(members: Vec<MemberResult<crate::history::CoverageStatus>>) -> WorkspaceCoverage {
+    let rows: Vec<MemberResult<MemberCoverage>> = members
+        .into_iter()
+        .map(|m| MemberResult { member: m.member, result: m.result.as_ref().map(MemberCoverage::from), error: m.error })
+        .collect();
+    let states = || rows.iter().filter_map(|m| m.result.as_ref().map(|c| c.coverage));
+    WorkspaceCoverage {
+        members_total: rows.len(),
+        members_read: states().count(),
+        members_fresh: states().filter(|s| *s == MemberCoverageState::Fresh).count(),
+        members_never_run: states().filter(|s| *s == MemberCoverageState::NeverRun).count(),
+        members: rows,
     }
 }
 
@@ -3334,7 +3544,7 @@ mod tests {
                 "a",
                 MemberScan::Fresh,
                 Some(counts(2, 1)),
-                Excluded { not_fresh: 0, suppressed: 1 },
+                Excluded { not_fresh: 0, suppressed: 1, test: 2 },
                 &[("A01", Some(1)), ("A02", Some(0)), ("A03", None)],
             ),
             security_row(
@@ -3348,7 +3558,7 @@ mod tests {
                 "c",
                 MemberScan::Stale,
                 Some(counts(0, 2)),
-                Excluded { not_fresh: 4, suppressed: 0 },
+                Excluded { not_fresh: 4, suppressed: 0, test: 3 },
                 &[("A01", None), ("A02", None), ("A03", None)],
             ),
             security_row("d", MemberScan::NeverRun, None, Excluded::default(), &[("A01", None), ("A02", None), ("A03", None)]),
@@ -3361,7 +3571,7 @@ mod tests {
         );
         assert_eq!((rolled.reports_fresh, rolled.reports_stored), (2, 3), "two of the three stored reports are fresh");
         assert_eq!(rolled.totals, counts(3, 3));
-        assert_eq!(rolled.excluded, Excluded { not_fresh: 4, suppressed: 1 });
+        assert_eq!(rolled.excluded, Excluded { not_fresh: 4, suppressed: 1, test: 5 }, "test code is summed apart");
         let names: Vec<&str> = rolled.members.iter().map(|m| m.member.as_str()).collect();
         assert_eq!(names, ["a", "b", "c", "d", "e"], "every row kept, in order");
 
@@ -3370,6 +3580,50 @@ mod tests {
             rolled.owasp[0].categories.iter().map(|c| (c.id, c.covered_in, c.findings)).collect();
         assert_eq!(summed, [("A01", 2, Some(2)), ("A02", 1, Some(0)), ("A03", 0, None)]);
         assert_eq!(rolled.owasp[0].unclassified, 3, "the findings under no category are summed apart");
+    }
+
+    /// The Dashboard's state read keeps each member's own state and counts —
+    /// the figures the full roll-up's row holds — states how many members have
+    /// a fresh scan out of all, and lists an unread member as a row with its
+    /// error. A stale member is not fresh, and a never-scanned one has no count
+    /// (not a zero).
+    #[test]
+    fn the_security_state_keeps_each_members_row_and_counts_the_fresh_ones() {
+        let rows = vec![
+            security_row("a", MemberScan::Fresh, Some(counts(2, 1)), Excluded::default(), &[]),
+            security_row("b", MemberScan::Stale, Some(counts(0, 2)), Excluded { not_fresh: 4, suppressed: 0, test: 3 }, &[]),
+            security_row("c", MemberScan::NeverRun, None, Excluded::default(), &[]),
+            MemberResult { member: "d".to_string(), result: None, error: Some("unable to open database file".into()) },
+        ];
+        let state = roll_up_security_state(rows);
+        assert_eq!((state.members_total, state.members_read, state.members_fresh), (4, 3, 1));
+        let row = |i: usize| {
+            let m = &state.members[i];
+            (m.member.as_str(), m.result.clone(), m.error.as_deref())
+        };
+        let state_of = |scan, findings| Some(MemberSecurityState { scan, findings });
+        assert_eq!(row(0), ("a", state_of(MemberScan::Fresh, Some(counts(2, 1))), None));
+        assert_eq!(row(1), ("b", state_of(MemberScan::Stale, Some(counts(0, 2))), None));
+        assert_eq!(row(2), ("c", state_of(MemberScan::NeverRun, None), None));
+        assert_eq!(row(3), ("d", None, Some("unable to open database file")));
+    }
+
+    /// BR-56: the state read-model carries no composite. Its serialised keys are
+    /// pinned — a total, a mean, a score or any figure summed over members would
+    /// be a new key here, and this test names it.
+    #[test]
+    fn the_security_state_carries_no_figure_summed_across_members() {
+        let state = roll_up_security_state(vec![
+            security_row("a", MemberScan::Fresh, Some(counts(2, 1)), Excluded::default(), &[]),
+            security_row("b", MemberScan::Fresh, Some(counts(1, 0)), Excluded::default(), &[]),
+        ]);
+        let json = serde_json::to_value(&state).unwrap();
+        let mut top: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        top.sort_unstable();
+        assert_eq!(top, ["members", "members_fresh", "members_read", "members_total"]);
+        let mut row: Vec<&str> = json["members"][0]["result"].as_object().unwrap().keys().map(String::as_str).collect();
+        row.sort_unstable();
+        assert_eq!(row, ["findings", "scan"]);
     }
 
     /// No member read: nothing summed, and no edition is invented.
@@ -3384,5 +3638,157 @@ mod tests {
         assert_eq!((rolled.reports_fresh, rolled.reports_stored), (0, 0));
         assert_eq!(rolled.totals, SeverityCounts::default());
         assert!(rolled.owasp.is_empty());
+    }
+
+    // ── the workspace coverage roll-up (S-740, FR-CV-16) ────────────────────
+
+    /// A coverage status with `reports` merged reports over `fresh` of `total`
+    /// files at `bp`, and one runner row per `(tool, state, last run end)`.
+    fn coverage_status(
+        reports: usize,
+        fresh: usize,
+        total: usize,
+        bp: Option<i64>,
+        tools: &[(&str, &'static str, Option<u64>)],
+    ) -> crate::history::CoverageStatus {
+        use crate::history::coverage::{CoverageConsentStatus, CoverageLastRun, CoverageRunnerStatus, CoverageToolStatus};
+        crate::history::CoverageStatus {
+            head_sha: (reports > 0).then(|| "abc".to_string()),
+            config_hash: None,
+            formats: Vec::new(),
+            report_count: reports,
+            total_files: total,
+            fresh_files: fresh,
+            stale_files: total - fresh,
+            freshness_bp: None,
+            overall_coverage_bp: bp,
+            files: Vec::new(),
+            notice: None,
+            current_head: None,
+            head_stale: false,
+            staleness_prompt: None,
+            runner: Some(CoverageRunnerStatus {
+                consent: CoverageConsentStatus { consented: Vec::new(), pending: Vec::new(), command_changed: false },
+                tools: tools
+                    .iter()
+                    .map(|&(tool, state, finished)| CoverageToolStatus {
+                        tool: tool.to_string(),
+                        state,
+                        version: None,
+                        origin: None,
+                        hint: None,
+                        offer: None,
+                        last_run: finished.map(|finished_at| CoverageLastRun {
+                            outcome: "ran".to_string(),
+                            exit_code: Some(0),
+                            head_sha: None,
+                            finished_at,
+                            log: None,
+                        }),
+                    })
+                    .collect(),
+            }),
+            job: None,
+        }
+    }
+
+    fn coverage_read(member: &str, status: crate::history::CoverageStatus) -> MemberResult<crate::history::CoverageStatus> {
+        MemberResult { member: member.to_string(), result: Some(status), error: None }
+    }
+
+    /// A row narrows the member's own status: its figures verbatim, tools that
+    /// produced a report (a failing suite's included) apart from tools that
+    /// failed, over the tools that apply and are enabled, and the latest end of
+    /// any tool's last run — an uninstalled tool's included, since its run
+    /// still happened.
+    #[test]
+    fn a_member_coverage_row_narrows_its_own_status() {
+        let status = coverage_status(
+            2,
+            3,
+            5,
+            Some(8125),
+            &[
+                ("cargo-llvm-cov", "ran", Some(100)),
+                ("vitest", "tests_failed", Some(300)),
+                ("pytest", "failed", Some(200)),
+                ("go", "timed_out", None),
+                ("maven", "not_installed", Some(400)),
+                ("jest", "cancelled", None),
+                ("gradle", "never_run", None),
+                ("bun", "not_applicable", None),
+                ("custom", "disabled", None),
+            ],
+        );
+        assert_eq!(
+            MemberCoverage::from(&status),
+            MemberCoverage {
+                coverage: MemberCoverageState::Fresh,
+                overall_coverage_bp: Some(8125),
+                fresh_files: 3,
+                total_files: 5,
+                tools_ran: 2,
+                tools_failed: 2,
+                tools_applicable: 7,
+                last_run: Some(400),
+            }
+        );
+    }
+
+    /// Never run is the state of a member with nothing ingested, whatever its
+    /// tools did — a failed run ingests nothing — and it carries no percentage;
+    /// a snapshot whose every file moved is stale, not never run; and one whose
+    /// reports matched no indexed file is unmatched — nothing in it changed.
+    #[test]
+    fn nothing_ingested_is_never_run_and_every_file_moved_is_stale() {
+        let never = MemberCoverage::from(&coverage_status(0, 0, 0, None, &[("vitest", "failed", Some(7))]));
+        assert_eq!(never.coverage, MemberCoverageState::NeverRun);
+        assert_eq!(never.overall_coverage_bp, None, "never run is not 0 %");
+        assert_eq!((never.tools_failed, never.last_run), (1, Some(7)), "the failed run is still stated");
+
+        let stale = MemberCoverage::from(&coverage_status(1, 0, 4, None, &[]));
+        assert_eq!(stale.coverage, MemberCoverageState::Stale);
+        assert_eq!((stale.fresh_files, stale.total_files, stale.tools_applicable, stale.last_run), (0, 4, 0, None));
+
+        let unmatched = MemberCoverage::from(&coverage_status(1, 0, 0, None, &[]));
+        assert_eq!(unmatched.coverage, MemberCoverageState::Unmatched, "a report matching no file is not stale");
+    }
+
+    /// The fold counts members, never sums a figure: the fresh ones of all,
+    /// the never-run ones apart, a stale one in neither, and an unread member
+    /// in the total alone, as a row with its error.
+    #[test]
+    fn the_coverage_roll_up_counts_fresh_and_never_run_members_of_all() {
+        let rolled = roll_up_coverage(vec![
+            coverage_read("fresh", coverage_status(1, 2, 2, Some(5000), &[])),
+            coverage_read("idle", coverage_status(0, 0, 0, None, &[])),
+            coverage_read("moved", coverage_status(1, 0, 3, None, &[])),
+            MemberResult { member: "broken".to_string(), result: None, error: Some("would not open".to_string()) },
+        ]);
+        let order: Vec<&str> = rolled.members.iter().map(|m| m.member.as_str()).collect();
+        assert_eq!(order, ["fresh", "idle", "moved", "broken"], "roster order, the unread member kept");
+        assert_eq!(
+            (rolled.members_total, rolled.members_read, rolled.members_fresh, rolled.members_never_run),
+            (4, 3, 1, 1)
+        );
+        assert_eq!(rolled.members[3].error.as_deref(), Some("would not open"));
+        assert!(rolled.members[3].result.is_none());
+        let state = |i: usize| rolled.members[i].result.as_ref().map(|c| c.coverage);
+        assert_eq!(state(2), Some(MemberCoverageState::Stale));
+        let mut keys: Vec<String> = serde_json::to_value(&rolled).unwrap().as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["members", "members_fresh", "members_never_run", "members_read", "members_total"],
+            "no composite across members (BR-56)"
+        );
+    }
+
+    /// An empty roster rolls up to zeroes, with nothing read.
+    #[test]
+    fn an_empty_workspace_rolls_coverage_up_to_zeroes() {
+        let rolled = roll_up_coverage(Vec::new());
+        assert!(rolled.members.is_empty());
+        assert_eq!((rolled.members_total, rolled.members_read, rolled.members_fresh, rolled.members_never_run), (0, 0, 0, 0));
     }
 }

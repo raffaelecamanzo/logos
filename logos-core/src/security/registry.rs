@@ -32,6 +32,38 @@
 //! earlier lines broke on changes to the NVD data they read. CodeQL's command
 //! line was not re-verified at the managed 2.27.2 bundle, so 2.19 stands.
 //!
+//! gosec is pinned at 2.29.0 (S-782), the release that adds Go 1.27 support: 2.21.4
+//! cannot type a package that imports the standard library under it, and exits 1
+//! with no report. Its command line above is the one proven at 2.21.4; the
+//! hand-run harness, whose Go files now import the standard library, is re-run
+//! on 2.29.0 by the maintainer, and until its rows are committed at the pin the
+//! `exclude-dir-tree` evidence is the 2.21.4 run. A gosec of any version that
+//! still prints `without types was imported` reads *failed* with a cause naming
+//! its version, the local Go and the remedy (`surface::failure_cause`).
+//!
+//! OSV-Scanner is pinned at 2.7.0 (S-779), and its command line is the 1.9 one
+//! with `--output-file` in place of `--output` (2.x keeps `--output` as a
+//! deprecated alias that warns on every run). The argv, the flag spellings and
+//! the root command's fallback to `scan source` are read from the source at the
+//! tags, not from a run: 1.9.2 defines `--output` and the `--experimental-*`
+//! flags and no `--output-file`, `--offline` or `--all-packages`; 2.7.0 the
+//! reverse. The tested version above stays 1.9, the last a real run proved, and
+//! the manifest's minimum with it, until the owner's harness run commits rows at
+//! the pin: 2.0.0 extracts dependencies with osv-scalibr, so the proof that the
+//! unignored targets keep OSV-Scanner out of ignored paths does not carry over
+//! until the six rows are committed at 2.7.0, and a pin the run does not prove
+//! is reverted. The harness probes with `--offline` and `--all-packages`, the
+//! 2.x spellings of the `--experimental-offline` and
+//! `--experimental-all-packages` its 1.9.2 run used. A 1.9.x copy has no
+//! `--output-file`, so one that runs the current command line reads *failed*
+//! with its stderr, and `security status` shows a managed 1.9.2 copy's update.
+//! The minimum is not raised ahead of the run (S-782 decided the same for
+//! gosec): a minimum above an installed managed copy makes the copy vanish
+//! instead of offering its update. Still unrun, and the owner's run must show:
+//! that the root command takes the flags before its subcommand, that `scan
+//! source` takes the file targets (`.gitignore`, `go.mod`) the unignored list
+//! can hold, and the exit status of an offline run with no local database.
+//!
 //! Path arguments at those versions ([FR-SC-17], CR-219 CRA-02), read from each
 //! scanner's source at its release tag, and what each [`ScopedPaths`] encodes:
 //! - **Semgrep 1.85** takes any number of file or directory targets as
@@ -84,9 +116,9 @@
 //! - **Dependency-Check 13.0** adds each `--exclude` to an Ant
 //!   `DirectoryScanner` based at the scanned directory, so `target/**` is
 //!   anchored there.
-//! - **Semgrep 1.85** and **OSV-Scanner 1.9** are given the project's
-//!   unignored paths as their targets instead of `.` ([`Arg::Unignored`],
-//!   S-772). The hand-run harness (S-771,
+//! - **Semgrep 1.85** and **OSV-Scanner** (proven at 1.9.2, see above) are
+//!   given the project's unignored paths as their targets instead of `.`
+//!   ([`Arg::Unignored`], S-772). The hand-run harness (S-771,
 //!   `scripts/tests/fixtures/scanner-exclusions/`) shows this is the one
 //!   mechanism that keeps either out of an ignored `target/` and keeps the
 //!   near misses `src/target/` and `targets/`, in a git checkout, a linked
@@ -129,24 +161,16 @@
 //! manifests or any file, so no extension rules one out; CodeQL decides per
 //! language instead.
 //!
-//! Severity (S-768). OSV-Scanner's SARIF writer
-//! (`internal/output/sarif.go`) writes `warning` on every result, at 1.9.2 and
-//! still at 2.7.0, so its level rates nothing and a finding it gives no score
-//! reads `unrated`. From 2.0.0 (PR #1587, first in 2.0.0-rc1) a rule carries
-//! the worst CVSS score of its advisories as `security-severity` when one has
-//! a score, which the parser reads as the advisory's rating. The pin stays at
-//! 1.9.2, and the command line is unchanged. Moving it is the owner's call,
-//! because only a real run, which sends the dependency list to the OSV API,
-//! could settle two points. 2.0.0 extracts dependencies with osv-scalibr, so
-//! the harness's proof that the unignored targets keep it out of ignored
-//! paths does not carry over. From 2.3.5 each result carries
-//! `partialFingerprints`, which becomes its identity, so every stored
-//! OSV-Scanner finding, baseline entry and fingerprint suppression would read
-//! as new. A 2.x report ingested from CI is read with its ratings today. A
-//! 2.x copy on `PATH` is used too. At 2.7.0 its root command falls back to
-//! `scan`, whose `source` command still reads `--format`, `--output` (a
-//! deprecated alias of `--output-file`) and `--recursive`. That comes from
-//! the source, not from a run.
+//! Severity (S-768). OSV-Scanner's SARIF writer (`internal/output/sarif.go`)
+//! writes `warning` on every result, at 1.9.2 and still at 2.7.0, so its level
+//! rates nothing and a finding it gives no score reads `unrated`. From 2.0.0
+//! (PR #1587, first in 2.0.0-rc1) a rule carries the worst CVSS score of its
+//! advisories as `security-severity` when one has a score, which the parser
+//! reads as the advisory's rating; a 1.9.2 report ingested from CI still reads
+//! `unrated`, gated as `medium`. From 2.3.5 each result also carries
+//! `partialFingerprints`; S-778 keys an OSV-Scanner finding by rule and
+//! lockfile path instead, so no stored finding, baseline entry or fingerprint
+//! suppression reads as new across the move to 2.x.
 //!
 //! [FR-SC-05]: ../../../docs/specs/requirements/FR-SC-05.md
 //! [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
@@ -160,6 +184,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
+
+use super::CoverageKind;
 
 /// One element of an invocation template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,9 +217,17 @@ pub(crate) enum Arg {
     /// whole-project run; nothing in a path-capable scanner's run on paths the
     /// user named, which the [`Arg::Paths`] after it reads instead.
     Unignored,
+    /// `--propertyfile` and the private file holding the NVD API key Logos
+    /// read from [`NVD_API_KEY_ENV`](super::NVD_API_KEY_ENV), when it hands
+    /// one over ([FR-SC-27]); nothing otherwise. Dependency-Check's only: its
+    /// CLI reads no variable for the key, and a key in argv is visible to
+    /// every process listing.
+    ///
+    /// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
+    NvdKeyFile,
 }
 
-use Arg::{Database, Extra, Ignored, Language, Lit, Out, Paths, PinnedConfig, Unignored};
+use Arg::{Database, Extra, Ignored, Language, Lit, NvdKeyFile, Out, Paths, PinnedConfig, Unignored};
 
 /// How [`Arg::Ignored`] passes the ignored directories — the shapes the
 /// [module docs](self) record per scanner and tested version.
@@ -443,9 +477,10 @@ pub struct Scanner {
     /// [NFR-SE-02]: ../../../docs/specs/requirements/NFR-SE-02.md
     pub(crate) refuse_if_present: &'static [&'static str],
     /// For a scanner a whole-project run passes neither [`Arg::Ignored`] nor
-    /// [`Arg::Unignored`]: why it reads the ignored directories, the coverage
-    /// note its outcome carries ([`Scanner::coverage`]).
-    pub(crate) reads_ignored: Option<&'static str>,
+    /// [`Arg::Unignored`]: why it reads the ignored directories: the
+    /// [`CoverageKind`] and the coverage note its outcome carries
+    /// ([`Scanner::coverage`]).
+    pub(crate) reads_ignored: Option<(CoverageKind, &'static str)>,
     /// The files it reads, for a scanner that reads one language's files only:
     /// without one it has nothing to scan and is not started
     /// ([`Scanner::not_applicable`], S-769).
@@ -569,7 +604,7 @@ pub static REGISTRY: [Scanner; 9] = [
             keeps_full_findings: true,
         }),
         refuse_if_present: &[],
-        reads_ignored: Some("it reads the committed history, which holds any file committed inside an ignored directory"),
+        reads_ignored: Some((CoverageKind::History, "it reads the committed history, which holds any file committed inside an ignored directory")),
         applies_to: None,
         exclusion_evidence: None,
     },
@@ -583,7 +618,7 @@ pub static REGISTRY: [Scanner; 9] = [
         run: &[
             Lit("--format"),
             Lit("sarif"),
-            Lit("--output"),
+            Lit("--output-file"),
             Out,
             Extra,
             Lit("--recursive"),
@@ -720,7 +755,7 @@ pub static REGISTRY: [Scanner; 9] = [
         ok_exit: &[0],
         path_slot: None,
         refuse_if_present: &[],
-        reads_ignored: Some("no exclusion is proven for it, so its database holds the ignored directories' files"),
+        reads_ignored: Some((CoverageKind::Unproven, "no exclusion is proven for it, so its database holds the ignored directories' files")),
         applies_to: None,
         exclusion_evidence: None,
     },
@@ -748,6 +783,7 @@ pub static REGISTRY: [Scanner; 9] = [
             Lit("--disableBundleAudit"),
             Lit("--disableGolangMod"),
             Lit("--disableMixAudit"),
+            NvdKeyFile,
             Extra,
         ],
         output: Output::Dir { produced: "dependency-check-report.sarif" },
@@ -798,6 +834,9 @@ pub(crate) struct Fill<'a> {
     /// (canonical); `None` when it is not UTF-8. Only read by
     /// [`Spelling::RootRegex`].
     pub root: Option<&'a str>,
+    /// The private file holding the NVD API key, when Logos hands one over
+    /// (only read by [`Arg::NvdKeyFile`]).
+    pub nvd_key_file: Option<&'a Path>,
 }
 
 impl Scanner {
@@ -821,6 +860,12 @@ impl Scanner {
                 Language => argv.push(OsString::from(format!("--language={}", fill.language))),
                 Database => argv.push(fill.database.as_os_str().to_owned()),
                 PinnedConfig => argv.push(fill.pinned_config.as_os_str().to_owned()),
+                NvdKeyFile => {
+                    if let Some(file) = fill.nvd_key_file {
+                        argv.push(OsString::from("--propertyfile"));
+                        argv.push(file.as_os_str().to_owned());
+                    }
+                }
                 Ignored(_) if fill.scope.is_some() => {}
                 // A scoped run's paths are the path position's; a scanner
                 // without one runs whole whatever the scope.
@@ -886,7 +931,8 @@ impl Scanner {
     /// exclusion flag ([`Arg::Ignored`]) is proven
     /// ([`exclusion_evidence`](Self::exclusion_evidence)) and given every
     /// ignored directory — none left out for a misreadable name or past the
-    /// budget; otherwise `scanned`, with why. An unproven flag reads `scanned`
+    /// budget; otherwise `scanned`, with a [`CoverageKind`] naming how and a note
+    /// saying why. An unproven flag reads `scanned`
     /// ([`FLAG_UNPROVEN`]) however much of the list it is given.
     ///
     /// The budget is measured without the root, which only
@@ -897,22 +943,22 @@ impl Scanner {
         if ignores.is_empty() {
             return super::Coverage::EXCLUDED;
         }
-        if let Some(note) = self.reads_ignored {
-            return super::Coverage::scanned(note.to_string());
+        if let Some((kind, note)) = self.reads_ignored {
+            return super::Coverage::scanned(kind, note.to_string());
         }
         if self.run.contains(&Unignored) {
             return match ignores.targets {
-                Targets::Unpassable(why) => super::Coverage::scanned(format!(
+                Targets::Unpassable(why) => super::Coverage::scanned(CoverageKind::WholeProject, format!(
                     "it is given the whole project, because {why}"
                 )),
                 Targets::Root | Targets::Paths(_) => super::Coverage::EXCLUDED,
             };
         }
         let Some(exclusion) = self.exclusion().filter(|_| self.exclusion_evidence.is_some()) else {
-            return super::Coverage::scanned(FLAG_UNPROVEN.to_string());
+            return super::Coverage::scanned(CoverageKind::Unproven, FLAG_UNPROVEN.to_string());
         };
         if ignores.misread > 0 {
-            return super::Coverage::scanned(format!(
+            return super::Coverage::scanned(CoverageKind::Partial, format!(
                 "it is not given {} ignored director{} whose name an exclusion flag could misread",
                 ignores.misread,
                 if ignores.misread == 1 { "y" } else { "ies" }
@@ -921,7 +967,7 @@ impl Scanner {
         let given = fitting(&ignores.dirs, None, exclusion).len();
         if given < ignores.dirs.len() {
             let cut = ignores.dirs.len() - given;
-            return super::Coverage::scanned(format!(
+            return super::Coverage::scanned(CoverageKind::Partial, format!(
                 "it is not given {cut} ignored director{} past the 64 KiB argument budget",
                 if cut == 1 { "y" } else { "ies" }
             ));
@@ -938,6 +984,12 @@ impl Scanner {
         let applies = self.applies_to?;
         (!has_file_with(applies.extensions))
             .then(|| format!("no {} among the files the project does not ignore", applies.files))
+    }
+
+    /// Whether this scanner takes the NVD API key ([`Arg::NvdKeyFile`]):
+    /// Dependency-Check alone.
+    pub(crate) fn takes_nvd_key(&self) -> bool {
+        self.run.contains(&NvdKeyFile)
     }
 
     /// Whether this scanner runs once per CodeQL language.
@@ -1003,6 +1055,20 @@ pub(crate) static CODEQL_LANGUAGES: [CodeqlLanguage; 10] = [
     CodeqlLanguage { label: "rust", codeql_id: None, extensions: &["rs"] },
     CodeqlLanguage { label: "swift", codeql_id: None, extensions: &["swift"] },
 ];
+
+/// Whether the user's own `extra_args` already hand Dependency-Check its NVD
+/// API key — `--nvdApiKey`, or a properties file of their own
+/// (`--propertyfile`, `-P`), each as its own element or joined to its value
+/// (`--nvdApiKey=<key>`, `-P<file>`) — so that Logos adds no file of its own
+/// ([FR-SC-27]: the user's own setting wins).
+///
+/// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
+pub(crate) fn supplies_nvd_key(extra: &[String]) -> bool {
+    extra.iter().any(|arg| {
+        let flag = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
+        matches!(flag, "--nvdApiKey" | "--propertyfile") || arg.starts_with("-P")
+    })
+}
 
 /// The first version-shaped token (`1.2`, `v8.18.4`, `10.0.4`) in a version
 /// command's output, without a leading `v`.

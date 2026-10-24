@@ -40,9 +40,18 @@ members = [
 # package (cli) feeds cargo-dist, so renumbering the libraries changes no
 # artifact, tag, or download URL.
 [workspace.package]
-version = "1.20.5"
+version = "1.21.2"
 license = "Apache-2.0"
 repository = "https://github.com/raffaelecamanzo/logos"
+
+# `cfg(coverage)` is set by cargo-llvm-cov (`--cfg coverage`) and by nothing
+# else. Tests whose assertion is a wall-clock bound skip themselves under it
+# (`#[cfg_attr(coverage, ignore = ...)]`, `cfg!(coverage) || ...`): an
+# instrumented binary at cargo's default parallelism measures the
+# instrumentation, not the code. Declared here so the unexpected_cfgs lint
+# knows the name in every member (each carries `[lints] workspace = true`).
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 # ── Release profile (ADR-16 fitness note, NFR-PC-04) ─────────────────────────
 # The ≤50 MB default-binary budget is met with thin LTO + single codegen unit

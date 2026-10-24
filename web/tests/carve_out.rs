@@ -632,6 +632,35 @@ async fn security_triage_posts_are_refused_without_same_origin_intent() {
     }
 }
 
+/// The coverage run's start and cancel (S-738, [FR-CV-15]) run the project's
+/// build and tests, or stop them, so they are intent-guarded like every
+/// admitted `POST` ([NFR-SE-06]): a cross-origin, tokenless or forged-token one
+/// is refused `403` — past the method guard, stopped by the intent guard —
+/// before any handler runs. A `POST` to a path beside them stays `405`. (The
+/// admitted run is `tests/coverage_job.rs`.)
+///
+/// [FR-CV-15]: ../../docs/specs/requirements/FR-CV-15.md
+/// [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
+#[tokio::test]
+async fn coverage_run_posts_are_refused_without_same_origin_intent() {
+    assert_eq!(web::COVERAGE_RUN_POST_ROUTES, ["/api/v1/coverage/run", "/api/v1/coverage/run/cancel"]);
+    let body = r#"{"consent":["go"]}"#;
+    for path in web::COVERAGE_RUN_POST_ROUTES {
+        let (_dir, router, intent) = mutating_router();
+        for (req, what) in [
+            (config_post(path, Some(intent.as_str()), Some("http://evil.example"), body), "cross-origin"),
+            (config_post(path, None, Some("http://127.0.0.1:4983"), body), "intent-less"),
+            (config_post(path, Some("forged"), Some("http://127.0.0.1:4983"), body), "forged-token"),
+        ] {
+            let status = router.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{what} POST {path}");
+        }
+    }
+    for path in ["/api/v1/coverage/runs", "/api/v1/coverage/run/start", "/api/v1/coverage/refresh", "/api/v1/coverage"] {
+        assert_unmounted_post_is_405(path, "only the coverage run's start and cancel routes are admitted").await;
+    }
+}
+
 /// An invalid candidate is rejected `422` with the typed validation message and
 /// **no partial write** — the engine validates before the atomic swap (S-096,
 /// NFR-RA-07); the file stays absent here.

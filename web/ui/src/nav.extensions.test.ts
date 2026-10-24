@@ -5,7 +5,7 @@
  * is the committed surface snapshot's (`nav.snapshot.test.ts`).
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionNavEntry } from "./api/extensionsClient.ts";
 import { clearExtensions, registerExtensionUi, setActiveExtensions } from "./extensions/registry.ts";
@@ -19,7 +19,19 @@ import {
 } from "./nav.ts";
 import { extensionsInfo, STUB_ID, StubAppView, StubView, stubInfo } from "./test/extensions.tsx";
 
-afterEach(clearExtensions);
+/** Routes a test withdraws the view from, over the real route list: since S-740
+ *  registered the last built-in view, no built-in entry reaches S-788's "an entry
+ *  no view owns is not offered" filters, so a test makes one. Cleared after each. */
+const { UNREGISTERED } = vi.hoisted(() => ({ UNREGISTERED: new Set<string>() }));
+vi.mock("./views/routes.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./views/routes.ts")>();
+  return { ...real, hasViewFor: (pathname: string) => !UNREGISTERED.has(pathname) && real.hasViewFor(pathname) };
+});
+
+afterEach(() => {
+  clearExtensions();
+  UNREGISTERED.clear();
+});
 
 const MEMBER: ExtensionNavEntry = { id: "stub", label: "Stub", path: "/stub", group: "A", scope: "member" };
 const APP: ExtensionNavEntry = { id: "stub-app", label: "Stub app", path: "/stub-app", group: "A", scope: "app" };
@@ -75,9 +87,9 @@ describe("a mounted extension's navigation", () => {
     mountStub(APP);
     expect(navItemsFor(false).some((i) => i.id === "stub-app")).toBe(false);
     expect(navItemsFor(true).at(-1)).toEqual(APP);
-    expect(navItemsFor(true).slice(0, -1).filter((i) => WORKSPACE_NAV_ITEMS.includes(i))).toHaveLength(
-      WORKSPACE_NAV_ITEMS.length,
-    );
+    // Every workspace-only entry that owns a view is offered, in registered order —
+    // since S-740 registered the Coverage view, that is every one of them (S-788).
+    expect(navItemsFor(true).slice(0, -1).filter((i) => WORKSPACE_NAV_ITEMS.includes(i))).toEqual(WORKSPACE_NAV_ITEMS);
   });
 
   it("declares its scope for the shell's remount rule", () => {
@@ -145,6 +157,20 @@ describe("a mounted extension's replacement in workspace mode", () => {
 
   it("clears a replacement that names no offered app entry — nothing is dropped for nothing", () => {
     mountStub({ ...MEMBER, replaced_in_workspace_by: "no-such-entry" });
+    expect(navItemsFor(true).some((i) => i.id === "stub")).toBe(true);
+    expect(workspaceReplacementPath("/stub")).toBeNull();
+  });
+});
+
+describe("a replacement target whose route owns no view (S-788)", () => {
+  it("is cleared like an unresolvable one, so the replaced entry stays offered and its route stays put", () => {
+    // The control: with its view registered (S-740), the workspace Coverage entry is
+    // offered, so it replaces the stub's entry…
+    mountStub({ ...MEMBER, replaced_in_workspace_by: "workspace-coverage" });
+    expect(workspaceReplacementPath("/stub")).toBe("/workspace-coverage");
+    expect(navItemsFor(true).some((i) => i.id === "stub")).toBe(false);
+    // …and with no view owning its route it is not offered, so it replaces nothing.
+    UNREGISTERED.add("/workspace-coverage");
     expect(navItemsFor(true).some((i) => i.id === "stub")).toBe(true);
     expect(workspaceReplacementPath("/stub")).toBeNull();
   });
@@ -243,16 +269,16 @@ describe("a built-in entry always wins a clash", () => {
 describe("an entry its extension places (navAfter, S-643)", () => {
   it("sits directly after its anchor in its own section, in both modes", () => {
     mountStubPlaced({ stub: "health", "stub-app": "workspace-dashboard" }, false, MEMBER, APP);
-    expect(navItemsFor(false).map((i) => i.id).slice(0, 4)).toEqual(["overview", "health", "stub", "graph"]);
+    expect(navItemsFor(false).map((i) => i.id).slice(0, 4)).toEqual(["overview", "health", "stub", "security"]);
     const app = navItemsFor(true).filter((i) => i.scope === "app").map((i) => i.id);
-    expect(app.slice(0, 3)).toEqual(["workspace-dashboard", "stub-app", "workspace-health"]);
+    expect(app.slice(0, 3)).toEqual(["workspace-dashboard", "stub-app", "workspace"]);
   });
 
   it("follows an entry another extension placed after the same anchor, in registration order", () => {
     // The other extension is anchored after Graph; a later extension anchored there
     // too follows it, so the two keep the order the composition registered them in.
     mountStubPlaced({ stub: "graph" }, true, MEMBER);
-    expect(navItemsFor(false).map((i) => i.id).slice(2, 6)).toEqual(["graph", "other", "stub", "files"]);
+    expect(navItemsFor(false).map((i) => i.id).slice(4, 8)).toEqual(["graph", "other", "stub", "gaps"]);
   });
 
   it("is appended when its anchor is not offered — never placed into another section", () => {

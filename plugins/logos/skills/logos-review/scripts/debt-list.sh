@@ -7,7 +7,11 @@
 #
 # Writes the recorded units (at most ten, ranked by the signal points a fix is
 # estimated to recover) in the entry shape coverage-lookup.sh and trust-gate.sh
-# read, and prints one summary line. A unit has no trust label of its own, so one
+# read, and prints one summary line. A unit is known by its `node_id` when that is
+# a string (`symbol`; the bare `name` beside it); a duplicate or near-clone group
+# names no single symbol and carries its own `reason`; a unit whose id is an
+# integer or null (Logos 1.20.0-1.20.2) falls back to name, file and dimension,
+# and the denominator counts how many did. A unit has no trust label of its own, so one
 # is derived: `stale` when its file is dirty in the worktree (an edit the graph may
 # not hold yet), the cause tag of a language whose calls the graph binds within
 # files only, else `resolved`. The points are an estimate; the verdict never rests

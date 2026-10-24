@@ -1515,6 +1515,130 @@ impl DriftReference {
     pub const BASE: &'static str = "base";
 }
 
+/// What `logos review --headroom` and its MCP twin return ([FR-GV-29], S-798):
+/// for every `[constraints]` budget [`BranchesProjection`] projects, each
+/// subject's value on the base commit, its allowance and the room left, plus
+/// the margin under a numeric `[review] drift_budget`.
+///
+/// The base is the one `--branches` measures, through the same cache; the
+/// working tree and `HEAD` are never measured. Report only. With `measured:
+/// false` nothing was listed — `rules` is `[]` and means nothing — and
+/// `not_measured_because` says why ([NFR-CC-04]); `measured: true` with no
+/// `rules` is a base with no projectable budget declared, which `notes`
+/// says. Byte-stable over an unchanged base commit ([NFR-RA-06]): no field
+/// carries a time or a storage id.
+///
+/// [FR-GV-29]: ../../../docs/specs/requirements/FR-GV-29.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HeadroomReport {
+    /// The ref the values are read on, as stated or as the default branch
+    /// resolved to.
+    pub base: String,
+    /// Where `base` came from: [`BranchReview::STATED`] or
+    /// [`BranchReview::DEFAULT_BRANCH`].
+    pub base_origin: &'static str,
+    /// `base`'s commit — the tree every value is read on.
+    pub base_commit: Option<String>,
+    /// `true` when the base was measured, or declares no budget to measure.
+    pub measured: bool,
+    /// Why nothing was listed; `None` when `measured`.
+    pub not_measured_because: Option<String>,
+    /// Each projected `[constraints]` budget, in the projection's order.
+    pub rules: Vec<HeadroomRule>,
+    /// The margin under a numeric `drift_budget`, or why there is none; `None`
+    /// — and elided — when nothing was measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<HeadroomDrift>,
+    /// Declared budgets the projection does not judge, each with why — the
+    /// list `--branches` gives.
+    pub not_projected: Vec<UnprojectedLimit>,
+    /// Each `--subjects` entry that resolved to nothing, with why.
+    pub unresolved: Vec<UnresolvedSubject>,
+    /// Advisory notes on how the answer was produced.
+    pub notes: Vec<String>,
+}
+
+/// One budget of a [`HeadroomReport`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HeadroomRule {
+    /// The `[constraints]` key.
+    pub rule: String,
+    /// The declared ceiling (`max`).
+    pub limit: u64,
+    /// The denominator: the subjects the base records a value for — a module,
+    /// function or file with a value above 0 — or 1 for a project-wide count.
+    pub evaluated: u64,
+    /// How many of them `subjects` lists.
+    pub listed: u64,
+    /// The listed subjects, tightest first — headroom ascending, then subject.
+    pub subjects: Vec<HeadroomSubject>,
+}
+
+/// One subject's room under a budget.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HeadroomSubject {
+    /// What the budget holds: a module key, a function's symbol id or a file,
+    /// as `check` names it under ratchet — or `""` for a project-wide count.
+    pub subject: String,
+    /// The subject's file; `""` for a project-wide count.
+    pub file: String,
+    /// The file's trust label, as [`ExceededLimit::trust`] gives it.
+    pub trust: String,
+    /// [`HeadroomSubject::LIMIT`] or [`HeadroomSubject::RATCHET`].
+    pub kind: &'static str,
+    /// The value the subject may reach: the ceiling, or its blessed value.
+    pub allowance: u64,
+    /// The value on the base commit.
+    pub current: u64,
+    /// `allowance − current`; negative when the base is already past it.
+    pub headroom: i64,
+    /// Why the room is what it is, when the kind alone does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl HeadroomSubject {
+    /// `kind`: held to the budget's ceiling.
+    pub const LIMIT: &'static str = "limit";
+    /// `kind`: held to its blessed value, or to no rise at all.
+    pub const RATCHET: &'static str = "ratchet";
+}
+
+/// The margin under a numeric `drift_budget`: the budget less the signal's
+/// current drop, from the reference `--branches` judges drift from.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HeadroomDrift {
+    /// `false` for `"report"` or no `[review]` table, with `reason`.
+    pub applicable: bool,
+    /// The `drift_budget` in points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<f64>,
+    /// The reference signal less the base commit's: how far the signal has
+    /// fallen already.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drop: Option<i64>,
+    /// `budget − drop`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headroom: Option<f64>,
+    /// What the drop is measured from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<DriftReference>,
+    /// Why there is no margin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// A `--subjects` entry that resolved to no budget subject.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct UnresolvedSubject {
+    /// The entry as given.
+    pub entry: String,
+    /// Why it resolved to nothing.
+    pub reason: String,
+}
+
 /// The class of one reviewed entry ([FR-GV-24]).
 ///
 /// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
@@ -2504,6 +2628,53 @@ pub struct GateResult {
     /// [S-762]: ../../../docs/planning/journal.md#s-762-the-re-baseline-notice-shows-what-it-replaced
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_reset: Option<BaselineReset>,
+    /// Under a `rules.toml [review]` table ([FR-GV-27]): one entry per
+    /// distributional dimension in decline over the snapshots up to the one
+    /// this verdict judged. `warnings` carries each entry's
+    /// [`warning`](DimensionTrend::warning). Advisory — it never moves
+    /// `passed`. Empty and elided without the table.
+    ///
+    /// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub trend: Vec<DimensionTrend>,
+}
+
+/// A distributional dimension that declined at each of the last `window`
+/// recorded snapshots that moved it ([FR-GV-27], [BR-95]).
+///
+/// [`warning`](Self::warning) is the one spelling of the trend warning `scan`,
+/// `gate`, `session_end` and `review` print; the Health page renders the
+/// fields, never the string.
+///
+/// [FR-GV-27]: ../../../docs/specs/requirements/FR-GV-27.md
+/// [BR-95]: ../../../docs/specs/software-spec.md#312-governance--rules-gate-evolution-dsm-test-gaps
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DimensionTrend {
+    /// The dimension, in its canonical metric spelling (`equality`, …).
+    pub dimension: &'static str,
+    /// Its `window + 1` normalised values, oldest first, exact.
+    pub values: Vec<f64>,
+    /// The `review.trend_window` the run filled.
+    pub window: u32,
+}
+
+impl DimensionTrend {
+    /// `equality declined at each of the last 2 recorded snapshots that moved
+    /// it: 0.9 → 0.8 → 0.7 (review.trend_window = 2); a trend warning, never a
+    /// failure`.
+    pub fn warning(&self) -> String {
+        let window = self.window;
+        // Each value as its shortest exact spelling: a decline just past the
+        // noise floor still prints as one, and the value reads back.
+        let chain: Vec<String> = self.values.iter().map(f64::to_string).collect();
+        format!(
+            "{} declined at each of the last {window} recorded snapshot{} that moved it: {} \
+             (review.trend_window = {window}); a trend warning, never a failure",
+            self.dimension,
+            if window == 1 { "" } else { "s" },
+            chain.join(" → "),
+        )
+    }
 }
 
 /// An announced re-baseline ([FR-GV-10], [S-762]): a baseline that no longer
@@ -2639,11 +2810,16 @@ pub struct DimensionContribution {
 pub struct AttributionDriver {
     /// How the entry moved.
     pub status: ReviewStatus,
-    /// The symbol's name; a near-clone group's first member's.
+    /// The symbol's name; a near-clone group's is its naming member's — the
+    /// member first in identity order, the one its [`FixUnit`] is named by.
     pub name: String,
-    /// As [`ReviewedOffender::node_id`].
+    /// As [`ReviewedOffender::node_id`]; a near-clone group's is the group's
+    /// own `clone_group:<digest>`, the id its [`FixUnit`] carries, never a
+    /// member's. `None` for a group with a member that has no identity.
     pub node_id: Option<String>,
+    /// The symbol's file; a near-clone group's naming member's.
     pub file: String,
+    /// The symbol's line; a near-clone group's naming member's.
     pub line: Option<i64>,
     /// What `before` and `after` count, as [`ReviewedOffender::measure`]; a
     /// near-clone group's is its size.

@@ -181,3 +181,58 @@ fn review_branches_exits_0_whatever_it_reports() {
     let no_base = run(&["--json", "review", "--base", "no-such-ref", "--branches", "b1"]);
     assert_eq!(no_base["measured"], false, "{no_base}");
 }
+
+/// `review --headroom` (S-798, [FR-GV-29]) exits 0 whenever it answers, 1 with
+/// `measured: false` when the base does not resolve, and 2 for flags that
+/// contradict each other or need `--headroom`; its bytes do not change on a
+/// rerun or on an uncommitted edge.
+///
+/// [FR-GV-29]: ../../docs/specs/requirements/FR-GV-29.md
+#[test]
+fn review_headroom_exits_0_when_it_answers_1_when_it_cannot_measure_and_2_on_a_usage_error() {
+    let tmp = branches_fixture();
+    let root = tmp.path();
+    write(root, ".logos/rules.toml", "[constraints]\nmax_fan_out = 4\n");
+    let run = |args: &[&str]| {
+        let out = logos(root, args);
+        (out.status.code(), out.stdout, String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+
+    let args = ["--json", "review", "--headroom", "--base", "main", "--subjects", "src/engine.rs", "src/missing.rs"];
+    let (code, first, stderr) = run(&args);
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(report["measured"], true, "{report}");
+    assert_eq!(report["base_commit"].as_str().map(str::len), Some(40), "{report}");
+    let engine = &report["rules"][0]["subjects"][0];
+    assert_eq!((&engine["current"], &engine["headroom"], &engine["kind"]), (&Value::from(2), &Value::from(2), &Value::from("limit")));
+    assert_eq!(report["unresolved"][0]["entry"], "src/missing.rs", "{report}");
+    assert_eq!(report["unresolved"][0]["reason"], "not in the base commit", "{report}");
+
+    let (code, again, _) = run(&args);
+    assert_eq!((code, &again), (Some(0), &first), "a rerun prints the same bytes");
+    write(root, "src/engine.rs", &engine_calling(&["a", "b", "c"]));
+    let (_, edited, _) = run(&args);
+    assert_eq!(edited, first, "an uncommitted edge changes nothing");
+
+    let (code, near, _) = run(&["--json", "review", "--headroom", "--base", "main", "--near", "1"]);
+    assert_eq!(code, Some(0));
+    let near: Value = serde_json::from_slice(&near).unwrap();
+    assert_eq!(near["rules"][0]["listed"], 0, "{near}");
+
+    let (code, missing, _) = run(&["--json", "review", "--headroom", "--base", "no-such-ref"]);
+    assert_eq!(code, Some(1), "could not measure");
+    let missing: Value = serde_json::from_slice(&missing).unwrap();
+    assert_eq!(missing["measured"], false, "{missing}");
+    assert!(missing["not_measured_because"].as_str().is_some_and(|w| w.contains("does not resolve")), "{missing}");
+
+    for args in [
+        &["review", "--headroom", "--branches", "b1"][..],
+        &["review", "--subjects", "src/engine.rs"][..],
+        &["review", "--near", "1"][..],
+    ] {
+        let (code, stdout, stderr) = run(args);
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert!(stdout.is_empty(), "{args:?} prints nothing on stdout");
+    }
+}

@@ -1,7 +1,7 @@
 //! The coverage half of the evidence store ([CR-007], [ADR-23], [S-049]).
 //!
-//! Turns an external LCOV / Cobertura coverage report into anchored, deterministic
-//! evidence in `.logos/history.db` — the store [S-046] established, rescoped by
+//! Turns an external LCOV / Cobertura / JaCoCo / Go coverprofile report into
+//! anchored, deterministic evidence in `.logos/history.db` — the store [S-046] established, rescoped by
 //! [ADR-23] from "git-history store" to **evidence store**. The pipeline:
 //!
 //! 1. **read + detect + parse** ([parse]) — auto-detect the format from content
@@ -64,7 +64,7 @@ pub(super) const BP_SCALE: i64 = 10_000;
 
 pub use parse::CoverageFormat;
 
-pub(crate) use artifact::{discover as discover_artifact, ArtifactMatcher};
+pub(crate) use artifact::{candidates as artifact_candidates, ArtifactMatcher};
 pub(crate) use read::read_latest;
 
 // The one report-path binder, shared with the security ingest ([FR-SC-02]).
@@ -110,24 +110,6 @@ pub struct IngestSummary {
     pub rejected_stale: Vec<String>,
 }
 
-/// The outcome of the opt-in `coverage refresh` ([FR-CV-10], [ADR-38]): the
-/// command that was run, the artifact it produced and ingested, and the resulting
-/// [`IngestSummary`]. A `Serialize` read-model so the CLI `coverage refresh` and
-/// the MCP `coverage_refresh` twin render the same payload byte-for-byte
-/// ([NFR-CC-01]).
-///
-/// [NFR-CC-01]: ../../../../docs/specs/requirements/NFR-CC-01.md
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct CoverageRefreshSummary {
-    /// The `refresh_cmd` that was run (via `sh -c`, cwd = project root). The lone
-    /// explicit coverage subprocess, off the serve/watcher path ([ADR-38]).
-    pub command: String,
-    /// The root-relative artifact path the refresh produced and ingested.
-    pub artifact: String,
-    /// The ingest summary for the produced artifact ([FR-CV-01]).
-    pub ingest: IngestSummary,
-}
-
 /// Ingest a coverage report at `report_path` into the evidence store under `root`,
 /// mapping report paths against `indexed_paths` ([FR-CV-01]..[FR-CV-04]).
 ///
@@ -159,7 +141,8 @@ pub fn ingest(
         None => parse::detect_format(&text).ok_or_else(|| {
             anyhow!(
                 "could not detect the coverage format of {} (expected LCOV `TN:`/`SF:` \
-                 records or a Cobertura `<coverage>` XML root); pass --format",
+                 records, a Cobertura `<coverage>` or JaCoCo `<report>` XML root, or a Go \
+                 coverprofile `mode:` header); pass --format",
                 report_path.display()
             )
         })?,
@@ -182,10 +165,40 @@ pub fn ingest(
     //    report — Cobertura emits a line at both method and class level), summing
     //    only happens across reports in the store ([FR-CV-04]).
     let mapper = PathMapper::new(indexed_paths, &cfg.path_strip_prefixes);
+    // A Go profile names files by import path; the project's `go.mod` modules turn
+    // that into a project-relative path ([FR-CV-12]). Read only for a Go profile,
+    // and only the `go.mod` files above an indexed `.go` file.
+    let go_modules = if format == CoverageFormat::Gocover {
+        crate::resolve::go_module::discover(
+            root,
+            indexed_paths
+                .iter()
+                .map(String::as_str)
+                .filter(|p| p.ends_with(".go")),
+        )
+    } else {
+        Vec::new()
+    };
+    // Once the tree declares Go modules a profile path is bound *through* them: the
+    // rewritten path must name an indexed file exactly, and a path no module claims
+    // binds nothing — a foreign module's `main.go` is not the root `main.go`
+    // ([NFR-RA-05]). With no `go.mod` at all the path goes verbatim to the suffix
+    // mapper.
+    let go_exact: BTreeSet<&str> = if go_modules.is_empty() {
+        BTreeSet::new()
+    } else {
+        indexed_paths.iter().map(String::as_str).collect()
+    };
     let mut per_indexed: BTreeMap<String, BTreeMap<i64, i64>> = BTreeMap::new();
     let mut unmatched: BTreeSet<String> = BTreeSet::new();
     for file in parsed {
-        match mapper.map(&file.path) {
+        let bound = pathmap::strip_go_module(&go_modules, &file.path);
+        let target = if go_modules.is_empty() {
+            Some(file.path.as_str())
+        } else {
+            bound.as_deref().filter(|rel| go_exact.contains(rel))
+        };
+        match target.and_then(|t| mapper.map(t)) {
             Some(indexed) => {
                 let lines = per_indexed.entry(indexed.to_string()).or_default();
                 for hit in file.lines {
@@ -293,8 +306,8 @@ pub const FRESHNESS_NA: &str = "n/a";
 
 /// The one-line notice both surfaces render when no coverage has been ingested
 /// ([FR-CV-06]): `n/a`, exit 0, never an error.
-pub const NO_COVERAGE_NOTICE: &str =
-    "no coverage ingested — run `logos coverage ingest <report>` to populate the evidence tier";
+pub const NO_COVERAGE_NOTICE: &str = "no coverage ingested — run `logos coverage run`, or \
+     `logos coverage ingest <report>`, to populate the evidence tier";
 
 /// The `coverage status` read-model ([FR-CV-06]) — a `Serialize` payload shared
 /// byte-for-byte by the CLI and the MCP `coverage_status` twin ([NFR-CC-01]).
@@ -350,6 +363,99 @@ pub struct CoverageStatus {
     /// otherwise. Advisory wording only — it never grades or moves the gate
     /// ([BR-28]).
     pub staleness_prompt: Option<String>,
+    /// The coverage runner's state ([FR-CV-06] as modified by CR-234, S-737):
+    /// each tool's one state, the execution consent, and each tool's last run.
+    /// `None` — and absent from the payload — on a read that probes no tool
+    /// (the Dashboard's), and from [`status`], which reads the store alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<CoverageRunnerStatus>,
+    /// The member's `coverage-run` job, running or last run, on a surface
+    /// that runs one ([FR-CV-14], S-738): MCP `coverage_status` reports the job
+    /// its `coverage_run` started. `None` — and absent from the payload — on
+    /// the CLI, which runs no job, and before any job ran.
+    ///
+    /// [FR-CV-14]: ../../../../docs/specs/requirements/FR-CV-14.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::jobs::JobSnapshot>,
+}
+
+/// The coverage runner on the `coverage status` surface (S-737): what a
+/// `coverage run` would start, what the project's execution consent covers,
+/// and how each tool's last run ended. Filled by the
+/// [coverage runner](crate::coverage), which reads no report: the evidence
+/// above is the store's alone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CoverageRunnerStatus {
+    /// The project's coverage execution consent ([FR-CV-13]).
+    ///
+    /// [FR-CV-13]: ../../../../docs/specs/requirements/FR-CV-13.md
+    pub consent: CoverageConsentStatus,
+    /// One row per registered tool, in registry order, then the custom entry
+    /// when a `[coverage_ingest].refresh_cmd` is configured.
+    pub tools: Vec<CoverageToolStatus>,
+}
+
+/// The project's coverage execution consent, as a `coverage run` would find it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CoverageConsentStatus {
+    /// The tools the recorded consent names in this project, sorted.
+    pub consented: Vec<String>,
+    /// The tools a full run would start that the consent does not cover yet:
+    /// the next run asks for these, and only these.
+    pub pending: Vec<String>,
+    /// Whether the custom command was consented to and its text has changed
+    /// since: the next run that starts it asks again.
+    pub command_changed: bool,
+}
+
+/// One coverage tool's one state ([FR-CV-11], [BR-77]): `not_applicable`,
+/// `disabled` or `not_installed` from detection; else its last run —
+/// `ran`, `tests_failed`, `failed`, `timed_out` or `cancelled` — or
+/// `never_run`. No state reads as 0 % or as clean.
+///
+/// [FR-CV-11]: ../../../../docs/specs/requirements/FR-CV-11.md
+/// [BR-77]: ../../../../docs/specs/software-spec.md#323-coverage--test-evidence
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CoverageToolStatus {
+    /// The registry name, or `custom`.
+    pub tool: String,
+    pub state: &'static str,
+    /// The version detection read, when it read one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Which copy runs: `override`, `wrapper`, `project` or `path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<&'static str>,
+    /// For a tool not installed, what to do when there is more to say than
+    /// "install it".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+    /// For a tool not installed, what Logos can do about it on consent
+    /// (S-750): `install` (a managed tool, `logos coverage install`) or
+    /// `add_dependency` (its missing coverage dev dependency, added by the
+    /// project's own package manager).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer: Option<&'static str>,
+    /// How its last run ended, whatever its state now: a tool uninstalled
+    /// since reads `not_installed` and keeps this.
+    pub last_run: Option<CoverageLastRun>,
+}
+
+/// How one tool's last run ended, as the coverage runner recorded it under
+/// `.logos/coverage/` (S-737).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CoverageLastRun {
+    /// `ran`, `tests_failed`, `failed`, `timed_out` or `cancelled`.
+    pub outcome: String,
+    /// Its exit status, when it exited.
+    pub exit_code: Option<i32>,
+    /// The HEAD it ran at, when the project has one.
+    pub head_sha: Option<String>,
+    /// When it ended, in Unix seconds.
+    pub finished_at: u64,
+    /// For a failed run, its whole bounded output, root-relative: the payload
+    /// carries only a masked excerpt.
+    pub log: Option<String>,
 }
 
 /// One covered file's freshness-resolved coverage on the `status` surface
@@ -400,6 +506,8 @@ pub fn status(root: &Path) -> Result<CoverageStatus> {
             current_head,
             head_stale: false,
             staleness_prompt: None,
+            runner: None,
+            job: None,
         });
     };
 
@@ -439,7 +547,7 @@ pub fn status(root: &Path) -> Result<CoverageStatus> {
     let staleness_prompt = head_stale.then(|| {
         format!(
             "coverage artifact lags HEAD (ingested at {}, HEAD is {}) — \
-             re-ingest with `logos coverage ingest <report>` or `logos coverage refresh`",
+             run `logos coverage run`, or re-ingest with `logos coverage ingest <report>`",
             short_sha(&view.head_sha),
             current_head.as_deref().map(short_sha).unwrap_or_default(),
         )
@@ -460,6 +568,8 @@ pub fn status(root: &Path) -> Result<CoverageStatus> {
         current_head,
         head_stale,
         staleness_prompt,
+        runner: None,
+        job: None,
     })
 }
 

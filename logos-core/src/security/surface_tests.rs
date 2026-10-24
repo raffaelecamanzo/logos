@@ -24,6 +24,7 @@ use tempfile::TempDir;
 
 use super::context::{FindingContext, UnboundBecause};
 use super::registry::REGISTRY;
+use super::scope::no_test_symbols;
 use super::surface::{consent_pending, findings, scan, status, FindingsFilter, ScanProgress};
 use super::{ScanEnvironment, ScanRequest, OUTPUT_DIR};
 use crate::config::{ConfigError, SCAN_CONSENT_FILE};
@@ -51,6 +52,8 @@ struct World {
     bin: PathBuf,
     rec: PathBuf,
     user: PathBuf,
+    /// The NVD API key the scanning process's environment carries.
+    nvd_api_key: Option<super::NvdApiKey>,
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -77,7 +80,7 @@ impl World {
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "seed"]);
-        Self { _tmp: tmp, root, bin, rec, user }
+        Self { _tmp: tmp, root, bin, rec, user, nvd_api_key: None }
     }
 
     fn env(&self) -> ScanEnvironment {
@@ -85,6 +88,7 @@ impl World {
             user_dir: Some(self.user.clone()),
             search_path: Some(self.bin.clone().into_os_string()),
             tools_dir: None,
+            nvd_api_key: self.nvd_api_key.clone(),
         }
     }
 
@@ -100,7 +104,7 @@ impl World {
              printf '%s\\n' \"$*\" >> '{record}'\n\
              case \"$1\" in --version|version|-version) printf '%s\\n' '{name} 1.2.3'; exit 0;; esac\n\
              out=''; prev=''\n\
-             for a in \"$@\"; do case \"$prev\" in --output|--report-path) out=\"$a\";; esac; prev=\"$a\"; done\n\
+             for a in \"$@\"; do case \"$prev\" in --output|--output-file|--report-path) out=\"$a\";; esac; prev=\"$a\"; done\n\
              {copy}\n\
              printf '%s\\n' '{stderr}' >&2\n\
              exit {exit}\n",
@@ -108,6 +112,29 @@ impl World {
         );
         let path = self.bin.join(name);
         fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A `go` that records its `GOTOOLCHAIN` and argv, prints `output` for
+    /// `go version` and exits `exit`.
+    fn stub_go(&self, output: &str, exit: i32) {
+        let script = format!(
+            "#!/bin/sh\nprintf 'GOTOOLCHAIN=%s %s\\n' \"$GOTOOLCHAIN\" \"$*\" >> '{}'\nprintf '%s\\n' '{output}'\nexit {exit}\n",
+            self.rec.join("go.argv").display(),
+        );
+        let path = self.bin.join("go");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A `name` that prints `line` on stdout alone, writes no report and exits `exit`.
+    fn stub_stdout(&self, name: &str, exit: i32, line: &str) {
+        let path = self.bin.join(name);
+        fs::write(
+            &path,
+            format!("#!/bin/sh\ncase \"$1\" in --version|version|-version) echo '{name} 1.2.3'; exit 0;; esac\nprintf '%s\\n' '{line}'\nexit {exit}\n"),
+        )
+        .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
@@ -161,7 +188,7 @@ impl World {
     }
 
     fn status(&self) -> Value {
-        serde_json::to_value(status(&self.root, &self.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every, true).unwrap()).unwrap()
+        serde_json::to_value(status(&self.root, &self.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every, true, no_test_symbols).unwrap()).unwrap()
     }
 
     /// The listing with no graph behind it: every finding unbound. The graph
@@ -170,7 +197,7 @@ impl World {
         let no_graph = |listed: &[&SecurityFinding]| {
             Ok(listed.iter().map(|f| FindingContext::unbound(f.start_line, UnboundBecause::NoSymbol)).collect())
         };
-        serde_json::to_value(findings(&self.root, &self.env(), crate::tools::Manifest::builtin(), filter, TODAY.unwrap(), no_graph).unwrap()).unwrap()
+        serde_json::to_value(findings(&self.root, &self.env(), crate::tools::Manifest::builtin(), filter, TODAY.unwrap(), no_test_symbols, no_graph).unwrap()).unwrap()
     }
 }
 
@@ -290,6 +317,10 @@ fn a_dependency_check_failing_for_want_of_an_nvd_api_key_names_the_remedy() {
     assert!(cause.contains("https://nvd.nist.gov/developers/request-an-api-key"), "{cause}");
     assert!(cause.contains("[security_scan.dependency-check]") && cause.contains(r#"extra_args = ["--nvdApiKey", "<key>"]"#), "{cause}");
     assert!(cause.contains("user config"), "the repository config may not set extra_args: {cause}");
+    // FR-SC-27: the environment variable is the first route named, `serve` with it.
+    let (env, extra) = (cause.find("NVD_API_KEY").unwrap_or(usize::MAX), cause.find("extra_args").unwrap());
+    assert!(env < extra, "NVD_API_KEY is named before extra_args: {cause}");
+    assert!(cause.contains("logos serve"), "{cause}");
     assert!(!cause.contains('\n') && cause.chars().count() <= super::surface::CAUSE_CHARS, "one bounded line: {cause:?}");
     assert_eq!(scanner_row(&w.status(), "dependency-check")["last_failure_cause"].as_str(), Some(cause));
 }
@@ -332,20 +363,100 @@ fn the_status_cause_reads_the_whole_log_a_scan_wrote() {
     assert_eq!(scanner_row(&w.status(), "dependency-check")["last_failure_cause"], failed["cause"]);
 }
 
-/// The managed gosec 2.21.4 under a newer Go toolchain cannot type a
+/// A gosec built for an older Go than the local one cannot type a
 /// standard-library import and exits 1 with no report (S-771's observation).
-/// That is a `failed` outcome naming gosec's own line, never a clean scan.
+/// That is a `failed` outcome, never `not_applicable` nor a clean scan, and its
+/// cause names the gosec version, the local Go and the remedy (S-782) — on the
+/// scan and again on `status`, which reads it from the log.
 #[test]
-fn a_gosec_that_cannot_type_a_stdlib_import_fails_naming_that_line() {
+fn a_gosec_that_cannot_type_a_stdlib_import_fails_naming_its_version_the_local_go_and_the_remedy() {
     let w = World::new();
     fs::write(w.root.join("app/hash.go"), "package app\n\nimport _ \"crypto/md5\"\n").unwrap();
     let line = r#"internal error: package "crypto/md5" without types was imported from "command-line-arguments""#;
     w.stub("gosec", None, 1, line);
+    w.stub_go("go version go1.27.2 darwin/arm64", 0);
     let payload = serde_json::to_value(w.scan(true).expect("the scan runs")).unwrap();
     let row = scanner_row(&payload, "gosec");
-    assert_eq!(row["outcome"], "failed", "{row}");
+    assert_eq!(row["outcome"], "failed", "never not_applicable or a clean scan: {row}");
     assert_eq!(row["exit_code"], 1, "{row}");
-    assert_eq!(row["cause"], line, "{row}");
+    let cause = row["cause"].as_str().expect("a cause");
+    assert!(cause.contains("gosec 1.2.3"), "the gosec version: {cause}");
+    assert!(cause.contains("go1.27.2"), "the local go version: {cause}");
+    assert!(
+        cause.contains("use a gosec release built for that Go, or a Go toolchain gosec supports"),
+        "the remedy: {cause}"
+    );
+    assert!(cause.contains("without types was imported"), "the symptom: {cause}");
+    assert!(cause.chars().count() <= super::surface::CAUSE_CHARS && !cause.ends_with('…'), "whole: {cause}");
+    // gosec's own line stays in the log, with the added one after it.
+    let log = fs::read_to_string(w.root.join(OUTPUT_DIR).join("gosec.failed.log")).unwrap();
+    assert!(log.contains(line) && log.trim_end().ends_with(cause), "{log}");
+    // `status` reads the same cause from the log.
+    let status_payload = w.status();
+    let status = scanner_row(&status_payload, "gosec");
+    assert_eq!(status["last_failure_cause"].as_str(), Some(cause), "{status}");
+    assert_ne!(status["state"], "not_applicable", "{status}");
+    // The local Go was asked once, with `version` alone, and never allowed to
+    // fetch a toolchain.
+    assert_eq!(fs::read_to_string(w.rec.join("go.argv")).unwrap(), "GOTOOLCHAIN=local version\n");
+}
+
+/// The added cause is a fact of gosec's own report, so it needs no `go`: with
+/// none on the `PATH` the Go version reads `unknown`, and the remedy stays. And
+/// output without the line adds nothing — another gosec failure keeps its own.
+#[test]
+fn the_stdlib_cause_survives_a_missing_go_and_is_not_added_to_another_failure() {
+    let w = World::new();
+    fs::write(w.root.join("app/hash.go"), "package app\n").unwrap();
+    w.stub("gosec", None, 1, r#"package "crypto/md5" without types was imported"#);
+    let payload = serde_json::to_value(w.scan(true).unwrap()).unwrap();
+    let cause = scanner_row(&payload, "gosec")["cause"].as_str().unwrap().to_string();
+    assert!(cause.contains("with the local go unknown") && cause.contains("gosec 1.2.3"), "{cause}");
+    assert!(cause.contains("a Go toolchain gosec supports"), "{cause}");
+
+    let other = World::new();
+    fs::write(other.root.join("app/hash.go"), "package app\n").unwrap();
+    other.stub("gosec", None, 1, "loading packages failed: no Go files");
+    other.stub_go("go version go1.27.2 darwin/arm64", 0);
+    let payload = serde_json::to_value(other.scan(true).unwrap()).unwrap();
+    assert_eq!(scanner_row(&payload, "gosec")["cause"], "loading packages failed: no Go files");
+    assert!(!other.rec.join("go.argv").exists(), "go was asked for a failure that is not about types");
+}
+
+/// The line is built from two version tokens and a fixed sentence — a `go`
+/// whose version token carries anything but version characters or runs long, or
+/// that exits non-zero, is `unknown`, never repeated; and gosec's marker on its
+/// stdout alone is named all the same.
+#[test]
+fn a_go_that_prints_no_trustworthy_version_is_unknown_and_never_quoted() {
+    let long = format!("go version go1.{} darwin/arm64", "9".repeat(200));
+    for (output, exit) in [
+        ("go version go1.27.2;evil darwin/arm64 devel", 0),
+        (long.as_str(), 0),
+        ("go version go1.27.2 darwin/arm64", 1),
+    ] {
+        let w = World::new();
+        fs::write(w.root.join("app/hash.go"), "package app\n").unwrap();
+        w.stub("gosec", None, 1, "without types was imported");
+        w.stub_go(output, exit);
+        let payload = serde_json::to_value(w.scan(true).unwrap()).unwrap();
+        let cause = scanner_row(&payload, "gosec")["cause"].as_str().unwrap().to_string();
+        assert!(cause.contains("with the local go unknown"), "{output:?} (exit {exit}): {cause}");
+        assert!(cause.ends_with("a Go toolchain gosec supports") && !cause.contains("evil"), "{cause}");
+    }
+}
+
+/// gosec's own line on stdout, nothing on stderr, is the failure's output
+/// (`step` falls back to stdout): the cause is added there too.
+#[test]
+fn the_stdlib_cause_is_named_when_gosec_prints_its_line_on_stdout() {
+    let w = World::new();
+    fs::write(w.root.join("app/hash.go"), "package app\n").unwrap();
+    w.stub_stdout("gosec", 1, r#"package "crypto/md5" without types was imported"#);
+    w.stub_go("go version go1.27.2 darwin/arm64", 0);
+    let payload = serde_json::to_value(w.scan(true).unwrap()).unwrap();
+    let cause = scanner_row(&payload, "gosec")["cause"].as_str().unwrap().to_string();
+    assert!(cause.contains("gosec 1.2.3 with the local go1.27.2"), "{cause}");
 }
 
 /// The cause is one line whatever the output: the first error line, else the
@@ -580,7 +691,7 @@ fn an_expired_suppression_counts_as_active_on_status_and_findings() {
     )
     .unwrap();
     let only = |token: &str| {
-        let filter = FindingsFilter::parse(None, None, None, None, Some(token), None).unwrap();
+        let filter = FindingsFilter::parse(None, None, None, None, Some(token), None, None).unwrap();
         w.findings(&filter)["findings"].as_array().unwrap().clone()
     };
     let active = only("active");
@@ -716,7 +827,7 @@ fn status_states_each_case_and_neither_read_starts_a_scanner() {
     assert_eq!((semgrep["state"].as_str(), semgrep["findings"].as_u64(), semgrep["suppressed"].as_u64()), (Some("fresh"), Some(1), Some(1)), "{semgrep}");
     assert_eq!(semgrep["last_failure"], Value::Null, "a symlinked log is not reported");
     assert_eq!(scanner_row(&status, "bandit")["state"], "disabled", "disabled outranks a stored report");
-    assert_eq!(status["other_reports"], json!([{"scanner": "ESLint", "driver": "ESLint", "state": "fresh", "snapshot_head": semgrep["snapshot_head"], "version": "1.7.10", "findings": 0, "suppressed": 0, "installed": null, "install": null, "last_failure": null}]));
+    assert_eq!(status["other_reports"], json!([{"scanner": "ESLint", "driver": "ESLint", "state": "fresh", "snapshot_head": semgrep["snapshot_head"], "version": "1.7.10", "findings": 0, "suppressed": 0, "not_fresh": 0, "test": 0, "installed": null, "install": null, "last_failure": null}]));
     // Status reads each installed copy's version (S-744, FR-SC-08): the
     // version probe is the only process it starts, and findings starts none.
     assert_eq!(w.started(), ["--version"], "status starts no scan, only semgrep's version probe");
@@ -772,7 +883,7 @@ fn findings_are_classified_labelled_and_the_filters_intersect() {
         format!("[[ignore]]\nfingerprint = \"{target}\"\nreason = \"accepted\"\n"),
     )
     .unwrap();
-    let parse = |args: [Option<&str>; 6]| FindingsFilter::parse(args[0], args[1], args[2], args[3], args[4], args[5]).unwrap();
+    let parse = |args: [Option<&str>; 6]| FindingsFilter::parse(args[0], args[1], args[2], args[3], args[4], args[5], None).unwrap();
     let count = |filter: &FindingsFilter| w.findings(filter)["findings"].as_array().unwrap().len();
     let fingerprints = |filter: &FindingsFilter| -> Vec<String> {
         w.findings(filter)["findings"].as_array().unwrap().iter().map(|f| f["fingerprint"].as_str().unwrap().to_string()).collect()
@@ -844,7 +955,7 @@ fn findings_are_classified_labelled_and_the_filters_intersect() {
             assert!(c["state"].get("findings").is_none(), "not covered never carries a count: {c}");
         }
     }
-    let bad = FindingsFilter::parse(Some("severe"), None, None, None, None, None).unwrap_err();
+    let bad = FindingsFilter::parse(Some("severe"), None, None, None, None, None, None).unwrap_err();
     assert!(bad.to_string().contains("severe"), "{bad}");
 }
 
@@ -860,7 +971,7 @@ fn unrated_findings_carry_their_reason_and_are_filterable() {
         crate::history::security::ingest(&w.root, &fixture(name), &indexed).unwrap();
     }
     let least = |severity: &str| -> Vec<(String, String)> {
-        let filter = FindingsFilter::parse(Some(severity), None, None, None, None, None).unwrap();
+        let filter = FindingsFilter::parse(Some(severity), None, None, None, None, None, None).unwrap();
         let mut got: Vec<(String, String)> = w.findings(&filter)["findings"]
             .as_array()
             .unwrap()
@@ -886,7 +997,7 @@ fn unrated_findings_carry_their_reason_and_are_filterable() {
             _ => assert!(f.get("severity_reason").is_none(), "a rating carries no reason: {f}"),
         }
     }
-    let bad = FindingsFilter::parse(Some("unrate"), None, None, None, None, None).unwrap_err();
+    let bad = FindingsFilter::parse(Some("unrate"), None, None, None, None, None, None).unwrap_err();
     assert!(bad.to_string().contains("unrated"), "the error lists the token: {bad}");
 }
 
@@ -946,7 +1057,7 @@ fn consent_pending_names_the_unconsented_scanners_and_starts_nothing() {
 /// the earlier snapshot is kept, and the job ends cancelled.
 #[test]
 fn a_cancelled_scan_kills_its_scanner_writes_no_failure_log_and_starts_nothing_after() {
-    use crate::jobs::{JobKind, JobState, ScanJobs};
+    use crate::jobs::{JobKind, JobState, AnalysisJobs};
     use std::time::{Duration, Instant};
 
     let w = World::new();
@@ -964,7 +1075,7 @@ fn a_cancelled_scan_kills_its_scanner_writes_no_failure_log_and_starts_nothing_a
     fs::remove_dir_all(&w.rec).unwrap();
     fs::create_dir_all(&w.rec).unwrap();
 
-    let jobs = ScanJobs::new();
+    let jobs = AnalysisJobs::new();
     let (root, env) = (w.root.clone(), w.env());
     jobs.start(JobKind::SecurityScan, &w.root, move |_| {
         let indexed = vec!["app/db.py".to_string()];
@@ -1012,7 +1123,7 @@ fn a_cancelled_scan_kills_its_scanner_writes_no_failure_log_and_starts_nothing_a
 /// reported started, and no process of it runs.
 #[test]
 fn a_cancel_between_scanners_reports_no_later_scanner_started() {
-    use crate::jobs::{JobKind, JobState, ScanJobs};
+    use crate::jobs::{JobKind, JobState, AnalysisJobs};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1021,7 +1132,7 @@ fn a_cancel_between_scanners_reports_no_later_scanner_started() {
     w.stub("bandit", Some(&w.clean_bandit()), 0, "");
     crate::config::record_scan_consent(Some(&w.user), &w.root, &["semgrep", "bandit"]).unwrap();
 
-    let jobs = Arc::new(ScanJobs::new());
+    let jobs = Arc::new(AnalysisJobs::new());
     let heard = Arc::new(Mutex::new(Vec::new()));
     let (root, env, member) = (w.root.clone(), w.env(), w.root.clone());
     let (canceller, log) = (Arc::clone(&jobs), Arc::clone(&heard));
@@ -1062,8 +1173,8 @@ impl World {
     /// its findings listed under each edition, as the workspace roll-up reads them.
     fn rollup(&self) -> super::MemberSecurity {
         let manifest = crate::tools::Manifest::builtin();
-        let status = status(&self.root, &self.env(), manifest, TODAY.unwrap(), super::VersionProbes::Every, true).unwrap();
-        let listings = super::listings(&self.root, &self.env(), manifest, TODAY.unwrap()).unwrap();
+        let status = status(&self.root, &self.env(), manifest, TODAY.unwrap(), super::VersionProbes::Every, true, no_test_symbols).unwrap();
+        let listings = super::listings(&self.root, &self.env(), manifest, TODAY.unwrap(), no_test_symbols).unwrap();
         super::MemberSecurity::from_reads(status, &listings)
     }
 }
@@ -1196,15 +1307,25 @@ impl World {
         let no_graph = |listed: &[&SecurityFinding]| {
             Ok(listed.iter().map(|f| FindingContext::unbound(f.start_line, UnboundBecause::NoSymbol)).collect())
         };
-        let listed = findings(&self.root, &self.env(), crate::tools::Manifest::builtin(), &FindingsFilter::default(), TODAY.unwrap(), no_graph).unwrap();
+        let listed = findings(&self.root, &self.env(), crate::tools::Manifest::builtin(), &FindingsFilter::default(), TODAY.unwrap(), no_test_symbols, no_graph).unwrap();
         super::FindingTally::of(&listed.findings)
     }
 
     /// What Files & Risk reads for this project: every file's counted findings
-    /// summed, and the stale ones apart.
+    /// summed, and the stale ones apart. Each finding's scope is the path
+    /// rule's: no graph is behind this project.
     fn files_and_risk(&self) -> Option<(usize, usize)> {
-        let cells = crate::history::security::path_findings(&self.root, TODAY.unwrap()).unwrap()?;
+        let cells = self.cells()?;
         Some((cells.values().map(|c| c.count).sum(), cells.values().map(|c| c.stale).sum()))
+    }
+
+    /// Files & Risk's cells, each finding classified as the engine classifies
+    /// it, by the path rule alone here.
+    fn cells(&self) -> Option<std::collections::BTreeMap<String, crate::history::PathFindings>> {
+        crate::history::security::path_findings(&self.root, TODAY.unwrap(), |stored| {
+            Ok(super::scope::scopes(&self.root, stored, no_test_symbols)?.into_iter().map(|s| s.code_scope).collect())
+        })
+        .unwrap()
     }
 }
 
@@ -1816,7 +1937,19 @@ fn every_scan_surface_states_what_each_scanner_did_with_the_ignored_directories(
     }
     let gitleaks = scanner_row(&payload, "gitleaks");
     assert_eq!(gitleaks["ignored_paths"], "scanned", "{gitleaks}");
-    assert_eq!(gitleaks["coverage_note"], super::registry::scanner("gitleaks").unwrap().reads_ignored.unwrap());
+    let (kind, note) = super::registry::scanner("gitleaks").unwrap().reads_ignored.unwrap();
+    assert_eq!(gitleaks["coverage_note"], note);
+    assert_eq!(gitleaks["coverage_kind"], "history", "the kind the page maps to a marker: {gitleaks}");
+    assert_eq!(serde_json::to_value(kind).unwrap(), "history");
+    // The names the page maps to a marker, one per kind: the wire's spelling.
+    let wire = |k: super::CoverageKind| serde_json::to_value(k).unwrap();
+    assert_eq!(
+        [wire(super::CoverageKind::Unproven), wire(super::CoverageKind::WholeProject), wire(super::CoverageKind::Partial)],
+        ["unproven", "whole_project", "partial"]
+    );
+    for name in ["semgrep", "osv-scanner"] {
+        assert!(scanner_row(&payload, name).get("coverage_kind").is_none(), "no kind when excluded: {name}");
+    }
     for name in ["trivy", "bandit", "codeql"] {
         assert!(scanner_row(&payload, name).get("ignored_paths").is_none(), "{name} did not run");
     }
@@ -1829,6 +1962,8 @@ fn every_scan_surface_states_what_each_scanner_did_with_the_ignored_directories(
     assert_eq!(scanner_row(&status, "semgrep")["ignored_paths"], "excluded");
     assert_eq!(scanner_row(&status, "gitleaks")["ignored_paths"], "scanned");
     assert!(scanner_row(&status, "gitleaks")["coverage_note"].is_string());
+    assert_eq!(scanner_row(&status, "gitleaks")["coverage_kind"], "history", "status carries the kind too");
+    assert!(scanner_row(&status, "semgrep").get("coverage_kind").is_none(), "no kind when excluded");
     assert!(scanner_row(&status, "trivy").get("ignored_paths").is_none(), "not installed here");
     // A readout that does not ask for it walks no tree, whatever it probes.
     let without = status_without_coverage(&w);
@@ -1859,9 +1994,425 @@ fn every_scan_surface_states_what_each_scanner_did_with_the_ignored_directories(
 }
 
 fn status_without_coverage(w: &World) -> super::SecurityStatus {
-    status(&w.root, &w.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every, false).unwrap()
+    status(&w.root, &w.env(), crate::tools::Manifest::builtin(), TODAY.unwrap(), super::VersionProbes::Every, false, no_test_symbols).unwrap()
 }
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| (*s).to_string()).collect()
+}
+
+// ── Test code is labelled, listed apart and counted apart (S-795, FR-SC-28) ──
+
+/// A Semgrep report with one result per `(uri, rule, line, level)`.
+fn rated_report(results: &[(&str, &str, i64, &str)]) -> String {
+    let results: Vec<Value> = results
+        .iter()
+        .map(|(uri, rule, line, level)| {
+            json!({
+                "ruleId": rule,
+                "level": level,
+                "message": {"text": "tainted"},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}, "region": {"startLine": line}}}]
+            })
+        })
+        .collect();
+    json!({"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Semgrep OSS", "semanticVersion": "1.85.0", "rules": []}}, "results": results}]})
+        .to_string()
+}
+
+impl World {
+    /// Index `app/db.py`, `tests/test_db.py` and the fixture
+    /// `tests/fixtures/axum/Dockerfile`, then ingest one Semgrep report with
+    /// an `error` finding in each and a `note` in `app/db.py`: two production
+    /// findings and two in test code, one of each by the path conventions and
+    /// the fixture segment.
+    fn with_test_code(&self) {
+        for (path, text) in [("tests/test_db.py", "import sqlite3\n"), ("tests/fixtures/axum/Dockerfile", "FROM rust\n")] {
+            let full = self.root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, text).unwrap();
+        }
+        git(&self.root, &["add", "."]);
+        git(&self.root, &["commit", "-q", "-m", "tests"]);
+        let report = self.rec.join("scoped.sarif");
+        fs::write(
+            &report,
+            rated_report(&[
+                ("app/db.py", "sql", 1, "error"),
+                ("app/db.py", "weak", 1, "note"),
+                ("tests/test_db.py", "sql", 1, "error"),
+                ("tests/fixtures/axum/Dockerfile", "root-user", 1, "error"),
+            ]),
+        )
+        .unwrap();
+        let indexed = ["app/db.py", "tests/test_db.py", "tests/fixtures/axum/Dockerfile"].map(str::to_string);
+        crate::history::security::ingest(&self.root, &report, &indexed).unwrap();
+    }
+}
+
+fn scoped(filter: &FindingsFilter, w: &World) -> (Vec<(String, String, Value)>, u64) {
+    let listed = w.findings(filter);
+    let rows = listed["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap().to_string(), f["code_scope"].as_str().unwrap().to_string(), f["code_scope_reason"].clone()))
+        .collect();
+    (rows, listed["hidden_by_scope"].as_u64().unwrap())
+}
+
+/// Every finding carries its scope and reason; no scope lists production and
+/// states how many it hid; `test` and `all` narrow exactly, and the scope
+/// intersects with every other filter — its hidden count is of what they kept.
+#[test]
+fn a_finding_in_test_code_is_labelled_and_listed_apart_by_the_scope() {
+    let w = World::new();
+    w.with_test_code();
+    let parse = |severity: Option<&str>, path: Option<&str>, scope: Option<&str>| {
+        FindingsFilter::parse(severity, None, None, path, None, None, scope).unwrap()
+    };
+
+    let (default, hidden) = scoped(&parse(None, None, None), &w);
+    let production = |p: &str| (p.to_string(), "production".to_string(), Value::Null);
+    assert_eq!(default, [production("app/db.py"), production("app/db.py")]);
+    assert_eq!(hidden, 2, "the two findings in test code are hidden, and said to be");
+    assert_eq!(w.findings(&parse(None, None, None))["scope"], "production");
+
+    let (test, hidden) = scoped(&parse(None, None, Some("test")), &w);
+    assert_eq!(
+        test,
+        [
+            ("tests/fixtures/axum/Dockerfile".to_string(), "test".to_string(), json!("test_path")),
+            ("tests/test_db.py".to_string(), "test".to_string(), json!("test_path")),
+        ],
+        "store order"
+    );
+    assert_eq!(hidden, 2, "the production ones are what `test` hides");
+    let (all, hidden) = scoped(&parse(None, None, Some("all")), &w);
+    assert_eq!((all.len(), hidden), (4, 0));
+    assert_eq!(scoped(&FindingsFilter::default(), &w), (all, 0), "an unset filter keeps every scope");
+
+    // Intersection: severity × scope, path × scope. A finding another filter
+    // dropped is never counted as hidden by the scope.
+    let (high_prod, hidden) = scoped(&parse(Some("high"), None, None), &w);
+    assert_eq!((high_prod, hidden), (vec![production("app/db.py")], 2), "the note is dropped by severity, not hidden");
+    let (fixture, hidden) = scoped(&parse(None, Some("tests/fixtures"), None), &w);
+    assert_eq!((fixture.len(), hidden), (0, 1), "a test-code path under the default scope lists nothing and says one was hidden");
+    let (fixture, hidden) = scoped(&parse(None, Some("tests/fixtures"), Some("test")), &w);
+    assert_eq!((fixture.len(), hidden), (1, 0));
+    assert_eq!(scoped(&parse(Some("high"), Some("tests"), Some("all")), &w).0.len(), 2, "deterministic and intersecting");
+
+    let bad = FindingsFilter::parse(None, None, None, None, None, None, Some("unit")).unwrap_err();
+    assert!(bad.to_string().contains("\"unit\""), "{bad}");
+}
+
+/// One counting rule behind every count: `status`, the page, the roll-up and
+/// Files & Risk count the same production findings and state the test-code
+/// remainder; the excluded buckets — suppressed, not fresh, test, each finding
+/// in the first that holds — partition the rest with the counted ones.
+#[test]
+fn every_count_leaves_test_code_out_and_the_buckets_partition_the_rest() {
+    let w = World::new();
+    w.with_test_code();
+    // Suppress one production finding and one test-code finding; edit the
+    // test file so its unsuppressed finding is stale.
+    let listed = w.findings(&FindingsFilter::default());
+    let fingerprint = |path: &str, rule: &str| {
+        listed["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == path && f["rule_id"] == rule)
+            .unwrap()["fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    crate::history::security::suppress(&w.root, fingerprint("app/db.py", "weak"), "accepted", None, TODAY.unwrap()).unwrap();
+    crate::history::security::suppress(&w.root, fingerprint("tests/fixtures/axum/Dockerfile", "root-user"), "fixture", None, TODAY.unwrap())
+        .unwrap();
+    fs::write(w.root.join("tests/test_db.py"), "import sqlite3  # edited\n").unwrap();
+
+    // 4 stored: 1 counted (app/db.py sql), 2 suppressed (one per scope), 1
+    // not fresh (the edited test file, stale before it is test code).
+    let status = w.status();
+    let row = &scanner_row(&status, "semgrep");
+    let partition = |v: &Value| ["findings", "suppressed", "not_fresh", "test"].map(|k| v[k].as_u64().unwrap());
+    assert_eq!(partition(row), [1, 2, 1, 0], "{row}");
+
+    let page = w.page_counts();
+    assert_eq!(page.counted.total, 1);
+    assert_eq!((page.excluded.suppressed, page.excluded.not_fresh, page.excluded.test), (2, 1, 0));
+    let rollup = w.rollup();
+    assert_eq!((rollup.findings.unwrap(), rollup.excluded), (page.counted, page.excluded), "one rule, two surfaces");
+
+    // Restore the test file: its finding is fresh again, and now test code.
+    fs::write(w.root.join("tests/test_db.py"), "import sqlite3\n").unwrap();
+    assert_eq!(partition(scanner_row(&w.status(), "semgrep")), [1, 2, 0, 1]);
+    let page = w.page_counts();
+    assert_eq!((page.counted.total, page.excluded.suppressed, page.excluded.not_fresh, page.excluded.test), (1, 2, 0, 1));
+    let rollup = w.rollup();
+    assert_eq!(rollup.excluded, page.excluded);
+    // No result here carries a CWE, so the one counted finding is unclassified
+    // in each edition, and the test-code one adds to no edition's figures.
+    for edition in &rollup.owasp {
+        assert_eq!(edition.unclassified, 1, "{:?}", edition.edition);
+        assert!(edition.categories.iter().all(|c| c.findings.unwrap_or(0) == 0), "{:?}", edition.edition);
+    }
+    let cells = w.cells().unwrap();
+    assert_eq!((cells["app/db.py"].count, cells["app/db.py"].test), (1, 0));
+    assert_eq!((cells["tests/test_db.py"].count, cells["tests/test_db.py"].test), (0, 1), "Files & Risk states it apart");
+    assert!(!cells.contains_key("tests/fixtures/axum/Dockerfile"), "a suppressed finding joins no cell");
+    let stored = w.findings(&FindingsFilter::default())["total"].as_u64().unwrap();
+    assert_eq!(partition(scanner_row(&w.status(), "semgrep")).iter().sum::<u64>(), stored, "every finding once");
+}
+
+// ── the NVD API key (FR-SC-27, S-794) ────────────────────────────────────────
+
+/// A planted NVD API key. The scanning process's environment carries it; it
+/// must reach Dependency-Check's private file and nothing Logos writes or
+/// returns.
+const NVD_KEY: &str = "LOGOSPLANTEDNVDKEY-0123-4567-89ab-cdef01234567";
+
+/// Every file under `dir`, recursively, that holds `needle`: the reports, the
+/// failure logs, `history.db` and its WAL.
+fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                pending.push(path);
+            } else if meta.is_file() && fs::read(&path).unwrap().windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// A Dependency-Check stub that copies the file its `--propertyfile` names to
+/// the record directory and echoes it on stdout and stderr — the worst a
+/// scanner could do with the key — then writes `report` (when given) and
+/// exits `exit`.
+fn echoing_dependency_check(w: &World, report: Option<&Path>, exit: i32) {
+    let write = report.map_or(String::new(), |r| {
+        format!("/bin/mkdir -p \"$out\" && /bin/cp '{}' \"$out/dependency-check-report.sarif\"", r.display())
+    });
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> '{argv}'\n\
+         case \"$1\" in --version) printf '%s\\n' 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n\
+         out=''; pf=''; prev=''\n\
+         for a in \"$@\"; do case \"$prev\" in --out) out=\"$a\";; --propertyfile) pf=\"$a\";; esac; prev=\"$a\"; done\n\
+         if [ -f \"$pf\" ]; then /bin/cp \"$pf\" '{props}'; /bin/cat \"$pf\"; /bin/cat \"$pf\" >&2; fi\n\
+         {write}\n\
+         exit {exit}\n",
+        argv = w.rec.join("dependency-check.argv").display(),
+        props = w.rec.join("nvd.props").display(),
+    );
+    let path = w.bin.join("dependency-check");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// FR-SC-08, FR-SC-27: `security status` carries `nvd_api_key` on the
+/// Dependency-Check row only — `not_set`, then `set` with a key in the
+/// scanning process's environment, and `set` when the user's own
+/// `extra_args` hand one — and never the key.
+#[test]
+fn status_says_whether_dependency_check_has_an_nvd_key_never_what_it_is() {
+    let mut w = World::new();
+    w.stub("dependency-check", None, 0, "");
+    let rows = |status: &Value| -> Vec<(String, Value)> {
+        status["scanners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(status["other_reports"].as_array().unwrap())
+            .filter_map(|row| row.get("nvd_api_key").map(|k| (row["scanner"].as_str().unwrap().to_string(), k.clone())))
+            .collect()
+    };
+    assert_eq!(rows(&w.status()), [("dependency-check".to_string(), json!("not_set"))]);
+
+    w.nvd_api_key = super::NvdApiKey::new(NVD_KEY);
+    let status = w.status();
+    assert_eq!(rows(&status), [("dependency-check".to_string(), json!("set"))]);
+    assert!(!status.to_string().contains(NVD_KEY), "{status}");
+
+    // Not installed, it still says whether a key is there for it.
+    fs::remove_file(w.bin.join("dependency-check")).unwrap();
+    assert_eq!(rows(&w.status()), [("dependency-check".to_string(), json!("set"))]);
+
+    w.nvd_api_key = None;
+    fs::write(w.user.join("config.toml"), "[security_scan.dependency-check]\nextra_args = [\"--nvdApiKey\", \"users-own\"]\n").unwrap();
+    assert_eq!(rows(&w.status()), [("dependency-check".to_string(), json!("set"))]);
+}
+
+/// FR-SC-27 AC 3: a planted key, handed to a Dependency-Check that echoes it on
+/// both streams, appears in no scan payload, failure log, cause, status row or
+/// stored row — on a failed run and on one that ran and ingested — and no key
+/// file remains after either. The log lines are `tests/security_nvd_key.rs`'s,
+/// in a test binary of its own.
+#[test]
+fn a_planted_nvd_key_appears_in_no_payload_log_cause_or_row() {
+    let mut w = World::new();
+    fs::write(w.root.join("requirements.txt"), "Django==2.2.0\n").unwrap();
+    w.nvd_api_key = super::NvdApiKey::new(NVD_KEY);
+    let key_file = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
+
+    for (report, exit) in [(None, 1), (Some(fixture("dependency-check")), 0)] {
+        echoing_dependency_check(&w, report.as_deref(), exit);
+        let payload = serde_json::to_value(w.scan(true).expect("the scan runs")).unwrap();
+        let row = scanner_row(&payload, "dependency-check");
+        assert_eq!(row["outcome"], if exit == 0 { "ran" } else { "failed" }, "{row}");
+        assert_eq!(fs::read_to_string(w.rec.join("nvd.props")).unwrap(), format!("nvd.api.key={NVD_KEY}\n"), "the key was handed over");
+        fs::remove_file(w.rec.join("nvd.props")).unwrap();
+        let argv = fs::read_to_string(w.rec.join("dependency-check.argv")).unwrap();
+        assert!(argv.contains("--propertyfile") && !argv.contains(NVD_KEY), "{argv}");
+
+        assert!(!payload.to_string().contains(NVD_KEY), "scan payload: {payload}");
+        let status = w.status();
+        assert!(!status.to_string().contains(NVD_KEY), "status: {status}");
+        let listed = w.findings(&FindingsFilter::default());
+        assert!(!listed.to_string().contains(NVD_KEY), "findings: {listed}");
+        assert_eq!(files_holding(&w.root.join(".logos"), NVD_KEY), Vec::<PathBuf>::new(), "a file under .logos holds the key");
+        assert!(fs::symlink_metadata(&key_file).is_err(), "the key file outlived the run");
+    }
+    let stored = w.findings(&FindingsFilter::default());
+    assert!(stored["findings"].as_array().is_some_and(|f| !f.is_empty()), "the ran scan was ingested: {stored}");
+}
+
+/// FR-SC-27 AC 2: a cancelled Dependency-Check run leaves no key file — the
+/// file existed while it ran — and its job's events never carry the key.
+#[test]
+fn a_cancelled_dependency_check_run_leaves_no_key_file() {
+    use crate::jobs::{JobKind, JobState, AnalysisJobs};
+    use std::time::{Duration, Instant};
+
+    let mut w = World::new();
+    w.nvd_api_key = super::NvdApiKey::new(NVD_KEY);
+    let seen = w.rec.join("seen");
+    let sleeper = format!(
+        "#!/bin/sh\ncase \"$1\" in --version) printf '%s\\n' 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n\
+         pf=''; prev=''\nfor a in \"$@\"; do if [ \"$prev\" = '--propertyfile' ]; then pf=\"$a\"; fi; prev=\"$a\"; done\n\
+         /bin/ls \"$pf\" > '{seen}.tmp' && /bin/mv '{seen}.tmp' '{seen}'\n\
+         /bin/sleep 60 & wait\n",
+        seen = seen.display()
+    );
+    let path = w.bin.join("dependency-check");
+    fs::write(&path, sleeper).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let jobs = AnalysisJobs::new();
+    let (root, env) = (w.root.clone(), w.env());
+    jobs.start(JobKind::SecurityScan, &w.root, move |_| {
+        let indexed = vec!["app/db.py".to_string()];
+        let request = ScanRequest::new(vec!["dependency-check".to_string()], Vec::new());
+        let summary = scan(&root, &env, crate::tools::Manifest::builtin(), true, &request, &mut |_| {}, |report, _| {
+            crate::history::security::ingest(&root, report, &indexed)
+        })?;
+        Ok(serde_json::to_value(summary)?)
+    })
+    .unwrap();
+
+    let key_file = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !seen.exists() {
+        assert!(Instant::now() < deadline, "the sleeping scanner never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), key_file.display().to_string(), "the file existed during the run");
+    jobs.cancel(JobKind::SecurityScan, &w.root);
+    let job = loop {
+        let job = jobs.snapshot(JobKind::SecurityScan, &w.root).unwrap();
+        if job.state != JobState::Running {
+            break job;
+        }
+        assert!(Instant::now() < deadline, "the cancelled scan is still running");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(job.state, JobState::Cancelled, "{job:?}");
+    assert!(fs::symlink_metadata(&key_file).is_err(), "the key file outlived a cancelled run");
+    let events = serde_json::to_string(&job).unwrap();
+    assert!(!events.contains(NVD_KEY), "{events}");
+}
+
+/// FR-SC-27 AC 3: a scanner's output is kept to a bound — each stream's head
+/// and tail, with a note between — and a cut can split an echoed key, at the
+/// end of the head or at the start of the tail. Neither piece reaches the
+/// failure log, the scan payload or the status row.
+#[test]
+fn a_key_split_by_the_output_bound_leaves_no_piece_of_it_behind() {
+    use crate::jobs::spawn::{head_cap, tail_cap, STDERR_CAP, STDOUT_CAP};
+    let filler = |n: usize| format!("/usr/bin/head -c {n} /dev/zero | /usr/bin/tr '\\0' x");
+    // The key file is `nvd.api.key=<key>` and a newline: each case cuts 20
+    // bytes inside the key — the head ending there, or the tail starting there.
+    let file = "nvd.api.key=".len() + NVD_KEY.len() + 1;
+    let inside = "nvd.api.key=".len() + 20;
+    let cases = [("stderr", STDERR_CAP, " >&2"), ("stdout", STDOUT_CAP, "")].into_iter().flat_map(|(stream, cap, redirect)| {
+        let head_cut = format!("{{ {}; /bin/cat \"$pf\"; {}; }}{redirect}", filler(head_cap(cap) - inside), filler(cap * 2));
+        let tail_cut = format!("{{ {}; /bin/cat \"$pf\"; {}; }}{redirect}", filler(cap * 2), filler(tail_cap(cap) - (file - inside)));
+        [(format!("{stream}, head ends in the key"), head_cut), (format!("{stream}, tail starts in the key"), tail_cut)]
+    });
+    for (stream, print) in cases {
+        let mut w = World::new();
+        w.nvd_api_key = super::NvdApiKey::new(NVD_KEY);
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1\" in --version) printf '%s\\n' 'Dependency-Check Core version 13.0.0'; exit 0;; esac\n\
+             pf=''; prev=''\nfor a in \"$@\"; do if [ \"$prev\" = '--propertyfile' ]; then pf=\"$a\"; fi; prev=\"$a\"; done\n\
+             {print}\nexit 1\n"
+        );
+        let path = w.bin.join("dependency-check");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let payload = serde_json::to_value(w.scan(true).unwrap()).unwrap();
+        assert_eq!(scanner_row(&payload, "dependency-check")["outcome"], "failed", "{stream}: {payload}");
+        let log = fs::read_to_string(w.root.join(OUTPUT_DIR).join("dependency-check.failed.log")).unwrap();
+        assert!(log.contains(super::mask::MASK), "{stream}: the cut piece is masked, not dropped");
+        let shown = format!("{payload} {} {log}", w.status());
+        for piece in NVD_KEY.as_bytes().windows(8).map(|w| std::str::from_utf8(w).unwrap()) {
+            assert!(!shown.contains(piece), "{stream}: {piece:?} of the key is left behind");
+            assert_eq!(files_holding(&w.root.join(".logos"), piece), Vec::<PathBuf>::new(), "{stream}: {piece:?}");
+        }
+    }
+}
+
+/// The key's pieces around an omission note are masked wherever the note lies
+/// — a piece ending the head, a piece starting the tail, the newline the capture
+/// sets before the note — and a note a scanner printed itself only adds a place
+/// to look.
+#[test]
+fn redact_masks_the_key_pieces_each_side_of_an_omission_note() {
+    let key = super::NvdApiKey::new("abcd1234-efgh-5678-ijkl").unwrap();
+    let cut = "[… 300000 bytes omitted …]\n";
+    let masked = super::mask::MASK;
+    assert_eq!(key.redact(&format!("head abcd1234-e\n{cut}fgh-5678-ijkl tail")), format!("head {masked}\n{cut}{masked} tail"));
+    assert_eq!(key.redact(&format!("a abcd1234-efgh-5678-ijkl\n{cut}z")), format!("a {masked}\n{cut}z"));
+    // Two notes (one printed by the scanner), a piece on each side of each.
+    assert_eq!(
+        key.redact(&format!("x abcd1234\n{cut}1234-efgh-5678-ijkl y abcd1234-e\n{cut}ijkl")),
+        format!("x {masked}\n{cut}{masked} y {masked}\n{cut}{masked}")
+    );
+    // Under the fragment floor nothing is masked; no note, the ends still are.
+    assert_eq!(key.redact(&format!("abc\n{cut}ijk")), format!("abc\n{cut}ijk"));
+    assert_eq!(key.redact("tail ends abcd1234-"), format!("tail ends {masked}"));
+}
+
+/// FR-SC-27 AC 2: a key file a crash left is removed at the next scan's start
+/// even when that scan starts no scanner — the one it names is not installed.
+#[test]
+fn a_scan_that_starts_no_scanner_still_sweeps_a_stale_key_file() {
+    let w = World::new();
+    let stale = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    fs::write(&stale, format!("nvd.api.key={NVD_KEY}\n")).unwrap();
+    let request = ScanRequest::new(vec!["dependency-check".to_string()], Vec::new());
+    let payload = serde_json::to_value(w.scan_request(true, &request, &mut |_| {}).unwrap()).unwrap();
+    assert_eq!(scanner_row(&payload, "dependency-check")["outcome"], "not_installed", "{payload}");
+    assert!(w.started().is_empty(), "nothing started: {:?}", w.started());
+    assert!(fs::symlink_metadata(&stale).is_err(), "the stale key file survived a scan's start");
 }

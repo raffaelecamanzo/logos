@@ -7,7 +7,10 @@
 //! and CodeQL are [opt-in](OptIn): never part of the default set, installed
 //! whole from a [tree](Layout::Tree) archive, Dependency-Check with the
 //! [managed Java runtime](Manifest::java) and CodeQL only once its
-//! [licence](CODEQL_LICENCE) is acknowledged (S-746).
+//! [licence](CODEQL_LICENCE) is acknowledged (S-746). `cargo-llvm-cov` is
+//! the one [coverage tool](Manifest::coverage) the installer manages: a
+//! release binary like a scanner's, installed by `logos coverage install` and
+//! never by a security surface (S-748, [FR-CV-17]).
 //!
 //! [`Manifest::builtin`] is what every shipped surface installs from. Its pins
 //! travel with the Logos release: a newer upstream version is not used until a
@@ -23,6 +26,7 @@
 //!
 //! [FR-SC-21]: ../../../../docs/specs/requirements/FR-SC-21.md
 //! [FR-SC-23]: ../../../../docs/specs/requirements/FR-SC-23.md
+//! [FR-CV-17]: ../../../../docs/specs/requirements/FR-CV-17.md
 //! [ADR-88]: ../../../../docs/specs/architecture/decisions/ADR-88.md
 
 use std::path::PathBuf;
@@ -135,7 +139,8 @@ pub struct Artifact {
 /// One tool the installer can install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolEntry {
-    /// The registry name of the scanner this tool is.
+    /// The registry name of the scanner — or, in [`Manifest::coverage`], of
+    /// the coverage tool — this tool is.
     pub tool: String,
     /// The installed executable's file name.
     pub binary: String,
@@ -354,6 +359,11 @@ pub struct Manifest {
     /// a release artifact that is never a tool of its own — installed with the
     /// first tool that needs it and removed with the last (S-746).
     pub java: ToolEntry,
+    /// The coverage tools the installer manages (S-748): each a tool of the
+    /// [coverage registry](crate::coverage::registry), never a scanner, so
+    /// none is ever listed, installed or removed by a security surface —
+    /// only `logos coverage install` installs one.
+    pub coverage: Vec<ToolEntry>,
 }
 
 impl Manifest {
@@ -364,6 +374,7 @@ impl Manifest {
             uv: builtin_uv(),
             python: builtin_python(),
             java: builtin_java(),
+            coverage: builtin_coverage(),
         })
     }
 
@@ -372,14 +383,28 @@ impl Manifest {
         self.tools.iter().find(|t| t.tool == tool)
     }
 
+    /// The entry for the coverage tool `tool`, by coverage registry name.
+    pub fn coverage_tool(&self, tool: &str) -> Option<&ToolEntry> {
+        self.coverage.iter().find(|t| t.tool == tool)
+    }
+
+    /// The entry for any tool the installer installs — a scanner or a
+    /// coverage tool — by its registry name: what [`resolve`](super::resolve)
+    /// and the installer look a name up by.
+    pub fn entry(&self, tool: &str) -> Option<&ToolEntry> {
+        self.tool(tool).or_else(|| self.coverage_tool(tool))
+    }
+
     /// Whether a copy of `tool` at `version` meets the minimum tested version
     /// ([FR-SC-05]): the one rule detection and install share. A version that
     /// could not be read does not; a tool this manifest does not list has no
-    /// minimum.
+    /// minimum. A coverage tool's minimum counts as a scanner's does
+    /// ([FR-CV-17]).
     ///
     /// [FR-SC-05]: ../../../../docs/specs/requirements/FR-SC-05.md
+    /// [FR-CV-17]: ../../../../docs/specs/requirements/FR-CV-17.md
     pub fn meets_minimum(&self, tool: &str, version: Option<&str>) -> bool {
-        self.tool(tool).is_none_or(|entry| {
+        self.entry(tool).is_none_or(|entry| {
             version.is_some_and(|v| version_at_least(v, &entry.min_version))
         })
     }
@@ -501,10 +526,10 @@ fn builtin_tools() -> Vec<ToolEntry> {
         format!("https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_{asset}.tar.gz")
     };
     let osv = |asset: &str| {
-        format!("https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_{asset}")
+        format!("https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_{asset}")
     };
     let gosec = |asset: &str| {
-        format!("https://github.com/securego/gosec/releases/download/v2.21.4/gosec_2.21.4_{asset}.tar.gz")
+        format!("https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_{asset}.tar.gz")
     };
     vec![
         ToolEntry {
@@ -538,13 +563,13 @@ fn builtin_tools() -> Vec<ToolEntry> {
         ToolEntry {
             tool: "osv-scanner".to_string(),
             binary: "osv-scanner".to_string(),
-            version: "1.9.2".to_string(),
+            version: "2.7.0".to_string(),
             min_version: "1.9.0".to_string(),
             artifacts: vec![
-                binary(MacosArm64, osv("darwin_arm64"), "393f2c7089d9431bd26a3804d6e46d417b1c05abd5d49c41c7dfc174c520acf0", 31_840_978),
-                binary(MacosX86_64, osv("darwin_amd64"), "487ab433b2c2a8c80b737c0bd428a80e6d2e211b4adf775a52a6964163fa3249", 32_986_512),
-                binary(LinuxX86_64, osv("linux_amd64"), "d6af4b67fa5de658598bd2d445efb99e90d1734b3146962418719c4350ecb74b", 32_116_888),
-                binary(LinuxArm64, osv("linux_arm64"), "9c6160afb26c79449a1f1b667323b989a57dda8fc19f22936c9ff920fd97ddfa", 30_802_072),
+                binary(MacosArm64, osv("darwin_arm64"), "d4926ef8da134332543be276dff157e4c170f99ad91fc48e89448a8816bdf70b", 55_336_530),
+                binary(MacosX86_64, osv("darwin_amd64"), "e82c5df7ab0a42dff29a1cd0660711447b56b4c0483ff66ad8634df10fd81a45", 58_881_680),
+                binary(LinuxX86_64, osv("linux_amd64"), "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b", 57_725_088),
+                binary(LinuxArm64, osv("linux_arm64"), "4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7", 53_870_752),
             ],
             python: None,
             opt_in: None,
@@ -552,13 +577,13 @@ fn builtin_tools() -> Vec<ToolEntry> {
         ToolEntry {
             tool: "gosec".to_string(),
             binary: "gosec".to_string(),
-            version: "2.21.4".to_string(),
+            version: "2.29.0".to_string(),
             min_version: "2.21.0".to_string(),
             artifacts: vec![
-                tar_gz(MacosArm64, gosec("darwin_arm64"), "32fa76e1142b81696c53066970c53d221b41bac03c2edb8f452cb993ade89881", 14_448_698, "gosec"),
-                tar_gz(MacosX86_64, gosec("darwin_amd64"), "ac58986182c99ee74f4a01283aae1bb22b8a904573887aeecf51854c789757a3", 15_086_215, "gosec"),
-                tar_gz(LinuxX86_64, gosec("linux_amd64"), "9229dbfdc092b176e628b9ea6e4210757373b819f47365cedd9f9e12d3b2c173", 15_127_867, "gosec"),
-                tar_gz(LinuxArm64, gosec("linux_arm64"), "7e5b0aa5052c2559d78e2ef60100285ddcd95b19b2229b114ed25dfdf89a88c8", 14_226_257, "gosec"),
+                tar_gz(MacosArm64, gosec("darwin_arm64"), "7ab6a92c1983b7cb9df12b3ac20fb270afa43cfa12a143c354edae3109c763e5", 28_626_563, "gosec"),
+                tar_gz(MacosX86_64, gosec("darwin_amd64"), "a48152c3c009988f1750b6508316339c8b55076d24b1a958789e30ea2a21794c", 29_469_820, "gosec"),
+                tar_gz(LinuxX86_64, gosec("linux_amd64"), "6431b119741c1f4a50fdfcf94e782e16b9e642afc8c7fa9b5d39d48bf3003095", 27_920_687, "gosec"),
+                tar_gz(LinuxArm64, gosec("linux_arm64"), "c71244ec8d37488fd479d0d26990968fee03ece48b305d8224ac0c1ebd66e87c", 26_356_042, "gosec"),
             ],
             python: None,
             opt_in: None,
@@ -694,6 +719,34 @@ fn builtin_java() -> ToolEntry {
         python: None,
         opt_in: None,
     }
+}
+
+/// `cargo-llvm-cov` 0.9.1 (S-748): the binary sits at each archive's root,
+/// as the project's README installs it (`tar xf … -C ~/.cargo/bin`); the
+/// Linux builds are the static musl ones. Each SHA-256 is the GitHub asset
+/// digest, read from the release API's `latest` and its `tags/v0.9.1`
+/// listing, which agree. The minimum is the line the coverage registry's
+/// command line was written against.
+#[rustfmt::skip]
+fn builtin_coverage() -> Vec<ToolEntry> {
+    use Platform::{LinuxArm64, LinuxX86_64, MacosArm64, MacosX86_64};
+    let llvm_cov = |target: &str| {
+        format!("https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-{target}.tar.gz")
+    };
+    vec![ToolEntry {
+        tool: "cargo-llvm-cov".to_string(),
+        binary: "cargo-llvm-cov".to_string(),
+        version: "0.9.1".to_string(),
+        min_version: "0.6.0".to_string(),
+        artifacts: vec![
+            tar_gz(MacosArm64, llvm_cov("aarch64-apple-darwin"), "7e821a6c90c0884f79f759f5d9be50799ade67bb82515186d922f26032ef43b8", 1_488_900, "cargo-llvm-cov"),
+            tar_gz(MacosX86_64, llvm_cov("x86_64-apple-darwin"), "ddf949b82a63017441ea76aa068bdd7e2dde8055f47cd3ef736fdbbd633bc33e", 1_613_897, "cargo-llvm-cov"),
+            tar_gz(LinuxX86_64, llvm_cov("x86_64-unknown-linux-musl"), "3fca950394a3c49457657c158b1619cec8dfd2647ae5b48746734c0ab969a522", 1_789_044, "cargo-llvm-cov"),
+            tar_gz(LinuxArm64, llvm_cov("aarch64-unknown-linux-musl"), "49c0085628392a8d727c4464d91ec417c613c5015f5197cd16d5c05aa3fb5ad1", 1_637_442, "cargo-llvm-cov"),
+        ],
+        python: None,
+        opt_in: None,
+    }]
 }
 
 /// CPython 3.12.14, python-build-standalone 20260929 `install_only_stripped`:

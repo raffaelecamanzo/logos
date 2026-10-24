@@ -7,8 +7,8 @@ source tree and serves it through two surfaces: a **CLI** for humans and
 scripts, and an **MCP server** for AI coding agents such as Claude Code. It
 opens no network connection itself, writes outside the project's `.logos/`
 directory only for setup you ask for — the agent-integration files of
-`logos init -i`, and the scanners `logos security install` downloads under your
-consent — and supports twelve languages out of the box: Rust, Python,
+`logos init -i`, the scanners `logos security install` downloads under your
+consent, and a coverage dev dependency you consent to adding — and supports twelve languages out of the box: Rust, Python,
 TypeScript/JavaScript, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, and PHP.
 
 ## What it is primarily for: scoping work before you decompose it
@@ -87,7 +87,8 @@ are content-sniffed into `ApiPath`/`ApiOperation` anchors. This layer is
 
 Two **evidence tiers** layer over the graph from a second store (`.logos/history.db`):
 the **temporal tier** mines git history for churn-and-complexity *hotspots*, and
-the **coverage tier** ingests external LCOV/Cobertura reports for freshness-checked
+the **coverage tier** ingests LCOV, Cobertura, JaCoCo and Go coverprofile reports (or runs the
+project's own coverage tools under a per-project execution consent) for freshness-checked
 per-file coverage and the *untested-hotspots* join. Both are **non-gated and
 advisory** — they never move the quality signal and the quality gate never reads
 `history.db`.
@@ -104,7 +105,8 @@ advisory** — they never move the quality signal and the quality gate never rea
 8. [Contributing](contributing.md) — the per-sprint pull request (`scripts/publish-sprint.sh`), the issue status labels, and the owner's GitHub settings checklist; contributors start at [CONTRIBUTING.md](../../CONTRIBUTING.md)
 9. [Claude Code plugin](plugin.md) — installing the plugin, migrating from `init -i`, `init --uninstall`, the Stop check with its security leg and its off switch, the `/logos:review` and `/logos:sec-review` skills and their verdicts, the guardrail, and the trust labels
 10. [Security](security.md) — the security section end to end: installing the nine scanners and their tested versions, consent and the network, scans and re-scans, reachability confidence, the `[security]` gate with its ratchet and exit 5, the ignore file, reviewing what a branch introduced (the five verdicts, and that a clean review is not a claim of security), and the Security page
-11. [Development](development.md) — for maintainers: the hand-run harnesses kept outside every gate: `scripts/verify-scanner-exclusions.sh` and how to read the scanner-exclusion evidence it commits, and `scripts/verify-sync-history.sh`, the on-demand review check that replays real commits through `logos sync` and compares the result with a fresh index
+11. [Coverage runs](coverage.md) — the seven coverage tools with their markers, invocations and tested versions, the execution consent and what it does and does not protect against, `coverage run` and `coverage refresh`, the managed `cargo-llvm-cov` install and the dependency consent, the Coverage page, the Workspace Coverage page and the user-level overrides
+12. [Development](development.md) — for maintainers: the hand-run harnesses kept outside every gate: `scripts/verify-scanner-exclusions.sh` and how to read the scanner-exclusion evidence it commits, and `scripts/verify-sync-history.sh`, the on-demand review check that replays real commits through `logos sync` and compares the result with a fresh index
 
 ## Quick start
 
@@ -139,10 +141,11 @@ the review loop around each editing turn.
 
 - **Offline by construction** — no outbound-HTTP client crate exists in the
   dependency graph, and the slim build links no socket stack at all (both
-  enforced by a fitness test). Nothing phones home. The one download is
-  `logos security install` (and Install on the Security page), which runs the
-  system `curl` and `uv` under a consent you give; the scanners themselves may
-  reach the network under the scan consent
+  enforced by a fitness test). Nothing phones home. The downloads are
+  `logos security install` and `logos coverage install` (and Install on the Security
+  and Coverage pages), which run the system `curl` and `uv` under a consent you give;
+  the scanners themselves may reach the network under the scan consent, and a
+  [coverage run](coverage.md) may fetch the project's own dependencies under its own
   ([Logos makes no network connection](security.md#logos-makes-no-network-connection)).
 - **`.logos/` is the only write target, except for setup you ask for** — derived
   databases live there, and the only non-derived writes are the policy files
@@ -154,7 +157,9 @@ the review loop around each editing turn.
   `core.hooksPath`; `logos init --uninstall` removes them all. The security
   consents and the scanners Logos installs live in your user-level directories,
   never in a repository ([Consent](security.md#consent)). Your source tree is
-  never touched.
+  never touched, except by a coverage dev dependency you consent to
+  ([coverage.md](coverage.md#installing-cargo-llvm-cov-and-adding-a-missing-dependency)),
+  which stays uncommitted in your working tree.
 - **Never-fabricate resolution** — a call edge is created only when exactly
   one candidate matches; ambiguity yields *no* edge rather than a guessed one.
 - **Stdout discipline** — `--json` output is always parseable; logs go to

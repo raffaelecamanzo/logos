@@ -4,10 +4,15 @@
  * radius, and the confidence label on each claim (S-669).
  *
  * `unknown` reachability renders as unknown, never as unreachable, with
- * `unresolved_because` stated when set. The payload carries the blast radius as
- * sizes only, so the lists come from `GET /api/v1/impact` on the enclosing
- * symbol — the same answer `logos impact` gives. No source snippet is rendered;
- * a secret-class message reads `[redacted]`.
+ * `unresolved_because` stated when set. The message lives here, not in the table
+ * (§4.23), and a suppressed or expired finding states its state, reason and
+ * expiry.
+ *
+ * The payload carries the blast radius as sizes only, so the lists come from
+ * `GET /api/v1/impact` on the enclosing symbol — the same answer `logos impact`
+ * gives. No source snippet is rendered; a secret-class message says why it is
+ * withheld and where the finding is (S-796), and a finding in test code states
+ * its reason (FR-SC-28).
  *
  * The detail sits below every other widget, so choosing a finding would change
  * nothing the reader can see. Each `shown` request (HF-1) therefore moves focus
@@ -21,8 +26,15 @@ import { fetchImpact } from "../../api/client.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type { ImpactEntry, ImpactResult, SecurityFinding } from "../../api/types.ts";
 import { Badge, DataTable, DEFAULT_TABLE_PAGE_SIZE, Widget, type Column } from "../../components/index.ts";
-import { CONTEXT_TEXT, SECURITY_ABSENCE, UNCLASSIFIED_TEXT, findingDetail } from "../../copy/security.copy.ts";
-import { findingLocation, findingMessage, type Classification } from "./securityModel.ts";
+import {
+  CONTEXT_TEXT,
+  FINDINGS_TABLE_TEXT,
+  SECURITY_ABSENCE,
+  UNCLASSIFIED_TEXT,
+  findingDetail,
+  suppressionNote,
+} from "../../copy/security.copy.ts";
+import { findingLocation, findingMessage, reachabilityText, scopeReasonText, type Classification } from "./securityModel.ts";
 import styles from "./SecurityView.module.css";
 
 export function FindingDetail({
@@ -57,12 +69,8 @@ export function FindingDetail({
     return <Widget title={title} className={styles.detail} copy={findingDetail} absence={SECURITY_ABSENCE.noneSelected} />;
   }
   const { enclosing, reachability, blast_radius: blast } = finding.context;
-  const reach =
-    reachability.verdict === "reachable" && reachability.route !== null
-      ? CONTEXT_TEXT.reachable(reachability.route.name, reachability.route.hops)
-      : reachability.verdict === "unreachable"
-        ? CONTEXT_TEXT.unreachable
-        : CONTEXT_TEXT.unknown(reachability.unresolved_because);
+  const reach = reachabilityText(reachability);
+  const scopeReason = scopeReasonText(finding);
   return (
     <Widget
       title={title}
@@ -86,6 +94,21 @@ export function FindingDetail({
         )}
         <dt>Message</dt>
         <dd>{findingMessage(finding)}</dd>
+        {finding.suppression && (
+          <>
+            <dt>{FINDINGS_TABLE_TEXT.suppression}</dt>
+            <dd>
+              <Badge tone="muted">{finding.suppression.state}</Badge>{" "}
+              <span data-suppression-reason>{suppressionNote(finding.suppression)}</span>
+            </dd>
+          </>
+        )}
+        {scopeReason !== null && (
+          <>
+            <dt>Code</dt>
+            <dd data-code-scope="test">{scopeReason}</dd>
+          </>
+        )}
         <dt>OWASP</dt>
         <dd>
           {classification.categories.length > 0 ? (
@@ -105,7 +128,7 @@ export function FindingDetail({
           )}{" "}
           <span className="muted">({CONTEXT_TEXT.confidence(enclosing.confidence)})</span>
         </dd>
-        <dt>Route reach</dt>
+        <dt>Reachable from a route</dt>
         <dd data-reachability={reachability.verdict}>
           {reach} <span className="muted">({CONTEXT_TEXT.confidence(reachability.confidence)})</span>
         </dd>
@@ -128,9 +151,33 @@ const ENTRY_COLUMNS: Column<ImpactEntry>[] = [
   { key: "dist", header: "Distance", numeric: true, sortValue: (e) => e.distance, cell: (e) => e.distance },
 ];
 
+/** One blast-radius list: its title above its table — or above its empty-state
+ *  sentence, since an empty list still says which list it is (CR-245). */
+function ImpactList({ title, rows, empty }: { title: string; rows: ImpactEntry[]; empty: string }) {
+  if (rows.length > 0) {
+    return (
+      <DataTable
+        className={styles.impactSection}
+        caption={title}
+        captionVisible
+        columns={ENTRY_COLUMNS}
+        rows={rows}
+        rowKey={(e) => e.symbol}
+        pageSize={DEFAULT_TABLE_PAGE_SIZE}
+      />
+    );
+  }
+  return (
+    <div className={styles.impactSection}>
+      <p className={styles.impactTitle}>{title}</p>
+      <p>{empty}</p>
+    </div>
+  );
+}
+
 /**
  * The blast-radius lists, from `impact` on the enclosing symbol. Each list — its
- * title and table, or its empty-state sentence — is one `impactSection`, and a
+ * title and table, or its title and empty-state sentence — is one `impactSection`, and a
  * section that follows another is spaced from it by one token.
  */
 function ImpactLists({ symbol }: { symbol: string }) {
@@ -150,26 +197,8 @@ function ImpactLists({ symbol }: { symbol: string }) {
           </div>
         ) : (
           <>
-            <DataTable
-              className={styles.impactSection}
-              caption={result.upstream_label}
-              captionVisible
-              columns={ENTRY_COLUMNS}
-              rows={result.upstream}
-              rowKey={(e) => e.symbol}
-              pageSize={DEFAULT_TABLE_PAGE_SIZE}
-              empty="Nothing depends on it."
-            />
-            <DataTable
-              className={styles.impactSection}
-              caption={result.downstream_label}
-              captionVisible
-              columns={ENTRY_COLUMNS}
-              rows={result.downstream}
-              rowKey={(e) => e.symbol}
-              pageSize={DEFAULT_TABLE_PAGE_SIZE}
-              empty="It depends on nothing."
-            />
+            <ImpactList title={result.upstream_label} rows={result.upstream} empty="Nothing depends on it." />
+            <ImpactList title={result.downstream_label} rows={result.downstream} empty="It depends on nothing." />
           </>
         )
       }

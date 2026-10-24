@@ -1,3 +1,3 @@
 #!/bin/sh
 # Fixture osv-scanner for the tool-installer tests (S-743).
-echo "osv-scanner version: 1.9.2"
+echo "osv-scanner version: 2.7.0"
